@@ -10,7 +10,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendAssets, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendAssets, fetchBackendCanvasFolders, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { MediaImage } from "@/components/media/media-image";
 import { nanoid } from "nanoid";
@@ -91,6 +91,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [sharedCanvasSnapshot, setSharedCanvasSnapshot] = useState<ProductionCanvasSnapshot>();
     const [styleSaving, setStyleSaving] = useState(false);
     const [styleWaiverDraft, setStyleWaiverDraft] = useState("");
+    const pendingStyleTransfer = useRef("");
     const coverInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
 
@@ -172,7 +173,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             });
         });
         return () => { disposed = true; };
-    }, [folder?.sharedAssetCanvasId, sharedAssetsReload]);
+    }, [folder?.sharedAssetCanvasId, sharedAssetsReload, view]);
 
     if (!folder) return <div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>;
 
@@ -205,19 +206,55 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         ...styleAssets.map(item => ({ value: `asset:${String(item.asset_id || item.id || "")}`, label: String(item.asset_name || item.name || item.title || item.asset_id || item.id || "") })),
         ...sharedStyleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleCanvasNode", { title: node.title || node.id }) })),
     ];
-    const styleValue = styleAnchorNodeId ? `node:${styleAnchorNodeId}` : styleAnchorAssetId ? `asset:${styleAnchorAssetId}` : undefined;
+    const pendingStyleAnchorNodeId = String(folder.productionPlan?.styleAnchorNodeId || "");
+    const styleValue = styleAnchorNodeId ? `node:${styleAnchorNodeId}` : styleAnchorAssetId ? `asset:${styleAnchorAssetId}` : pendingStyleAnchorNodeId ? `node:${pendingStyleAnchorNodeId}` : undefined;
     const patchSharedStyle = async (patch: Record<string, unknown>) => {
-        if (!folder.sharedAssetCanvasId || !sharedProduction || styleSaving) return;
+        if (!folder.sharedAssetCanvasId || !sharedProduction || styleSaving) return false;
         setStyleSaving(true);
         try {
             const result = await editEpisodeProduction({ projectId: folder.sharedAssetCanvasId }, sharedProduction.revision, [{ type: "patch_director_source", entity: "style", patch }], nanoid());
             setSharedProduction(result.production);
             setStyleWaiverDraft(String((result.production.draft.director?.source as Record<string, any> | undefined)?.style_policy_reason || ""));
-            message.success(t("productionCanvas.styleAnchorSaved"));
+            return true;
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));
+            return false;
         } finally { setStyleSaving(false); }
     };
+    const clearPendingStyleAnchor = async (nodeId: string) => {
+        const latest = await fetchBackendCanvasFolders();
+        const current = (latest.folders || []).find(item => String(item.id || "") === dramaId) as unknown as CanvasFolder | undefined;
+        if (!current || String(current.productionPlan?.styleAnchorNodeId || "") !== nodeId) return;
+        const productionPlan = { ...current.productionPlan, styleAnchorNodeId: undefined };
+        const saved = await upsertBackendCanvasFolder({ ...current, productionPlan, expectedPlanningUpdatedAt: current.updatedAt || current.createdAt, updatedAt: new Date().toISOString() });
+        if (saved.folder) {
+            useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === dramaId ? saved.folder as unknown as CanvasFolder : item) }));
+            setDraft(value => value ? { ...value, productionPlan: { ...value.productionPlan, styleAnchorNodeId: undefined }, expectedPlanningUpdatedAt: String((saved.folder as Record<string, unknown>).updatedAt || value.expectedPlanningUpdatedAt) } : value);
+        }
+    };
+    useEffect(() => {
+        if (!pendingStyleAnchorNodeId || !folder.sharedAssetCanvasId || !sharedProduction?.draft.director) return;
+        const source = sharedProduction.draft.director.source as Record<string, unknown>;
+        const currentAnchor = String(source.style_anchor_node_id || "");
+        if (currentAnchor && currentAnchor !== pendingStyleAnchorNodeId) return;
+        if (pendingStyleTransfer.current === pendingStyleAnchorNodeId) return;
+        pendingStyleTransfer.current = pendingStyleAnchorNodeId;
+        void (async () => {
+            try {
+                const transferred = currentAnchor === pendingStyleAnchorNodeId || await patchSharedStyle({
+                    anchor_asset_id: "",
+                    style_anchor_node_id: pendingStyleAnchorNodeId,
+                    style_policy: "waived",
+                    style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: t("drama.createProjectStyleNode") }),
+                });
+                if (transferred) await clearPendingStyleAnchor(pendingStyleAnchorNodeId);
+                else pendingStyleTransfer.current = "";
+            } catch (error) {
+                pendingStyleTransfer.current = "";
+                message.error(error instanceof Error ? error.message : String(error));
+            }
+        })();
+    }, [pendingStyleAnchorNodeId, folder.sharedAssetCanvasId, sharedProduction, styleSaving, t, message]);
     const goToPlanning = () => navigate(`${location.pathname}?${productionWorkspaceQuery(new URLSearchParams(location.search), "series", { seriesView: "planning" }).toString()}`);
     const openSharedCanvas = async () => {
         if (openingSharedCanvas) return;

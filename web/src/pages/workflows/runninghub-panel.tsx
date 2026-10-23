@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { Alert, App, Button, Checkbox, Form, Input, InputNumber, Select, Table } from "antd";
 import { useTranslation } from "react-i18next";
-import { fetchRunningHubConfig, inspectRunningHubWorkflow, saveRunningHubConfig, type RunningHubConfig, type RunningHubField } from "@/services/api/runninghub";
+import { fetchRunningHubConfig, inspectRunningHubWorkflow, saveRunningHubConfig, fetchRunningHubSession, importRunningHubBrowserSession, saveRunningHubSession, deleteRunningHubSession, type RunningHubConfig, type RunningHubField, type RunningHubSessionStatus, type RunningHubSite } from "@/services/api/runninghub";
 import { keepTypedRunningHubSecret } from "@/lib/runninghub-secret-field";
 
-const initial: RunningHubConfig = { baseUrl: "https://www.runninghub.ai", apiKey: "", mode: "workflow", workflowId: "", appId: "", fields: [], useWallet: false, instanceType: "default", concurrency: 1 };
+const initial: RunningHubConfig = { baseUrl: "https://www.runninghub.ai", apiKey: "", mode: "workflow", workflowId: "", appId: "", fields: [], useWallet: false, instanceType: "default", concurrency: 1, uploadSite: "default", siteApiKeys: { ai: "", cn: "" } };
+/** 站点下拉：`default` 跟随运行环境那条链路，另外两档固定站点。 */
+const sites: RunningHubSite[] = ["default", "ai", "cn"];
 
 export function RunningHubPanel() {
     const { t } = useTranslation();
@@ -14,11 +16,40 @@ export function RunningHubPanel() {
     const [error, setError] = useState("");
     const [loaded, setLoaded] = useState(false);
     const [filter, setFilter] = useState("");
+    const [session, setSession] = useState<RunningHubSessionStatus | null>(null);
+    const [sessionBusy, setSessionBusy] = useState(false);
+    const [sessionToken, setSessionToken] = useState("");
+    // 上传站点：决定本地工作流上传到哪个站，也决定这里的会话连的是哪个站。
+    const uploadSite: RunningHubSite = config.uploadSite || "default";
+    const setUploadSite = async (site: RunningHubSite) => {
+        patch({ uploadSite: site });
+        setSession(null); setSessionToken("");
+        try {
+            await saveRunningHubConfig({ uploadSite: site });
+            const { session } = await fetchRunningHubSession(site);
+            setSession(session);
+        } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    };
     useEffect(() => {
         let active = true;
         fetchRunningHubConfig().then(({ config }) => { if (active) { setConfig(config); setLoaded(true); } }).catch((error) => { if (active) setError(String(error.message || error)); });
         return () => { active = false; };
     }, []);
+    useEffect(() => {
+        let active = true;
+        fetchRunningHubSession(uploadSite).then(({ session }) => { if (active) setSession(session); }).catch(() => { if (active) setSession({ connected: false }); });
+        return () => { active = false; };
+    }, [uploadSite]);
+    const connectSession = async (read: () => Promise<{ session: RunningHubSessionStatus }>, okKey = "runningHub.session.connected") => {
+        setSessionBusy(true); setError("");
+        try {
+            const { session } = await read();
+            setSession(session);
+            setSessionToken("");
+            message.success(t(okKey));
+        } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+        finally { setSessionBusy(false); }
+    };
     const patch = (value: Partial<RunningHubConfig>) => setConfig((current) => ({ ...current, ...value }));
     const patchField = (index: number, value: Partial<RunningHubField>) => setConfig((current) => ({ ...current, fields: (current.fields || []).map((field, i) => i === index ? { ...field, ...value } : field) }));
     const save = async (inspect = false) => {
@@ -43,6 +74,26 @@ export function RunningHubPanel() {
     return <section className="rounded-lg border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900" aria-label="RunningHub">
         <h2 className="mb-2 text-sm font-semibold">RunningHub · H3</h2>
         <p className="mb-4 text-xs text-stone-500">{t("runningHub.description")}</p>
+        <div className="mb-4 rounded-md border border-stone-200 p-3 dark:border-stone-800">
+            <div className="mb-1 text-xs font-semibold">{t("runningHub.session.title")}</div>
+            <p className="mb-2 text-xs text-stone-500">{t("runningHub.session.hint")}</p>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+                <span className="text-xs text-stone-500">{t("runningHub.upload.site")}</span>
+                <Select size="small" aria-label={t("runningHub.upload.site")} className="min-w-56" value={uploadSite} onChange={(value) => void setUploadSite(value as RunningHubSite)} options={sites.map((value) => ({ value, label: t(`runningHub.upload.sites.${value}`) }))} />
+                <span className="text-xs text-stone-500">{uploadSite === "default" ? config.baseUrl : t(`runningHub.upload.sites.${uploadSite}`)}</span>
+            </div>
+            {session?.connected ? <p className="mb-2 text-xs text-stone-500">{t("runningHub.session.state")}：{session.source === "browser" ? t("runningHub.session.fromBrowser") : t("runningHub.session.manual")}{session.expired ? ` · ${t("runningHub.session.expired")}` : ""}</p> : null}
+            <div className="flex flex-wrap items-center gap-2">
+                <Button size="small" loading={sessionBusy} onClick={() => void connectSession(() => importRunningHubBrowserSession(uploadSite))}>{t("runningHub.session.readBrowser")}</Button>
+                <Input.Password aria-label={t("runningHub.session.token")} size="small" className="max-w-64" autoComplete="off" placeholder={t("runningHub.session.tokenPlaceholder")} value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} />
+                <Button size="small" loading={sessionBusy} disabled={!sessionToken.trim()} onClick={() => void connectSession(() => saveRunningHubSession(sessionToken.trim(), uploadSite))}>{t("runningHub.session.useToken")}</Button>
+                {session?.connected ? <Button size="small" danger loading={sessionBusy} onClick={() => void connectSession(() => deleteRunningHubSession(uploadSite), "runningHub.session.disconnected")}>{t("runningHub.session.disconnect")}</Button> : null}
+            </div>
+            {uploadSite !== "default" ? <div className="mt-3">
+                <div className="mb-1 text-xs text-stone-500">{t("runningHub.upload.siteKeyHint", { site: t(`runningHub.upload.sites.${uploadSite}`) })}</div>
+                <Input.Password aria-label={t("runningHub.upload.siteKey")} size="small" className="max-w-96" autoComplete="off" placeholder={t("runningHub.upload.siteKeyPlaceholder")} value={config.siteApiKeys?.[uploadSite] || ""} onChange={(event) => patch({ siteApiKeys: { ...(config.siteApiKeys || {}), [uploadSite]: event.target.value } })} />
+            </div> : null}
+        </div>
         {error && <Alert type="error" showIcon message={error} className="mb-4" />}
         <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 p-3 dark:border-stone-800 dark:bg-stone-950/40">
             <div className="mb-1 text-xs font-semibold">{t("runningHub.invite")}</div>

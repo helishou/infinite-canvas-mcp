@@ -116,6 +116,17 @@ export class EpisodeProductionRunner {
         const director = current.draft.director;
         const canvasId = this.service.preparationCanvas(id, true);
         if (!director || !canvasId) throw new Error("缺少正式制作稿或固定画布");
+        const scenes = productionSceneEntries(director.source);
+        // A scene preparation is the normal entry point for a newly created
+        // scene. Include its existing Clip targets so the scene operation
+        // materializes the H3 nodes that own those Clips in the same commit.
+        const effectiveTargetIds = [...new Set(targetIds.flatMap(target => {
+            if (!target.startsWith("scene:")) return [target];
+            const sceneId = target.slice("scene:".length);
+            return [target, ...current.draft.clipGroups
+                .filter(group => productionSceneIdsForShots(scenes, group.shotIds).includes(sceneId))
+                .map(group => `segment:${group.id}`)];
+        }))];
         const project = this.stores.projects.get(canvasId) as (Record<string, unknown> & { nodes: Record<string, any>[] }) | null;
         if (!project) throw new Error("分集画布不存在");
         const bindings: Array<Record<string, unknown>> = [];
@@ -126,7 +137,7 @@ export class EpisodeProductionRunner {
         const requested = new Map<string, ProductionLayoutUnit>();
         const sceneIds = new Set<string>();
         const add = (unit?: ProductionLayoutUnit) => { if (unit) requested.set(unit.id, unit); };
-        for (const target of [...new Set(targetIds)]) {
+        for (const target of effectiveTargetIds) {
             const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
             if (!targetId) throw new Error("缺少准备目标 ID");
             if (kind === "scene") {
@@ -167,7 +178,7 @@ export class EpisodeProductionRunner {
         const owner = this.service.ownerIdentity(id);
         const sharedPlans = (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(object).filter(plan => Boolean(plan.sharedSource));
         const registeredSubjects = Array.isArray(director.source.subject_registry) ? director.source.subject_registry.map(object) : [];
-        for (const target of [...new Set(targetIds)]) {
+        for (const target of effectiveTargetIds) {
             const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
             if (kind !== "entity") continue;
             const entity = productionEntities(director.source, owner).find(item => `${item.kind}:${item.entityId}` === targetId);
@@ -194,7 +205,7 @@ export class EpisodeProductionRunner {
             object(this.stores.settings.get(H3_DEFAULTS_KEY)),
         ));
         const assetTitleFor = (assetId: string) => assetTitle(director.source, assetId);
-        for (const target of [...new Set(targetIds)]) {
+        for (const target of effectiveTargetIds) {
             const [kind, ...parts] = target.split(":"), targetId = parts.join(":");
             if (kind === "scene" || kind === "entity") continue;
             if (kind === "asset" || kind === "frame") {
@@ -284,7 +295,7 @@ export class EpisodeProductionRunner {
         }
         // Preparing a complete scene also repairs its physical timeline order.
         // Published sync remains unchanged; draft repair needs no new publication.
-        const selectedSegments = new Set(targetIds.filter(target => target.startsWith("segment:")).map(target => target.slice(8)));
+        const selectedSegments = new Set(effectiveTargetIds.filter(target => target.startsWith("segment:")).map(target => target.slice(8)));
         for (const nodeId of new Set(current.draft.clipGroups.filter(group => selectedSegments.has(group.id)).map(group => group.nodeId).filter(Boolean))) {
             const groups = current.draft.clipGroups.filter(group => group.nodeId === nodeId);
             if (!groups.every(group => selectedSegments.has(group.id))) continue;
@@ -296,7 +307,8 @@ export class EpisodeProductionRunner {
         const unitsForTarget = (target: string) => {
             if (target.startsWith("scene:")) {
                 const sceneId = target.slice("scene:".length);
-                return requestedUnits.filter(unit => unit.sceneId === sceneId && (unit.area === "script" || unit.members.some(member => member.role === "scene")));
+                const sceneSegments = effectiveTargetIds.filter(item => item.startsWith("segment:") && requestedUnits.some(unit => unit.sceneId === sceneId && unit.targets.includes(item)));
+                return requestedUnits.filter(unit => unit.sceneId === sceneId && (unit.area === "script" || unit.members.some(member => member.role === "scene") || sceneSegments.some(item => unit.targets.includes(item))));
             }
             if (target.startsWith("segment:")) {
                 const sceneId = requestedUnits.find(unit => unit.targets.includes(target) && unit.members.some(member => member.role === "video"))?.sceneId;

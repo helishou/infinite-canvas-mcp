@@ -90,6 +90,15 @@ export type WorkflowDetail = {
     workflow: Record<string, unknown>;
     config: WorkflowConfig;
     builtin: boolean;
+    source?: WorkflowSourceLink;
+};
+
+export type WorkflowSourceLink = {
+    instance: string;
+    relativePath: string;
+    syncedSha256: string;
+    syncedAt: string;
+    syncState?: "current" | "changed" | "missing";
 };
 
 export type WorkflowPackage = {
@@ -122,6 +131,10 @@ function workflowFilePath(name: string): string {
         throw new Error("工作流名称不合法：路径穿越");
     }
     return fullPath;
+}
+
+function workflowSourcePath(name: string) {
+    return `${workflowFilePath(name)}.source`;
 }
 
 function isBuiltin(name: string): boolean {
@@ -207,7 +220,23 @@ export class WorkflowStore {
             description: "",
             fields: [],
         };
-        return { name, workflow, config, builtin: isBuiltin(name) };
+        const source = await this.getSourceLink(name);
+        return { name, workflow, config, builtin: isBuiltin(name), ...(source ? { source } : {}) };
+    }
+
+    async getSourceLink(name: string): Promise<WorkflowSourceLink | null> {
+        try {
+            const value = JSON.parse(await fs.readFile(workflowSourcePath(name), "utf8")) as Partial<WorkflowSourceLink>;
+            if (typeof value.instance !== "string" || typeof value.relativePath !== "string" || typeof value.syncedSha256 !== "string" || typeof value.syncedAt !== "string") return null;
+            return { instance: value.instance, relativePath: value.relativePath, syncedSha256: value.syncedSha256, syncedAt: value.syncedAt };
+        } catch { return null; }
+    }
+
+    async saveSourceLink(name: string, source: WorkflowSourceLink): Promise<void> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!source.instance || !source.relativePath || !/^[a-f\d]{64}$/i.test(source.syncedSha256)) throw new Error("ComfyUI 工作流来源信息无效");
+        await fs.writeFile(workflowSourcePath(name), JSON.stringify({ ...source, syncState: undefined }, null, 2), "utf8");
     }
 
     async upload(name: string, workflow: Record<string, unknown>): Promise<{ name: string }> {
@@ -313,6 +342,7 @@ export class WorkflowStore {
         const filePath = workflowFilePath(name);
         try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
         await fs.unlink(filePath);
+        await fs.unlink(workflowSourcePath(name)).catch(() => undefined);
         this.db.deleteWorkflowConfig(name);
         return { ok: true };
     }

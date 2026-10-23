@@ -1,11 +1,13 @@
 import { useEffect, useId, useMemo, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Cpu } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { modelOptionLabel, modelOptionName, selectableModelsByCapability, VIDEO_CONCAT_MODEL, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { fetchCanvasModelUsage } from "@/services/backend-api";
+import { decodeChannelModel, modelOptionLabel, modelOptionName, selectableModelsByCapability, VIDEO_CONCAT_MODEL, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -14,15 +16,36 @@ type ModelPickerProps = {
     capability?: ModelCapability;
     className?: string;
     fullWidth?: boolean;
+    sortByCanvasUsage?: boolean;
     placeholder?: string;
     onMissingConfig?: () => void;
 };
 
-export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder, onMissingConfig }: ModelPickerProps) {
+export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, sortByCanvasUsage = false, placeholder, onMissingConfig }: ModelPickerProps) {
     const { t } = useTranslation();
     const pickerId = useId();
     const [open, setOpen] = useState(false);
-    const options = useMemo(() => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))), [capability, config, value]);
+    const modelUsage = useQuery({ queryKey: ["canvas-model-usage"], queryFn: fetchCanvasModelUsage, staleTime: 60_000, enabled: sortByCanvasUsage }).data;
+    const options = useMemo(() => {
+        const unique = Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model))));
+        const originalOrder = new Map(unique.map((model, index) => [model, index]));
+        const usageByName = new Map<string, number>();
+        const usageByChannelModel = new Map<string, number>();
+        for (const { model, channelId, count } of modelUsage || []) {
+            usageByName.set(model, (usageByName.get(model) || 0) + count);
+            if (channelId) usageByChannelModel.set(`${channelId}::${model}`, count);
+        }
+        if (!sortByCanvasUsage) return unique;
+        return unique.sort((left, right) => {
+            const usage = (model: string) => {
+                const decoded = decodeChannelModel(model);
+                const name = decoded?.model || modelOptionName(model);
+                return (decoded && usageByChannelModel.get(`${decoded.channelId}::${name}`)) || usageByName.get(name) || 0;
+            };
+            const usageDifference = usage(right) - usage(left);
+            return usageDifference || originalOrder.get(left)! - originalOrder.get(right)!;
+        });
+    }, [capability, config, modelUsage, sortByCanvasUsage, value]);
     const current = value || "";
     const pickerPlaceholder = placeholder || t("settingsPanels.model.select");
 

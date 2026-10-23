@@ -2,6 +2,7 @@
 export const workspaceNavigationZhCN = {
     workbench: "工作台",
     projects: "项目",
+    freeCanvas: "自由画布",
     generate: "快速生成",
     resources: "资源库",
     workflows: "工作流",
@@ -33,6 +34,7 @@ export const workspaceNavigationZhCN = {
 export const workspaceNavigationEnUS = {
     workbench: "Workbench",
     projects: "Projects",
+    freeCanvas: "Free Canvas",
     generate: "Quick Generate",
     resources: "Resources",
     workflows: "Workflows",

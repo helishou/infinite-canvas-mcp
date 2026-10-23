@@ -1,16 +1,73 @@
 import type { Request, Response, Router } from "express";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { WorkflowStore } from "./store.js";
 import type { WorkflowExecutor } from "./executor.js";
 import type { WorkflowConfig } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
 import {
   loadInstances,
   saveInstances,
   validateInstance,
 } from "../comfyui/instances.js";
+
+type LocalComfyWorkflowFile = { id: string; instance: string; relativePath: string; name: string; bytes: number; modifiedAt: string };
+
+function localInstanceRoot(roots: Record<string, string> | undefined, instance: string) {
+  for (const [address, root] of Object.entries(roots || {})) {
+    const normalized = address.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    if (normalized === instance) return root;
+  }
+  return "";
+}
+
+async function localComfyWorkflowFiles(): Promise<LocalComfyWorkflowFile[]> {
+  const data = await loadInstances();
+  const files: LocalComfyWorkflowFile[] = [];
+  for (const rawAddress of data.instances || []) {
+    const instance = rawAddress.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+    if (!/^(?:localhost|127\.0\.0\.1):\d+$/.test(instance)) continue;
+    const root = localInstanceRoot(data.roots, instance);
+    if (!root) continue;
+    try { await fs.access(path.join(root, "main.py")); } catch { continue; }
+    const workflowsDir = path.join(root, "user", "default", "workflows");
+    const visit = async (directory: string): Promise<void> => {
+      let entries;
+      try { entries = await fs.readdir(directory, { withFileTypes: true }); } catch { return; }
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue;
+        const absolutePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) { await visit(absolutePath); continue; }
+        if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json") || entry.name.toLowerCase().endsWith(".config.json")) continue;
+        const stat = await fs.stat(absolutePath).catch(() => undefined);
+        if (!stat) continue;
+        const relativePath = path.relative(workflowsDir, absolutePath).split(path.sep).join("/");
+        files.push({ id: JSON.stringify([instance, relativePath]), instance, relativePath, name: entry.name, bytes: stat.size, modifiedAt: stat.mtime.toISOString() });
+      }
+    };
+    await visit(workflowsDir);
+  }
+  return files.sort((a, b) => a.name.localeCompare(b.name) || a.instance.localeCompare(b.instance) || a.relativePath.localeCompare(b.relativePath));
+}
+
+async function readLocalComfyWorkflow(instance: string, relativePath: string) {
+  const selected = (await localComfyWorkflowFiles()).find((item) => item.instance === instance && item.relativePath === relativePath);
+  if (!selected) throw new Error("所选工作流已不存在或不在已登记的本机 ComfyUI 工作流目录中，请刷新列表");
+  const data = await loadInstances();
+  const root = localInstanceRoot(data.roots, instance);
+  const workflowsDir = path.resolve(root, "user", "default", "workflows");
+  const absolutePath = path.resolve(workflowsDir, ...relativePath.split("/"));
+  const rel = path.relative(workflowsDir, absolutePath);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) throw new Error("工作流路径无效");
+  const realWorkflowsDir = await fs.realpath(workflowsDir);
+  const realFilePath = await fs.realpath(absolutePath);
+  const realRel = path.relative(realWorkflowsDir, realFilePath);
+  if (realRel.startsWith("..") || path.isAbsolute(realRel)) throw new Error("工作流文件必须位于 ComfyUI 工作流目录内");
+  const raw = await fs.readFile(realFilePath, "utf8");
+  return { selected, raw, sha256: createHash("sha256").update(raw, "utf8").digest("hex") };
+}
 
 export function registerWorkflowRoutes(
   router: Router,
@@ -41,12 +98,68 @@ export function registerWorkflowRoutes(
     res.json({ workflows });
   });
 
+  // Only enumerate files under roots explicitly registered for local ComfyUI instances.
+  router.get("/api/comfyui/local-workflows", async (_req: Request, res: Response) => {
+    try {
+      res.json({ workflows: await localComfyWorkflowFiles() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  router.post("/api/workflows/import-comfyui", async (req: Request, res: Response) => {
+    try {
+      const instance = typeof req.body?.instance === "string" ? req.body.instance : "";
+      const relativePath = typeof req.body?.relativePath === "string" ? req.body.relativePath : "";
+      const { selected, raw, sha256 } = await readLocalComfyWorkflow(instance, relativePath);
+      const workflow = convertComfyWorkflowToApi(JSON.parse(raw));
+      const existing = new Set((await store.list()).map((item) => item.name.toLocaleLowerCase()));
+      const sourceName = path.basename(relativePath);
+      const extension = path.extname(sourceName) || ".json";
+      const stem = path.basename(sourceName, extension);
+      let name = sourceName;
+      for (let suffix = 2; existing.has(`custom/${name}`.toLocaleLowerCase()) || existing.has(name.toLocaleLowerCase()); suffix += 1) name = `${stem} (${suffix})${extension}`;
+      const result = await store.upload(name, workflow);
+      await store.saveSourceLink(result.name, { instance: selected.instance, relativePath: selected.relativePath, syncedSha256: sha256, syncedAt: new Date().toISOString() });
+      await onImported?.(result.name);
+      res.status(201).json(result);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  router.post("/api/workflows/:name/sync-comfyui", async (req: Request, res: Response) => {
+    try {
+      const name = decodeURIComponent(req.params.name as string);
+      const detail = await store.get(name);
+      const source = detail.source;
+      if (!source) return res.status(409).json({ error: "该工作流没有记录 ComfyUI 原流来源" });
+      const { raw, sha256 } = await readLocalComfyWorkflow(source.instance, source.relativePath);
+      const workflow = convertComfyWorkflowToApi(JSON.parse(raw));
+      await store.saveWorkflow(name, workflow);
+      const updatedSource = { ...source, syncedSha256: sha256, syncedAt: new Date().toISOString() };
+      await store.saveSourceLink(name, updatedSource);
+      await onImported?.(name);
+      res.json({ name, source: updatedSource });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // GET /api/workflows/:name - 获取单个工作流（含 config）
   router.get("/api/workflows/:name", async (req: Request, res: Response) => {
     try {
       const name = decodeURIComponent(req.params.name as string);
       const detail = await store.get(name);
       if (detail?.config) detail.config = normalizeWorkflowConfig(detail.config);
+      if (detail.source) {
+        try {
+          const { sha256 } = await readLocalComfyWorkflow(detail.source.instance, detail.source.relativePath);
+          detail.source.syncState = sha256 === detail.source.syncedSha256 ? "current" : "changed";
+        } catch {
+          detail.source.syncState = "missing";
+        }
+      }
       res.json(detail);
     } catch (error) {
       res

@@ -160,7 +160,7 @@ export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) 
   let selected;
   try { selected = dramaWorkbenchEpisode(availableEpisodes, requestedEpisodeId); }
   catch {
-    // 请求的分集已不存在：回退到第一集，不再报「分集不属于当前剧目」。
+    // 请求的分集已不存在：回退到最新一集，不再报「分集不属于当前剧目」。
     if (!availableEpisodes.length) return <ProductionEditor key={`series:${dramaId}`} series={{ id: dramaId, episodes: [] }} onSeriesEpisodesChanged={refreshEpisodes} />;
     selected = dramaWorkbenchEpisode(availableEpisodes, null);
   }

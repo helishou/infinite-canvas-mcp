@@ -9,7 +9,14 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.get("/agent/runninghub/status", (_req, res) => res.json({ ok: true, ...runningHub.status(), workflowTaskReplaySafe: true }));
     app.get("/agent/runninghub/config", (_req, res) => res.json({ ok: true, config: mask(runningHub.getConfig()) }));
     app.put("/agent/runninghub/config", (req, res) => res.json({ ok: true, config: mask(runningHub.setConfig(req.body || {})) }));
-    app.post("/agent/runninghub/workflow/inspect", async (req, res) => res.json({ ok: true, ...(await runningHub.inspectWorkflow(typeof req.body?.workflowId === "string" ? req.body.workflowId : undefined)) }));
+    app.post("/agent/runninghub/workflow/inspect", async (req, res) => res.json({ ok: true, ...(await runningHub.inspectWorkflow(typeof req.body?.workflowId === "string" ? req.body.workflowId : undefined, siteOf(req))) }));
+    // 网页会话：上传工作流走 RunningHub 网页端接口，需要登录令牌而不是 OpenAPI Key。两套站点各一份。
+    app.get("/agent/runninghub/session", (req, res) => res.json({ ok: true, session: runningHub.sessionStatus(siteOf(req)) }));
+    app.put("/agent/runninghub/session", async (req, res) => res.json({ ok: true, session: await runningHub.setSessionToken(typeof req.body?.accessToken === "string" ? req.body.accessToken : "", siteOf(req)) }));
+    app.delete("/agent/runninghub/session", (req, res) => res.json({ ok: true, session: runningHub.disconnectSession(siteOf(req)) }));
+    app.post("/agent/runninghub/session/browser-import", async (req, res) => res.json({ ok: true, session: await runningHub.importBrowserSession(siteOf(req)) }));
+    // 本地节点图 → 云端工作流；拿到 workflowId 后自动建档，返回档案。站点缺省时跟随运行环境链路。
+    app.post("/agent/runninghub/workflows/upload", async (req, res) => res.json({ ok: true, ...(await runningHub.publishLocalWorkflow({ name: typeof req.body?.name === "string" ? req.body.name : undefined, graph: objectBody(req.body?.graph), site: siteOf(req) })) }));
     app.get("/agent/runninghub/workflows", (_req, res) => res.json({ ok: true, workflows: runningHub.listWorkflowProfiles() }));
     app.put("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, workflow: runningHub.saveWorkflowProfile({ ...objectBody(req.body), id: String(req.params.id) }) }));
     app.delete("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, deleted: runningHub.removeWorkflowProfile(String(req.params.id)) }));
@@ -40,4 +47,12 @@ function taskResponse(id: string, prefix: string, stores: Stores, req: Request, 
     return res.json({ ok: true, task, events: stores.tasks.events(id, Number(req.query.after || 0)) });
 }
 function objectBody(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
-function mask<T extends Record<string, unknown>>(config: T): T { return { ...config, ...(config.apiKey ? { apiKey: "********" } : {}), ...(config.walletApiKey ? { walletApiKey: "********" } : {}) }; }
+/** 站点既可以从 query 传（GET/DELETE），也可以从 body 传（PUT/POST）。 */
+function siteOf(req: Request): "default" | "ai" | "cn" {
+    const raw = typeof req.query?.site === "string" ? req.query.site : typeof req.body?.site === "string" ? req.body.site : "";
+    return raw === "ai" || raw === "cn" ? raw : "default";
+}
+function mask<T extends Record<string, unknown>>(config: T): T {
+    const keys = objectBody(config.siteApiKeys);
+    return { ...config, ...(config.apiKey ? { apiKey: "********" } : {}), ...(config.walletApiKey ? { walletApiKey: "********" } : {}), ...(Object.keys(keys).length ? { siteApiKeys: { ...keys, ...(keys.ai ? { ai: "********" } : {}), ...(keys.cn ? { cn: "********" } : {}) } } : {}) } as T;
+}

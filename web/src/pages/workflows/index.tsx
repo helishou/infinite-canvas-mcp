@@ -1,9 +1,9 @@
 import { useTranslation } from "react-i18next";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { App, Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
-import { Upload as UploadIcon, Cloud, Download, Play, Trash2, Workflow } from "lucide-react";
+import { Upload as UploadIcon, Cloud, Download, Play, RefreshCw, Trash2, Workflow, ExternalLink, UploadCloud } from "lucide-react";
 import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
-import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
+import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, syncWorkflowFromComfyUI, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
 import { RunTab } from "./run-panel";
@@ -11,11 +11,13 @@ import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
 import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
+import { ComfyUIWorkflowImport } from "./comfyui-workflow-import";
+import { useRunningHubUpload } from "./runninghub-workflow-upload";
 import { RunningHubProfileActions } from "./runninghub-profile-actions";
 import { RunningHubGraphPanel } from "./runninghub-graph-panel";
 import { runningHubProfileToConfig, runningHubRequestFromForm, RunningHubMediaConflict } from "./runninghub-run-adapter";
 import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
-import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, saveRunningHubWorkflow, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, fetchRunningHubConfig, saveRunningHubWorkflow, type RunningHubSite, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
@@ -55,6 +57,7 @@ type WorkflowDetail = {
     workflow: Record<string, any>;
     config: WorkflowConfig;
     builtin: boolean;
+    source?: { instance: string; relativePath: string; syncedSha256: string; syncedAt: string; syncState?: "current" | "changed" | "missing" };
 };
 
 let backendSession: { url: string; token: string; scope: string } | undefined;
@@ -88,6 +91,8 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
 
     const [rhTab, setRhTab] = useState<WorkbenchTab>("graph");
     const [rhBaseUrl, setRhBaseUrl] = useState("https://www.runninghub.ai");
+    // 上传站点：来自 RunningHub 设置，缺省跟随运行环境那条链路。
+    const [rhUploadSite, setRhUploadSite] = useState<RunningHubSite>("default");
     const [activeTab, setActiveTab] = useState<WorkbenchTab>("graph");
     const [historyLogs, setHistoryLogs] = useState<Array<{ id: string; workflow: string; prompt: string; status: string; createdAt: string; outputs: Array<{ url: string; mimeType: string }>; error?: string }>>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
@@ -108,6 +113,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     const [profileHistoryError, setProfileHistoryError] = useState("");
     const savingRef = useRef(new Set<string>());
     const [savingOwners, setSavingOwners] = useState<Set<string>>(new Set());
+    const [syncingSource, setSyncingSource] = useState("");
     // 字段编辑逐键触发，保存要防抖合并；ref 镜像最新选中项，供防抖回调读取。
     const selectedRef = useRef<WorkflowDetail | null>(selected);
     selectedRef.current = selected;
@@ -222,6 +228,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                 if (status?.url) setRhBaseUrl(status.url);
             })
             .catch((error) => setRhStatusError(error instanceof Error ? error.message : String(error)));
+        void fetchRunningHubConfig()
+            .then(({ config }) => setRhUploadSite(config.uploadSite || "default"))
+            .catch(() => setRhUploadSite("default"));
     }, [fetchProfiles]);
 
     /**
@@ -366,6 +375,19 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         }
     };
 
+    // 「上传到 RunningHub」：本地节点图 → 云端工作流 → workflowId → 自动建档。
+    const [draftNotice, setDraftNotice] = useState<string | null>(null);
+    const handleUploadedToRunningHub = useCallback((profile: RunningHubWorkflowProfile, cloudRead: boolean) => {
+        void fetchProfiles().then(() => {
+            setLibrary("runninghub");
+            setSelectedProfile(profile);
+            setRhTab("graph");
+            setDraftNotice(cloudRead ? null : profile.workflowId);
+        });
+    }, [fetchProfiles]);
+    const { uploading, upload } = useRunningHubUpload({ workflows, site: rhUploadSite, onUploaded: handleUploadedToRunningHub });
+    const handleUploadToRunningHub = (id: string) => void upload(id);
+
     const handleLoadDetail = async (name: string) => {
         const version = ++detailRequest.current;
         setDetailLoading(true);
@@ -381,6 +403,20 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
             if (version === detailRequest.current) setDetailError(err instanceof Error ? err.message : String(err));
         } finally {
             if (version === detailRequest.current) setDetailLoading(false);
+        }
+    };
+
+    const handleSyncComfySource = async (owner: WorkflowDetail) => {
+        if (!owner.source || owner.source.syncState !== "changed" || syncingSource) return;
+        setSyncingSource(owner.name);
+        try {
+            await syncWorkflowFromComfyUI(owner.name);
+            await Promise.all([fetchWorkflows(), handleLoadDetail(owner.name)]);
+            message.success(t("workflowLibraryActions.syncComfyUISuccess"));
+        } catch (err) {
+            message.error(err instanceof Error ? err.message : t("workflowLibraryActions.syncComfyUIFailed"));
+        } finally {
+            setSyncingSource("");
         }
     };
 
@@ -607,6 +643,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
             {libraryError && library === "local" ? <Alert type="error" description={libraryError} action={<Button size="small" onClick={() => void fetchWorkflows()}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
             {profilesError && library === "runninghub" ? <Alert type="error" description={profilesError} action={<Button size="small" onClick={() => void fetchProfiles()}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
             {rhStatusError && library === "runninghub" ? <Alert type="error" description={rhStatusError} action={<Button size="small" onClick={() => { void fetchRunningHubStatus().then((status) => { setRhConfigured(status); setRhStatusError(""); }).catch((error) => { setRhConfigured((current) => current ? { ...current, workflowTaskReplaySafe: false } : current); setRhStatusError(String(error)); }); }}>{t("workflowRecovery.refreshStatus")}</Button>} /> : null}
+            {draftNotice && library === "runninghub" ? <Alert type="info" showIcon closable onClose={() => setDraftNotice(null)} message={t("runningHub.upload.draftHint")} description={<a className="underline" href={`${rhUploadSite === "ai" ? "https://www.runninghub.ai" : rhUploadSite === "cn" ? "https://www.runninghub.cn" : rhBaseUrl}/workflow/${draftNotice}`} target="_blank" rel="noreferrer">{draftNotice}</a>} /> : null}
             {libraryLoading && library === "local" ? <Spin size="small" /> : null}
             {library === "runninghub" ? (
                 <div className="flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs dark:border-stone-700 dark:bg-stone-900">
@@ -624,6 +661,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                     <h2 className="min-w-0 text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
                     <div role="group" aria-label={t("workflowLibraryActions.libraryActions")} className="flex shrink-0 items-center gap-1">
                         {library === "local" ? <>
+                            <ComfyUIWorkflowImport onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
                             <Tooltip title={t(loading ? "workflowLibraryActions.importingFile" : "workflowLibraryActions.importFile")}>
                                 <label className={`relative inline-flex size-6 items-center justify-center rounded text-stone-600 focus-within:ring-2 focus-within:ring-blue-500 dark:text-stone-300 ${loading ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-stone-100 dark:hover:bg-stone-800"}`}>
                                     {loading ? <Spin size="small" /> : <UploadIcon aria-hidden="true" className="size-3.5" />}
@@ -660,9 +698,22 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                             onSelect={(item) => void handleLoadDetail(item.id)}
                             onRename={(item, title) => void handleRename(item.id, title)}
                             emptyText="暂无本地工作流"
-                            onAction={(item) => void handleOpenInComfyUI(item.id)}
-                            actionTitle="在 ComfyUI 中打开"
-                            actionBusyId={comfyOpening || null}
+                            actions={(item) => [
+                                {
+                                    key: "upload",
+                                    title: t("runningHub.upload.title"),
+                                    icon: <UploadCloud className="size-3.5" aria-hidden="true" />,
+                                    busy: uploading === item.id,
+                                    onSelect: () => void handleUploadToRunningHub(item.id),
+                                },
+                                {
+                                    key: "comfyui",
+                                    title: "在 ComfyUI 中打开",
+                                    icon: <ExternalLink className="size-3.5" aria-hidden="true" />,
+                                    busy: comfyOpening === item.id,
+                                    onSelect: () => void handleOpenInComfyUI(item.id),
+                                },
+                            ]}
                         /> : null}
                     </>
                 ) : (
@@ -813,9 +864,15 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                 )
                             }
                             subtitle={`${selected.name.replace(/^custom\//, "")} · ${Object.keys(selected.workflow).length} 个节点 · ${selected.config.fields.length} 字段`}
+                            alerts={selected.source?.syncState === "changed"
+                                ? <Alert type="warning" showIcon message={t("workflowLibraryActions.syncComfyUIChanged")} description={`${selected.source.relativePath} · ${selected.source.instance}`} />
+                                : selected.source?.syncState === "missing"
+                                    ? <Alert type="info" showIcon message={t("workflowLibraryActions.syncComfyUIMissing")} description={`${selected.source.relativePath} · ${selected.source.instance}`} />
+                                    : undefined}
                             actions={
                                 <>
                                     <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>导出</Button>
+                                    {selected.source?.syncState === "changed" && <Button size="small" icon={<RefreshCw className="size-3.5" />} loading={syncingSource === selected.name} disabled={Boolean(syncingSource) || savingOwners.has(selected.name)} onClick={() => void handleSyncComfySource(selected)}>{t("workflowLibraryActions.syncComfyUI")}</Button>}
                                     {!selected.builtin && (
                                         <Button size="small" danger loading={savingOwners.has(selected.name)} icon={<Trash2 className="size-3.5" />} onClick={() => handleDelete(selected.name)}>删除</Button>
                                     )}

@@ -9,6 +9,8 @@ export type WorkflowItem = {
     hasConfig?: boolean;
 };
 
+export type LocalComfyWorkflowFile = { id: string; instance: string; relativePath: string; name: string; bytes: number; modifiedAt: string };
+
 // 字段与配置类型只有一份定义在 @/types/workflow；这里只做转发，
 // 避免两个同名类型各自漂移。跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
 import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
@@ -19,6 +21,7 @@ export type WorkflowDetail = {
     description?: string;
     workflow: Record<string, unknown>;
     config?: WorkflowConfig;
+    source?: { instance: string; relativePath: string; syncedSha256: string; syncedAt: string; syncState?: "current" | "changed" | "missing" };
 };
 
 export type WorkflowPackage = {
@@ -73,6 +76,18 @@ export type WorkflowRunFields = {
 
 export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
     return request<{ workflows: WorkflowItem[] }>("GET", "/api/workflows");
+}
+
+export function fetchLocalComfyWorkflows(): Promise<{ workflows: LocalComfyWorkflowFile[] }> {
+    return request<{ workflows: LocalComfyWorkflowFile[] }>("GET", "/api/comfyui/local-workflows");
+}
+
+export function importLocalComfyWorkflow(input: Pick<LocalComfyWorkflowFile, "instance" | "relativePath">): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", "/api/workflows/import-comfyui", input);
+}
+
+export function syncWorkflowFromComfyUI(name: string): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/sync-comfyui`);
 }
 
 export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {

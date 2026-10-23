@@ -27,7 +27,7 @@ test("production navigation never adds a second app-preferences action", () => {
         for (const layout of [{ horizontal: true, compact: false }, { horizontal: false, compact: true }, { horizontal: false, compact: false }]) {
             const html = render(createElement(ProductionWorkspaceNavigation, { ...props, ...layout }));
             assert.doesNotMatch(html, /app-preferences|config\.preferences/);
-            if (!layout.horizontal) assert.match(html, /director.workspace.tab.advanced/);
+            assert.match(html, /director\.workspace\.tab\.advanced/);
         }
     }
 });

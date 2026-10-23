@@ -6,7 +6,10 @@ export function dramaWorkbenchEpisode(episodes: DramaEpisode[], requestedId?: st
         if (!selected) throw new Error("EPISODE_OUTSIDE_DRAMA");
         return selected;
     }
-    return [...episodes].sort((a, b) => a.episodeNumber - b.episodeNumber || a.id.localeCompare(b.id))[0];
+    return episodes.reduce<DramaEpisode | undefined>((latest, episode) =>
+        !latest || episode.episodeNumber > latest.episodeNumber ? episode : latest,
+        undefined,
+    );
 }
 
 export function dramaWorkbenchPath(dramaId: string, episodeId?: string, workspace?: string) {

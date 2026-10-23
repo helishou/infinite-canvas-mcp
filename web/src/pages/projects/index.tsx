@@ -20,7 +20,7 @@ import { uploadBackendMedia } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { cn } from "@/lib/utils";
 import DramaPage from "@/pages/drama";
-import { canvasProjectDestination, matchesProjectQuery, ordinaryCanvasProjects, projectDirectoryType, updateProjectDirectoryLocation, type ProjectDirectoryType } from "./directory-data";
+import { canvasProjectDestination, matchesProjectQuery, ordinaryCanvasProjects, projectDirectoryType, updateProjectDirectoryLocation } from "./directory-data";
 import { useDramaDirectory } from "./use-drama-directory";
 
 export default function ProjectsPage() {
@@ -34,7 +34,6 @@ export default function ProjectsPage() {
     const directoryType = projectDirectoryType(location.pathname, searchParams);
     const searchQuery = searchParams.get("q") || "";
     const showCanvases = directoryType !== "drama";
-    const changeDirectoryType = (type: ProjectDirectoryType) => navigate(updateProjectDirectoryLocation(location, { type }));
     const changeSearch = (q: string) => navigate(updateProjectDirectoryLocation(location, { q }), { replace: true });
     const inputRef = useRef<HTMLInputElement>(null);
     const autoOpenRef = useRef(false);
@@ -121,11 +120,6 @@ export default function ProjectsPage() {
                         <p className="mt-1 text-sm text-muted-foreground">{t("projects.description")}</p>
                     </div>
                     <Input className="!w-full sm:!w-80" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("projects.search")} placeholder={t("projects.search")} value={searchQuery} onChange={event => changeSearch(event.target.value)} />
-                    <nav className="flex w-full flex-wrap gap-1" aria-label={t("projects.filter")}>
-                        {(["all", "canvas", "drama"] as const).map(type => <button key={type} type="button" aria-current={directoryType === type ? "page" : undefined} onClick={() => changeDirectoryType(type)} className={cn("rounded-md px-4 py-2 text-sm transition-colors hover:bg-muted", directoryType === type ? "bg-muted font-medium text-foreground" : "text-muted-foreground")}>
-                            {t(`projects.${type}`)}
-                        </button>)}
-                    </nav>
                 </div>
             </header>
             <div className="flex min-h-0 w-full flex-1">

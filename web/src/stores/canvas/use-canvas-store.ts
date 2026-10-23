@@ -89,7 +89,7 @@ type CanvasStore = {
     adoptRemoteOnCanvasConflict: (id: string) => Promise<void>;
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
-    createFolder: (name?: string, isDrama?: boolean) => string;
+    createFolder: (name?: string, isDrama?: boolean, productionPlan?: CanvasFolder["productionPlan"]) => string;
     renameFolder: (id: string, name: string) => void;
     updateFolder: (id: string, patch: Partial<Pick<CanvasFolder, "name" | "outline" | "description" | "coverStorageKey" | "tags">>) => void;
     deleteFolder: (id: string) => void;
@@ -675,9 +675,9 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         void importLegacyGenerationLogs(project.id, (source as Partial<CanvasProject> & { logs?: unknown[] }).logs);
         return project.id;
     },
-    createFolder: (name = "新文件夹", isDrama = false) => {
+    createFolder: (name = "新文件夹", isDrama = false, productionPlan) => {
         const now = new Date().toISOString();
-        const folder = { id: nanoid(), name: name.trim() || "新文件夹", createdAt: now, updatedAt: now, outline: "", description: "", coverStorageKey: null, tags: [], isDrama };
+        const folder = { id: nanoid(), name: name.trim() || "新文件夹", createdAt: now, updatedAt: now, outline: "", description: "", coverStorageKey: null, tags: [], isDrama, ...(productionPlan ? { productionPlan } : {}) };
         set((state) => ({ folders: [...state.folders, folder] }));
         scheduleCanvasFolderSync();
         return folder.id;

@@ -8,8 +8,8 @@ import { resolveWorkspaceNavigation } from "./workspace-navigation";
 for (const [pathname, area] of [
     ["/", "workbench"],
     ["/projects", "projects"],
-    ["/canvas", "projects"],
-    ["/canvas/project-a", "projects"],
+    ["/canvas", "freeCanvas"],
+    ["/canvas/project-a", "freeCanvas"],
     ["/production", "projects"],
     ["/director", "projects"],
     ["/director/project-a", "projects"],
@@ -27,14 +27,14 @@ for (const [pathname, area] of [
     });
 }
 
-test("primary navigation includes five areas regardless of optional provider settings", () => {
+test("primary navigation includes six areas regardless of optional provider settings", () => {
     assert.deepEqual(
         navigationTools.map((item) => item.slug),
-        ["workbench", "projects", "generate", "resources", "workflows"],
+        ["workbench", "projects", "freeCanvas", "generate", "resources", "workflows"],
     );
     assert.deepEqual(
         navigationTools.map((item) => item.href),
-        ["/", "/projects", "/image", "/assets", "/workflows"],
+        ["/", "/projects", "/projects?type=canvas", "/image", "/assets", "/workflows"],
     );
 });
 
@@ -55,10 +55,11 @@ test("assets and prompts remain separately reachable full pages", () => {
 });
 
 test("project filters select matching tabs, including legacy catalogue routes", () => {
-    assert.equal(resolveWorkspaceNavigation("/projects", "?type=canvas").activeSecondary, "canvasProjects");
+    assert.equal(resolveWorkspaceNavigation("/projects", "?type=canvas").area, "freeCanvas");
+    assert.equal(resolveWorkspaceNavigation("/projects", "?type=canvas").secondary, undefined);
     assert.equal(resolveWorkspaceNavigation("/projects", "?type=drama").activeSecondary, "dramaProjects");
     assert.equal(resolveWorkspaceNavigation("/projects", "?type=unknown").activeSecondary, "allProjects");
-    assert.equal(resolveWorkspaceNavigation("/canvas").activeSecondary, "canvasProjects");
+    assert.equal(resolveWorkspaceNavigation("/canvas").area, "freeCanvas");
     assert.equal(resolveWorkspaceNavigation("/director").activeSecondary, "canvasProjects");
     assert.equal(resolveWorkspaceNavigation("/production").activeSecondary, "dramaProjects");
 });

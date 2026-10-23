@@ -31,8 +31,8 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
         </section>)}
     </nav>;
     if (horizontal) return <><nav data-production-horizontal-navigation aria-label={t("director.workspace.navigation")}>
-        {/* 剧目工作区显示剧目子 Tab（规划/共享画布/分集），分集制作区显示制作子 Tab。 */}
-        {groups.filter(group => selectedId.startsWith("series:") ? group.id === "series" : group.id === "owner").flatMap(group => group.items).map(item => {
+        {/* 剧目页显示剧目子 Tab；制作页显示工作区，并在末尾保留设置与历史入口。 */}
+        {groups.filter(group => selectedId.startsWith("series:") ? group.id === "series" : group.id === "owner" || group.id === "settings").flatMap(group => group.items).map(item => {
             const Icon = item.seriesView === "shared" ? Images : item.seriesView === "episodes" ? ListVideo : item.seriesView === "planning" ? Images : icons[item.workspace];
             return <button key={item.id} type="button" aria-current={selectedId === item.id ? "page" : undefined} onClick={() => { if (selectedId !== item.id) onSelect(item); }}><Icon className="size-4 shrink-0" /><span>{t(item.labelKey)}</span></button>;
         })}

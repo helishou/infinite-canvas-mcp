@@ -16,6 +16,15 @@ export type WorkflowLibraryItem = {
     builtin?: boolean;
 };
 
+/** 行尾动作；本地库同时有「在 ComfyUI 中打开」和「上传到 RunningHub」两个。 */
+export type WorkflowLibraryAction = {
+    key: string;
+    title: string;
+    icon: ReactNode;
+    busy?: boolean;
+    onSelect: (item: WorkflowLibraryItem) => void;
+};
+
 export function WorkflowLibraryList({
     items,
     selectedId,
@@ -23,9 +32,7 @@ export function WorkflowLibraryList({
     onRename,
     emptyText = "暂无工作流",
     renderLeading,
-    onAction,
-    actionTitle,
-    actionBusyId,
+    actions,
 }: {
     items: WorkflowLibraryItem[];
     selectedId?: string | null;
@@ -34,11 +41,8 @@ export function WorkflowLibraryList({
     emptyText?: string;
     /** 选中态左侧的图标槽；两个库各自决定是否显示来源标记。 */
     renderLeading?: (item: WorkflowLibraryItem) => ReactNode;
-    /** 行尾操作按钮（本地库是「在 ComfyUI 中打开」）；不传则不渲染，RunningHub 列表保持原样。 */
-    onAction?: (item: WorkflowLibraryItem) => void;
-    actionTitle?: string;
-    /** 正在执行该操作的行 id：按钮转圈且不可再点。 */
-    actionBusyId?: string | null;
+    /** 行尾动作按钮；不传则不渲染。 */
+    actions?: (item: WorkflowLibraryItem) => WorkflowLibraryAction[];
 }) {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editValue, setEditValue] = useState("");
@@ -101,19 +105,19 @@ export function WorkflowLibraryList({
                                 {item.meta ? <p className="mt-0.5 truncate text-xs text-stone-500">{item.meta}</p> : null}
                             </div>
                         </div>
-                        {onAction && actionTitle ? (
-                            <Tooltip title={actionTitle}>
+                        {(actions?.(item) || []).map((action) => (
+                            <Tooltip key={action.key} title={action.title}>
                                 <button
                                     type="button"
-                                    aria-label={actionTitle}
-                                    className="flex size-6 shrink-0 items-center justify-center rounded text-stone-400 hover:bg-stone-100 hover:text-blue-600 dark:hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
-                                    disabled={actionBusyId === item.id}
-                                    onClick={(event) => { event.stopPropagation(); onAction(item); }}
+                                    aria-label={action.title}
+                                    className="flex size-6 shrink-0 items-center justify-center rounded text-stone-400 hover:bg-stone-100 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-stone-800"
+                                    disabled={action.busy}
+                                    onClick={(event) => { event.stopPropagation(); action.onSelect(item); }}
                                 >
-                                    {actionBusyId === item.id ? <Spin size="small" /> : <ExternalLink className="size-3.5" aria-hidden="true" />}
+                                    {action.busy ? <Spin size="small" /> : action.icon}
                                 </button>
                             </Tooltip>
-                        ) : null}
+                        ))}
                         {item.badge ? (
                             <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-xs text-blue-600 dark:bg-blue-950 dark:text-blue-300">{item.badge}</span>
                         ) : null}

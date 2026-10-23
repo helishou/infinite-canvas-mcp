@@ -717,7 +717,8 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - Open a workflow whose saved output selection contains a removed node ID. Verify checkboxes, the selected-node summary, and submitted task parameters contain only outputs available in the current graph. Change the graph and confirm stale IDs are cleared.
 - For image/video/audio run fields stored as Backend `/media/` URLs, verify the submission uploads them and sends RunningHub filenames. Empty `SaveImageToLocal.file_path` and a uniquely inferable `SamplerCustomAdvanced.noise` link should be patched only in the submitted copy; ambiguous noise links must remain untouched.
 - Cancel a queued and a submitted workflow task. Restart Backend with a RunningHub workflow active and confirm it resumes by the saved remote task ID without running H3 Clip writeback.
-
+- Use "Upload to RunningHub" on a local workflow row to push the current graph to the cloud and create its profile automatically. Verify the page switches to the RunningHub library and selects the new profile, the returned workflowId opens on RunningHub, and nothing happens when the web session is missing. After opening and running the uploaded workflow once in the RunningHub web editor, verify "Resync" on the profile replaces the uploaded graph with the platform graph.
+- Upload-site switching: switch "Upload site" from "Follow the runtime site" to runninghub.ai / runninghub.cn and verify each site keeps its own web session (connect, disconnect, paste token). Uploading with the .cn site must hit runninghub.cn, and the error must name the site that is not connected. With no API Key for a non-default site, resync and run must refuse up front and point to that site's key instead of reusing the other site's key.
 
 ## Self-hosted deployment and portability
 

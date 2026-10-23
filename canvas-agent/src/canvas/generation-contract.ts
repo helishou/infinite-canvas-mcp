@@ -23,12 +23,22 @@ export const runningHubFieldSchema = z.object({
   paramKey: z.string().optional(), index: z.number().int().positive().optional(),
 });
 export type RunningHubField = z.infer<typeof runningHubFieldSchema>;
+/**
+ * 上传本地工作流的站点：`default` 跟随运行环境地址（即当前这条 RH 链路），
+ * 另外两档把上传固定到某个站点，两个站点的账号与令牌、API Key 互不相通。
+ */
+export const runningHubSiteSchema = z.enum(["default", "ai", "cn"]);
+export type RunningHubSite = z.infer<typeof runningHubSiteSchema>;
 export const runningHubConfigPatchSchema = z.object({
   baseUrl: z.string().optional(), apiKey: z.string().optional(), walletApiKey: z.string().optional(),
   mode: z.enum(["workflow", "app"]).optional(), workflowId: z.string().optional(), appId: z.string().optional(),
   fields: z.array(runningHubFieldSchema).optional(), workflowJson: z.unknown().optional(),
   useWallet: z.boolean().optional(), instanceType: z.enum(["default", "plus", "ultra"]).optional(),
   concurrency: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  /** 上传本地工作流时用哪个站点；缺省 `default` = 跟随上面 baseUrl 所在的链路。 */
+  uploadSite: runningHubSiteSchema.optional(),
+  /** 非默认站点各自独立的 OpenAPI Key：站点之间不通用，没有就跑不了该站点的工作流。 */
+  siteApiKeys: z.object({ ai: z.string().optional(), cn: z.string().optional() }).optional(),
 });
 export type RunningHubConfig = z.infer<typeof runningHubConfigPatchSchema> & {
   baseUrl: string; apiKey: string; mode: "workflow" | "app"; concurrency: number;
@@ -42,6 +52,8 @@ export const runningHubWorkflowProfileSchema = z.object({
   instanceType: z.enum(["default", "plus", "ultra"]).optional(), fields: z.array(runningHubFieldSchema),
   /** 读取节点图时的原始图快照；只读展示，运行以平台当前工作流为准。 */
   workflowJson: runningHubWorkflowGraphSchema.optional(),
+  /** 这个工作流属于哪个站点；缺省 `default` 表示走运行环境那条链路。 */
+  site: runningHubSiteSchema.optional(),
   createdAt: z.string().optional(), updatedAt: z.string().optional(),
 });
 export type RunningHubWorkflowProfile = z.infer<typeof runningHubWorkflowProfileSchema>;

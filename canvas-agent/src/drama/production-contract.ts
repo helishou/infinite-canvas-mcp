@@ -645,6 +645,8 @@ export const dramaProductionPlanSchema = z.object({
     requirements: z.string().default(""),
     imageModel: z.string().default(""),
     imageModelsByKind: productionSettingsSchema.shape.imageModelsByKind,
+    /** Initial style image node selected during drama setup; transferred into the shared director source once it exists. */
+    styleAnchorNodeId: z.string().min(1).optional(),
     h3Model: z.string().default(""),
     videoAspectRatio: productionSettingsSchema.shape.videoAspectRatio,
     storyboardImageMode: productionSettingsSchema.shape.storyboardImageMode,

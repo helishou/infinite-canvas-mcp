@@ -1839,6 +1839,9 @@ export function startServer(
 
   // ── Tasks ────────────────────────────────────────────────────────────
   app.get(CANVAS_TASKS_PATH, (req, res) => {
+    if (req.query.modelUsage === "true") {
+      return void res.json({ ok: true, modelUsage: stores.tasks.modelUsage() });
+    }
     const status =
       typeof req.query.status === "string" ? req.query.status : undefined;
     const kind =

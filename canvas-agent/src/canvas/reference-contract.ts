@@ -307,8 +307,9 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
+    const promptWithBoundOutfits = bindOutfitReferenceDetails(promptWithBoundSubjects, project, segment, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
-    return { semanticPrompt, compiledPrompt: promptWithBoundSubjects, bindings, references, issues, migratedLegacyRefs };
+    return { semanticPrompt, compiledPrompt: promptWithBoundOutfits, bindings, references, issues, migratedLegacyRefs };
 }
 
 function promptUsesSubmissionPictureOrder(
@@ -393,6 +394,65 @@ function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBindi
     const url = String(media.content || media.url || media.localUrl || media.sourceUrl || "");
     if (!storageKey && !url) return {};
     return { ...(storageKey ? { storageKey } : {}), ...(url ? { url } : {}), ...(media.mimeType ? { mimeType: String(media.mimeType) } : {}) };
+}
+
+function bindOutfitReferenceDetails(
+    prompt: string,
+    project: Record<string, unknown>,
+    segment: Record<string, unknown>,
+    references: CompiledReference[],
+    bySubjectId: Map<string, { reference: CompiledReference; ordinal: number }>,
+) {
+    const groups = Object.values(recordOf(segment.h3CharacterGroups));
+    const nodes = Array.isArray(project.nodes) ? project.nodes.map(recordOf) : [];
+    const additions = new Map<number, Array<{ token: string; instruction: string }>>();
+    for (const reference of references) {
+        if (reference.mediaType !== "image" || !reference.outfitId) continue;
+        const group = groups.map(recordOf).find((item) =>
+            String(item.id || "") === String(reference.groupId || "")
+            || String(item.subjectId || "") === String(reference.subjectId || "")
+            || String(item.characterNodeId || "") === String(reference.sourceNodeId || ""));
+        if (!group) continue;
+        const subject = [reference.subjectId, reference.groupId, reference.id]
+            .map((id) => id ? bySubjectId.get(id) : undefined)
+            .find(Boolean);
+        if (!subject) continue;
+        const outfits = Array.isArray(group.outfits) ? group.outfits.map(recordOf) : [];
+        const outfit = outfits.find((item) => String(item.id || "") === reference.outfitId);
+        if (!outfit || outfit.enabled === false) continue;
+        const characterNodeId = String(group.characterNodeId || reference.sourceNodeId || "");
+        const characterNode = nodes.find((item) => String(item.id || "") === characterNodeId);
+        const metadata = recordOf(characterNode?.metadata);
+        const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.map(recordOf) : [];
+        const outfitImage = images.find((item) => String(item.storageKey || "") === String(reference.storageKey || ""))
+            || images.find((item) => String(item.outfit || item.name || "") === String(outfit.name || ""));
+        const description = String(outfitImage?.outfitDescription || outfit.outfitDescription || outfit.description || "").trim();
+        const purposes = [...(Array.isArray(reference.picturePurpose) ? reference.picturePurpose : []), ...(Array.isArray(outfit.picturePurpose) ? outfit.picturePurpose : [])].map(String);
+        // A character image can be present in the outfit group while serving only as
+        // the identity reference. Add wardrobe instructions only when that role is
+        // explicit or the user supplied an outfit description for this image.
+        if (purposes.length && !purposes.includes("wardrobe")) continue;
+        if (!purposes.includes("wardrobe") && !description) continue;
+        const instruction = description
+            ? `Authored outfit description: ${description}. Match these details and the exact visible design; do not substitute or redesign it.`
+            : "This is the exact outfit reference for this Subject. Reproduce its visible clothing design without substitution, simplification, or invented details.";
+        const items = additions.get(subject.ordinal) || [];
+        items.push({ token: reference.token, instruction });
+        additions.set(subject.ordinal, items);
+    }
+    if (!additions.size) return prompt;
+    const sectionPattern = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im;
+    const section = sectionPattern.exec(prompt);
+    if (!section) return prompt;
+    const linkedSection = section[2].replace(/<Subject\s+(\d+)>[^\r\n]*/g, (line, ordinalText: string) => {
+        const items = additions.get(Number(ordinalText));
+        if (!items?.length) return line;
+        const missing = items.filter(({ token }) => !line.includes(token));
+        if (missing.length) return line;
+        const detail = items.map(({ instruction }) => instruction).join(" ");
+        return `${line.trimEnd().replace(/[.。]+$/u, "")}; ${detail}`;
+    });
+    return `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
 }
 
 /** Resolve one image for a formal binding. Existing clips retain their legacy primary-image rule. */

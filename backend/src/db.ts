@@ -4138,6 +4138,12 @@ export class BackendDatabase {
         return rows.map((row) => this.taskFromRow(row));
     }
 
+    listCanvasTaskModelUsage(): Array<{ model: string; channelId: string; count: number }> {
+        return this.db.prepare(`SELECT model, COALESCE(NULLIF(json_extract(params_json, '$.channelId'), ''), NULLIF(json_extract(input_json, '$.channelId'), ''), '') AS channelId, COUNT(*) AS count
+            FROM tasks WHERE project_id IS NOT NULL AND model IS NOT NULL AND model != ''
+            GROUP BY model, channelId`).all() as Array<{ model: string; channelId: string; count: number }>;
+    }
+
     /**
      * 任务列表「摘要」投影：只保留卡片渲染所需标量 + 输出媒体引用，裁掉多 MB 的 input/params 大列。
      * 供首页、全局任务按钮、制作工作台等纯展示场景用；导出、任务中心和单任务详情仍走 list()。

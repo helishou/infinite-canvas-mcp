@@ -4,18 +4,36 @@ import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import path from "node:path";
 import WebSocket from "ws";
-import { runningHubConfigPatchSchema, runningHubWorkflowProfileSchema, type RunningHubField, type RunningHubConfig, type RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
+import { runningHubConfigPatchSchema, runningHubWorkflowProfileSchema, type RunningHubField, type RunningHubConfig, type RunningHubSite, type RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
 import type { RuntimeTask } from "../db.js";
 import type { MediaStore, SettingStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
+import { randomUUID } from "node:crypto";
 import { H3ExecutionQueue, h3CanResumeQueued } from "./h3-queue.js";
+import { collectBrowserSessions, jwtExpiry, probeSession, readSession, clearSession, sessionStatus, writeSession, type RunningHubBrowserSession, type RunningHubSession, type RunningHubSessionStatus } from "./runninghub-session.js";
 
 export type { RunningHubField, RunningHubConfig } from "@basketikun/canvas-agent/generation-contract";
 export type { RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
 type Json = Record<string, any>;
 type RunConfig = RunningHubConfig & { remoteId?: string };
 const DEFAULT_URL = "https://www.runninghub.ai";
+/** 两个站点是两套独立账号：令牌、API Key、工作流列表都不互通，上传必须按站点分别走。 */
+const SITE_URLS = { ai: "https://www.runninghub.ai", cn: "https://www.runninghub.cn" } as const;
+const SITE_LABEL = { ai: "runninghub.ai（国际站）", cn: "runninghub.cn（国内站）" } as const;
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+/** 站点取值归一：只认三档，其它一律按「跟随运行环境」处理。 */
+export function normalizeSite(value: unknown): RunningHubSite {
+    return value === "ai" || value === "cn" ? value : "default";
+}
+/** 上传/同步/运行实际请求的地址：`default` 用运行环境那条链路，其余用固定站点。 */
+export function siteBaseUrl(baseUrl: string, site: RunningHubSite): string {
+    return site === "default" ? baseUrl : SITE_URLS[site];
+}
+/** 非默认站点没有自己的 Key 时返回空：跨站点的 API Key 不通，宁愿报错也不拿错 Key 去试。 */
+export function siteApiKey(config: Pick<RunningHubConfig, "apiKey" | "siteApiKeys">, site: RunningHubSite): string {
+    return site === "default" ? String(config.apiKey || "") : String(config.siteApiKeys?.[site] || "");
+}
 
 export class RunningHubBackend {
     private readonly controllers = new Map<string, AbortController>();
@@ -30,13 +48,16 @@ export class RunningHubBackend {
     getConfig(): RunningHubConfig {
         const stored = record(this.settings.get("runninghub.config"));
         const instanceType = stored.instanceType === "plus" || stored.instanceType === "ultra" ? stored.instanceType : "default";
-        return { ...stored, baseUrl: normalizeUrl(String(stored.baseUrl || DEFAULT_URL)), apiKey: String(stored.apiKey || ""), walletApiKey: String(stored.walletApiKey || ""), mode: stored.mode === "app" ? "app" : "workflow", workflowId: String(stored.workflowId || ""), appId: String(stored.appId || ""), fields: Array.isArray(stored.fields) ? stored.fields : [], useWallet: stored.useWallet === true, instanceType, concurrency: validConcurrency(stored.concurrency ?? 1) };
+        const siteApiKeys = record(stored.siteApiKeys);
+        return { ...stored, baseUrl: normalizeUrl(String(stored.baseUrl || DEFAULT_URL)), apiKey: String(stored.apiKey || ""), walletApiKey: String(stored.walletApiKey || ""), mode: stored.mode === "app" ? "app" : "workflow", workflowId: String(stored.workflowId || ""), appId: String(stored.appId || ""), fields: Array.isArray(stored.fields) ? stored.fields : [], useWallet: stored.useWallet === true, instanceType, concurrency: validConcurrency(stored.concurrency ?? 1), uploadSite: normalizeSite(stored.uploadSite), siteApiKeys: { ai: String(siteApiKeys.ai || ""), cn: String(siteApiKeys.cn || "") } };
     }
     setConfig(patch: Partial<RunningHubConfig>) {
         patch = runningHubConfigPatchSchema.parse(patch);
         const current = this.getConfig();
         if (patch.apiKey === "********") patch = { ...patch, apiKey: current.apiKey };
         if (patch.walletApiKey === "********") patch = { ...patch, walletApiKey: current.walletApiKey };
+        // 站点 Key 同样是掩码回传的；原样保存会用掩码覆盖真值，这里换回已存的那个。
+        if (patch.siteApiKeys) patch = { ...patch, siteApiKeys: { ...current.siteApiKeys, ...Object.fromEntries(Object.entries(patch.siteApiKeys).map(([site, value]) => [site, value === "********" ? String(current.siteApiKeys?.[site as "ai" | "cn"] || "") : String(value || "")])) } };
         const next = { ...current, ...patch, baseUrl: normalizeUrl(String(patch.baseUrl ?? current.baseUrl)), concurrency: validConcurrency(patch.concurrency ?? current.concurrency) };
         if (!["workflow", "app"].includes(next.mode)) throw new Error("RunningHub 调用类型无效");
         if (!["default", "plus", "ultra"].includes(next.instanceType || "default")) throw new Error("RunningHub 运行实例类型无效");
@@ -54,8 +75,21 @@ export class RunningHubBackend {
         const config = this.runConfig(params);
         return Boolean(keyFor(config) && (config.mode === "app" ? config.appId : config.workflowId) && config.fields?.some((field) => field.enabled !== false));
     }
-    async inspectWorkflow(workflowId?: string) {
+    /** 按站点取一套可直接发请求的配置：地址、Key 都换成该站点的。 */
+    private siteConfig(site: RunningHubSite = "default"): RunningHubConfig {
         const config = this.getConfig();
+        if (site === "default") return config;
+        return { ...config, baseUrl: siteBaseUrl(config.baseUrl, site), apiKey: siteApiKey(config, site), walletApiKey: "" };
+    }
+    /** 非默认站点必须自带 API Key：跨站点不通用，缺省时给出可操作的提示。 */
+    private requireSiteKey(site: RunningHubSite) {
+        if (site === "default" || siteApiKey(this.getConfig(), site)) return;
+        throw new Error(`${SITE_LABEL[site]} 还没有配置 API Key。请在 RunningHub 设置里填写该站点的 API Key（站点之间不通用，要在对应站点网页端单独生成）。`);
+    }
+    async inspectWorkflow(workflowId?: string, site?: RunningHubSite) {
+        const target = normalizeSite(site);
+        this.requireSiteKey(target);
+        const config = this.siteConfig(target);
         const id = String(workflowId || config.workflowId || "").trim();
         if (!keyFor(config) || !id) throw new Error("请先设置 RunningHub API Key 和工作流 ID");
         const graph = await this.fetchWorkflow({ ...config, workflowId: id }, new AbortController().signal);
@@ -65,10 +99,92 @@ export class RunningHubBackend {
     async refreshProfileGraph(profileId: string) {
         const profile = this.listWorkflowProfiles().find((item) => item.id === profileId);
         if (!profile) throw new Error("RunningHub 工作流配置不存在");
-        const inspected = await this.inspectWorkflow(profile.workflowId);
+        const inspected = await this.inspectWorkflow(profile.workflowId, normalizeSite(profile.site));
         const previous = new Map(profile.fields.map((field) => [`${field.nodeId}::${field.fieldName}`, field]));
         const fields = inspected.fields.map((field) => ({ ...field, ...previous.get(`${field.nodeId}::${field.fieldName}`) }));
         return this.saveWorkflowProfile({ ...profile, workflowJson: inspected.workflowJson, fields });
+    }
+    /** 网页会话状态（不含令牌本体）。上传本地工作流必须要有这个会话，按站点分别保存。 */
+    sessionStatus(site?: RunningHubSite): RunningHubSessionStatus { return sessionStatus(this.sessionFor(normalizeSite(site))); }
+    /**
+     * 取站点会话：站点与运行环境同一个域时，允许共用运行环境那份（同域令牌本来就通用），
+     * 免得选中「国际站」却发现要重新连一次。
+     */
+    private sessionFor(site: RunningHubSite): RunningHubSession {
+        const own = readSession(this.settings, site);
+        if (own.accessToken || site === "default") return own;
+        const config = this.getConfig();
+        return siteBaseUrl(config.baseUrl, site) === config.baseUrl ? readSession(this.settings, "default") : own;
+    }
+    /** 从本机浏览器里读取已登录的 RunningHub 会话；多个候选逐个验证，取第一个还能用的。 */
+    async importBrowserSession(site?: RunningHubSite): Promise<RunningHubSessionStatus> {
+        const target = normalizeSite(site);
+        const baseUrl = siteBaseUrl(this.getConfig().baseUrl, target);
+        const candidates = await collectBrowserSessions();
+        for (const candidate of candidates) {
+            if (!(await probeSession(baseUrl, candidate.accessToken))) continue;
+            writeSession(this.settings, { accessToken: candidate.accessToken, refreshToken: candidate.refreshToken, expiresAt: candidate.expiresAt, source: "browser" }, target);
+            return this.sessionStatus(target);
+        }
+        const where = target === "default" ? "RunningHub" : SITE_LABEL[target];
+        throw new Error(candidates.length
+            ? `在本机浏览器里找到了会话，但${where}不接受这个令牌（站点之间不通用）；请用浏览器打开 ${where} 登录后重试`
+            : `没有在本机浏览器里找到登录会话；请先用 Edge/Chrome 打开 ${where} 登录`);
+    }
+    /** 手填网页令牌：同样先验证再落盘，避免保存一个看起来连上但一用就错的令牌。 */
+    async setSessionToken(token: string, site?: RunningHubSite): Promise<RunningHubSessionStatus> {
+        const trimmed = String(token || "").trim();
+        const target = normalizeSite(site);
+        if (!trimmed) return this.disconnectSession(target);
+        const baseUrl = siteBaseUrl(this.getConfig().baseUrl, target);
+        if (!(await probeSession(baseUrl, trimmed))) throw new Error(`RunningHub 网页令牌无效或已过期${target === "default" ? "" : `（${SITE_LABEL[target]} 要用该站点自己的令牌）`}，请重新复制`);
+        writeSession(this.settings, { accessToken: trimmed, expiresAt: jwtExpiry(trimmed), source: "manual" }, target);
+        return this.sessionStatus(target);
+    }
+    disconnectSession(site?: RunningHubSite): RunningHubSessionStatus { const target = normalizeSite(site); clearSession(this.settings, target); return this.sessionStatus(target); }
+    /** 内部接口只认网页令牌，缺 Session 时给出唯一修法。 */
+    private requireSession(site: RunningHubSite): RunningHubSession {
+        const session = this.sessionFor(site);
+        const where = site === "default" ? "RunningHub" : SITE_LABEL[site];
+        if (!session.accessToken) throw new Error(`请先连接${where}的网页账号（读取本机浏览器会话或粘贴网页令牌）；OpenAPI Key 没有上传工作流的权限`);
+        if (session.expiresAt && session.expiresAt * 1000 <= Date.now()) throw new Error(`${where}的网页会话已过期，请在浏览器里重新登录后重新读取`);
+        return session;
+    }
+    /** 把本地节点图上传到 RunningHub 工作台，返回云端工作流 ID。 */
+    async pushWorkflowGraph(input: { name?: string; graph?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; name: string; site: RunningHubSite }> {
+        const graph = record(input.graph);
+        if (!Object.values(graph).some((node) => record(node).class_type)) throw new Error("要上传的节点图不是 ComfyUI API 格式（节点缺少 class_type）");
+        const name = String(input.name || "").trim().slice(0, 120) || "未命名工作流";
+        const site = normalizeSite(input.site);
+        const session = this.requireSession(site);
+        const config = this.siteConfig(site);
+        const form = new FormData();
+        form.set("workflowFile", new Blob([JSON.stringify(graph)], { type: "application/json" }), `${safeFileName(name)}.json`);
+        form.set("workflowName", name);
+        const response = await fetch(`${config.baseUrl}/api/workflow/upload`, { method: "POST", body: form, headers: { Authorization: `Bearer ${session.accessToken}` } });
+        const raw = await response.json().catch(() => ({})) as Json;
+        if (Number(raw.code) === 403 || Number(raw.code) === 412) throw new Error(`${site === "default" ? "RunningHub" : SITE_LABEL[site]}的网页会话已失效，请重新读取浏览器会话或粘贴新的令牌`);
+        checkResponse(response, raw, config);
+        const workflowId = String(record(raw.data).id || "");
+        if (!workflowId) throw new Error("RunningHub 已接收工作流但没有返回工作流 ID");
+        return { workflowId, name, site };
+    }
+    /**
+     * 上传本地工作流并在本地建档：上传 → 拿 workflowId → 自动导入。
+     * 平台侧新建的工作流是草稿，对 OpenAPI 暂不可读，所以读不到平台图时直接用刚上传的这份图建档。
+     */
+    async publishLocalWorkflow(input: { name?: string; graph?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite }> {
+        const uploaded = await this.pushWorkflowGraph(input);
+        let cloudRead = true;
+        let workflowJson: Json = record(input.graph);
+        let fields = discoverRunningHubFields(workflowJson);
+        try {
+            const inspected = await this.inspectWorkflow(uploaded.workflowId, uploaded.site);
+            workflowJson = inspected.workflowJson;
+            fields = inspected.fields;
+        } catch { cloudRead = false; }
+        const profile = this.saveWorkflowProfile({ id: randomUUID(), name: uploaded.name, workflowId: uploaded.workflowId, fields, workflowJson, site: uploaded.site === "default" ? undefined : uploaded.site });
+        return { workflowId: uploaded.workflowId, profile, cloudRead, site: uploaded.site };
     }
     listWorkflowProfiles() {
         const stored = this.settings.get("runninghub.workflows");
@@ -103,15 +219,21 @@ export class RunningHubBackend {
     async runWorkflow(profileId: string, input: Record<string, unknown>, values: Record<string, unknown>, overrides: Record<string, unknown> = {}, clientTaskId?: string) {
         const profile = this.listWorkflowProfiles().find((item) => item.id === profileId);
         if (!profile) throw new Error("RunningHub 工作流配置不存在，请重新添加");
-        if (!keyFor(this.getConfig())) throw new Error("请先在 ComfyUI → 运行环境配置 RunningHub API Key");
+        const site = normalizeSite(profile.site);
+        this.requireSiteKey(site);
+        if (!keyFor(this.siteConfig(site))) throw new Error("请先在 ComfyUI → 运行环境配置 RunningHub API Key");
         const requestedOutputNodes = outputNodesOf(overrides);
         const outputSelection = resolveRunningHubOutputNodes(requestedOutputNodes, profile.workflowJson);
         const params = {
             runninghubMode: "workflow", runninghubWorkflowId: profile.workflowId, runninghubFields: profile.fields,
             ...overrides, runninghubParams: values, runninghubInstanceType: profile.instanceType || "default",
             runninghubProfileId: profile.id, model: `runninghub-workflow:${profile.id}`,
+            // 档案属于哪个站点就打到哪个站点；跨站点的工作流 ID 与 API Key 都不通用。
+            runninghubSite: site,
             // 输出节点是本轮运行的选择，不写进工作流档案；未指定时平台返回什么就收什么。
             runninghubOutputNodes: outputSelection.selected,
+            // 平台侧草稿工作流对 OpenAPI 不可读；带上本地图，读不到平台图时直接跑这份。
+            ...(profile.workflowJson && Object.keys(profile.workflowJson).length ? { runninghubGraph: profile.workflowJson } : {}),
             ...(outputSelection.ignored.length ? { runninghubUnavailableOutputNodes: outputSelection.ignored } : {}),
         };
         return this.startTask("runninghub:workflow", input, params, clientTaskId, false, (task) => {
@@ -177,7 +299,7 @@ export class RunningHubBackend {
                 if (this.tasks.get(task.id)?.status === "cancelled") return;
                 if (!recovered) {
                     this.update(task.id, { status: "running", progress: 0.02 });
-                    const graph = config.mode === "workflow" ? await this.fetchWorkflow(config, controller.signal) : undefined;
+                    const graph = config.mode === "workflow" ? await this.fetchWorkflowWithFallback(task, config, controller.signal) : undefined;
                     const fields = await this.resolveFields(task, config, controller.signal);
                     const body: Json = { apiKey: keyFor(config), instanceType: config.instanceType || "default", addMetadata: true };
                     if (config.mode === "workflow") {
@@ -214,6 +336,21 @@ export class RunningHubBackend {
         };
         if (recovered) { this.queue.recover(task, "runninghub", work); return Promise.resolve(); }
         return work();
+    }
+    /**
+     * 平台图优先；读不到时用任务参数里随上传带来的本地图。
+     * 云端刚导入的工作流是草稿（OpenAPI 返回 380 WORKFLOW_NOT_EXISTS），
+     * 此时本地那份图就是唯一可提交的节点图，不降级会直接跑不起来。
+     */
+    private async fetchWorkflowWithFallback(task: RuntimeTask, config: RunConfig, signal: AbortSignal): Promise<Json> {
+        try {
+            return await this.fetchWorkflow(config, signal);
+        } catch (error) {
+            const local = localGraphOf(task.params);
+            if (!local) throw error;
+            this.tasks.addEvent(task.id, "workflow_graph_fallback_local", { reason: redact(error instanceof Error ? error.message : String(error), config) });
+            return local;
+        }
     }
     private async fetchWorkflow(config: RunConfig, signal: AbortSignal): Promise<Json> {
         const response = await this.request(config, "/api/openapi/getJsonApiFormat", { apiKey: keyFor(config), workflowId: config.workflowId }, signal);
@@ -485,7 +622,8 @@ export class RunningHubBackend {
         }
     }
     private runConfig(params: Record<string, unknown>): RunConfig {
-        const config = this.getConfig();
+        const site = normalizeSite(params.runninghubSite);
+        const config = this.siteConfig(site);
         return { ...config, mode: params.runninghubMode === "app" ? "app" : params.runninghubMode === "workflow" ? "workflow" : config.mode, workflowId: String(params.runninghubWorkflowId || config.workflowId || ""), appId: String(params.runninghubAppId || config.appId || ""), fields: Array.isArray(params.runninghubFields) ? params.runninghubFields as RunningHubField[] : config.fields, instanceType: params.runninghubInstanceType === "plus" || params.runninghubInstanceType === "ultra" ? params.runninghubInstanceType : params.runninghubInstanceType === "default" ? "default" : config.instanceType, useWallet: params.useWallet === undefined ? config.useWallet : params.useWallet === true };
     }
     private async request(config: RunConfig, endpoint: string, body: Json, signal: AbortSignal) {
@@ -553,6 +691,17 @@ function fakeSettings(): SettingStore {
     const store = new Map<string, unknown>();
     return { get: (key) => store.get(key), set: (key, value) => void store.set(key, value), delete: (key) => void store.delete(key) };
 }
+/** 任务参数里随上传带到云端的本地图；不是 ComfyUI API 格式时当作没带。 */
+export function localGraphOf(params: Record<string, unknown>): Json | null {
+    const graph = record(params.runninghubGraph);
+    return Object.values(graph).some((node) => record(node).class_type) ? graph : null;
+}
+
+function safeFileName(value: string) {
+    const safe = value.trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+    return safe || "runninghub-workflow";
+}
+
 /** 任务参数里带的输出节点选择；缺省或非法时返回空数组，表示不过滤。 */
 function outputNodesOf(params: Record<string, unknown>): string[] {
     const raw = params.runninghubOutputNodes ?? params.outputNodes;

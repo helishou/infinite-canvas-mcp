@@ -11,6 +11,7 @@ export function createTaskStore(db: BackendDatabase): TaskStore {
             return t ? { taskId: t.taskId, terminalStatus: t.terminalStatus, prunedAt: t.prunedAt } : null;
         },
         list: (filter) => db.listTasks(filter),
+        modelUsage: () => db.listCanvasTaskModelUsage(),
         listSummaries: (filter) => db.listTaskSummaries(filter),
         update: (id, patch) => {
             const task = db.updateTask(id, patch);

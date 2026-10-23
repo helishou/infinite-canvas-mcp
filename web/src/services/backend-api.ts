@@ -746,6 +746,10 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     return sharedGet<{ ok: boolean; tasks?: BackendRuntimeTask[] }>(path);
 }
 
+export function fetchCanvasModelUsage() {
+    return sharedGet<{ ok: boolean; modelUsage?: Array<{ model: string; channelId: string; count: number }> }>(`${CANVAS_TASKS_PATH}?modelUsage=true`).then((result) => result.modelUsage || []);
+}
+
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {
     return request<{ ok: boolean; task?: Record<string, unknown> }>("POST", CANVAS_TASKS_PATH, { kind, input, params, ...(clientTaskId ? { clientTaskId } : {}) });
 }

@@ -1105,6 +1105,36 @@ test("new scene Clips materialize one H3 segment whose storyboard cells use stab
     assert.equal(saved.draft.clipGroups.every(group => Boolean(group.nodeId && group.segmentId)), true);
 });
 
+test("preparing a scene restores its existing Clip H3 node and segment", t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
+    const d = director();
+    (d.source.shots as any[])[0].source_scene_id = "morning";
+    (d.source.shots as any[])[1].source_scene_id = "night";
+    d.shotInputs = { s1: { keyframePolicy: "none", assetIds: [] }, s2: { keyframePolicy: "none", assetIds: [] } };
+    d.sourceHash = directorHash(d.source);
+    d.artifacts = d.artifacts.map(item => ({ ...item, sourceHash: d.sourceHash, receipt: { ...item.receipt, sourceHash: d.sourceHash } }));
+    save(f.episode, "ep", d);
+
+    const morningGroup = f.episode.get("ep").draft.clipGroups.find(group => group.shotIds.includes("s1"))!;
+    const originalNodeId = morningGroup.nodeId!;
+    const revision = Number(f.db.getCanvasProject(project.id)!.revision);
+    f.stores.projects.applyOperations(project.id, revision, [{ type: "delete_node", id: originalNodeId }], { runtimeWrite: true });
+
+    const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
+    const productionRevision = f.episode.get("ep").revision;
+    const prepared = runner.prepareTargets("ep", productionRevision, ["scene:morning"], "restore-scene-h3");
+    const restored = (f.db.getCanvasProject(project.id)!.nodes as any[]).find(node => node.id === originalNodeId);
+    assert.ok(restored, "scene preparation should recreate the existing scene H3 node");
+    assert.equal(restored.metadata.productionSceneId, "morning");
+    assert.deepEqual(restored.metadata.segments.map((segment: any) => segment.id), [morningGroup.segmentId]);
+    assert.equal(restored.metadata.segments[0].productionClipProjection.targetId, morningGroup.id);
+    assert.ok(prepared.layoutReceipt?.created.find(item => item.target === "scene:morning")?.nodeIds.includes(originalNodeId));
+    assert.equal(f.stores.tasks.list().length, 0, "preparing nodes must not submit media generation");
+    const projectAfterPreparation = f.db.getCanvasProject(project.id);
+    assert.equal(runner.prepareTargets("ep", productionRevision, ["scene:morning"], "restore-scene-h3").replayed, true);
+    assert.deepEqual(f.db.getCanvasProject(project.id), projectAfterPreparation, "replaying the same scene preparation must not duplicate or rewrite nodes");
+});
+
 test("confirmed scene deletion is 30-day restorable with its H3 node and exact source IDs", t => {
     const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep");
     const d = director();

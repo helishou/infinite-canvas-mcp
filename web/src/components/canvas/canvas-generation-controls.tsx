@@ -137,6 +137,7 @@ export function CanvasGenerationControls({
             value={config.model}
             onChange={changeModel}
             capability={mode}
+            sortByCanvasUsage
             onMissingConfig={() => openConfigDialog(true)}
             fullWidth
         />

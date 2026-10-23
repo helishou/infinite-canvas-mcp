@@ -1,12 +1,16 @@
-import { useEffect, useState } from "react";
-import { App, Button, Input, Modal, Tag } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { App, Button, Input, Modal, Radio, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Plus, Search } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { nanoid } from "nanoid";
 
-import type { DramaEpisode } from "@/services/backend-api";
-import { resolveImageUrl } from "@/services/image-storage";
+import { applyBackendCanvasOperations, ensureSharedAssetCanvas, startCanvasGeneration, upsertBackendCanvasFolder, type DramaEpisode } from "@/services/backend-api";
+import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
+import { ModelPicker } from "@/components/model-picker";
+import { useConfigStore } from "@/stores/use-config-store";
+import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { cn } from "@/lib/utils";
 
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
@@ -16,6 +20,7 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
     const { t } = useTranslation();
     const hydrated = useCanvasStore((state) => state.hydrated);
     const createFolder = useCanvasStore((state) => state.createFolder);
+    const modelConfig = useConfigStore((state) => state.config);
     const [localQuery, setLibraryQuery] = useState("");
     const libraryQuery = searchQuery ?? localQuery;
     const [query] = useSearchParams();
@@ -34,16 +39,65 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
         .filter(folder => matchesProjectQuery(folder.name, libraryQuery));
     const [createOpen, setCreateOpen] = useState(false);
     const [newDramaName, setNewDramaName] = useState("");
+    const [newDramaPlan, setNewDramaPlan] = useState<DramaProductionPlan>(() => dramaProductionPlanSchema.parse({}));
+    const [styleMode, setStyleMode] = useState<"upload" | "prompt" | "none">("upload");
+    const [styleImageFile, setStyleImageFile] = useState<File>();
+    const [stylePrompt, setStylePrompt] = useState("");
+    const [creatingDrama, setCreatingDrama] = useState(false);
+    const creationRef = useRef<{ folderId: string; image?: UploadedImage; imageNodeId: string; operationId: string; taskKey: string; mode: "upload" | "prompt" | "none"; prompt: string; plan: DramaProductionPlan } | undefined>(undefined);
     const openCreateDrama = () => {
         setNewDramaName(t("drama.defaultProjectName"));
+        setNewDramaPlan(dramaProductionPlanSchema.parse({}));
+        setStyleMode("upload");
+        setStyleImageFile(undefined);
+        setStylePrompt("");
+        creationRef.current = undefined;
         setCreateOpen(true);
     };
-    const createDrama = () => {
+    const createDrama = async () => {
         const name = newDramaName.trim();
-        if (!name) return;
-        setActiveView(createFolder(name, true));
-        setCreateOpen(false);
+        if (!name || creatingDrama || styleMode === "upload" && !styleImageFile || styleMode === "prompt" && !stylePrompt.trim()) return;
+        setCreatingDrama(true);
+        try {
+            let creation = creationRef.current;
+            if (!creation) {
+                const uploaded = styleMode === "upload" && styleImageFile ? await uploadImage(styleImageFile, { category: "library" }) : undefined;
+                const imageNodeId = (styleMode !== "none") ? nanoid() : "";
+                const plan = {
+                    ...newDramaPlan,
+                    ...(imageNodeId ? { styleAnchorNodeId: imageNodeId } : {}),
+                } as DramaProductionPlan;
+                const folderId = createFolder(name, true, plan);
+                creation = { folderId, image: uploaded, imageNodeId, operationId: nanoid(), taskKey: nanoid(), mode: styleMode, prompt: stylePrompt.trim(), plan };
+                creationRef.current = creation;
+            }
+            const folder = useCanvasStore.getState().folders.find(item => item.id === creation!.folderId);
+            if (!folder) throw new Error("新剧目已创建，但读取不到本地剧目信息");
+            const saved = await upsertBackendCanvasFolder(folder as unknown as Record<string, unknown>);
+            if (saved.folder) useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === creation!.folderId ? saved.folder as unknown as CanvasFolder : item) }));
+            if (creation.imageNodeId) {
+                const { project } = await ensureSharedAssetCanvas(creation.folderId);
+                const image = creation.image;
+                const node = creation.mode === "prompt"
+                    ? { type: "add_node", id: creation.imageNodeId, nodeType: "config", title: t("drama.createProjectStyleNode"), position: { x: 0, y: 0 }, width: 360, height: 260, metadata: { smart: true, generationMode: "image", prompt: creation.prompt, composerContent: creation.prompt, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, status: "idle", generationType: "generation", count: 1, styleMother: true } }
+                    : { type: "add_node", id: creation.imageNodeId, nodeType: "image", title: t("drama.createProjectStyleNode"), position: { x: 0, y: 0 }, width: 360, height: Math.max(220, Math.min(420, 360 * ((image?.height || 1) / Math.max(1, image?.width || 1)))), metadata: { content: image?.url, storageKey: image?.storageKey, status: "success", naturalWidth: image?.width, naturalHeight: image?.height, bytes: image?.bytes, mimeType: image?.mimeType, styleMother: true } };
+                await applyBackendCanvasOperations(String(project.id), [node], Number(project.revision || 0), creation.operationId);
+                if (creation.mode === "prompt") {
+                    await startCanvasGeneration({ mode: "image", projectId: String(project.id), nodeId: creation.imageNodeId, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, prompt: creation.prompt, count: 1, clientTaskId: creation.taskKey, idempotencyKey: creation.taskKey });
+                }
+            }
+            setCreateOpen(false);
+            creationRef.current = undefined;
+            navigate(dramaProjectDestination(creation.folderId, query.toString()));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally { setCreatingDrama(false); }
     };
+
+    const updateAssetImageModel = (kind: keyof DramaProductionPlan["imageModelsByKind"], model: string) => setNewDramaPlan(current => ({
+        ...current,
+        imageModelsByKind: { ...current.imageModelsByKind, [kind]: model || undefined },
+    }));
 
     return (
         <section className="text-foreground" aria-label={t("projects.drama")}>
@@ -71,22 +125,32 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
                 )}
             </section>
             <Modal
+                width={680}
                 open={createOpen}
                 title={t("drama.createProject")}
                 okText={t("drama.createProject")}
                 cancelText={t("common.cancel")}
-                okButtonProps={{ disabled: !newDramaName.trim() }}
+                okButtonProps={{ disabled: !newDramaName.trim() || styleMode === "upload" && !styleImageFile || styleMode === "prompt" && !stylePrompt.trim() }}
+                confirmLoading={creatingDrama}
                 onOk={createDrama}
-                onCancel={() => setCreateOpen(false)}
+                onCancel={() => { if (!creatingDrama) setCreateOpen(false); }}
             >
-                <Input
-                    autoFocus
-                    aria-label={t("drama.createProjectPrompt")}
-                    placeholder={t("drama.createProjectPrompt")}
-                    value={newDramaName}
-                    onChange={event => setNewDramaName(event.target.value)}
-                    onPressEnter={createDrama}
-                />
+                <div className="grid gap-5">
+                    <Input autoFocus aria-label={t("drama.createProjectPrompt")} placeholder={t("drama.createProjectPrompt")} value={newDramaName} onChange={event => setNewDramaName(event.target.value)} />
+                    <section className="grid gap-3">
+                        <div><h3 className="text-sm font-medium">{t("drama.createAssetImageModels")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("drama.createAssetImageModelsHint")}</p></div>
+                        <label className="grid gap-1.5 text-sm"><span>{t("productionCanvas.generalImageModel")}</span><ModelPicker config={modelConfig} capability="image" fullWidth value={newDramaPlan.imageModel || undefined} onChange={imageModel => setNewDramaPlan(current => ({ ...current, imageModel }))} /><Button type="link" className="justify-self-start px-0" size="small" disabled={!newDramaPlan.imageModel} onClick={() => setNewDramaPlan(current => ({ ...current, imageModel: "" }))}>{t("productionCanvas.inheritImageModel")}</Button></label>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <label key={kind} className="grid gap-1.5 text-sm"><span>{t(`productionCanvas.assetModel.${kind}`)}</span><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={newDramaPlan.imageModelsByKind[kind]} onChange={model => updateAssetImageModel(kind, model)} /><Button type="link" className="justify-self-start px-0" size="small" disabled={!newDramaPlan.imageModelsByKind[kind]} onClick={() => updateAssetImageModel(kind, "")}>{t("productionCanvas.inheritImageModel")}</Button></label>)}
+                        </div>
+                    </section>
+                    <section className="grid gap-3">
+                        <div><h3 className="text-sm font-medium">{t("drama.createStyleReference")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("drama.createStyleReferenceHint")}</p></div>
+                        <Radio.Group value={styleMode} onChange={event => setStyleMode(event.target.value as "upload" | "prompt" | "none")} options={[{ value: "upload", label: t("drama.uploadStyleReference") }, { value: "prompt", label: t("drama.generateStyleReference") }, { value: "none", label: t("drama.skipStyleReference") }]} />
+                        {styleMode === "upload" && <div className="flex flex-wrap items-center gap-3"><input type="file" accept="image/*" aria-label={t("drama.uploadStyleReference")} onChange={event => setStyleImageFile(event.target.files?.[0])} />{styleImageFile && <span className="text-xs text-muted-foreground">{styleImageFile.name}</span>}</div>}
+                        {styleMode === "prompt" && <Input.TextArea rows={3} value={stylePrompt} onChange={event => setStylePrompt(event.target.value)} placeholder={t("drama.styleReferencePrompt")} />}
+                    </section>
+                </div>
             </Modal>
         </section>
     );

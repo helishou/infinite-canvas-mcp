@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { Activity } from "lucide-react";
+import { Activity, BarChart3 } from "lucide-react";
 import { Button } from "antd";
 import { Link } from "react-router-dom";
 
@@ -16,11 +16,18 @@ export default function ConfigPage() {
                         <h1 className="text-3xl font-medium tracking-tight text-foreground">{t("config.title")}</h1>
                         <p className="mt-1 text-sm text-muted-foreground">{t("config.description")}</p>
                     </div>
-                    <Link to="/diagnostics/mcp">
-                        <Button type="text" icon={<Activity className="size-4" />}>
-                            MCP 诊断
-                        </Button>
-                    </Link>
+                    <div className="flex flex-wrap gap-1">
+                        <Link to="/analytics/local">
+                            <Button type="text" icon={<BarChart3 className="size-4" />}>
+                                {t("localAnalytics.title")}
+                            </Button>
+                        </Link>
+                        <Link to="/diagnostics/mcp">
+                            <Button type="text" icon={<Activity className="size-4" />}>
+                                MCP 诊断
+                            </Button>
+                        </Link>
+                    </div>
                 </div>
                 <AppConfigPanel />
             </div>

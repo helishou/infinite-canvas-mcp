@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Progress, Radio, Select, Tag } from "antd";
-import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Database, GripHorizontal, Image as ImageIcon, LoaderCircle, Locate, Lock, LockOpen, Play, Search, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Database, Eye, GripHorizontal, Image as ImageIcon, LoaderCircle, Locate, Lock, LockOpen, Play, Search, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
@@ -168,6 +168,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const [writtenTranslationStatuses, setWrittenTranslationStatuses] = useState<Record<string, { sourceHash: string; status: "complete" | "cached" }>>({});
     const [translationError, setTranslationError] = useState("");
     const [translatingPrompts, setTranslatingPrompts] = useState(false);
+    const [promptPreviewClipId, setPromptPreviewClipId] = useState("");
     const translatingPromptsRef = useRef(false);
     const autoTranslateHandledRef = useRef("");
     const activeTranslationRef = useRef<{ controller: AbortController; sourceHash: string } | null>(null);
@@ -451,6 +452,13 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const lockedClipIds = new Set(clips.filter(item => clipLockOverrides[String(item.id)] ?? item.locked === true).map(item => String(item.id)));
     const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
+    const viewableCompiledPrompts = visibleClipStates.flatMap(item => {
+        const artifact = director.artifacts.find(candidate => candidate.kind === "h3" && candidate.targetId === item.id);
+        return item.tone === "ready" && artifact?.status === "ready" && currentCompilationArtifact(director, artifact)
+            ? [{ targetId: item.id, prompt: artifact.prompt }]
+            : [];
+    });
+    const selectedPromptPreview = viewableCompiledPrompts.find(item => item.targetId === promptPreviewClipId);
     const activeVisibleClipStates = visibleClipStates.filter(item => !lockedClipIds.has(item.id));
     const clipsNeedingCompile = activeVisibleClipStates.filter(item => item.tone !== "ready");
     const sceneCompileAvailable = !sceneFilter || sceneDirectory.scenes.some(scene => scene.id === sceneFilter);
@@ -820,6 +828,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     const clipNumber = t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 });
                     const refreshJob = activeRefreshJob(item.id);
                     const locked = lockedClipIds.has(item.id);
+                    const compiledPrompt = viewableCompiledPrompts.find(candidate => candidate.targetId === item.id);
                     const translationStatus = translationStatusFor(item.id);
                     const translationColor = translationStatus === "failed" || translationStatus === "writeFailed" ? "red"
                         : translationStatus === "complete" || translationStatus === "cached" ? "green"
@@ -829,6 +838,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{clipNumber}</button>
                     <Tag className="!mr-0 !text-[11px] !leading-4" color={locked ? "default" : item.color} title={locked ? t("director.atomic.clipLocked") : item.reason || t("director.atomic.savedSourceStatus")}><span className="grid"><span className={`col-start-1 row-start-1 ${locked ? "invisible" : ""}`} aria-hidden={locked}>{item.label}</span><span className={`col-start-1 row-start-1 ${locked ? "" : "invisible"}`} aria-hidden={!locked}>{t("director.atomic.clipLocked")}</span></span><CompileElapsed updatedAt={refreshJob?.updatedAt} status={refreshJob?.status} /></Tag>
                     {translationStatus && <Tag className="!mr-0 !text-[11px] !leading-4" color={translationColor} data-clip-translation-status={translationStatus}>{t(`director.atomic.translationClipStatus.${translationStatus}`)}</Tag>}
+                    {compiledPrompt && <Button type="text" size="small" className="!h-5 !px-1" icon={<Eye className="size-3" />} aria-label={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} title={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} onClick={() => setPromptPreviewClipId(item.id)} />}
                     {onToggleClipLock && <Button type="text" size="small" className="!h-5 !px-1" icon={locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} aria-pressed={locked} aria-label={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} title={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} disabled={lockReadOnly || compileBusy || compilePending || clipLockPending[item.id] === true} onClick={() => { const next = !locked; setClipLockOverrides(current => ({ ...current, [item.id]: next })); setClipLockPending(current => ({ ...current, [item.id]: true })); const action = clipLockQueueRef.current.then(async () => {
                         while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
                         const callback = onToggleClipLockRef.current;
@@ -849,6 +859,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     {translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}
                 </Button>
             </div>}
+            <Modal open={Boolean(promptPreviewClipId && selectedPromptPreview)} onCancel={() => setPromptPreviewClipId("")} footer={null} title={t("director.atomic.viewCompiledPrompt")} width={900} destroyOnHidden>
+                <Input.TextArea value={selectedPromptPreview?.prompt || ""} readOnly autoSize={{ minRows: 18, maxRows: 30 }} className="font-mono text-xs" />
+            </Modal>
             {visibleClipStates.length > 0 && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live={translationProgress ? "polite" : undefined} data-translation-progress>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="flex min-w-0 items-start gap-3">
