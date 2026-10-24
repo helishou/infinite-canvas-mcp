@@ -50,14 +50,35 @@ export class ProductionContinuityReports {
 
     get(owner: { kind: string; id: string }, snapshot: "draft" | "published", current: { sourceHash?: string; runtimeId?: string; snapshotVersion?: number }, view: string, targetId?: string, objectId?: string, pageSize = 20, cursor?: string) {
         const database = this.database();
-        const directory = typeof this.store === "string" ? this.ownerDirectory(owner) : "";
-        const reports = database
-            ? (database.db.prepare("SELECT report_gzip FROM production_continuity_reports WHERE owner_kind=? AND owner_id=? AND snapshot=? ORDER BY checked_at DESC,created_at DESC").all(owner.kind, owner.id, snapshot) as Array<{ report_gzip: Uint8Array }>).flatMap(row => { try { return [this.decode<any>(row.report_gzip)]; } catch { return []; } })
-            : fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.startsWith("report-") && name.endsWith(".json")).flatMap(name => {
-            try { return [JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))]; } catch { return []; }
-        }).filter(report => report.owner?.kind === owner.kind && report.owner?.id === owner.id && report.snapshot === snapshot).sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt))) : [];
-        const prior = (reports.find(report => report.sourceHash === current.sourceHash && (!current.runtimeId || report.runtimeId === current.runtimeId) &&
-            (snapshot === "draft" || report.snapshotVersion === current.snapshotVersion)) || reports[0]) as any;
+        let prior: any;
+        if (database) {
+            if (current.sourceHash) {
+                const freshRows = database.db.prepare(`SELECT report_gzip FROM production_continuity_reports
+                    WHERE owner_kind=? AND owner_id=? AND snapshot=? AND source_hash=? AND (? IS NULL OR runtime_id=?)
+                    ORDER BY checked_at DESC,created_at DESC`)
+                    .all(owner.kind, owner.id, snapshot, current.sourceHash, current.runtimeId || null, current.runtimeId || null) as Array<{ report_gzip: Uint8Array }>;
+                for (const row of freshRows) {
+                    let report: any;
+                    try { report = this.decode<any>(row.report_gzip); } catch { continue; }
+                    if (snapshot !== "published" || report.snapshotVersion === current.snapshotVersion) { prior = report; break; }
+                }
+            }
+            if (!prior) {
+                const latestRows = database.db.prepare(`SELECT report_gzip FROM production_continuity_reports
+                    WHERE owner_kind=? AND owner_id=? AND snapshot=? ORDER BY checked_at DESC,created_at DESC`)
+                    .all(owner.kind, owner.id, snapshot) as Array<{ report_gzip: Uint8Array }>;
+                for (const row of latestRows) {
+                    try { prior = this.decode<any>(row.report_gzip); break; } catch { /* Skip corrupt history like the legacy reader. */ }
+                }
+            }
+        } else {
+            const directory = this.ownerDirectory(owner);
+            const reports = fs.existsSync(directory) ? fs.readdirSync(directory).filter(name => name.startsWith("report-") && name.endsWith(".json")).flatMap(name => {
+                try { return [JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))]; } catch { return []; }
+            }).filter(report => report.owner?.kind === owner.kind && report.owner?.id === owner.id && report.snapshot === snapshot).sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt))) : [];
+            prior = reports.find(report => report.sourceHash === current.sourceHash && (!current.runtimeId || report.runtimeId === current.runtimeId) &&
+                (snapshot === "draft" || report.snapshotVersion === current.snapshotVersion)) || reports[0];
+        }
         if (!prior) return { status: "unchecked", report: null, total: 0, items: [], nextCursor: null };
         const currentReport = prior.sourceHash === current.sourceHash && (!current.runtimeId || prior.runtimeId === current.runtimeId) &&
             (snapshot === "draft" || prior.snapshotVersion === current.snapshotVersion);

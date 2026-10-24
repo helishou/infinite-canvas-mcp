@@ -306,14 +306,66 @@ function isAiConfigReady(config: AiConfig, model: string) {
 let configSyncQueue = Promise.resolve();
 let webdavSyncQueue = Promise.resolve();
 
-function syncConfigToBackend(config: AiConfig) {
-    if (typeof window === "undefined") return;
+/**
+ * 配置编辑按字符触发 updateConfig（提示词输入框尤甚）。合并成「至多一个在途请求 +
+ * 一个待发快照」，避免逐键 PUT 把串行队列排到秒级；离散设置最多延后一个防抖窗口。
+ */
+const CONFIG_SYNC_DEBOUNCE_MS = 300;
+let configSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingConfigSync: AiConfig | null = null;
+let latestConfigSync: AiConfig | null = null;
+let configSyncInFlight = 0;
+
+/** True while local edits are not yet acknowledged by Backend; Backend events must not clobber them. */
+function hasPendingConfigSync() {
+    return configSyncInFlight > 0 || latestConfigSync !== null || pendingConfigSync !== null || configSyncTimer !== null;
+}
+
+/** Send the pending snapshot now; `force` is used by import and page unload where waiting would lose the edit. */
+function flushConfigSync(force = false) {
+    if (configSyncTimer !== null) {
+        clearTimeout(configSyncTimer);
+        configSyncTimer = null;
+    }
+    if (pendingConfigSync) {
+        latestConfigSync = pendingConfigSync;
+        pendingConfigSync = null;
+    }
+    if (!latestConfigSync) return;
+    // 在途写入未完成时不再叠加请求：完成后补发最新快照，避免队列堆积。
+    if (!force && configSyncInFlight > 0) {
+        scheduleConfigSync();
+        return;
+    }
     configSyncQueue = configSyncQueue
         .then(async () => {
-            const [api, backend] = await Promise.all([import("@/services/backend-api"), import("@/stores/use-backend-store")]);
-            if (backend.useBackendStore.getState().connected) await api.syncBackendAiConfig(config);
+            const config = latestConfigSync;
+            if (!config) return;
+            latestConfigSync = null;
+            configSyncInFlight += 1;
+            try {
+                const [api, backend] = await Promise.all([import("@/services/backend-api"), import("@/stores/use-backend-store")]);
+                if (backend.useBackendStore.getState().connected) await api.syncBackendAiConfig(config);
+            } finally {
+                configSyncInFlight -= 1;
+                if (pendingConfigSync) scheduleConfigSync();
+            }
         })
         .catch(() => undefined);
+}
+
+function scheduleConfigSync() {
+    if (configSyncTimer !== null) return;
+    configSyncTimer = setTimeout(() => {
+        configSyncTimer = null;
+        flushConfigSync();
+    }, CONFIG_SYNC_DEBOUNCE_MS);
+}
+
+function syncConfigToBackend(config: AiConfig) {
+    if (typeof window === "undefined") return;
+    pendingConfigSync = config;
+    scheduleConfigSync();
 }
 
 function syncWebdavToBackend(webdav: WebdavSyncConfig) {
@@ -323,6 +375,7 @@ function syncWebdavToBackend(webdav: WebdavSyncConfig) {
 
 /** Import waits behind pending edits and only publishes acknowledged values. */
 export function importConfigConfirmed(input: AiConfig, expected = useConfigStore.getState().config): Promise<void> {
+    flushConfigSync(true);
     const config = normalizeConfig(input);
     const before = expected;
     const operation = configSyncQueue.then(async () => {
@@ -464,9 +517,14 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
 // 订阅 backend 事件，做 source-of-truth 同步：
 // - backend-event 收到 settings.updated：本机或其它 tab 改动了 ai.config
 if (typeof window !== "undefined") {
+    // 防抖窗口内关闭标签页时补发最后一次编辑，避免静默丢配置。
+    window.addEventListener("pagehide", () => flushConfigSync(true));
     window.addEventListener("backend-event", (event) => {
         const detail = (event as CustomEvent).detail as { type?: string; entityId?: string } | undefined;
-        if (detail?.type === "settings.updated" && (detail.entityId === "ai.config" || detail.entityId === "webdav.config")) {
+        if (detail?.type !== "settings.updated") return;
+        // 本地写入未确认时以本地为准：用旧回执覆盖输入框会让正在打字的内容跳回上一版。
+        if (detail.entityId === "ai.config" && hasPendingConfigSync()) return;
+        if (detail.entityId === "ai.config" || detail.entityId === "webdav.config") {
             void hydrateConfigFromBackend();
         }
     });

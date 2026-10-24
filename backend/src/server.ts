@@ -65,7 +65,7 @@ import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-e
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
-import { safeOperationPath, watchSlowOperation } from "./slow-operation.js";
+import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
 
 const logger = createLogger("backend");
 
@@ -196,9 +196,19 @@ export function startServer(
   });
 
   // ── 慢请求本地遥测 ───────────────────────────────────────────────────
+  // SSE（/mcp、/events）与媒体下载的连接存活时间不是请求耗时：按首字节计时，
+  // 否则一条挂着的长连接会长期占满统计，把真实慢请求挤出去。
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method === "OPTIONS") return next();
-    const finish = watchSlowOperation(logger, `${req.method} ${safeOperationPath(req.path)}`);
+    const watch = watchHttpOperation(logger, `${req.method} ${safeOperationPath(req.path)}`);
+    const originalWriteHead = res.writeHead;
+    res.writeHead = function writeHead(this: Response, ...args: unknown[]) {
+      const result = (originalWriteHead as (...rest: unknown[]) => Response).apply(this, args);
+      watch.markFirstByte(String(this.getHeader("content-type") ?? ""));
+      return result;
+    } as Response["writeHead"];
+    const finish = (outcome: string) =>
+      watch.finish(outcome, String(res.getHeader("content-type") ?? ""));
     res.once("finish", () => finish(`http-${res.statusCode}`));
     res.once("close", () => finish("connection-closed"));
     next();

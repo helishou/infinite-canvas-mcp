@@ -7,6 +7,7 @@ import type { WorkflowExecutor } from "./executor.js";
 import type { WorkflowConfig } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
+import { findUiWorkflowFile } from "./ui-workflow-file.js";
 import {
   loadInstances,
   saveInstances,
@@ -21,6 +22,29 @@ function localInstanceRoot(roots: Record<string, string> | undefined, instance: 
     if (normalized === instance) return root;
   }
   return "";
+}
+
+/**
+ * 按工作流名在本机 ComfyUI 工作流目录里找**原始 UI 格式** JSON（带 nodes 数组）。
+ * 本地库里存的是转好的 API 格式，上传到 RunningHub 等「编辑器生态」时必须用 UI 原件，
+ * 否则平台解析不出节点、跑不了。
+ * 库名与磁盘文件名不完全一致（副本 `(1)` 后缀）时的回退匹配在 ui-workflow-file.ts。
+ */
+async function findUiWorkflowJson(name: string): Promise<Record<string, unknown> | null> {
+  try {
+    const data = await loadInstances();
+    for (const rawAddress of data.instances || []) {
+      const instance = rawAddress.trim().replace(/^https?:\/\//, "").replace(/\/$/, "");
+      if (!/^(?:localhost|127\.0\.0\.1):\d+$/.test(instance)) continue;
+      const root = localInstanceRoot(data.roots, instance);
+      if (!root) continue;
+      const hit = await findUiWorkflowFile(path.join(root, "user", "default", "workflows"), name);
+      if (hit) return hit;
+    }
+  } catch {
+    /* 实例配置读不到就当作没有 UI 原件 */
+  }
+  return null;
 }
 
 async function localComfyWorkflowFiles(): Promise<LocalComfyWorkflowFile[]> {
@@ -234,7 +258,9 @@ export function registerWorkflowRoutes(
         const name = decodeURIComponent(req.params.name as string);
         const pkg = await store.exportPackage(name);
         if (pkg?.config) pkg.config = normalizeWorkflowConfig(pkg.config);
-        res.json(pkg);
+        // 附带原始 UI 格式（有的话）：上传到 RunningHub 网页端必须用 UI 格式，API 格式编辑器解析不了。
+        const uiWorkflow = await findUiWorkflowJson(name);
+        res.json(uiWorkflow ? { ...pkg, uiWorkflow } : pkg);
       } catch (error) {
         res
           .status(404)

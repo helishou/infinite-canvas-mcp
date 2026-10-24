@@ -270,7 +270,7 @@ export class WorkflowStore {
         };
     }
 
-    async importPackage(fallbackName: string, value: unknown): Promise<{ name: string }> {
+    async importPackage(fallbackName: string, value: unknown): Promise<{ name: string; inheritedFrom?: string }> {
         if (!value || typeof value !== "object") throw new Error("工作流包格式不正确");
         const pkg = value as Partial<WorkflowPackage>;
         if (pkg.format !== "infinite-canvas-workflow") throw new Error("不是无限画布工作流包");
@@ -284,8 +284,36 @@ export class WorkflowStore {
             throw new Error("工作流包缺少有效的字段配置");
         }
         const result = await this.upload(typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : fallbackName, pkg.workflow as Record<string, unknown>);
-        await this.saveConfig(result.name, pkg.config);
-        return result;
+        // 上传到 RunningHub 时只带了节点图，云端档案的字段是平台自动发现的；
+        // 再下载回来时要沿用本地那份自定义字段配置，否则用户改过的名称/类型/默认值全丢。
+        const inherited = this.inheritFromCloudSibling(pkg.config as WorkflowConfig, result.name);
+        await this.saveConfig(result.name, inherited.config);
+        return { name: result.name, ...(inherited.inheritedFrom ? { inheritedFrom: inherited.inheritedFrom } : {}) };
+    }
+
+    /**
+     * 同一个云端档案若已经有本地工作流（用户上传后一直在本地编辑），把它的配置继承到新副本上。
+     * 字段以本地为准，云端新发现、本地没有的 `node::input` 追加在后面，避免丢掉云端新增节点。
+     */
+    private inheritFromCloudSibling(config: WorkflowConfig, selfName: string): { config: WorkflowConfig; inheritedFrom?: string } {
+        const profileId = config.runningHubProfileId;
+        if (!profileId) return { config };
+        const source = this.db.listWorkflowNamesByRunningHubProfile(profileId).find((name) => name !== selfName);
+        if (!source) return { config };
+        const sibling = this.getConfig(source);
+        if (!sibling) return { config };
+        const identity = (field: WorkflowField) => `${String(field.node || "")}::${String(field.input || "")}`;
+        const seen = new Set((sibling.fields || []).map(identity));
+        return {
+            config: {
+                ...config,
+                fields: [...(sibling.fields || []), ...(config.fields || []).filter((field) => !seen.has(identity(field)))],
+                ...(sibling.outputNodes?.length ? { outputNodes: sibling.outputNodes } : {}),
+                ...(sibling.mediaInputs ? { mediaInputs: sibling.mediaInputs } : {}),
+                ...(sibling.miniCards ? { miniCards: sibling.miniCards } : {}),
+            },
+            inheritedFrom: source,
+        };
     }
 
     async saveConfig(name: string, config: WorkflowConfig): Promise<{ config: WorkflowConfig }> {
@@ -299,6 +327,8 @@ export class WorkflowStore {
             fieldsJson: JSON.stringify(config.fields),
             mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
             miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+            runningHubProfileId: config.runningHubProfileId ?? "",
+            runTarget: config.runTarget ?? "local",
         });
         return { config };
     }
@@ -330,6 +360,8 @@ export class WorkflowStore {
                 fields: JSON.parse(row.fieldsJson) as WorkflowField[],
                 mediaInputs: JSON.parse(row.mediaInputsJson),
                 miniCards: JSON.parse(row.miniCardsJson),
+                ...(row.runningHubProfileId ? { runningHubProfileId: row.runningHubProfileId } : {}),
+                ...(row.runTarget && row.runTarget !== "local" ? { runTarget: row.runTarget as WorkflowConfig["runTarget"] } : {}),
             };
             if (name === "custom/视频修复FlashVSR1.1.json") {
                 config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);

@@ -11,6 +11,7 @@ import type { BackendEventBus } from "../events.js";
 import { randomUUID } from "node:crypto";
 import { H3ExecutionQueue, h3CanResumeQueued } from "./h3-queue.js";
 import { collectBrowserSessions, jwtExpiry, probeSession, readSession, clearSession, sessionStatus, writeSession, type RunningHubBrowserSession, type RunningHubSession, type RunningHubSessionStatus } from "./runninghub-session.js";
+import { appendRunningHubOutputTail, type TailResult } from "./runninghub-workflow-tail.js";
 
 export type { RunningHubField, RunningHubConfig } from "@basketikun/canvas-agent/generation-contract";
 export type { RunningHubWorkflowProfile } from "@basketikun/canvas-agent/generation-contract";
@@ -21,6 +22,15 @@ const DEFAULT_URL = "https://www.runninghub.ai";
 const SITE_URLS = { ai: "https://www.runninghub.ai", cn: "https://www.runninghub.cn" } as const;
 const SITE_LABEL = { ai: "runninghub.ai（国际站）", cn: "runninghub.cn（国内站）" } as const;
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+/** 收尾节点（Play Sound KJ → Save Image To Local）的注入结果，给前端决定提示文案。 */
+export type TailStatus = "added" | "added-video" | "video-no-image" | "already" | "no-sink" | "not-ui";
+function tailStatusOf(tail: TailResult | undefined): TailStatus {
+    if (!tail) return "not-ui";
+    if (!tail.added) return (tail.reason as TailStatus) || "not-ui";
+    if (tail.kind === "video") return tail.attachedSave ? "added-video" : "video-no-image";
+    return "added";
+}
 
 /**
  * 需要用户动手才能解决的错误（去登录、去粘贴令牌）用 400，而不是 500。
@@ -187,16 +197,25 @@ export class RunningHubBackend {
         if (session.expiresAt && session.expiresAt * 1000 <= Date.now()) throw new Error(`${where}的网页会话已过期，请在浏览器里重新登录后重新读取`);
         return session;
     }
-    /** 把本地节点图上传到 RunningHub 工作台，返回云端工作流 ID。 */
-    async pushWorkflowGraph(input: { name?: string; graph?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; name: string; site: RunningHubSite }> {
+    /**
+     * 把本地节点图上传到 RunningHub 工作台，返回云端工作流 ID。
+     * 优先用**原始 UI 格式**（nodes/links）：RunningHub 编辑器只认它；API 格式（class_type）虽能上传，
+     * 但编辑器解析不出节点，工作流等于不能用。没有 UI 原件时才退回 API 格式并标记 format=api。
+     */
+    async pushWorkflowGraph(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; name: string; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus }> {
         const graph = record(input.graph);
-        if (!Object.values(graph).some((node) => record(node).class_type)) throw new Error("要上传的节点图不是 ComfyUI API 格式（节点缺少 class_type）");
+        const ui = input.uiWorkflow && typeof input.uiWorkflow === "object" && !Array.isArray(input.uiWorkflow) ? record(input.uiWorkflow) : undefined;
+        const usingUi = Boolean(ui && Array.isArray((ui as { nodes?: unknown }).nodes) && ((ui as { nodes: unknown[] }).nodes).length > 0);
+        if (!usingUi && !Object.values(graph).some((node) => record(node).class_type)) throw new Error("要上传的节点图既不是 RunningHub 编辑器格式（缺 nodes），也不是 ComfyUI API 格式（缺 class_type）");
         const name = String(input.name || "").trim().slice(0, 120) || "未命名工作流";
         const site = normalizeSite(input.site);
         const session = this.requireSession(site);
         const config = this.siteConfig(site);
+        // 云端收尾：输出节点后面补 Play Sound KJ → Save Image To Local（幂等，已有就跳过）。
+        const tailed = usingUi ? appendRunningHubOutputTail(ui!) : undefined;
+        const payload = tailed ? tailed.workflow : graph;
         const form = new FormData();
-        form.set("workflowFile", new Blob([JSON.stringify(graph)], { type: "application/json" }), `${safeFileName(name)}.json`);
+        form.set("workflowFile", new Blob([JSON.stringify(payload)], { type: "application/json" }), `${safeFileName(name)}.json`);
         form.set("workflowName", name);
         const response = await fetch(`${config.baseUrl}/api/workflow/upload`, { method: "POST", body: form, headers: { Authorization: `Bearer ${session.accessToken}` } });
         const raw = await response.json().catch(() => ({})) as Json;
@@ -204,13 +223,13 @@ export class RunningHubBackend {
         checkResponse(response, raw, config);
         const workflowId = String(record(raw.data).id || "");
         if (!workflowId) throw new Error("RunningHub 已接收工作流但没有返回工作流 ID");
-        return { workflowId, name, site };
+        return { workflowId, name, site, format: usingUi ? "ui" : "api", tail: tailStatusOf(tailed) };
     }
     /**
      * 上传本地工作流并在本地建档：上传 → 拿 workflowId → 自动导入。
      * 平台侧新建的工作流是草稿，对 OpenAPI 暂不可读，所以读不到平台图时直接用刚上传的这份图建档。
      */
-    async publishLocalWorkflow(input: { name?: string; graph?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite }> {
+    async publishLocalWorkflow(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus }> {
         const uploaded = await this.pushWorkflowGraph(input);
         let cloudRead = true;
         let workflowJson: Json = record(input.graph);
@@ -221,7 +240,7 @@ export class RunningHubBackend {
             fields = inspected.fields;
         } catch { cloudRead = false; }
         const profile = this.saveWorkflowProfile({ id: randomUUID(), name: uploaded.name, workflowId: uploaded.workflowId, fields, workflowJson, site: uploaded.site === "default" ? undefined : uploaded.site });
-        return { workflowId: uploaded.workflowId, profile, cloudRead, site: uploaded.site };
+        return { workflowId: uploaded.workflowId, profile, cloudRead, site: uploaded.site, format: uploaded.format, tail: uploaded.tail };
     }
     listWorkflowProfiles() {
         const stored = this.settings.get("runninghub.workflows");

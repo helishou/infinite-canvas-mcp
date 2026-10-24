@@ -28,7 +28,10 @@ export type WorkflowPackage = {
     format: "infinite-canvas-workflow";
     version: 1;
     name: string;
+    /** ComfyUI API 格式（本地执行用）。 */
     workflow: Record<string, unknown>;
+    /** 原始 UI 格式（nodes/links）；上传到 RunningHub 网页端用这个，API 格式编辑器解析不了。 */
+    uiWorkflow?: Record<string, unknown>;
     config: WorkflowConfig;
 };
 

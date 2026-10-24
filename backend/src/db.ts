@@ -165,11 +165,18 @@ export type WorkflowConfig = {
     outputNodes?: string[];
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
+    /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）。留空表示没绑定。 */
+    runningHubProfileId?: string;
+    /** 运行位置：本地 ComfyUI / 云端 RunningHub / 两者自动（本地并发占满时上云）。 */
+    runTarget?: WorkflowRunTarget;
 };
+
+export type WorkflowRunTarget = "local" | "cloud" | "hybrid";
 
 export type WorkflowConfigRow = {
     name: string; title: string; backend: string; description: string; operation: string;
     fieldsJson: string; mediaInputsJson: string; miniCardsJson: string; updatedAt: string;
+    runningHubProfileId: string; runTarget: string;
 };
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -409,9 +416,19 @@ export class BackendDatabase {
                 fields_json TEXT NOT NULL DEFAULT '[]',
                 media_inputs_json TEXT NOT NULL DEFAULT '{}',
                 mini_cards_json TEXT NOT NULL DEFAULT '{}',
+                runninghub_profile_id TEXT NOT NULL DEFAULT '',
+                run_target TEXT NOT NULL DEFAULT 'local',
                 updated_at TEXT NOT NULL
             );
         `);
+        // 本地工作流绑定云端档案 / 运行位置：老库补列，幂等。
+        const workflowColumns = this.db.prepare("PRAGMA table_info(workflow_configs)").all() as Array<{ name: string }>;
+        if (!workflowColumns.some((column) => column.name === "runninghub_profile_id")) {
+            this.db.exec("ALTER TABLE workflow_configs ADD COLUMN runninghub_profile_id TEXT NOT NULL DEFAULT ''");
+        }
+        if (!workflowColumns.some((column) => column.name === "run_target")) {
+            this.db.exec("ALTER TABLE workflow_configs ADD COLUMN run_target TEXT NOT NULL DEFAULT 'local'");
+        }
         // 文本身份属于对象的一次生命周期，不得由可复用的 nodeId / segmentId 推导。
         const textColumns = this.db.prepare("PRAGMA table_info(canvas_text_documents)").all() as Array<{ name: string }>;
         if (!textColumns.some((column) => column.name === "document_id")) {
@@ -3214,6 +3231,8 @@ export class BackendDatabase {
                 fieldsJson: String(row.fields_json || '[]'),
                 mediaInputsJson: String(row.media_inputs_json || '{}'),
                 miniCardsJson: String(row.mini_cards_json || '{}'),
+                runningHubProfileId: String(row.runninghub_profile_id || ''),
+                runTarget: String(row.run_target || 'local'),
                 updatedAt: String(row.updated_at),
             };
         } catch { return null; }
@@ -3252,16 +3271,19 @@ export class BackendDatabase {
     upsertWorkflowConfig(name: string, config: {
         title?: string; backend?: string; description?: string; operation?: string;
         fieldsJson?: string; mediaInputsJson?: string; miniCardsJson?: string;
+        runningHubProfileId?: string; runTarget?: string;
     }): void {
         const now = new Date().toISOString();
         const existing = this.getWorkflowConfig(name);
         this.db.prepare(`
-            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 title = excluded.title, backend = excluded.backend, description = excluded.description,
                 operation = excluded.operation, fields_json = excluded.fields_json,
                 media_inputs_json = excluded.media_inputs_json, mini_cards_json = excluded.mini_cards_json,
+                runninghub_profile_id = excluded.runninghub_profile_id,
+                run_target = excluded.run_target,
                 updated_at = excluded.updated_at
         `).run(
             name,
@@ -3272,12 +3294,26 @@ export class BackendDatabase {
             config.fieldsJson ?? existing?.fieldsJson ?? '[]',
             config.mediaInputsJson ?? existing?.mediaInputsJson ?? '{}',
             config.miniCardsJson ?? existing?.miniCardsJson ?? '{}',
+            config.runningHubProfileId ?? existing?.runningHubProfileId ?? '',
+            config.runTarget ?? existing?.runTarget ?? 'local',
             now,
         );
     }
 
     deleteWorkflowConfig(name: string): number {
         return Number(this.db.prepare("DELETE FROM workflow_configs WHERE name = ?").run(name).changes);
+    }
+
+    /**
+     * 同一个云端档案对应的本地工作流（用户可能上传后又在本地断续编辑），按最近修改排序。
+     * 「从 RunningHub 导入本地副本」用它把本地自定义的字段配置继承回来。
+     */
+    listWorkflowNamesByRunningHubProfile(profileId: string): string[] {
+        if (!profileId) return [];
+        const rows = this.db.prepare(
+            "SELECT name FROM workflow_configs WHERE runninghub_profile_id = ? ORDER BY updated_at DESC",
+        ).all(profileId) as Array<{ name: string }>;
+        return rows.map((row) => String(row.name));
     }
 
     listAssets(options: { kind?: string; folderId?: string; dramaId?: string } = {}): Asset[] {

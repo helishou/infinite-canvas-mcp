@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Alert, App, Button, Checkbox, Form, Input, InputNumber, Select, Table } from "antd";
 import { useTranslation } from "react-i18next";
 import { fetchRunningHubConfig, inspectRunningHubWorkflow, saveRunningHubConfig, fetchRunningHubSession, importRunningHubBrowserSession, saveRunningHubSession, deleteRunningHubSession, type RunningHubConfig, type RunningHubField, type RunningHubSessionStatus, type RunningHubSite } from "@/services/api/runninghub";
-import { keepTypedRunningHubSecret } from "@/lib/runninghub-secret-field";
+import { keepTypedRunningHubSecret, runningHubSecretMask } from "@/lib/runninghub-secret-field";
 
 const initial: RunningHubConfig = { baseUrl: "https://www.runninghub.ai", apiKey: "", mode: "workflow", workflowId: "", appId: "", fields: [], useWallet: false, instanceType: "default", concurrency: 1, uploadSite: "default", siteApiKeys: { ai: "", cn: "" } };
 /** 站点下拉：`default` 跟随运行环境那条链路，另外两档固定站点。 */
@@ -12,7 +12,7 @@ const sites: RunningHubSite[] = ["default", "ai", "cn"];
  * 国内站 Rh-Accesstoken 存在 Cookie 里，但**不是 HttpOnly**——页面 JS 能直接读，绕开 App-Bound Encryption；
  * 而 Edge 136+ 又禁止在默认配置目录上开远程调试端口，所以走「页面内取令牌」比 CDP 可靠。
  */
-const TOKEN_SNIPPET = `(()=>{const m=document.cookie.match(/(?:^|;\\s*)Rh-Accesstoken=([^;]+)/);if(!m){console.warn("未找到 Rh-Accesstoken：请确认已在该站登录并刷新页面");return;}const v=decodeURIComponent(m[1]);navigator.clipboard.writeText(v).then(()=>console.log("%c已复制 Rh-Accesstoken（长度 "+v.length+"），回到画布粘贴即可","color:#16a34a;font-weight:600"),()=>console.log("自动复制失败，请手动复制下面这行：\\n"+v));})()`;
+const TOKEN_SNIPPET = `(()=>{const m=document.cookie.match(/(?:^|;\\s*)Rh-Accesstoken=([^;]+)/);if(!m){console.warn("%c未找到 Rh-Accesstoken","color:#dc2626;font-weight:600","\\n当前页面："+location.href+"\\n当前 cookie："+document.cookie.split(";").map(s=>s.split("=")[0].trim()).filter(Boolean).join(", "));return;}const v=decodeURIComponent(m[1]);const done=()=>console.log("%c已复制 Rh-Accesstoken（长度 "+v.length+"），回到画布粘贴即可","color:#16a34a;font-weight:600");if(typeof copy==="function"){copy(v);done();return;}navigator.clipboard.writeText(v).then(done,()=>{console.log("%c自动复制失败，请手动复制下面这行：","color:#d97706;font-weight:600");console.log(v);});})()`;
 
 export function RunningHubPanel() {
     const { t } = useTranslation();
@@ -106,7 +106,7 @@ export function RunningHubPanel() {
             </div>
             {uploadSite !== "default" ? <div className="mt-3">
                 <div className="mb-1 text-xs text-stone-500">{t("runningHub.upload.siteKeyHint", { site: t(`runningHub.upload.sites.${uploadSite}`) })}</div>
-                <Input.Password aria-label={t("runningHub.upload.siteKey")} size="small" className="max-w-96" autoComplete="off" placeholder={t("runningHub.upload.siteKeyPlaceholder")} value={config.siteApiKeys?.[uploadSite] || ""} onChange={(event) => patch({ siteApiKeys: { ...(config.siteApiKeys || {}), [uploadSite]: event.target.value } })} />
+                <Input.Password aria-label={t("runningHub.upload.siteKey")} size="small" className="max-w-96" autoComplete="off" placeholder={config.siteApiKeys?.[uploadSite] === runningHubSecretMask ? t("runningHub.secretStored") : t("runningHub.upload.siteKeyPlaceholder")} visibilityToggle={!!config.siteApiKeys?.[uploadSite] && config.siteApiKeys?.[uploadSite] !== runningHubSecretMask} value={config.siteApiKeys?.[uploadSite] === runningHubSecretMask ? "" : config.siteApiKeys?.[uploadSite] || ""} onChange={(event) => patch({ siteApiKeys: { ...(config.siteApiKeys || {}), [uploadSite]: event.target.value } })} />
                 <p className="mt-2 text-xs text-stone-500">{t("runningHub.session.snippetHint")}</p>
                 <Button size="small" className="mt-1" onClick={() => void copyTokenSnippet()}>{t("runningHub.session.copySnippet")}</Button>
             </div> : null}
@@ -123,7 +123,7 @@ export function RunningHubPanel() {
         <Form layout="vertical" requiredMark={false} disabled={busy || !loaded}>
             <div className="grid gap-x-4 md:grid-cols-2">
                 <Form.Item label={t("runningHub.site")}><Select aria-label={t("runningHub.site")} value={config.baseUrl} onChange={(baseUrl) => patch({ baseUrl })} options={[{ value: "https://www.runninghub.ai", label: t("runningHub.global") }, { value: "https://www.runninghub.cn", label: t("runningHub.china") }]} /></Form.Item>
-                <Form.Item label="API Key"><Input.Password aria-label="RunningHub API Key" autoComplete="off" value={config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /></Form.Item>
+                <Form.Item label="API Key"><Input.Password aria-label="RunningHub API Key" autoComplete="off" placeholder={config.apiKey === runningHubSecretMask ? t("runningHub.secretStored") : undefined} visibilityToggle={!!config.apiKey && config.apiKey !== runningHubSecretMask} value={config.apiKey === runningHubSecretMask ? "" : config.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /></Form.Item>
                 <Form.Item label={t("runningHub.instance")}><Select aria-label={t("runningHub.instance")} value={config.instanceType || "default"} onChange={(instanceType) => patch({ instanceType })} options={[{ value: "default", label: "default · 24G" }, { value: "plus", label: "plus · 48G" }, { value: "ultra", label: "ultra" }]} /></Form.Item>
                 <Form.Item label={t("runningHub.concurrency")} extra={t("runningHub.capacityHint")}><InputNumber aria-label={t("runningHub.concurrency")} min={1} precision={0} value={config.concurrency} onChange={(concurrency) => patch({ concurrency: concurrency ?? undefined })} /></Form.Item>
                 <Form.Item label={t("runningHub.localConcurrency")}><InputNumber aria-label={t("runningHub.localConcurrency")} value={1} disabled /></Form.Item>

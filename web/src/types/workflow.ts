@@ -42,4 +42,11 @@ export type WorkflowConfig = {
     outputNodes?: string[];
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
+    /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）；留空表示没绑定。 */
+    runningHubProfileId?: string;
+    /** 运行位置：本地 ComfyUI / 云端 RunningHub / 两者自动（本地并发占满时上云）。 */
+    runTarget?: WorkflowRunTarget;
 };
+
+/** 运行位置：本地、云端，或按本地并发自动选择。 */
+export type WorkflowRunTarget = 'local' | 'cloud' | 'hybrid';

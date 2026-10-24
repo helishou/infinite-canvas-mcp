@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { App, Alert, Button, Checkbox, Input, InputNumber, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
+import { App, Alert, Button, Checkbox, Input, InputNumber, Radio, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
 import { Upload as UploadIcon, Cloud, Download, Play, RefreshCw, Trash2, Workflow, ExternalLink, UploadCloud } from "lucide-react";
 import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, syncWorkflowFromComfyUI, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
@@ -16,6 +16,7 @@ import { useRunningHubUpload } from "./runninghub-workflow-upload";
 import { RunningHubProfileActions } from "./runninghub-profile-actions";
 import { RunningHubGraphPanel } from "./runninghub-graph-panel";
 import { runningHubProfileToConfig, runningHubRequestFromForm, RunningHubMediaConflict } from "./runninghub-run-adapter";
+import { bridgeLocalFormToProfile } from "./runninghub-field-bridge";
 import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
 import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, fetchRunningHubConfig, saveRunningHubWorkflow, type RunningHubSite, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -127,6 +128,20 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     const cloudOwner = selectedProfile ? `${connectionScope}:cloud:${selectedProfile.id}` : "";
     const localRun = useSyncExternalStore(localRuns.subscribe, () => localRuns.get(localOwner));
     const cloudRun = useSyncExternalStore(cloudRuns.subscribe, () => cloudRuns.get(cloudOwner));
+    // 绑定关系：本地工作流 ↔ RunningHub 档案。运行时按它决定「云端」那条链走哪个工作流。
+    const boundProfile = useMemo(
+        () => (selected?.config.runningHubProfileId ? profiles.find((profile) => profile.id === selected.config.runningHubProfileId) || null : null),
+        [profiles, selected?.config.runningHubProfileId],
+    );
+    const runTarget = selected?.config.runTarget || "local";
+    const boundCloudOwner = boundProfile ? `${connectionScope}:cloud:${boundProfile.id}` : "";
+    const boundCloudRun = useSyncExternalStore(cloudRuns.subscribe, () => cloudRuns.get(boundCloudOwner));
+    // 本地页签显示哪一个运行：非纯本地模式下云端在跑就看云端（混合可能把任务送上云），否则看本地。
+    const activeRun = runTarget !== "local" && boundCloudRun
+        && (boundCloudRun.running || boundCloudRun.submitting || boundCloudRun.cancellation === "pending")
+        ? boundCloudRun
+        : localRun;
+    const activeRunIsCloud = activeRun === boundCloudRun && Boolean(boundCloudRun);
     const readCloudTask = useCallback((id: string) => request<{ task: BackendRuntimeTask; events?: unknown[] }>("GET", `/agent/runninghub/tasks/${encodeURIComponent(id)}`), []);
     useEffect(() => {
         if (!localOwner || !localRun?.running) return;
@@ -140,6 +155,13 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         const timer = window.setInterval(() => void cloudRuns.poll(cloudOwner, readCloudTask), 2000);
         return () => window.clearInterval(timer);
     }, [cloudOwner, cloudRun?.running, cloudRun?.cancellation, readCloudTask]);
+    useEffect(() => {
+        // 本地页签里提交的云端任务也要跟着轮询，否则进度会停在提交中。
+        if (!boundCloudOwner || !(boundCloudRun?.running || boundCloudRun?.cancellation === "pending")) return;
+        void cloudRuns.poll(boundCloudOwner, readCloudTask);
+        const timer = window.setInterval(() => void cloudRuns.poll(boundCloudOwner, readCloudTask), 2000);
+        return () => window.clearInterval(timer);
+    }, [boundCloudOwner, boundCloudRun?.running, boundCloudRun?.cancellation, readCloudTask]);
     const markSaving = (owner: string, saving: boolean) => {
         if (saving) savingRef.current.add(owner); else savingRef.current.delete(owner);
         setSavingOwners(new Set(savingRef.current));
@@ -377,14 +399,27 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
 
     // 「上传到 RunningHub」：本地节点图 → 云端工作流 → workflowId → 自动建档。
     const [draftNotice, setDraftNotice] = useState<string | null>(null);
-    const handleUploadedToRunningHub = useCallback((profile: RunningHubWorkflowProfile, cloudRead: boolean) => {
+    /** 把云端档案写回本地工作流的绑定字段（上传后自动配对，省掉手动选一次）。 */
+    const bindLocalWorkflowToCloud = useCallback(async (name: string, profileId: string) => {
+        const detail = await request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
+        const next = { ...detail.config, runningHubProfileId: profileId };
+        await request("PUT", `/api/workflows/${encodeURIComponent(name)}/config`, next);
+        setSelected((current) => current?.name === name ? { ...current, config: next } : current);
+        void fetchWorkflows();
+    }, [fetchWorkflows]);
+
+    const handleUploadedToRunningHub = useCallback((profile: RunningHubWorkflowProfile, cloudRead: boolean, localName: string) => {
         void fetchProfiles().then(() => {
             setLibrary("runninghub");
             setSelectedProfile(profile);
             setRhTab("graph");
             setDraftNotice(cloudRead ? null : profile.workflowId);
         });
-    }, [fetchProfiles]);
+        // 上传即绑定：本地工作流 ↔ 刚生成的云端档案，之后运行位置切「云端」不用再选一次。
+        void bindLocalWorkflowToCloud(localName, profile.id)
+            .then(() => message.success(t("runningHub.upload.boundToLocal")))
+            .catch((error) => message.warning(error instanceof Error ? error.message : String(error)));
+    }, [bindLocalWorkflowToCloud, fetchProfiles, t]);
     const { uploading, upload } = useRunningHubUpload({ workflows, site: rhUploadSite, onUploaded: handleUploadedToRunningHub });
     const handleUploadToRunningHub = (id: string) => void upload(id);
 
@@ -436,9 +471,41 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         } finally { markSaving(owner.name, false); }
     };
 
+    /** 把本地表单值桥到绑定的云端档案后提交；返回是否真的提交成功。 */
+    const startBoundCloudRun = async (owner: WorkflowDetail, profile: RunningHubWorkflowProfile, fields: Record<string, string>) => {
+        let submission: ReturnType<typeof runningHubRequestFromForm>;
+        try {
+            submission = runningHubRequestFromForm(profile, bridgeLocalFormToProfile(profile, owner.config.fields, fields));
+        } catch (error) {
+            message.error(error instanceof RunningHubMediaConflict ? t("workflowRecovery.mediaConflict", { kind: error.kind, index: error.index }) : String(error));
+            return false;
+        }
+        const { input, values } = submission;
+        const taskId = crypto.randomUUID();
+        await cloudRuns.start(`${connectionScope}:cloud:${profile.id}`, taskId, async () => submitAndRead(
+            () => runRunningHubWorkflow(profile.id, input, values, {}, taskId),
+            () => readCloudTask(taskId),
+            rhConfigured?.workflowTaskReplaySafe === true,
+        ), rhConfigured?.workflowTaskReplaySafe === true);
+        return true;
+    };
+
     const handleRun = async (fields: Record<string, string>) => {
         if (!selected || savingRef.current.has(selected.name)) return;
         const owner = selected;
+        const target = owner.config.runTarget || "local";
+        if (target !== "local") {
+            // 混合：本地还吃得下就本地，本地已有任务在跑就上云。
+            const wantsCloud = target === "cloud" || localRuns.countRunning(`${connectionScope}:local:`) > 0;
+            if (wantsCloud) {
+                if (!boundProfile) message.warning(t("microTools.workflow.runTargetCloudMissing"));
+                else if (!rhConfigured?.hasApiKey) message.warning(t("microTools.workflow.runTargetCloudNoKey"));
+                else {
+                    if (target === "hybrid") message.info(t("microTools.workflow.runTargetRoutedCloud"));
+                    if (await startBoundCloudRun(owner, boundProfile, fields)) return;
+                }
+            }
+        }
         const config = { ...owner.config, outputNodes: normalizeOutputNodeSelection(outputNodes, owner.workflow) };
         const taskId = crypto.randomUUID();
         await localRuns.start(`${connectionScope}:local:${owner.name}`, taskId, async () => {
@@ -871,6 +938,36 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                     : undefined}
                             actions={
                                 <>
+                                    <Select
+                                        size="small"
+                                        className="min-w-40 max-w-56"
+                                        allowClear
+                                        showSearch
+                                        optionFilterProp="label"
+                                        placeholder={t("microTools.workflow.bindCloud")}
+                                        loading={profilesLoading}
+                                        value={selected.config.runningHubProfileId || undefined}
+                                        options={profiles.map((profile) => ({ label: profile.name, value: profile.id }))}
+                                        onChange={(value?: string) => {
+                                            const next = { ...selected.config, runningHubProfileId: value || "" };
+                                            void handleSaveConfig(selected, next).then((ok) => {
+                                                if (!ok) return;
+                                                message.success(t(value ? "microTools.workflow.bindCloudSaved" : "microTools.workflow.bindCloudCleared"));
+                                            });
+                                        }}
+                                    />
+                                    <Button
+                                        size="small"
+                                        icon={<Cloud className="size-3.5" />}
+                                        disabled={!boundProfile}
+                                        onClick={() => {
+                                            if (!boundProfile) return;
+                                            setLibrary("runninghub");
+                                            setSelectedProfile(boundProfile);
+                                        }}
+                                    >
+                                        {t("microTools.workflow.openCloudConfig")}
+                                    </Button>
                                     <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>导出</Button>
                                     {selected.source?.syncState === "changed" && <Button size="small" icon={<RefreshCw className="size-3.5" />} loading={syncingSource === selected.name} disabled={Boolean(syncingSource) || savingOwners.has(selected.name)} onClick={() => void handleSyncComfySource(selected)}>{t("workflowLibraryActions.syncComfyUI")}</Button>}
                                     {!selected.builtin && (
@@ -901,12 +998,38 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                     key={`local:${selected.name}`}
                                     config={selected.config}
                                     onRun={handleRun}
-                                    running={Boolean(localRun?.running)}
-                                    disabled={savingOwners.has(selected?.name || "") || Boolean(localRun?.unknown)}
-                                    statusText={t(localRun?.submitting ? "workflowRecovery.submitting" : localRun?.unknown ? "workflowRecovery.submissionUnknown" : localRun?.error ? "workflowRecovery.queryFailed" : "workflowRecovery.running")}
-                                    result={localRun?.result || null}
+                                    running={Boolean(activeRun?.running)}
+                                    disabled={savingOwners.has(selected?.name || "") || Boolean(activeRun?.unknown)}
+                                    cancelPending={activeRunIsCloud ? activeRun?.cancelling : undefined}
+                                    statusText={t(activeRun?.submitting ? "workflowRecovery.submitting" : activeRun?.unknown ? "workflowRecovery.submissionUnknown" : activeRun?.error ? "workflowRecovery.queryFailed" : "workflowRecovery.running")}
+                                    result={activeRun?.result || null}
+                                    onCancel={activeRunIsCloud && activeRun?.taskId && !activeRun.unknown && !activeRun.submitting && !activeRun.cancellation
+                                        ? () => void cloudRuns.cancel(boundCloudOwner, cancelRunningHubTask, readCloudTask)
+                                        : undefined}
                                     extra={runNotice(localOwner, localRun, localRuns, fetchBackendTask)}
                                     outputPicker={<OutputNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />}
+                                    advanced={
+                                        <div className="space-y-2">
+                                            <div className="flex flex-wrap items-center gap-3">
+                                                <span className="text-xs font-medium text-foreground">{t("microTools.workflow.runTarget")}</span>
+                                                <Radio.Group
+                                                    size="small"
+                                                    optionType="button"
+                                                    disabled={savingOwners.has(selected?.name || "")}
+                                                    value={runTarget}
+                                                    onChange={(event) => void handleSaveConfig(selected, { ...selected.config, runTarget: event.target.value })}
+                                                    options={[
+                                                        { label: t("microTools.workflow.runTargetLocal"), value: "local" },
+                                                        { label: t("microTools.workflow.runTargetCloud"), value: "cloud" },
+                                                        { label: t("microTools.workflow.runTargetHybrid"), value: "hybrid" },
+                                                    ]}
+                                                />
+                                                {boundProfile ? <span className="max-w-56 truncate text-xs text-stone-500">{boundProfile.name}</span> : null}
+                                            </div>
+                                            <p className="text-xs text-stone-500">{t(`microTools.workflow.runTargetHint${runTarget === "cloud" ? "Cloud" : runTarget === "hybrid" ? "Hybrid" : "Local"}`)}</p>
+                                            {runTarget !== "local" && !boundProfile ? <p className="text-xs text-amber-600">{t("microTools.workflow.runTargetNoBinding")}</p> : null}
+                                        </div>
+                                    }
                                 />
                             }
                             history={

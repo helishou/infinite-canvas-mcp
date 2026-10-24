@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { BackendDatabase } from "../db.js";
+import type { BackendDatabase, CanvasProject } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 
 export type ProductionCanvasContext = {
@@ -9,8 +9,9 @@ export type ProductionCanvasContext = {
     sharedAssetCanvasId?: string | null;
 };
 
-export function productionCanvasContext(db: BackendDatabase, canvasId: string): ProductionCanvasContext {
-    if (!db.getCanvasProject(canvasId)) throw new Error("画布不存在");
+/** `project` lets callers that already parsed the canvas skip a second full JSON parse. */
+export function productionCanvasContext(db: BackendDatabase, canvasId: string, project?: CanvasProject | null): ProductionCanvasContext {
+    if (project === undefined ? !db.getCanvasProject(canvasId) : !project) throw new Error("画布不存在");
     const episode = db.getDramaEpisodeByCanvasId(canvasId);
     const drama = db.db.prepare("SELECT folder_id, shared_asset_canvas_id FROM drama_projects WHERE folder_id=? OR shared_asset_canvas_id=?")
         .get(episode?.dramaId || "", canvasId) as { folder_id: string; shared_asset_canvas_id: string | null } | undefined;
@@ -31,7 +32,7 @@ export function ensureProductionCanvas(db: BackendDatabase, kind: "episode" | "s
     if (bound) {
         const project = db.getCanvasProject(bound);
         if (!project) throw new Error("固定绑定的画布不存在，请恢复原画布");
-        return { project, context: productionCanvasContext(db, bound), created: false };
+        return { project, context: productionCanvasContext(db, bound, project), created: false };
     }
     const canvasId = `production-${kind}-${crypto.createHash("sha256").update(id).digest("hex").slice(0, 24)}`;
     let project = db.getCanvasProject(canvasId);
@@ -43,5 +44,5 @@ export function ensureProductionCanvas(db: BackendDatabase, kind: "episode" | "s
     else db.db.prepare("UPDATE drama_projects SET shared_asset_canvas_id=?, updated_at=? WHERE folder_id=? AND shared_asset_canvas_id IS NULL")
         .run(canvasId, new Date().toISOString(), dramaId);
     events?.publishCanvasFolder({ entityId: dramaId, payload: { productionCanvasPrepared: canvasId } });
-    return { project, context: productionCanvasContext(db, canvasId), created };
+    return { project, context: productionCanvasContext(db, canvasId, project), created };
 }

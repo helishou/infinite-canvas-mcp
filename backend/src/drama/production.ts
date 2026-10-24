@@ -2005,9 +2005,13 @@ export class EpisodeProductionService {
     }
 
     workflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string): DirectorReadiness {
-        const baseline = this.formalWorkflowReadiness(episodeId, source, runId);
+        // 一次请求只读一次制作稿：get() 会完整 JSON.parse + zod 校验，制作稿可达数 MB。
+        const current = this.get(episodeId);
+        // 生产批次也只读一次：每次 listBatches 都会解析所有 run 的执行快照。
+        const batches = this.listBatches(episodeId);
+        const baseline = this.formalWorkflowReadiness(episodeId, source, runId, current, batches);
         if (source === "published") return baseline;
-        const data = this.get(episodeId).draft;
+        const data = current.draft;
         if (!data.director) return baseline;
         const stage = directorStageReadiness(data.director);
         const keyframeIds = new Set(Object.values(data.director.shotInputs).map(input => input.keyframeAssetId).filter(Boolean));
@@ -2038,17 +2042,16 @@ export class EpisodeProductionService {
                     status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers, notice: "使用当前已保存内容" };
             });
             const next = targets.find(target => target.status === "ready") || targets.find(target => target.status === "blocked");
-            const current = this.get(episodeId);
             return { ...baseline, targets, canvasId: checked.canvasId, canvasRevision: checked.canvasRevision,
                 unresolved: [...new Set(targets.flatMap(target => target.blockers))],
                 stage,
                 nextAction: next ? next.status === "ready" ? `可以推进：${next.title}` : `先补齐：${next.blockers[0]}` : stage.nextAction,
-                presentation: this.directorPresentation(episodeId, current, data.director, targets, runId) };
+                presentation: this.directorPresentation(episodeId, current, data.director, targets, runId, batches) };
         } catch { return baseline; }
     }
 
-    private formalWorkflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string): DirectorReadiness {
-        const current = this.get(episodeId);
+    private formalWorkflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string, loaded?: ProductionRecord, batches?: ProductionBatch[]): DirectorReadiness {
+        const current = loaded ?? this.get(episodeId);
         const selectedData = source === "published" ? current.published || current.draft : current.draft;
         const fallbackSettings = current.published?.settings || selectedData.settings;
         const data = { ...selectedData, settings: {
@@ -2134,7 +2137,7 @@ export class EpisodeProductionService {
         }
         const canvasId = this.episodeInfo(episodeId).canvasId || "";
         const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
-        const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId).role : "ordinary";
+        const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId, project).role : "ordinary";
         const nodes = project?.nodes as Array<Record<string, any>> | undefined;
         const subjectRows = objectList(director.source.subject_registry);
         const subjectById = new Map<string, Record<string, any>>(subjectRows.map(subject => [String(subject.id || ""), subject]));
@@ -2235,7 +2238,7 @@ export class EpisodeProductionService {
         }
         const boundaryByFrom = new Map(director.boundaries.map(boundary => [boundary.from, boundary]));
         const registeredSceneEntries = productionSceneEntries(director.source);
-        const completionBatches = this.listBatches(episodeId);
+        const completionBatches = batches ?? this.listBatches(episodeId);
         for (const [index, segment] of segments.entries()) {
             const segmentId = String(segment.id || "");
             if (!segmentId) continue;
@@ -2351,7 +2354,7 @@ export class EpisodeProductionService {
         const blockedModules = Object.values(director.modules).flatMap(item => item.unresolved);
         const next = targets.find(item => item.status === "ready") || targets.find(item => item.status === "needs_review") || targets.find(item => item.status === "blocked");
         const nextAction = next ? next.status === "ready" ? `可以推进：${next.title}` : next.status === "needs_review" ? `待审核：${next.title}` : `先补齐：${next.blockers[0]}` : blockedModules[0] || stage.nextAction;
-        const presentation = this.directorPresentation(episodeId, current, current.draft.director || director, targets, runId);
+        const presentation = this.directorPresentation(episodeId, current, current.draft.director || director, targets, runId, completionBatches);
         return { revision: current.revision, publishedVersion: current.publishedVersion, source, targets, modules: moduleStates, unresolved: [...new Set([...director.unresolved, ...blockedModules, ...ungroupedShotIssues, ...invalidBoundaryIssues])], nextAction, stage, ...(presentation ? { presentation } : {}), sceneWorks: current.draft.director?.workflow.sceneWorks };
     }
 
@@ -2384,8 +2387,10 @@ export class EpisodeProductionService {
         });
     }
 
-    private directorPresentation(episodeId: string, current: ProductionRecord, director: DirectorProduction, targets: DirectorReadinessTarget[], requestedRunId?: string): DirectorPresentation | undefined {
+    private directorPresentation(episodeId: string, current: ProductionRecord, director: DirectorProduction, targets: DirectorReadinessTarget[], requestedRunId?: string, batches?: ProductionBatch[]): DirectorPresentation | undefined {
         const owner = { kind: this.ownerKind, id: episodeId };
+        // 同一请求内只读一次批次；调用方已加载时直接复用。
+        const allBatches = () => batches ?? this.listBatches(episodeId);
         const canvasId = this.episodeInfo(episodeId).canvasId || undefined;
         const canonicalId = current.episodeId;
         const aliases = [...new Set([canonicalId, canvasId].filter((id): id is string => Boolean(id) && id !== owner.id))];
@@ -2393,7 +2398,7 @@ export class EpisodeProductionService {
         let inferredReason = "";
         let work = declaredWork;
         if (!work) {
-            const runs = this.listBatches(episodeId);
+            const runs = allBatches();
             const activeRun = runs.find(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status));
             const incompleteModule = directorModules.find(module => {
                 const state = director.modules[module];
@@ -2453,7 +2458,7 @@ export class EpisodeProductionService {
         let run = requestedRunId ? this.getBatch(episodeId, requestedRunId) : work.runId ? this.getBatch(episodeId, work.runId) : null;
         if ((requestedRunId || work.runId) && !run) { status = "blocked"; action = "blocked"; reason = "指定的生产运行不属于当前制作对象或已不存在"; }
         if (!run && (action === "produce" || action === "review")) {
-            const active = this.listBatches(episodeId).filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status));
+            const active = allBatches().filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status));
             const matching = keyForWork ? active.filter(item => item.targets.includes(keyForWork)) : active;
             if (matching.length === 1) run = matching[0];
         }

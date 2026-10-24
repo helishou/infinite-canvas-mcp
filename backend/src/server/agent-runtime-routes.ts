@@ -16,7 +16,13 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.delete("/agent/runninghub/session", (req, res) => res.json({ ok: true, session: runningHub.disconnectSession(siteOf(req)) }));
     app.post("/agent/runninghub/session/browser-import", async (req, res) => res.json({ ok: true, session: await runningHub.importBrowserSession(siteOf(req)) }));
     // 本地节点图 → 云端工作流；拿到 workflowId 后自动建档，返回档案。站点缺省时跟随运行环境链路。
-    app.post("/agent/runninghub/workflows/upload", async (req, res) => res.json({ ok: true, ...(await runningHub.publishLocalWorkflow({ name: typeof req.body?.name === "string" ? req.body.name : undefined, graph: objectBody(req.body?.graph), site: siteOf(req) })) }));
+    app.post("/agent/runninghub/workflows/upload", async (req, res) => res.json({ ok: true, ...(await runningHub.publishLocalWorkflow({
+        name: typeof req.body?.name === "string" ? req.body.name : undefined,
+        graph: objectBody(req.body?.graph),
+        // 原始 UI 格式（nodes/links）：RunningHub 编辑器只认这个，API 格式解析不出节点。
+        uiWorkflow: req.body?.uiWorkflow && typeof req.body.uiWorkflow === "object" && !Array.isArray(req.body.uiWorkflow) ? req.body.uiWorkflow as Record<string, unknown> : undefined,
+        site: siteOf(req),
+    })) }));
     app.get("/agent/runninghub/workflows", (_req, res) => res.json({ ok: true, workflows: runningHub.listWorkflowProfiles() }));
     app.put("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, workflow: runningHub.saveWorkflowProfile({ ...objectBody(req.body), id: String(req.params.id) }) }));
     app.delete("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, deleted: runningHub.removeWorkflowProfile(String(req.params.id)) }));

@@ -117,6 +117,8 @@ export type RunPanelProps = {
     onOutputNodesChange?: (next: string[]) => void;
     /** 输出节点选择器（需要节点图才能给出候选）。 */
     outputPicker?: ReactNode;
+    /** 高级设置区（运行位置等）；没有就不渲染。 */
+    advanced?: ReactNode;
 };
 
 /**
@@ -125,12 +127,14 @@ export type RunPanelProps = {
  * 各自的特有内容（默认值运行、取消、批量映射表）通过插槽传入。
  */
 export function RunTab({
-    config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker,
+    config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker, advanced,
 }: RunPanelProps & {
     hint?: ReactNode;
     toolbar?: ReactNode;
     footer?: ReactNode;
     extra?: ReactNode;
+    /** 高级设置区（运行位置等）；没有就不渲染，云端页签可以一直不传。 */
+    advanced?: ReactNode;
 }) {
     return (
         <div>
@@ -153,6 +157,7 @@ export function RunTab({
                 progress={progress}
                 statusText={statusText}
                 onCancel={onCancel}
+                advanced={advanced}
             />
             {footer}
             {extra}
@@ -164,7 +169,7 @@ export function RunTab({
  * 运行面板：按 config.fields 渲染可填写输入并提交。本地 ComfyUI 与 RunningHub
  * 都把字段归一化成 WorkflowConfig 后复用它，所以两边运行体验一致。
  */
-export function RunPanel({ config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, progress, statusText, onCancel }: RunPanelProps) {
+export function RunPanel({ config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, progress, statusText, onCancel, advanced }: RunPanelProps) {
     const { t } = useTranslation();
     const uploadingFields = useRef(new Set<string>());
     const [uploadCount, setUploadCount] = useState(0);
@@ -227,6 +232,8 @@ export function RunPanel({ config, onRun, running, disabled, cancelPending, resu
                     </section>)}
                 </div>
             )}
+
+            {advanced ? <div className="rounded border border-border p-3" aria-label={t("microTools.workflow.advancedSettings")}>{advanced}</div> : null}
 
             <div className="border-t border-border pt-3" aria-label={t("microTools.workflow.submit")}>
             <Button type="primary" icon={<Play className="size-4" />} onClick={() => { if (!running && !disabled && !uploadingFields.current.size) onRun({ ...fields }); }} loading={running} disabled={disabled || running || uploadCount > 0 || config.fields.length === 0}>

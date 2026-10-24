@@ -1862,7 +1862,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             return;
         }
         if (pluginReferencePickNodeId) {
-            window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { targetNodeId: pluginReferencePickNodeId } }));
+            window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { projectId, targetNodeId: pluginReferencePickNodeId } }));
             setSelectedNodeIds(new Set([pluginReferencePickNodeId]));
             setDialogNodeId(pluginReferencePickNodeId);
             setPluginReferencePickNodeId(null);
@@ -1876,7 +1876,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const focusNodeRef = useRef<(nodeId: string, options?: { automatic: boolean }) => void>(() => {});
     useEffect(() => {
         const onRequest = (event: Event) => {
-            const nodeId = String((event as CustomEvent<{ nodeId?: string }>).detail?.nodeId || "");
+            const detail = (event as CustomEvent<{ projectId?: string; nodeId?: string }>).detail || {};
+            if (detail.projectId !== projectId) return;
+            const nodeId = String(detail.nodeId || "");
             const rect = containerRef.current?.getBoundingClientRect();
             if (!nodeId || !rect || !nodesRef.current.some((node) => node.id === nodeId)) return;
             // 可点候选必须让用户看得见：H3 工作台动辄占满视口，参考节点常在屏幕外，
@@ -1885,6 +1887,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const candidates = nodesRef.current.filter((node) => node.id !== nodeId && isCanvasReferenceNode(node, nodesRef.current));
             if (!candidates.length) {
                 message.warning("画布上没有可用作参考的节点（图片 / 视频 / 音频 / 角色）");
+                window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { projectId, targetNodeId: nodeId } }));
                 return;
             }
             const view = liveViewportRef.current;
@@ -4133,8 +4136,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
             // 插件发起的选参考：不回写画布连线，只把选中节点回抛给插件，由插件写进被点的 ref 槽。
             if (pluginReferencePickNodeId) {
-                window.dispatchEvent(new CustomEvent("canvas-reference-pick", { detail: { targetNodeId: pluginReferencePickNodeId, sourceNodeId } }));
-                window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { targetNodeId: pluginReferencePickNodeId } }));
+                const pickDetail = { projectId, targetNodeId: pluginReferencePickNodeId, sourceNodeId, handled: false };
+                window.dispatchEvent(new CustomEvent("canvas-reference-pick", { detail: pickDetail }));
+                if (!pickDetail.handled) message.error("图片已选中，但 H3 制作台没有接到回写事件；请重新打开该 H3 节点后再试。");
+                window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { projectId, targetNodeId: pluginReferencePickNodeId } }));
                 setSelectedNodeIds(new Set([pluginReferencePickNodeId]));
                 setDialogNodeId(pluginReferencePickNodeId);
                 setPluginReferencePickNodeId(null);
