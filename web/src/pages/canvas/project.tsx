@@ -285,6 +285,17 @@ const VIDEO_NODE_MAX_HEIGHT = 420;
 const EMPTY_REFERENCES: CanvasResourceReference[] = [];
 const EMPTY_DRAG_PREVIEW = new Map<string, Position>();
 const EMPTY_RESIZE_PREVIEW = new Map<string, CanvasResizePreviewBounds>();
+const canvasSelectionStorageKey = (projectId: string) => `infinite-canvas-selection:${projectId}`;
+
+function readCanvasSelection(projectId: string, nodeIds: ReadonlySet<string>) {
+    try {
+        const value: unknown = JSON.parse(localStorage.getItem(canvasSelectionStorageKey(projectId)) || "null");
+        if (!Array.isArray(value)) return new Set<string>();
+        return new Set(value.filter((id): id is string => typeof id === "string" && nodeIds.has(id)));
+    } catch {
+        return new Set<string>();
+    }
+}
 const CONNECTION_HANDLE_HIT_RADIUS = 40;
 const CONNECTION_NODE_HIT_PADDING = 32;
 
@@ -535,6 +546,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [assetPickerAllowedKinds, setAssetPickerAllowedKinds] = useState<string[] | undefined>();
     const assetPickerResolverRef = useRef<((image: { kind: "image"; dataUrl: string; title: string; storageKey?: string } | null) => void) | null>(null);
     const [projectLoaded, setProjectLoaded] = useState(false);
+    const loadedProjectIdRef = useRef<string | null>(null);
     const [projectLoadError, setProjectLoadError] = useState("");
     const [projectLoadAttempt, setProjectLoadAttempt] = useState(0);
     const [toolbarNodeId, setToolbarNodeId] = useState<string | null>(null);
@@ -778,6 +790,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     useEffect(() => {
         if (!hydrated) return;
+        loadedProjectIdRef.current = null;
         setProjectLoaded(false);
         setProjectLoadError("");
         const generation = ++restoreGenerationRef.current;
@@ -797,8 +810,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 suppressNextViewportPersistRef.current = true;
                 commitViewport(project.viewport);
                 didInitialCenterRef.current = true;
-                setSelectedNodeIds(new Set());
+                setSelectedNodeIds(readCanvasSelection(projectId, new Set(project.nodes.map((node) => node.id))));
                 setSelectedConnectionId(null);
+                loadedProjectIdRef.current = projectId;
                 setProjectLoaded(true);
             })
             .catch((error) => {
@@ -817,7 +831,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [dialogNodeId]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
         if (suppressNextViewportPersistRef.current) {
             suppressNextViewportPersistRef.current = false;
             return;
@@ -831,6 +845,28 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (viewportSaveTimerRef.current) clearTimeout(viewportSaveTimerRef.current);
         };
     }, [projectId, projectLoaded, updateProject, viewport]);
+
+    // The debounced viewport writer is canceled when this surface unmounts. Flush its latest
+    // value on exit so a fast route change cannot lose the position the user just left.
+    useEffect(() => {
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
+        return () => {
+            if (viewportSaveTimerRef.current) {
+                clearTimeout(viewportSaveTimerRef.current);
+                viewportSaveTimerRef.current = null;
+            }
+            updateProject(projectId, { viewport: viewportRef.current });
+        };
+    }, [projectId, projectLoaded, updateProject]);
+
+    useEffect(() => {
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
+        try {
+            localStorage.setItem(canvasSelectionStorageKey(projectId), JSON.stringify(Array.from(selectedNodeIds)));
+        } catch {
+            // Selection remains usable for this session when local storage is unavailable.
+        }
+    }, [projectId, projectLoaded, selectedNodeIds]);
 
     useLayoutEffect(() => {
         nodesRef.current = nodes;
@@ -859,7 +895,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [selectionBox]);
 
     useEffect(() => {
-        if (!projectLoaded) return;
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
         const el = containerRef.current;
         if (!el) return;
 

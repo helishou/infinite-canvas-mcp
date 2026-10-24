@@ -8,6 +8,7 @@
 - 路由负责入参、鉴权和响应，业务复用既有 service/store。MCP、网页与后台任务共享逻辑，不各造一套任务、节点位置或结果回填。
 - Backend 消费 `@basketikun/canvas-agent` 的导出契约。修改共享 schema/operation/reference 逻辑时检查生产者、校验、持久化、广播与读取端，不只改一个类型声明。
 - 查询在存储层做项目过滤和分页，不先截断固定数量再在内存中过滤并宣称结果完整。
+- 任务 `input_json` 与画布历史 `operations_json/results_json` 支持旧 TEXT 和 gzip BLOB，读写统一使用 `json-storage.ts`。任务输入的 SQL JSON 查询经 `stored_json_text` 解码；历史回放、维护指纹及脱敏不能把 BLOB 直接转字符串。格式变化更新 schema 版本，历史行不在启动时批量重写。
 
 ## 数据、媒体与执行
 

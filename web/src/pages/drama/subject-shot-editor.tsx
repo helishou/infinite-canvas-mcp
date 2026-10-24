@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Cascader, Input, InputNumber, Select, Switch } from "antd";
 import { Camera, History, Image as ImageIcon, Users, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { isClothingPictureBinding, resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { keyframeSubjectSelectionFromPaths, setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode, syncKeyframeSubjectsToShotUsages } from "./subject-picture-selection";
 import { records, readableText } from "./director-display";
 import { backendMediaUrl } from "@/services/backend-api";
@@ -375,7 +375,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
             const frameSubjectIds: string[] = (frame.subjectIds || []).map(String);
             const outfitOptions = subjects.map(subject => {
                 const subjectId = String(subject.id);
-                const outfits = records(subject.pictureBindings).filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("clothing"));
+                const outfits = records(subject.pictureBindings).filter(isClothingPictureBinding);
                 const children = [{ value: "__default__", label: t("director.atomic.keyframeDefaultOutfit") }, ...outfits.map(binding => ({ value: String(binding.id), label: outfitBindingLabel(subject, binding) }))];
                 return { value: subjectId, label: subjectDisplayName(source, subjectId), children };
             });

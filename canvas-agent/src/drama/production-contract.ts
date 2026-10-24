@@ -244,6 +244,13 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
     }
     return { bindingIds: [...new Set(selected)], issues };
 }
+
+/** Both legacy `wardrobe` and current `clothing` labels mean a Subject clothing reference. */
+export function isClothingPictureBinding(bindingValue: unknown) {
+    const binding = bindingValue && typeof bindingValue === "object" && !Array.isArray(bindingValue)
+        ? bindingValue as Record<string, unknown> : {};
+    return Array.isArray(binding.provides) && binding.provides.map(String).some((value: string) => value === "clothing" || value === "wardrobe");
+}
 export const productionCompilationScopeSchema = z.object({ sceneId: id.optional(), targetIds: z.array(id).min(1).optional(), output: z.literal("selected").optional() }).strict().refine(scope => Boolean(scope.sceneId || scope.targetIds?.length), "编译范围不能为空");
 export const productionCompileSchema = z.object({
     operationId: id.optional(),
@@ -454,7 +461,7 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
                     const owner = bindingOwners.get(bindingId);
                     const subject = subjectById.get(subjectId);
                     const binding = rowsForContract(subject?.pictureBindings).find(item => String(item.id) === bindingId);
-                    if (owner !== subjectId || !binding?.provides?.includes("clothing")) add([...path, "keyframes", keyframeIndex, "subjectPictureBindingIds", subjectId], `服装绑定 ${bindingId} 不属于该主体或不是服装参考`);
+                    if (owner !== subjectId || !isClothingPictureBinding(binding)) add([...path, "keyframes", keyframeIndex, "subjectPictureBindingIds", subjectId], `服装绑定 ${bindingId} 不属于该主体或不是服装参考`);
                 }
             }
         }

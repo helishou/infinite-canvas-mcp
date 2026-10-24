@@ -22,6 +22,16 @@ const SITE_URLS = { ai: "https://www.runninghub.ai", cn: "https://www.runninghub
 const SITE_LABEL = { ai: "runninghub.ai（国际站）", cn: "runninghub.cn（国内站）" } as const;
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
+/**
+ * 需要用户动手才能解决的错误（去登录、去粘贴令牌）用 400，而不是 500。
+ * Express 5 会把 async 路由的抛错交给统一错误中间件，中间件按 error.status 决定状态码；不挂就是 500。
+ */
+function sessionActionError(message: string): Error & { status: number } {
+    const error = new Error(message) as Error & { status: number };
+    error.status = 400;
+    return error;
+}
+
 /** 站点取值归一：只认三档，其它一律按「跟随运行环境」处理。 */
 export function normalizeSite(value: unknown): RunningHubSite {
     return value === "ai" || value === "cn" ? value : "default";
@@ -116,18 +126,45 @@ export class RunningHubBackend {
         const config = this.getConfig();
         return siteBaseUrl(config.baseUrl, site) === config.baseUrl ? readSession(this.settings, "default") : own;
     }
-    /** 从本机浏览器里读取已登录的 RunningHub 会话；多个候选逐个验证，取第一个还能用的。 */
+    /**
+     * 从本机浏览器里读取已登录的 RunningHub 会话。
+     * localStorage 里的令牌带站点标记（见 readTokens），先按站点过滤再 probe——
+     * 否则拿 .ai 令牌去撞 .cn 只会得到「站点不通用」，既误导又白跑请求。
+     */
     async importBrowserSession(site?: RunningHubSite): Promise<RunningHubSessionStatus> {
         const target = normalizeSite(site);
         const baseUrl = siteBaseUrl(this.getConfig().baseUrl, target);
-        const candidates = await collectBrowserSessions();
-        for (const candidate of candidates) {
+        // `default` 跟随运行环境的 baseUrl：它实际指向哪个站，就按哪个站过滤。
+        const effectiveSite: "ai" | "cn" | undefined = target !== "default" ? target
+            : /runninghub\.cn/i.test(baseUrl) ? "cn"
+                : /runninghub\.ai/i.test(baseUrl) ? "ai"
+                    : undefined;
+        const all = await collectBrowserSessions();
+        const now = Date.now();
+        const sameSite = effectiveSite ? all.filter((candidate) => candidate.site === effectiveSite) : all;
+        // .cn 的令牌存 Cookie、不在 localStorage：只可能是别的站的令牌，别去 probe。
+        // .ai 的令牌本来就在 localStorage；站点标记缺失（老数据）时退回全量，避免误判「没找到」。
+        const pool = !effectiveSite ? all
+            : sameSite.length ? sameSite
+                : effectiveSite === "ai" ? all
+                    : [];
+        for (const candidate of pool) {
+            // 过期的令牌不用发请求：省一次往返，也能把「已过期」和「站点不对」分开说清楚。
+            if (candidate.expiresAt && candidate.expiresAt * 1000 <= now) continue;
             if (!(await probeSession(baseUrl, candidate.accessToken))) continue;
             writeSession(this.settings, { accessToken: candidate.accessToken, refreshToken: candidate.refreshToken, expiresAt: candidate.expiresAt, source: "browser" }, target);
             return this.sessionStatus(target);
         }
         const where = target === "default" ? "RunningHub" : SITE_LABEL[target];
-        throw new Error(candidates.length
+        if (effectiveSite === "cn" && !sameSite.length) {
+            // 国内站令牌在 Cookie 里、被浏览器加密，localStorage 扫不到；令牌本身不是 HttpOnly，用页内脚本取最稳。
+            throw sessionActionError("国内站令牌存在 Cookie 里、不在本地存储，无法用『从本机浏览器读取』；请点下方『复制取令牌脚本』，在 runninghub.cn 页面按 F12 打开控制台粘贴运行，取出 Rh-Accesstoken 再粘到令牌输入框。");
+        }
+        const expired = pool.find((candidate) => candidate.expiresAt && candidate.expiresAt * 1000 <= now);
+        if (expired?.expiresAt) {
+            throw sessionActionError(`本机浏览器里 ${where} 的登录令牌已于 ${new Date(expired.expiresAt * 1000).toLocaleString("zh-CN")} 过期，请用浏览器打开 ${where} 重新登录后重试`);
+        }
+        throw sessionActionError(pool.length
             ? `在本机浏览器里找到了会话，但${where}不接受这个令牌（站点之间不通用）；请用浏览器打开 ${where} 登录后重试`
             : `没有在本机浏览器里找到登录会话；请先用 Edge/Chrome 打开 ${where} 登录`);
     }
@@ -137,7 +174,7 @@ export class RunningHubBackend {
         const target = normalizeSite(site);
         if (!trimmed) return this.disconnectSession(target);
         const baseUrl = siteBaseUrl(this.getConfig().baseUrl, target);
-        if (!(await probeSession(baseUrl, trimmed))) throw new Error(`RunningHub 网页令牌无效或已过期${target === "default" ? "" : `（${SITE_LABEL[target]} 要用该站点自己的令牌）`}，请重新复制`);
+        if (!(await probeSession(baseUrl, trimmed))) throw sessionActionError(`RunningHub 网页令牌无效或已过期${target === "default" ? "" : `（${SITE_LABEL[target]} 要用该站点自己的令牌）`}，请重新复制`);
         writeSession(this.settings, { accessToken: trimmed, expiresAt: jwtExpiry(trimmed), source: "manual" }, target);
         return this.sessionStatus(target);
     }

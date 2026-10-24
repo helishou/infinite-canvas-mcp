@@ -1,4 +1,4 @@
-import { resolveSubjectPictureBindingIds } from "@basketikun/canvas-agent/drama/production-contract";
+import { isClothingPictureBinding, resolveSubjectPictureBindingIds } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type ShotPictureBindingMode = "default" | "explicit";
 
@@ -21,7 +21,7 @@ export function setShotPictureBindingIds(usage: Record<string, any>, pictureBind
 export function setShotOutfitBindingIds(subject: unknown, usage: Record<string, any>, outfitBindingIds: string[]) {
     const bindings = subject && typeof subject === "object" && Array.isArray((subject as Record<string, any>).pictureBindings)
         ? (subject as Record<string, any>).pictureBindings as Array<Record<string, any>> : [];
-    const outfitIds = new Set(bindings.filter(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("clothing")).map(binding => String(binding.id)));
+    const outfitIds = new Set(bindings.filter(isClothingPictureBinding).map(binding => String(binding.id)));
     const current = resolveSubjectPictureBindingIds(subject, usage).bindingIds;
     const retained = current.filter(id => !outfitIds.has(id));
     const selected = outfitBindingIds.filter(id => outfitIds.has(String(id))).map(String);

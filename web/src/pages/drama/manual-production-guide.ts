@@ -1,11 +1,11 @@
 type Row = Record<string, any>;
-type Workspace = "story" | "assets" | "shots" | "continuity" | "production" | "advanced";
+type Workspace = "series" | "story" | "assets" | "shots" | "continuity" | "clips" | "production" | "advanced";
 type Target = { kind: "asset" | "keyframe" | "segment"; targetId: string; title?: string; status: string; blockers: string[] };
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
 
 /** Source module notes describe past director work; only current target checks are blockers. */
 export function manualWorkspaceProgress(workspace: Workspace, source: Row, targets: Target[], continuityStatus?: string) {
-    const scoped = targets.filter(target => workspace === "assets" ? target.kind === "asset" : workspace === "production" ? target.kind === "segment" : workspace === "shots" ? target.kind === "keyframe" : false);
+    const scoped = targets.filter(target => workspace === "assets" ? target.kind === "asset" : workspace === "production" || workspace === "clips" ? target.kind === "segment" : workspace === "shots" ? target.kind === "keyframe" : false);
     const blocked = scoped.filter(target => target.status === "blocked" && target.blockers.length);
     const firstBlockedTarget = blocked[0];
     const issue = firstBlockedTarget ? `${firstBlockedTarget.title || firstBlockedTarget.targetId}：${firstBlockedTarget.blockers[0]}` : "";
@@ -36,7 +36,8 @@ export function manualTargetRecovery(target: Target, source: Row) {
     const segment = rows(source.segments).find(segment => String(segment.id) === target.targetId);
     const shotId = Array.isArray(segment?.shot_ids) ? segment.shot_ids[0] : undefined;
     if (/提示词为空|prompt.*empty/i.test(reason) && target.kind === "segment" && shotId) return { workspace: "shots" as Workspace, kind: "shot", id: String(shotId), messageKey: "promptMissing", actionKey: "completeShot" };
-    if (/模型|渠道|model|provider/i.test(reason)) return { workspace: "advanced" as Workspace, kind, id: target.targetId, messageKey: "modelMissing", actionKey: "chooseModel" };
+    if (/模型|渠道|model|provider/i.test(reason)) return { workspace: "series" as Workspace, seriesView: "planning" as const, seriesTab: "settings" as const, messageKey: "modelMissing", actionKey: "chooseModel" };
+    if (target.kind === "segment" && /帧窗与秒数|帧窗未覆盖|跨越多个正式场次|未映射到唯一正式场次|尚未编入 Shot|覆盖连续的相邻 Shot/.test(reason)) return { workspace: "clips" as Workspace, kind: "segment", id: target.targetId, messageKey: "timingInvalid", actionKey: "editShots" };
     if (reason && /图片|参考|素材|归档|文件|REFERENCE_|SUBJECT_IMAGE/.test(reason)) return { workspace: target.kind === "asset" ? "assets" as Workspace : "shots" as Workspace, kind: shotId ? "shot" : kind, id: shotId ? String(shotId) : target.targetId, messageKey: "referenceMissing", actionKey: "chooseReference" };
     if (reason && /帧窗|秒数|时长|相邻|跨越|连续边界/.test(reason)) return { workspace: "shots" as Workspace, kind: shotId ? "shot" : kind, id: shotId ? String(shotId) : target.targetId, messageKey: "timingInvalid", actionKey: "editShots" };
     return { workspace, kind, id: target.targetId, messageKey: target.status === "blocked" ? "targetBlocked" : target.status === "needs_review" ? "reviewTarget" : "openTarget", actionKey: target.status === "needs_review" ? "reviewMedia" : "openTargetEditor" };

@@ -20,13 +20,13 @@ function eventPath(path: string) {
 
 export async function recordLocalAnalyticsEvent(input: Omit<LocalAnalyticsEvent, "id" | "occurredAt">) {
     if (typeof window === "undefined") return;
-    const event: LocalAnalyticsEvent = {
-        ...input,
-        path: eventPath(input.path),
-        id: crypto.randomUUID(),
-        occurredAt: new Date().toISOString(),
-    };
     try {
+        const event: LocalAnalyticsEvent = {
+            ...input,
+            path: eventPath(input.path),
+            id: crypto.randomUUID(),
+            occurredAt: new Date().toISOString(),
+        };
         await events.setItem(event.id, event);
     } catch {
         // Analytics storage failures must never affect normal application use.
@@ -45,15 +45,17 @@ export async function readLocalAnalyticsEvents() {
     return result.sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
 }
 
-export async function exportLocalAnalytics() {
-    const records = await readLocalAnalyticsEvents();
+export async function exportLocalAnalytics(selectedEvents?: LocalAnalyticsEvent[]) {
+    const records = selectedEvents ?? await readLocalAnalyticsEvents();
     const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), events: records }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = `infinite-canvas-local-analytics-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     return records.length;
 }
 
@@ -70,7 +72,14 @@ function moduleIdentity(element: Element) {
     if (id) return id;
     const testId = element.getAttribute("data-testid")?.trim();
     if (testId) return testId;
-    return element.getAttribute("role") === "tabpanel" ? "tabpanel" : element.tagName.toLowerCase();
+    const role = element.getAttribute("role");
+    const kind = role === "tabpanel" || role === "region" ? role : element.tagName.toLowerCase();
+    const parent = element.parentElement;
+    const peers = parent ? Array.from(parent.children).filter((peer) => {
+        const peerRole = peer.getAttribute("role");
+        return (peerRole === "tabpanel" || peerRole === "region" ? peerRole : peer.tagName.toLowerCase()) === kind;
+    }) : [];
+    return `${kind}#${Math.max(1, peers.indexOf(element) + 1)}`;
 }
 
 function trackingModule(element: Element) {

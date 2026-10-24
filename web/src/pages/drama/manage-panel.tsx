@@ -55,9 +55,10 @@ function sharedAssetImageSource(asset: Asset) {
  * 剧目管理面板：剧目规划、共享资产画布、分集列表与自定义资产。
  * 按全剧规划、分集与共享素材分区，也兼容旧入口的完整管理视图。
  */
-export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode, view, navigationTitleVisible = false }: {
+export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode, view, initialPlanningTab, navigationTitleVisible = false }: {
     dramaId: string;
     view?: SeriesWorkspaceView;
+    initialPlanningTab?: "info" | "settings";
     navigationTitleVisible?: boolean;
     onEpisodesChanged?: (episodes: DramaEpisode[]) => void;
     onProduceEpisode?: (episode: DramaEpisode) => void;
@@ -73,7 +74,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [episodes, setEpisodes] = useState<DramaEpisode[]>([]);
     const [openingSharedCanvas, setOpeningSharedCanvas] = useState(false);
     const [draft, setDraft] = useState<DramaDraft | null>(null);
-    const [planningTab, setPlanningTab] = useState<"info" | "settings">("info");
+    const [planningTab, setPlanningTab] = useState<"info" | "settings">(initialPlanningTab || "info");
     const initializedDraftFor = useRef<string | null>(null);
     const [activeCoverUrl, setActiveCoverUrl] = useState("");
     const [uploadingCover, setUploadingCover] = useState(false);
@@ -94,6 +95,8 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const pendingStyleTransfer = useRef("");
     const coverInputRef = useRef<HTMLInputElement>(null);
     const assetInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => { setPlanningTab(initialPlanningTab || "info"); }, [dramaId, initialPlanningTab]);
 
     const folder = folders.find((item) => item.id === dramaId);
     const sharedCanvasRevision = projects.find(project => project.id === folder?.sharedAssetCanvasId)?.revision;

@@ -7,6 +7,12 @@ import { keepTypedRunningHubSecret } from "@/lib/runninghub-secret-field";
 const initial: RunningHubConfig = { baseUrl: "https://www.runninghub.ai", apiKey: "", mode: "workflow", workflowId: "", appId: "", fields: [], useWallet: false, instanceType: "default", concurrency: 1, uploadSite: "default", siteApiKeys: { ai: "", cn: "" } };
 /** 站点下拉：`default` 跟随运行环境那条链路，另外两档固定站点。 */
 const sites: RunningHubSite[] = ["default", "ai", "cn"];
+/**
+ * 在 runninghub 页面控制台运行取令牌脚本。
+ * 国内站 Rh-Accesstoken 存在 Cookie 里，但**不是 HttpOnly**——页面 JS 能直接读，绕开 App-Bound Encryption；
+ * 而 Edge 136+ 又禁止在默认配置目录上开远程调试端口，所以走「页面内取令牌」比 CDP 可靠。
+ */
+const TOKEN_SNIPPET = `(()=>{const m=document.cookie.match(/(?:^|;\\s*)Rh-Accesstoken=([^;]+)/);if(!m){console.warn("未找到 Rh-Accesstoken：请确认已在该站登录并刷新页面");return;}const v=decodeURIComponent(m[1]);navigator.clipboard.writeText(v).then(()=>console.log("%c已复制 Rh-Accesstoken（长度 "+v.length+"），回到画布粘贴即可","color:#16a34a;font-weight:600"),()=>console.log("自动复制失败，请手动复制下面这行：\\n"+v));})()`;
 
 export function RunningHubPanel() {
     const { t } = useTranslation();
@@ -21,6 +27,11 @@ export function RunningHubPanel() {
     const [sessionToken, setSessionToken] = useState("");
     // 上传站点：决定本地工作流上传到哪个站，也决定这里的会话连的是哪个站。
     const uploadSite: RunningHubSite = config.uploadSite || "default";
+    // `default` 跟随运行环境的 baseUrl；实际落到国内站时，「从本机浏览器读取」也读不到（令牌在 Cookie 里）。
+    const effectiveSite: RunningHubSite = uploadSite !== "default" ? uploadSite
+        : /runninghub\.cn/i.test(config.baseUrl) ? "cn"
+            : /runninghub\.ai/i.test(config.baseUrl) ? "ai"
+                : "default";
     const setUploadSite = async (site: RunningHubSite) => {
         patch({ uploadSite: site });
         setSession(null); setSessionToken("");
@@ -49,6 +60,10 @@ export function RunningHubPanel() {
             message.success(t(okKey));
         } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
         finally { setSessionBusy(false); }
+    };
+    const copyTokenSnippet = async () => {
+        try { await navigator.clipboard.writeText(TOKEN_SNIPPET); message.success(t("runningHub.session.snippetCopied")); }
+        catch { setError(t("runningHub.session.snippetCopyFailed")); }
     };
     const patch = (value: Partial<RunningHubConfig>) => setConfig((current) => ({ ...current, ...value }));
     const patchField = (index: number, value: Partial<RunningHubField>) => setConfig((current) => ({ ...current, fields: (current.fields || []).map((field, i) => i === index ? { ...field, ...value } : field) }));
@@ -84,7 +99,7 @@ export function RunningHubPanel() {
             </div>
             {session?.connected ? <p className="mb-2 text-xs text-stone-500">{t("runningHub.session.state")}：{session.source === "browser" ? t("runningHub.session.fromBrowser") : t("runningHub.session.manual")}{session.expired ? ` · ${t("runningHub.session.expired")}` : ""}</p> : null}
             <div className="flex flex-wrap items-center gap-2">
-                <Button size="small" loading={sessionBusy} onClick={() => void connectSession(() => importRunningHubBrowserSession(uploadSite))}>{t("runningHub.session.readBrowser")}</Button>
+                {effectiveSite !== "cn" ? <Button size="small" loading={sessionBusy} onClick={() => void connectSession(() => importRunningHubBrowserSession(uploadSite))}>{t("runningHub.session.readBrowser")}</Button> : null}
                 <Input.Password aria-label={t("runningHub.session.token")} size="small" className="max-w-64" autoComplete="off" placeholder={t("runningHub.session.tokenPlaceholder")} value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} />
                 <Button size="small" loading={sessionBusy} disabled={!sessionToken.trim()} onClick={() => void connectSession(() => saveRunningHubSession(sessionToken.trim(), uploadSite))}>{t("runningHub.session.useToken")}</Button>
                 {session?.connected ? <Button size="small" danger loading={sessionBusy} onClick={() => void connectSession(() => deleteRunningHubSession(uploadSite), "runningHub.session.disconnected")}>{t("runningHub.session.disconnect")}</Button> : null}
@@ -92,6 +107,8 @@ export function RunningHubPanel() {
             {uploadSite !== "default" ? <div className="mt-3">
                 <div className="mb-1 text-xs text-stone-500">{t("runningHub.upload.siteKeyHint", { site: t(`runningHub.upload.sites.${uploadSite}`) })}</div>
                 <Input.Password aria-label={t("runningHub.upload.siteKey")} size="small" className="max-w-96" autoComplete="off" placeholder={t("runningHub.upload.siteKeyPlaceholder")} value={config.siteApiKeys?.[uploadSite] || ""} onChange={(event) => patch({ siteApiKeys: { ...(config.siteApiKeys || {}), [uploadSite]: event.target.value } })} />
+                <p className="mt-2 text-xs text-stone-500">{t("runningHub.session.snippetHint")}</p>
+                <Button size="small" className="mt-1" onClick={() => void copyTokenSnippet()}>{t("runningHub.session.copySnippet")}</Button>
             </div> : null}
         </div>
         {error && <Alert type="error" showIcon message={error} className="mb-4" />}

@@ -16,6 +16,7 @@ import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "../database-snapshots.js";
 import { previewCanvasHistoryPrune, reconstructCanvasHistory } from "../canvas/history-maintenance.js";
 import { stripCanvasLocalViewState } from "../canvas/operation-authority.js";
+import { storedJsonText } from "../json-storage.js";
 
 export const REBALANCE_POLICY_VERSION = 1;
 
@@ -97,9 +98,9 @@ export function computeRebalanceFingerprint(db: DatabaseSync, projectId: string)
         hash.update("\0");
         hash.update(String(row.source_json));
         hash.update("\0");
-        hash.update(String(row.operations_json));
+        hash.update(storedJsonText(row.operations_json));
         hash.update("\0");
-        hash.update(String(row.results_json));
+        hash.update(storedJsonText(row.results_json));
         hash.update("\0");
         hash.update(String(row.created_at));
     }

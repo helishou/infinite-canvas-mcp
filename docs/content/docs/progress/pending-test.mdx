@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Storage: new large task inputs and canvas operation history use lossless compression, while small and legacy records remain readable. The Backend `compress-snapshot-json` maintenance command previews by default; `--apply` converts legacy records after backup and verifies the original JSON bytes, while `--backup` reuses a snapshot only if it contains every candidate's original text. Use `--vacuum` while idle to reclaim free database pages. Verify idempotent reruns, no writes on a backup mismatch, transaction rollback on failure, and task filtering, model usage, canvas synchronization, history recovery and operation replay after restart. Media and history retention remain unchanged.
+
+- Local usage analytics: open several routes and scroll through semantic sections to create PV, MV and MC records. At `/analytics/local`, select date ranges and check the overview, daily trend, page/module summaries and event details; export the selected range as JSON. Confirm query strings, button text and input contents are absent from stored records, and that reports remain available after refresh in the same browser.
+
 - Deleted text targets: keep an unsent prompt draft, delete its node (or Clip/text item), then refresh and generate from another node. The deleted target must not receive `/text` reads or block the current node; its original local draft remains recoverable. A current target's actual save failure must still stop generation. Also check reconnect and Undo with a new document identity.
 
 - Canvas interaction performance: hovering, selecting and panning should no longer rerender unrelated nodes, and moving or resizing a node should reuse unchanged content. Verify ordinary and H3 nodes, content editing, panel closing, rapid panning, pointer-centered zoom and culling coverage at 5% zoom on a large canvas.

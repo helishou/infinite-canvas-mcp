@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "./database-snapshots.js";
 
-export const DATABASE_SCHEMA_VERSION = 49;
+export const DATABASE_SCHEMA_VERSION = 50;
 
 /** 迁移快照用途族名：`runtime.sqlite.pre-schema-*`。 */
 export const MIGRATION_SNAPSHOT_FAMILY = "pre-schema";

@@ -39,6 +39,11 @@ export type RunningHubBrowserSession = {
     browser: string;
     /** 命中的浏览器 profile，便于失败时告诉用户去哪里登录。 */
     profile: string;
+    /**
+     * 这条 localStorage 记录属于哪个站点（从 key 前缀 `_https://www.runninghub.xx` 推断）。
+     * 两站令牌互不相通，按站点过滤后再 probe，避免拿 .ai 令牌去撞 .cn 报「站点不通用」误导用户。
+     */
+    site?: "ai" | "cn";
 };
 
 /**
@@ -183,17 +188,21 @@ async function listLevelDbFiles(leveldb: string): Promise<Array<{ name: string; 
 }
 
 /** 从 leveldb 原始字节里抓 `Rh-Accesstoken` / `Rh-Refreshtoken` 后面的 JWT。 */
-export function readTokens(bytes: Buffer): Array<{ accessToken: string; refreshToken?: string; expiresAt?: number }> {
-    const decoded: Array<{ accessToken: string; refreshToken?: string; expiresAt?: number }> = [];
+export function readTokens(bytes: Buffer): Array<{ accessToken: string; refreshToken?: string; expiresAt?: number; site?: "ai" | "cn" }> {
+    const decoded: Array<{ accessToken: string; refreshToken?: string; expiresAt?: number; site?: "ai" | "cn" }> = [];
     let index = bytes.indexOf(ACCESS_KEY, 0, "utf8");
     while (index >= 0) {
-        const window = bytes.subarray(index, Math.min(index + 2048, bytes.length)).toString("utf8");
-        for (const token of window.match(JWT) || []) {
-            if (!/^eyJ[A-Za-z0-9_-]+$/.test(token.split(".")[0])) continue;
-            const expiresAt = jwtExpiry(token);
-            if (!expiresAt) continue;
-            decoded.push({ accessToken: token, refreshToken: readRefreshNear(bytes, index), expiresAt });
-        }
+        // localStorage 的 key 形如 `_https://www.runninghub.cn\x00\x01Rh-Accesstoken`。
+        // 取 key 前面**最靠近**的那个域名当站点：多条记录挨在一起时，靠前的旧域名不能被误用。
+        const before = bytes.subarray(Math.max(0, index - 200), index).toString("utf8").toLowerCase();
+        const cnAt = before.lastIndexOf("runninghub.cn");
+        const aiAt = before.lastIndexOf("runninghub.ai");
+        const site = cnAt > aiAt ? "cn" : aiAt >= 0 ? "ai" : undefined;
+        // 一个 key 只对应一个值：只取它后面**第一个**合法 JWT，避免把相邻记录的值也算到这条上。
+        const window = bytes.subarray(index, Math.min(index + 1024, bytes.length)).toString("utf8");
+        const token = (window.match(JWT) || []).find((candidate) => /^eyJ[A-Za-z0-9_-]+$/.test(candidate.split(".")[0]) && jwtExpiry(candidate));
+        const expiresAt = token ? jwtExpiry(token) : undefined;
+        if (token && expiresAt) decoded.push({ accessToken: token, refreshToken: readRefreshNear(bytes, index), expiresAt, site });
         index = bytes.indexOf(ACCESS_KEY, index + 1, "utf8");
     }
     return decoded.sort((left, right) => (right.expiresAt || 0) - (left.expiresAt || 0));

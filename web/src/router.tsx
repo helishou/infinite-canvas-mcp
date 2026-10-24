@@ -67,6 +67,6 @@ export const router = createBrowserRouter([
             { path: "/analytics/local", element: lazyPage(LocalAnalyticsPage) },
         ],
     },
-    { path: "/pelican-bike", element: lazyPage(PelicanBikePage) },
+    { path: "/pelican-bike", element: <><AnalyticsTracker />{lazyPage(PelicanBikePage)}</> },
     { path: "*", element: lazyPage(NotFound) },
 ]);

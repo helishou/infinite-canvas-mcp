@@ -36,13 +36,15 @@ export function productionNavigationGroups({ hasSeries, scope, setup = false, se
 }
 
 /** Preserve owner and unrelated URL state; only the previous object's focus is cleared. */
-export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView } = {}) {
+export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView; seriesTab?: "settings" } = {}) {
     const next = new URLSearchParams(search);
     next.set("workspace", workspace);
     next.delete("target"); next.delete("nodeId"); next.delete("segmentId");
     if (!options.embedded) { next.delete("runId"); next.delete("workId"); }
     if (workspace === "series" && options.seriesView) next.set("seriesView", options.seriesView);
     else next.delete("seriesView");
+    if (workspace === "series" && options.seriesView === "planning" && options.seriesTab) next.set("seriesTab", options.seriesTab);
+    else next.delete("seriesTab");
     if (options.target?.id) next.set("target", `${options.target.kind === "keyframe" ? "frame" : options.target.kind}:${options.target.id}`);
     return next;
 }

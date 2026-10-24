@@ -483,6 +483,10 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     });
     const segment: Record<string, any> = { id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => shot.title).join(" / "),
         duration: storyboardShots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0), taskMode, prompt, referenceBindings: bindings,
+        // Keep the formal artifact's stable binding order explicit. Otherwise a
+        // newly-created Clip can inherit a different order when standalone scene
+        // references and derived character-group images are merged by the H3 UI.
+        referenceOrder: bindings.map(binding => String(binding.id || "")).filter(Boolean),
         tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
         directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
         ...(storyboardShots ? { storyboardShots } : {}),
@@ -490,22 +494,29 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName || BASE_H3_NODE_METADATA.modelName };
     const preflight = compileReferenceSubmission(project, segment);
     assertReferenceCompilation(preflight);
-    if (preflight.compiledPrompt !== prompt) {
-        // The authored prompt labels pictures in artifact-reference order, while
-        // H3 submits storyboard images before the remaining references. Preserve
-        // each image's meaning by rebasing Picture ordinals to the actual H3
-        // submission order. Reject only when a reference cannot be matched
-        // uniquely or when compilation changed more than those ordinals.
-        const remappedPrompt = remapPromptPicturesByBinding(prompt, bindings, preflight.references);
-        if (remappedPrompt !== undefined && remappedPrompt === preflight.compiledPrompt) {
-            prompt = remappedPrompt;
-            segment.prompt = remappedPrompt;
-            segment.referenceBindings = preflight.bindings;
-        } else {
-            const tokens = (value: string) => [...value.matchAll(/<(?:Picture|Subject|Video|Audio)\s+\d+>/g)].map(match => match[0]).join(" → ") || "无引用标记";
-            throw new Error(`Segment ${group.id} 的提示词引用映射与画布绑定不一致；源稿顺序：${tokens(prompt)}；画布编译顺序：${tokens(preflight.compiledPrompt)}。请按该映射重绑后重新编译，Backend 未改写提示词。`);
-        }
+    // The reference compiler also normalizes labels and may add authored outfit
+    // guidance. Those legitimate text changes do not indicate a bad reference
+    // mapping. Rebase only Picture ordinals by stable binding identity, then run
+    // compilation again with that explicit order so its valid guidance is kept.
+    const remappedPrompt = remapPromptPicturesByBinding(prompt, bindings, preflight.references);
+    if (remappedPrompt === undefined) {
+        const describe = (value: unknown) => enabledImageBindings(value).map((binding, index) => {
+            const label = String(binding.label || binding.name || "图片");
+            const source = String(binding.sourceNodeId || binding.nodeId || "未知节点");
+            const media = String(binding.storageKey || "无媒体身份");
+            return `<Picture ${index + 1}> ${label} [${source}; ${media}]`;
+        }).join(" → ") || "无图片引用";
+        throw new Error(`Segment ${group.id} 的图片引用无法按素材身份唯一对应；源稿：${describe(bindings)}；H3 输入：${describe(preflight.references)}。请修正缺失或重复绑定后重新编译。`);
     }
+    segment.prompt = remappedPrompt;
+    segment.referenceBindings = preflight.bindings;
+    segment.referenceOrder = preflight.bindings.map(binding => String(binding.id || "")).filter(Boolean);
+    const normalizedPreflight = compileReferenceSubmission(project, segment);
+    assertReferenceCompilation(normalizedPreflight);
+    prompt = normalizedPreflight.compiledPrompt;
+    segment.prompt = prompt;
+    segment.referenceBindings = normalizedPreflight.bindings;
+    segment.referenceOrder = normalizedPreflight.bindings.map(binding => String(binding.id || "")).filter(Boolean);
     const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
     segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
         promptAssemblyVersion: isSubjectPromptAssembly(d.source) ? 2 : 1, promptSourceMapAvailable: authored.status === "ready" && isSubjectPromptAssembly(d.source) && promptSourceMap.success && promptSourceMap.data.entries.length > 0,

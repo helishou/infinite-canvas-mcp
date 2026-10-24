@@ -386,13 +386,21 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const persistScroll = useCallback((left: number) => {
         ctx.updateMetadata({ timelineScrollLeft: Math.round(left) });
     }, [ctx]);
-    // 把时间轴滚动到指定 clip：使其右边缘与可见区最右侧对齐（右侧对齐该 clip 最右侧）
-    // 整个时间线（Ruler+Video+Refs）共用单一滚动容器，无需跨容器同步
+    // 把指定 Clip 保持在时间轴可视区内。使用卡片真实 DOM 尺寸，避免
+    // refs 区域点击时按时长重算宽度而滚到相邻 Clip；目标已可见时不移动时间轴。
     const scrollTimelineToSegment = useCallback((segment: H3Segment) => {
         const track = trackScrollRef.current;
         if (!track) return;
-        const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 100;
-        const target = Math.max(0, rightPx - track.clientWidth);
+        const clip = Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]"))
+            .find((element) => element.dataset.segmentId === segment.id);
+        if (!clip) return;
+        const left = clip.offsetLeft;
+        const right = left + clip.offsetWidth;
+        const target = left < track.scrollLeft
+            ? left
+            : right > track.scrollLeft + track.clientWidth
+                ? Math.max(0, right - track.clientWidth)
+                : track.scrollLeft;
         track.scrollLeft = target;
         const actual = track.scrollLeft;
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;

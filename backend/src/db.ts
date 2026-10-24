@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { decodeStoredJson, encodeStoredJson, storedJsonText, type StoredJson } from "./json-storage.js";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
@@ -198,6 +199,8 @@ export class BackendDatabase {
         ensureDataDirs();
         fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
         this.db = new DatabaseSync(file);
+        // SQL routing queries still see ordinary JSON, including for compressed inputs.
+        this.db.function("stored_json_text", { deterministic: true }, storedJsonText);
         this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
         try { this.migrate(); }
         catch (error) { this.db.close(); throw error; }
@@ -1256,6 +1259,11 @@ export class BackendDatabase {
                 this.db.exec("COMMIT");
             } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         }
+        if (currentVersion < 50) {
+            // Format marker only; old TEXT rows remain untouched. Older Backends must
+            // reject this schema rather than silently lose compressed inputs/history.
+            this.db.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (50, ?)").run(new Date().toISOString());
+        }
     }
 
     /** The production row that owns this canvas, when it is an archived episode's canvas. */
@@ -2081,7 +2089,7 @@ export class BackendDatabase {
         if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) throw new Error("afterRevision 必须为非负整数");
         const revision = Number(project.revision || 0);
         const rows = this.db.prepare("SELECT * FROM canvas_operation_batches WHERE project_id = ? AND revision > ? ORDER BY revision").all(id, afterRevision) as Array<Record<string, unknown>>;
-        const commits: CanvasCommit[] = rows.map((row) => ({ projectId: id, operationId: String(row.operation_id), baseRevision: Number(row.base_revision), revision: Number(row.revision), source: JSON.parse(String(row.source_json)), operations: JSON.parse(String(row.operations_json)), operationResults: JSON.parse(String(row.results_json)), updatedAt: String(row.created_at) }));
+        const commits: CanvasCommit[] = rows.map((row) => ({ projectId: id, operationId: String(row.operation_id), baseRevision: Number(row.base_revision), revision: Number(row.revision), source: JSON.parse(String(row.source_json)), operations: decodeStoredJson(row.operations_json), operationResults: decodeStoredJson(row.results_json), updatedAt: String(row.created_at) }));
         const complete = afterRevision <= revision && commits.length === revision - afterRevision && commits.every((commit, index) => commit.baseRevision === afterRevision + index && commit.revision === afterRevision + index + 1);
         return { projectId: id, revision, reset: !complete, commits: complete ? commits : [], ...(!complete ? { project } : {}) };
     }
@@ -2308,7 +2316,7 @@ export class BackendDatabase {
             }
             const currentRevision = Number(current.revision || 0);
             {
-                const existing = this.db.prepare("SELECT r.project_id AS projectId, r.committed_revision AS revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: string | null; resultsJson: string | null; requestHash?: string } | undefined;
+                const existing = this.db.prepare("SELECT r.project_id AS projectId, r.committed_revision AS revision, b.operations_json AS operationsJson, b.results_json AS resultsJson, r.request_hash AS requestHash FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE r.operation_id = ?").get(operationId) as { projectId: string; revision: number; operationsJson: StoredJson | null; resultsJson: StoredJson | null; requestHash?: string } | undefined;
                 if (existing) {
                     if (context?.mcpCommand) {
                         const commandHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
@@ -2319,7 +2327,7 @@ export class BackendDatabase {
                     if (existing.operationsJson === null || existing.resultsJson === null) throw Object.assign(collaborationError("RECEIPT_UNAVAILABLE", "操作已提交，历史快照已清理；请读取最新画布确认同步"), { committed: true, revision: Number(existing.revision), snapshotAvailable: false });
                     const project = this.canvasProjectAt(id, Number(existing.revision));
                     this.db.exec(commitSql);
-                    return { project, revision: Number(existing.revision), operationId, operationResults: JSON.parse(existing.resultsJson), operations: JSON.parse(existing.operationsJson), duplicated: true };
+                    return { project, revision: Number(existing.revision), operationId, operationResults: decodeStoredJson<CanvasOperationResult[]>(existing.resultsJson), operations: decodeStoredJson<CanvasOperation[]>(existing.operationsJson), duplicated: true };
                 }
                 // Legacy batches without a request hash must never be executed again.
                 if (this.db.prepare("SELECT 1 FROM canvas_operation_batches WHERE operation_id = ?").get(operationId)) throw collaborationError("OPERATION_ID_REUSED", "历史 operationId 缺少可核验的请求指纹，拒绝重新执行");
@@ -2567,7 +2575,7 @@ export class BackendDatabase {
             productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(committedOperations), JSON.stringify(operationResults), String(project.updatedAt));
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), encodeStoredJson(committedOperations), encodeStoredJson(operationResults), String(project.updatedAt));
             this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, project_id, request_hash, committed_revision) VALUES (?, ?, ?, ?)").run(operationId, id, fingerprint, revision);
             if (context?.mcpCommand) {
                 const requestHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
@@ -4019,7 +4027,7 @@ export class BackendDatabase {
             const fields = taskSearchFields(kind, input, params);
             this.db.prepare(
                 "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at, project_id, node_id, segment_id, model, is_image, is_video) VALUES (?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            ).run(id, kind, JSON.stringify(input), JSON.stringify(params), now, now, fields.projectId, fields.nodeId, fields.segmentId, fields.model, fields.isImage, fields.isVideo);
+            ).run(id, kind, encodeStoredJson(input), JSON.stringify(params), now, now, fields.projectId, fields.nodeId, fields.segmentId, fields.model, fields.isImage, fields.isVideo);
         } catch (error) {
             // 客户端传来的 id 已存在（重试 / 多标签）→ 直接复用该任务，让新请求接上同一行记录。
             const existing = this.getTask(id);
@@ -4117,7 +4125,7 @@ export class BackendDatabase {
         if (filter.kind) { clauses.push("kind = ?"); values.push(filter.kind); }
         if (filter.model) { clauses.push("model = ?"); values.push(filter.model); }
         if (filter.projectId) { clauses.push("project_id = ?"); values.push(filter.projectId); }
-        if (filter.parentThreadId) { clauses.push(`json_extract(input_json, '$.parentThreadId') = ?`); values.push(filter.parentThreadId); }
+        if (filter.parentThreadId) { clauses.push(`json_extract(stored_json_text(input_json), '$.parentThreadId') = ?`); values.push(filter.parentThreadId); }
         if (filter.scope === "canvas") clauses.push("project_id IS NOT NULL");
         if (filter.scope === "image") clauses.push("is_image = 1");
         if (filter.scope === "video") clauses.push("is_video = 1");
@@ -4139,7 +4147,7 @@ export class BackendDatabase {
     }
 
     listCanvasTaskModelUsage(): Array<{ model: string; channelId: string; count: number }> {
-        return this.db.prepare(`SELECT model, COALESCE(NULLIF(json_extract(params_json, '$.channelId'), ''), NULLIF(json_extract(input_json, '$.channelId'), ''), '') AS channelId, COUNT(*) AS count
+        return this.db.prepare(`SELECT model, COALESCE(NULLIF(json_extract(params_json, '$.channelId'), ''), NULLIF(json_extract(stored_json_text(input_json), '$.channelId'), ''), '') AS channelId, COUNT(*) AS count
             FROM tasks WHERE project_id IS NOT NULL AND model IS NOT NULL AND model != ''
             GROUP BY model, channelId`).all() as Array<{ model: string; channelId: string; count: number }>;
     }
@@ -4237,7 +4245,7 @@ export class BackendDatabase {
                 const result = row.result_json == null ? null : redactJsonColumn(row.result_json);
                 if (!input.changed && !params.changed && !result?.changed) continue;
                 this.db.prepare("UPDATE tasks SET input_json = ?, params_json = ?, result_json = ? WHERE id = ?")
-                    .run(input.json, params.json, result?.json ?? null, String(row.id));
+                    .run(input.changed ? encodeStoredJson(JSON.parse(input.json)) : row.input_json as StoredJson, params.json, result?.json ?? null, String(row.id));
                 tasks++;
             }
 
@@ -4319,7 +4327,7 @@ function mcpObservabilityDateFilter(options: McpObservabilityReportOptions) {
 }
 
 function redactJsonColumn(value: unknown) {
-    const json = String(value ?? "");
+    const json = value instanceof Uint8Array ? storedJsonText(value) : String(value ?? "");
     if (!json) return { json, changed: false };
     try {
         const parsed = JSON.parse(json);
@@ -4566,6 +4574,10 @@ function buildMcpObservabilityDiagnostics(input: {
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
+    if (value instanceof Uint8Array) {
+        const parsed = decodeStoredJson<unknown>(value);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    }
     try {
         const parsed = typeof value === "string" ? JSON.parse(value) : value;
         return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};

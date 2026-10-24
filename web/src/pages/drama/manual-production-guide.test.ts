@@ -18,7 +18,11 @@ test("current empty Clip prompt provides a direct Shot editor action rather than
 test("model, media and timing problems route to existing manual controls", () => {
     const target = { kind: "segment" as const, targetId: "clip", status: "blocked", blockers: [] as string[] };
     const source = { segments: [{ id: "clip", shot_ids: ["shot"] }] };
-    assert.equal(manualTargetRecovery({ ...target, blockers: ["缺少 H3 模型"] }, source).workspace, "advanced");
+    const modelRecovery = manualTargetRecovery({ ...target, blockers: ["缺少 H3 模型"] }, source);
+    assert.equal(modelRecovery.workspace, "series");
+    assert.equal(modelRecovery.seriesView, "planning");
+    assert.equal(modelRecovery.seriesTab, "settings");
+    assert.equal(manualTargetRecovery({ ...target, kind: "asset", targetId: "character", blockers: ["缺少图片模型"] }, source).seriesTab, "settings");
     assert.equal(manualTargetRecovery({ ...target, blockers: ["参考图片尚未归档"] }, source).messageKey, "referenceMissing");
     assert.equal(manualTargetRecovery({ ...target, blockers: ["帧窗与秒数须一致"] }, source).id, "shot");
 });

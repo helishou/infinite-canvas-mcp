@@ -328,14 +328,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const editorRootRef = useRef<HTMLElement>(null);
   const routeWorkspace = searchParams.get("workspace") as DirectorWorkspace | null;
   const seriesView = seriesWorkspaceView(searchParams.get("seriesView"));
+  const seriesTab = searchParams.get("seriesTab") === "settings" ? "settings" : undefined;
   const routeTarget = searchParams.get("target") || "";
   const routeNodeId = searchParams.get("nodeId") || "";
   const routeSegmentId = searchParams.get("segmentId") || "";
   const routeWorkId = searchParams.get("workId") || "";
 
-  const navigateWorkspace = (next: DirectorWorkspace, targetFocus?: { kind: string; id: string }, nextSeriesView?: SeriesWorkspaceView) => {
+  const navigateWorkspace = (next: DirectorWorkspace, targetFocus?: { kind: string; id: string }, nextSeriesView?: SeriesWorkspaceView, nextSeriesTab?: "settings") => {
     useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
-    setSearchParams(productionWorkspaceQuery(searchParams, next, { embedded, target: targetFocus, seriesView: nextSeriesView }), { replace: true });
+    setSearchParams(productionWorkspaceQuery(searchParams, next, { embedded, target: targetFocus, seriesView: nextSeriesView, seriesTab: nextSeriesTab }), { replace: true });
   };
 
   const load = useCallback(async (isActive: () => boolean = () => true, preserveBrief = false) => {
@@ -525,12 +526,18 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const root = embedded ? editorRootRef.current : document;
         if (embedded && useProductionWorkspaceStore.getState().panelTab !== "object") return;
         const direct = Array.from(root?.querySelectorAll<HTMLElement>("[data-production-target]") || []).find(element => element.dataset.productionTarget === routeTarget);
-        if (direct) {
+        const clipId = workspace === "clips" && routeTarget.startsWith("segment:") ? routeTarget.slice("segment:".length) : "";
+        const clip = clipId ? Array.from(root?.querySelectorAll<HTMLElement>("[data-production-clip-id]") || []).find(element => element.dataset.productionClipId === clipId) : undefined;
+        const targetElement = direct || clip;
+        if (targetElement) {
+          for (let ancestor = targetElement.parentElement; ancestor; ancestor = ancestor.parentElement) {
+            if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+          }
           const scroller = editorRootRef.current?.parentElement;
-          if (embedded && scroller) scroller.scrollTop += direct.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24;
+          if (embedded && scroller) scroller.scrollTop += targetElement.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 24;
           else if (workspace !== "shots") {
-            const content = direct.closest<HTMLElement>("[data-production-workspace-content]");
-            if (content) content.scrollTop += direct.getBoundingClientRect().top - content.getBoundingClientRect().top - 24;
+            const content = targetElement.closest<HTMLElement>("[data-production-workspace-content]");
+            if (content) content.scrollTop += targetElement.getBoundingClientRect().top - content.getBoundingClientRect().top - 24;
           }
         }
       });
@@ -2115,7 +2122,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           <div className="mb-7 flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-medium tracking-tight sm:text-[26px]">{seriesTitle}</h1><p className="mt-2 text-xs text-muted-foreground">{t(episodesUnavailable ? "director.atomic.episodesUnavailable" : "director.atomic.emptyDrama")}</p></div></div>
           {!episodesUnavailable && <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8">
             <ProductionWorkspaceNavigation groups={seriesNav} selectedId={`series:${currentView}`} horizontal onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
-            <section className="min-w-0"><DramaManagePanel navigationTitleVisible dramaId={series.id} view={currentView} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /></section>
+            <section className="min-w-0"><DramaManagePanel navigationTitleVisible dramaId={series.id} view={currentView} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /></section>
           </div>}
         </div>
       </main>;
@@ -2222,7 +2229,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
         <ProductionWorkspaceNavigation groups={navigationGroupsWithSeriesSubtabs} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
         <section data-production-workspace-content={!embedded || undefined} aria-label={workspaceLabel} className="min-w-0">
-          {workspace === "series" && series ? <DramaManagePanel navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
+          {workspace === "series" && series ? <DramaManagePanel navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
             {embedded && workspace === "assets" && <p className="mb-5 text-xs leading-5 text-muted-foreground" data-production-asset-scope={scope}>{t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`)}</p>}
             {embedded && workspace === "assets" && (!/^(asset|frame):/.test(routeTarget) || productionContext?.role === "shared-assets") && <SharedAssetsPicker />}
             <DirectorPanel
