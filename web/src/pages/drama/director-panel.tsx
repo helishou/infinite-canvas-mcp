@@ -763,6 +763,7 @@ export function DirectorPanel({
   const [newAssetKind, setNewAssetKind] = useState<ManualAssetKind>("prop");
   const [newAssetName, setNewAssetName] = useState("");
   const [newAssetDescription, setNewAssetDescription] = useState("");
+  const [newAssetVoiceDescription, setNewAssetVoiceDescription] = useState("");
   const [newAssetPrompt, setNewAssetPrompt] = useState("");
   const [newAssetPurpose, setNewAssetPurpose] = useState("");
   const [creatingAsset, setCreatingAsset] = useState(false);
@@ -867,6 +868,7 @@ export function DirectorPanel({
         kind: newAssetKind,
         name: newAssetName,
         description: newAssetDescription,
+        voiceDescription: newAssetVoiceDescription,
         prompt: newAssetPrompt,
         purpose: newAssetPurpose,
         canvasScope: canvasRole === "shared-assets" ? "shared" : canvasRole === "episode" ? "episode" : undefined,
@@ -884,7 +886,7 @@ export function DirectorPanel({
       const saved = await onCreateManualAsset(operation);
       if (saved === false) return;
       setNewAssetOpen(false);
-      setNewAssetName(""); setNewAssetDescription(""); setNewAssetPrompt(""); setNewAssetPurpose("");
+      setNewAssetName(""); setNewAssetDescription(""); setNewAssetVoiceDescription(""); setNewAssetPrompt(""); setNewAssetPurpose("");
       setSelectedAssetId(id);
       message.success(t("director.crud.manualAssetAdded"));
     } catch (cause) {
@@ -1649,13 +1651,14 @@ export function DirectorPanel({
   // 这里按实际节点类型列出，接入时由 Backend 再核验共享画布归属及来源节点。
   const sharedEpisodeNodes = (sharedCanvasNodes || []).filter(node => ["character", "scene", "prop"].includes(String(node.type || "")));
   const renderAssets = () => <div className="space-y-3">
-    <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t(subjectAssembly ? "director.atomic.subjects" : "director.studio.assets")} summary={assetScopeHint} help={<p>{t(subjectAssembly ? "director.workspace.subjectBindingHint" : "director.studio.assetsHint")}</p>} actions={<> <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => { setNewAssetKind("prop"); setNewAssetName(""); setNewAssetDescription(""); setNewAssetPrompt(""); setNewAssetPurpose(""); setNewAssetOpen(true); }}>{t("director.crud.addManualAsset")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "assets" })}>{t("director.studio.collaborate")}</Button> </>} />
+    <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t(subjectAssembly ? "director.atomic.subjects" : "director.studio.assets")} summary={assetScopeHint} help={<p>{t(subjectAssembly ? "director.workspace.subjectBindingHint" : "director.studio.assetsHint")}</p>} actions={<> <Button icon={<Plus className="size-4" />} disabled={busy || !d} onClick={() => { setNewAssetKind("prop"); setNewAssetName(""); setNewAssetDescription(""); setNewAssetVoiceDescription(""); setNewAssetPrompt(""); setNewAssetPurpose(""); setNewAssetOpen(true); }}>{t("director.crud.addManualAsset")}</Button><Button icon={<WandSparkles className="size-4" />} disabled={busy} onClick={() => onAskDirector({ workspace: "assets" })}>{t("director.studio.collaborate")}</Button> </>} />
     <Modal open={newAssetOpen} title={t("director.crud.addManualAsset")} onCancel={() => setNewAssetOpen(false)} onOk={() => void addManualAsset()} okText={t("common.save")} cancelText={t("common.cancel")} confirmLoading={creatingAsset} okButtonProps={{ disabled: busy || !d || !newAssetName.trim() }}>
       <div className="space-y-3">
         <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetKind")}</span><Select value={newAssetKind} disabled={creatingAsset} onChange={value => setNewAssetKind(value)} options={(["character", "scene", "prop"] as const).map(kind => ({ value: kind, label: t(`director.workspace.subjectKind.${kind}`) }))} /></label>
         <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetName")}</span><Input autoFocus value={newAssetName} onChange={event => setNewAssetName(event.target.value)} /></label>
         <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetPurpose")}</span><Input value={newAssetPurpose} onChange={event => setNewAssetPurpose(event.target.value)} /></label>
         <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetDescription")}</span><Input.TextArea rows={3} value={newAssetDescription} onChange={event => setNewAssetDescription(event.target.value)} /></label>
+        {newAssetKind === "character" && <label className="grid gap-1 text-xs"><span>{t("director.crud.fieldVoice")}</span><Input.TextArea rows={2} value={newAssetVoiceDescription} onChange={event => setNewAssetVoiceDescription(event.target.value)} placeholder={t("assets.character.voiceDescriptionPlaceholder")} /></label>}
         <label className="grid gap-1 text-xs"><span>{t("director.crud.manualAssetPrompt")}</span><Input.TextArea rows={4} value={newAssetPrompt} onChange={event => setNewAssetPrompt(event.target.value)} /></label>
       </div>
     </Modal>

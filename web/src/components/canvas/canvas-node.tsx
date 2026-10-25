@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
-import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Move, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -853,6 +853,26 @@ export const CanvasNode = React.memo(function CanvasNode({
                     }
                     return;
                 }
+                const target = event.target as HTMLElement;
+                const isH3 = data.type === "minimax-h3:video";
+                // Alt-drag selects and moves the node directly underneath this one. This recovers
+                // nodes accidentally created inside an H3 node's footprint without making its
+                // timeline, inputs, or other interactive controls draggable.
+                const overInteractiveControl = target.closest("button, input, textarea, select, video, [contenteditable='true'], [data-canvas-node-panel], [data-resize-handle], [data-connection-handle], [data-canvas-shortcuts-ignore]");
+                if (event.button === 0 && event.altKey && !overInteractiveControl) {
+                    const underlying = document.elementsFromPoint(event.clientX, event.clientY)
+                        .map((element) => element.closest<HTMLElement>(".node-element[data-node-id]"))
+                        .find((element) => element && element !== event.currentTarget);
+                    const underlyingNodeId = underlying?.dataset.nodeId;
+                    if (underlyingNodeId) {
+                        event.stopPropagation();
+                        onSelectCapture?.(event, underlyingNodeId);
+                        if (event.defaultPrevented) return;
+                        event.preventDefault();
+                        onMouseDown(event, underlyingNodeId);
+                        return;
+                    }
+                }
                 onSelectCapture?.(event, data.id);
                 if (event.defaultPrevented) return;
                 // H3 根节点会在冒泡阶段 stopPropagation，拖动只能从这里启动。
@@ -860,8 +880,6 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // contenteditable（CodeMirror 文本编辑器）与 data-canvas-shortcuts-ignore（编辑器容器）
                 // 必须排除：capture 先于编辑器自身的 stopPropagation 执行，命中拖拽会掐断 mousedown，
                 // 导致文本节点双击进入编辑后光标放不进去、拖动变成移动节点。
-                const target = event.target as HTMLElement;
-                const isH3 = data.type === "minimax-h3:video";
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                 // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
@@ -870,7 +888,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
                 // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
                 // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
-                if (shouldStartCanvasNodeDrag(target, isH3)) onMouseDown(event, data.id);
+                if (shouldStartCanvasNodeDrag(target, isH3, event)) onMouseDown(event, data.id);
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
@@ -950,7 +968,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onMouseDown={(event) => {
                     const target = event.target as HTMLElement;
                     const isH3 = data.type === "minimax-h3:video";
-                    if (!referenceSelectionState && shouldStartCanvasNodeDrag(target, isH3)) onMouseDown(event, data.id);
+                    if (!referenceSelectionState && shouldStartCanvasNodeDrag(target, isH3, event)) onMouseDown(event, data.id);
                 }}
                 onDoubleClick={(event) => {
                     if (referenceSelectionState) {
@@ -1889,6 +1907,16 @@ function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const source = selectedIndex >= 0 ? history[selectedIndex]?.content || node.metadata?.content : node.metadata?.content;
     return (
         <div className="relative h-full w-full">
+            <div
+                data-canvas-node-drag-handle="true"
+                data-canvas-node-drag-interactive-handle="true"
+                role="button"
+                aria-label={t("canvas.node.dragVideo")}
+                title={t("canvas.node.dragVideo")}
+                className="pointer-events-none absolute left-2 top-2 z-10 grid size-7 cursor-grab place-items-center rounded-md bg-black/45 text-white opacity-0 transition-opacity group-hover/node:pointer-events-auto group-hover/node:opacity-100 active:cursor-grabbing"
+            >
+                <Move className="size-4" />
+            </div>
             <video src={source} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />
             {history.length ? (
                 <select

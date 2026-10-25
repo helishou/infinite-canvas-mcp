@@ -8,6 +8,7 @@ import { ensureProductionCanvas } from "../drama/production-canvas.js";
 import { directorHash, withoutDirectorProjection } from "../drama/director.js";
 import { sharedSubjectPictureMedia } from "../drama/shared-subject-picture.js";
 import { sharedAssetClipInputOperations } from "../drama/clip-inputs.js";
+import { decodeStoredJson } from "../json-storage.js";
 import type { EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionNodePosition } from "../drama/production-layout-geometry.js";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
@@ -139,6 +140,25 @@ function assertUnused(db: BackendDatabase, source: SharedAssetSource) {
     const consumers = assetConsumers(db, source);
     if (consumers.length) throw Object.assign(collaborationError("ASSET_IN_USE", `资产仍被画布引用：${[...new Set(consumers.map(c => c.title))].join("、")}`), { consumers });
 }
+function containsExactValue(value: unknown, expected: string): boolean {
+    if (value === expected) return true;
+    if (Array.isArray(value)) return value.some(item => containsExactValue(item, expected));
+    if (!value || typeof value !== "object") return false;
+    return Object.entries(value as Record<string, unknown>).some(([key, child]) => key === expected || containsExactValue(child, expected));
+}
+/** Current source references, excluding append-only receipts/history that intentionally retain old asset IDs. */
+function hasCurrentAssetIdReference(db: BackendDatabase, assetId: string): boolean {
+    for (const row of db.db.prepare("SELECT data_json FROM canvas_projects").all() as Array<{ data_json: unknown }>) {
+        try { if (containsExactValue(decodeStoredJson(row.data_json), assetId)) return true; } catch { return true; }
+    }
+    for (const row of db.db.prepare("SELECT draft_json,published_json FROM episode_productions").all() as Array<{ draft_json: unknown; published_json: unknown }>) {
+        for (const data of [row.draft_json, row.published_json]) {
+            if (data == null) continue;
+            try { if (containsExactValue(decodeStoredJson(data), assetId)) return true; } catch { return true; }
+        }
+    }
+    return false;
+}
 /** 自动清理源画布或源节点已不存在、且没有任何存活画布引用的共享素材记录——与 propagateAssetChanges 删除路径同一条不变量。
  *  仍被引用（sharedAssetReference/sharedAssetOrigin）的孤儿保留，等引用方移除后下次读取再清。返回被清除的记录标题。 */
 export function purgeOrphanedSharedAssets(db: BackendDatabase): string[] {
@@ -178,7 +198,7 @@ export function validateAssetOperation(db: BackendDatabase, projectId: string, p
                 if (!original) throw new Error("复制引用的编辑基线不存在，不能伪造本地修改");
             }
             const episode = db.getDramaEpisodeByCanvasId(projectId);
-            if (!episode || episode.dramaId !== source.dramaId) throw new Error("只能引用同剧目的共享资产");
+            if (!episode) throw new Error("共享资产只能引用到分集画布");
             if (operation.nodeType && operation.nodeType !== rawAsset(db, source.assetId)?.kind) throw new Error("引用类型与共享资产不一致");
         }
     }
@@ -243,6 +263,9 @@ export function captureAssetEdits(db: BackendDatabase, project: CanvasProject, o
         if (sameAssetValue(value, shared)) delete edits[field];
         else edits[field] = { base: edits[field] ? edits[field].base : shared, ...(value === undefined ? { deleted: true } : { value }) };
     }
+    const canonicalImageFields = node.type === "character" ? ["metadata.characterImages", "metadata.characterPrimaryIndex"]
+        : node.type === "scene" ? ["metadata.sceneImage"] : node.type === "prop" ? ["metadata.propImage"] : [];
+    if (canonicalImageFields.some(field => touched.has(field))) for (const field of ["metadata.content", "metadata.storageKey", "metadata.naturalWidth", "metadata.naturalHeight", "metadata.bytes", "metadata.mimeType"]) delete edits[field];
     const updated = { ...ref, ...(Object.keys(edits).length ? { edits } : {}) };
     if (!Object.keys(edits).length) delete updated.edits;
     node.metadata!.sharedAssetReference = updated;
@@ -532,6 +555,12 @@ export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: Asse
 export function deleteDramaAsset(db: BackendDatabase, id: string): number {
     const source = sourceOf(rawAsset(db, id));
     if (!source) return db.deleteAssetRecord(id);
+    // `shared-*` rows are legacy directory aliases of the same canonical source node.
+    // Remove an alias row only when another source record remains and no current canvas
+    // or production object refers to that alias ID. Keep the shared node and its media.
+    if (id.startsWith("shared-") && db.listAssetRecords().some(asset => asset.id !== id && sourceOf(asset)?.dramaId === source.dramaId
+        && sourceOf(asset)?.sourceProjectId === source.sourceProjectId && sourceOf(asset)?.sourceNodeId === source.sourceNodeId)
+        && !hasCurrentAssetIdReference(db, id)) return db.deleteAssetRecord(id);
     assertUnused(db, source);
     const commits: CanvasCommit[] = [];
     db.db.exec("BEGIN IMMEDIATE");

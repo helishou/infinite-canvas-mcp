@@ -2,7 +2,7 @@ import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasProductionEditing, CanvasProductionStoryboardEditor } from "@/types/canvas-plugin";
 import { productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { nanoid } from "nanoid";
-import { applyProductionCompilation, BackendApiError, compileProduction, fetchBackendProject, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus } from "@/services/backend-api";
+import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
@@ -387,7 +387,46 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             return { targetId, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled };
         });
         const editor = boundaryEditors.get(projectId);
-        if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
-        return editor.handler({ boundaries, ...(requireNext ? { requireNext: true } : {}) });
+        if (editor) return editor.handler({ boundaries, ...(requireNext ? { requireNext: true } : {}) });
+        const context = (await fetchProductionCanvasContext(projectId)).context;
+        const owner: ProductionTarget | undefined = context.owner?.kind === "episode" ? context.owner.id
+            : context.owner?.kind === "scene" ? { sceneId: context.owner.id }
+                : context.owner?.kind === "canvas" ? { projectId: context.owner.id } : undefined;
+        if (!owner) throw new Error("PRODUCTION_EDITOR_NOT_READY");
+        const production = (await fetchEpisodeProduction(owner)).production;
+        const director = production.draft.director;
+        const sourceSegments = Array.isArray(director?.source.segments) ? director.source.segments as Array<Record<string, unknown>> : [];
+        if (!director || !sourceSegments.length) throw new Error("CONTINUATION_BOUNDARY_SOURCE_UNAVAILABLE");
+        const operations: ProductionOperation[] = [];
+        for (const boundary of boundaries) {
+            const index = sourceSegments.findIndex(segment => String(segment.id || "") === boundary.targetId);
+            // 节点级批量设置可能包含已从当前制作稿移除的旧投影；不能因此阻断有效边界。
+            if (index < 0) {
+                if (requireNext) throw new Error(`正式制作 Clip 不存在：${boundary.targetId}`);
+                continue;
+            }
+            const next = sourceSegments[index + 1];
+            if (!next) {
+                if (requireNext) throw new Error("当前 H3 Clip 没有相邻的下一段，无法登记续段衔接");
+                continue;
+            }
+            const to = String(next.id || "");
+            if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
+            const previous = director.boundaries.find(edge => edge.from === boundary.targetId && edge.to === to);
+            const canvasSegment = (Array.isArray(node?.metadata?.segments) ? node.metadata.segments : [])
+                .find(segment => String((segment.productionClipProjection as Record<string, unknown> | undefined)?.targetId || "") === boundary.targetId);
+            const projectionOutOfSync = canvasSegment && (
+                canvasSegment.tailFrameContinuation !== boundary.tailFrameContinuation
+                || canvasSegment.motionContextEnabled !== boundary.motionContextEnabled
+            );
+            if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim() && !projectionOutOfSync) continue;
+            operations.push({ type: "set_director_boundary", boundary: {
+                from: boundary.targetId, to, tailFrame: boundary.tailFrameContinuation, motionContext: boundary.motionContextEnabled,
+                reason: "由 H3 Clip 设置保存续段衔接",
+            } });
+        }
+        if (!operations.length) return { sourceSaved: true };
+        await editEpisodeProduction(owner, production.revision, operations);
+        return { sourceSaved: true };
     }
 }

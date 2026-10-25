@@ -8,7 +8,9 @@ const owner = { kind: z.enum(["episode", "canvas"]), id: z.string().min(1) };
 const identity = z.object(owner).strict();
 const stage = z.enum(["script", "shots", "director"]);
 const run = identity.extend({ runId: z.string().min(1) });
+const batchRead = run.extend({ view: z.enum(["summary", "full"]).default("summary") });
 const version = identity.extend({ version: z.number().int().min(1) });
+const runRead = version.extend({ view: z.enum(["summary", "full"]).default("summary") });
 const readSnapshot = { snapshot: z.enum(["draft", "published"]).default("draft"), ifRevision: z.number().int().nonnegative().optional() };
 const sourceRead = z.object({ ...owner, ...readSnapshot, sourceSection: productionSourceSectionSchema, targetIds: z.array(z.string().min(1)).optional(), pageSize: z.number().int().min(1).max(100).default(50), chunkBytes: z.number().int().min(1).max(65536).optional(), cursor: z.string().optional() }).strict();
 const artifactIndexRead = z.object({ ...owner, ...readSnapshot, targetIds: z.array(z.string().min(1)).optional(), pageSize: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() }).strict();
@@ -31,7 +33,7 @@ export const productionToolSchemas = {
         expectedRevision: z.number().int().nonnegative(), version: z.number().int().nonnegative().optional(), inputBasis: z.enum(["canvas", "published"]).optional(),
         expectedCanvasRevision: z.number().int().nonnegative().optional(), expectedPlanHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
         targets: z.array(z.string().min(1)).min(1), scope: z.enum(["selected", "all_ready"]).optional() }),
-    production_get_batch: run, production_pause_run: run, production_resume_run: run,
+    production_get_batch: batchRead, production_pause_run: run, production_resume_run: run,
     production_retire_run: run.extend({ reason: z.string().trim().min(8).max(400) }),
     production_list_versions: identity,
     production_get_version: version.extend(readSnapshot).strict(),
@@ -44,7 +46,7 @@ export const productionToolSchemas = {
     production_publish: identity.extend({ ...write, stage }),
     production_restore: version.extend(write),
     production_sync_clips: identity,
-    production_get_run: version,
+    production_get_run: runRead,
     production_export_markdown: identity.extend({ stage, version: z.number().int().min(1).optional() }),
 };
 export type ProductionToolName = keyof typeof productionToolSchemas;
@@ -58,8 +60,8 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_get_artifact: "按 targetId 分块读取正式编译提示词及引用绑定；Picture 编号对应本产物引用列表。Clip 应用时若画布参考顺序不同，Backend 按绑定身份同步重编号。使用 cursor 读完并核对 sha256。",
     production_get_workbench: "只读取一个 targetId 的指定 Subject、Shot 或 Clip 工作台。核对单镜姿势时用 shot_workbench；Shot/Clip 默认只返回正文核心（Shot/Segment）。需要连续性和解析上下文时传 includeContext=true，需要画布 Prompt、导演基线、参考与运行状态时传 includeRuntime=true。两者都传 true 可读取完整工作台；用 chunkBytes 分块并通过 cursor 续读。audio_bindings 是导演源稿正式音频绑定，audioRuntime 是 H3 画布设置的只读映射；映射依来源节点和 storageKey 确认，H3 referenceBindingId 与 authoredBindingId 不可互换。Subject 草稿返回 entityNodeSource 时，用真实 projectId/nodeId 定位实体节点。检查状态优先用 production_get_artifact_index。",
     production_get_readiness: "读取 kind/id 的制作依赖、缺项和下一步。",
-    production_start_run: "按 kind/id 启动已有授权的制作运行；inputBasis 默认 canvas，冻结当前有效画布输入，显式 published 核验指定发布稿。Backend 在提交边界执行一次权威预检并返回 ready/blocked 目标，输入未变化时不要先重复调用 production_preflight。保留 runId/idempotencyKey 与版本边界；保存、编译、审核和发布不授权生成。",
-    production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。",
+    production_start_run: "按 kind/id 启动已有授权的制作运行；inputBasis 默认 canvas，冻结当前有效画布输入，显式 published 核验指定发布稿。Backend 在提交边界执行一次权威预检并返回 ready/blocked 目标，输入未变化时不要先重复调用 production_preflight。默认返回紧凑批次回执；完整冻结快照用 production_get_batch({ view: \"full\" }) 按需读取。保留 runId/idempotencyKey 与版本边界；保存、编译、审核和发布不授权生成。",
+    production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。默认返回紧凑摘要；传 view: \"full\" 读取完整执行快照、逐目标诊断与运行参数。",
     production_pause_run: "暂停 kind/id/runId；在途任务完成后停在边界。",
     production_resume_run: "继续原 kind/id/runId，复用原快照和任务，不自动重生成失败任务。",
     production_retire_run: "结束已暂停或待审核的 kind/id/runId，释放其未执行目标；必须提供原因。仅当批次没有在途或状态未知的任务时接受，已完成任务和媒体保留。",
@@ -74,7 +76,7 @@ export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_publish: "按 kind/id 发布指定制作阶段；保留 operationId、expectedRevision，返回短回执。",
     production_restore: "按 kind/id 恢复历史版本为草稿；保留 operationId 和 expectedRevision，不修改历史快照。",
     production_sync_clips: "同步 kind/id 当前发布 Clip 输入，不提交媒体；相同输入、绑定和顺序不推进版本。",
-    production_get_run: "读取 kind/id 指定发布版本的制作运行。",
+    production_get_run: "读取 kind/id 指定发布版本的制作运行。默认返回状态、目标和任务摘要；传 view: \"full\" 读取完整运行参数与执行快照。",
     production_export_markdown: "按 kind/id/stage 导出指定或当前发布版本的制作文档。",
 };
 
@@ -93,7 +95,7 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_get_readiness": return get(base + "/readiness");
         case "production_preflight": return post(base + "/preflight", input);
         case "production_start_run": return post(base + "/runs", input);
-        case "production_get_batch": return get(`${base}/batches/${encodeURIComponent(input.runId)}`);
+        case "production_get_batch": return get(`${base}/batches/${encodeURIComponent(input.runId)}${input.view === "full" ? "?view=inputs" : ""}`);
         case "production_pause_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/pause`, {});
         case "production_resume_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/resume`, {});
         case "production_retire_run": return post(`${base}/batches/${encodeURIComponent(input.runId)}/retire`, { reason: input.reason });
@@ -115,10 +117,58 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
         case "production_export_markdown": return get(`${base}/export?stage=${input.stage}${input.version ? `&version=${input.version}` : ""}`);
     }
 }
+
+function productionBatchSummary(value: unknown): unknown {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const envelope = value as Record<string, any>;
+    const batch = envelope.run;
+    if (!batch || typeof batch !== "object" || Array.isArray(batch)) return value;
+    const snapshot = batch.executionSnapshot && typeof batch.executionSnapshot === "object" ? batch.executionSnapshot : undefined;
+    const plan = batch.plan && typeof batch.plan === "object" ? batch.plan : undefined;
+    return {
+        ...envelope,
+        run: {
+            runId: batch.runId,
+            episodeId: batch.episodeId,
+            version: batch.version,
+            sourceRevision: batch.sourceRevision,
+            idempotencyKey: batch.idempotencyKey,
+            status: batch.status,
+            targets: batch.targets,
+            submitted: Array.isArray(batch.submitted) ? batch.submitted.map((item: Record<string, any>) => ({
+                kind: item.kind, id: item.id, taskId: item.taskId, status: item.status,
+            })) : batch.submitted,
+            error: batch.error,
+            pauseRequested: batch.pauseRequested,
+            createdAt: batch.createdAt,
+            updatedAt: batch.updatedAt,
+            plan: plan ? {
+                changedSceneCount: plan.changedSceneIds?.length,
+                affectedShotCount: plan.affectedShotIds?.length,
+                imageShotCount: plan.imageShotIds?.length,
+                clipGroupCount: plan.clipGroupIds?.length,
+                missingAssetNodeCount: plan.missingAssetNodeIds?.length,
+                assetCount: plan.assetIds?.length,
+            } : undefined,
+            executionSnapshot: snapshot ? {
+                schemaVersion: snapshot.schemaVersion,
+                inputBasis: snapshot.inputBasis,
+                canvasId: snapshot.canvasId,
+                canvasRevision: snapshot.canvasRevision,
+                planHash: snapshot.planHash,
+                targetCount: Array.isArray(snapshot.targets) ? snapshot.targets.length : undefined,
+                blockedTargetCount: Array.isArray(snapshot.blockedTargets) ? snapshot.blockedTargets.length : undefined,
+                warningCount: Array.isArray(snapshot.warnings) ? snapshot.warnings.length : undefined,
+            } : batch.executionSnapshot,
+        },
+    };
+}
+
 export async function executeProductionTool(api: { get(path: string): Promise<unknown>; post(path: string, body: unknown): Promise<unknown> }, name: ProductionToolName, raw: unknown) {
     const request = productionToolRequest(name, raw);
     const result = request.method === "GET" ? await api.get(request.path) : await api.post(request.path, request.body);
     const projected = ["production_edit", "production_split_scene", "production_publish", "production_restore", "production_sync_clips"].includes(name)
         ? productionWriteReceipt(result, { tool: name, input: raw as Record<string, any> }) : result;
+    if (name === "production_start_run" || (["production_get_batch", "production_get_run"].includes(name) && (raw as Record<string, any>)?.view !== "full")) return productionBatchSummary(projected);
     return projected;
 }

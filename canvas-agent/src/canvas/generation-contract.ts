@@ -101,6 +101,8 @@ export const canvasGenerationCommandSchema = z
     size: z.string().optional(),
     seconds: z.string().optional(),
     resolution: z.string().optional(),
+    /** Canvas video workflow execution route; omitted means inherit the workflow default. */
+    runTarget: z.enum(["local", "cloud", "hybrid"]).optional(),
     width: z.number().optional(),
     height: z.number().optional(),
     quality: z.string().optional(),

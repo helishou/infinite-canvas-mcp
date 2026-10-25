@@ -24,7 +24,8 @@
         "acheng:status": "node scripts/acheng-engine.mjs status",
         "acheng:update": "node scripts/acheng-engine.mjs update",
         "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
-        "acheng:vendor": "node scripts/acheng-engine.mjs vendor"
+        "acheng:vendor": "node scripts/acheng-engine.mjs vendor",
+        "rh": "node tools/rh-flow/rh-flow.mjs"
     },
     "devDependencies": {
         "@infinite-canvas/plugin-sdk": "workspace:*",

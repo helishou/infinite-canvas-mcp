@@ -4,7 +4,7 @@ import os from "node:os";
 import test, { type TestContext } from "node:test";
 import path from "node:path";
 
-import { ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow as buildH3Entry, exactHistoryEntry, h3WatchdogState, localComfyInputName, summarizeH3Workflow, type ComfyUiDeps } from "./bridge.js";
+import { collectOutputMedia, ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow as buildH3Entry, exactHistoryEntry, h3WatchdogState, localComfyInputName, readComfyHistory, summarizeH3Workflow, type ComfyUiDeps } from "./bridge.js";
 import { appendTailFramePrompt, routeTailFrameInput } from "../canvas/h3-runner.js";
 import { MEDIA_DIR } from "../config.js";
 
@@ -91,6 +91,80 @@ test("history recovery never substitutes another prompt's output", () => {
     };
     assert.equal(exactHistoryEntry(history, promptA), undefined);
     assert.equal(exactHistoryEntry(history, promptB), history[promptB]);
+});
+
+test("Comfy history reads classify transient transport failures for retry on the same promptId", async t => {
+    const urls: string[] = [];
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+        urls.push(input instanceof Request ? input.url : String(input));
+        if (urls.length === 1) {
+            const cause = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+            throw Object.assign(new TypeError("fetch failed"), { cause });
+        }
+        return Response.json({ [promptA]: { status: { status_str: "success" }, outputs: { result: [] } } });
+    });
+
+    const signal = new AbortController().signal;
+    assert.deepEqual(await readComfyHistory("http://comfy.test", promptA, signal), { kind: "retry" });
+    const recovered = await readComfyHistory("http://comfy.test", promptA, signal);
+    assert.equal(recovered.kind, "history");
+    assert.deepEqual(urls, [
+        `http://comfy.test/history/${promptA}`,
+        `http://comfy.test/history/${promptA}`,
+    ]);
+});
+
+test("Comfy history treats auth failures as terminal and a missing entry as recoverable", async t => {
+    let status = 401;
+    t.mock.method(globalThis, "fetch", async () => new Response("unauthorized", { status }));
+
+    await assert.rejects(readComfyHistory("http://comfy.test", promptA, new AbortController().signal), /HTTP 401/);
+    status = 404;
+    assert.deepEqual(await readComfyHistory("http://comfy.test", promptA, new AbortController().signal), { kind: "missing" });
+});
+
+test("Comfy output retrieval retries transient HTTP failures and returns only archived media", async t => {
+    let requests = 0;
+    let archivedBytes = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+        requests += 1;
+        if (requests === 1) return new Response("temporarily unavailable", { status: 503 });
+        return new Response(Uint8Array.of(1, 2, 3), { status: 200, headers: { "content-type": "image/png" } });
+    });
+    const media = {
+        storeStream: async (source: NodeJS.ReadableStream) => {
+            for await (const chunk of source as AsyncIterable<Uint8Array>) archivedBytes += chunk.byteLength;
+            return { storageKey: "image:archived", mimeType: "image/png", filePath: "fixture.png" };
+        },
+        url: (stored: { storageKey: string }) => `/media/${encodeURIComponent(stored.storageKey)}`,
+    } as unknown as ComfyUiDeps["media"];
+
+    const [result] = await collectOutputMedia({ output: { images: [{ filename: "result.png", type: "output" }] } }, "http://comfy.test", media, new AbortController().signal);
+
+    assert.equal(requests, 2);
+    assert.equal(archivedBytes, 3);
+    assert.equal(result.storageKey, "image:archived");
+    assert.equal(result.url, "/media/image%3Aarchived");
+});
+
+test("Comfy output retrieval rejects deterministic HTTP errors instead of returning an unarchived URL", async t => {
+    let requests = 0;
+    let archived = false;
+    t.mock.method(globalThis, "fetch", async () => {
+        requests += 1;
+        return new Response("forbidden", { status: 403 });
+    });
+    const media = {
+        storeStream: async () => { archived = true; throw new Error("should not archive a rejected response"); },
+        url: () => "/media/unexpected",
+    } as unknown as ComfyUiDeps["media"];
+
+    await assert.rejects(
+        collectOutputMedia({ output: { images: [{ filename: "private.png", type: "output" }] } }, "http://comfy.test", media, new AbortController().signal),
+        /输出归档失败：HTTP 403/,
+    );
+    assert.equal(requests, 1);
+    assert.equal(archived, false);
 });
 
 test("H3 local input only exposes files from runtime-media", () => {

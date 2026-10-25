@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
+import { normalizeEntityPrimaryMedia } from "@basketikun/canvas-agent/shared-asset-reference";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -91,6 +92,14 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const id = String(operation.id || `${String(operation.nodeType || "node")}-${crypto.randomUUID()}`);
             operation.id = id;
             if (nodes.some((node) => String(node.id) === id)) throw new Error(`节点已存在：${id}`);
+            const entityType = String(operation.nodeType || "text");
+            if (["character", "scene", "prop"].includes(entityType)) {
+                const metadata = recordOf(operation.metadata);
+                const hasCanonicalImage = entityType === "character"
+                    ? Array.isArray(metadata.characterImages) && metadata.characterImages.length > 0
+                    : Boolean(metadata[entityType === "scene" ? "sceneImage" : "propImage"]);
+                operation.metadata = normalizeEntityPrimaryMedia(entityType, metadata, hasCanonicalImage ? entityType === "character" ? "gallery" : "nested" : "legacy");
+            }
             const width = Number(operation.width || 320);
             const height = Number(operation.height || 240);
             const hasExplicitPosition = operation.position !== undefined || operation.x !== undefined || operation.y !== undefined;
@@ -144,6 +153,34 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                     const incomingSegments = Array.isArray(metadataPatch.segments) ? metadataPatch.segments as Array<Record<string, unknown>> : [];
                     assertFullSegmentsReplacement(node, incomingSegments);
                     metadataPatch = { ...metadataPatch, segments: incomingSegments };
+                }
+                if (["character", "scene", "prop"].includes(String(node.type))) {
+                    const deleted = new Set((Array.isArray(operation.metadataDelete) ? operation.metadataDelete : []).map(String));
+                    const imageField = node.type === "character" ? "characterImages" : node.type === "scene" ? "sceneImage" : "propImage";
+                    const galleryTouched = Object.hasOwn(metadataPatch, imageField)
+                        || node.type === "character" && Object.hasOwn(metadataPatch, "characterPrimaryIndex")
+                        || deleted.has(imageField) || node.type === "character" && deleted.has("characterPrimaryIndex");
+                    const previewTouched = ["content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"]
+                        .some(field => Object.hasOwn(metadataPatch, field) || deleted.has(field));
+                    const source = galleryTouched ? node.type === "character" ? "gallery" : "nested" : previewTouched ? "preview" : "legacy";
+                    const candidate = { ...metadata, ...metadataPatch };
+                    for (const field of deleted) delete candidate[field];
+                    const normalized = normalizeEntityPrimaryMedia(String(node.type), candidate, source);
+                    metadataPatch = { ...metadataPatch };
+                    const syncedFields = node.type === "character"
+                        ? ["characterImages", "characterPrimaryIndex", "content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"]
+                        : [imageField, "content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"];
+                    for (const field of syncedFields) {
+                        if (Object.hasOwn(normalized, field)) {
+                            metadataPatch[field] = normalized[field];
+                            deleted.delete(field);
+                        } else {
+                            delete metadataPatch[field];
+                            if (Object.hasOwn(metadata, field)) deleted.add(field);
+                        }
+                    }
+                    operation.metadataDelete = [...deleted];
+                    operation.metadata = metadataPatch;
                 }
                 node.metadata = { ...metadata, ...metadataPatch };
             }

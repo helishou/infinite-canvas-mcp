@@ -5,7 +5,7 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, refsForSubmission, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
@@ -22,6 +22,7 @@ import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
 import { H3ReferenceModal } from "./H3ReferenceModal";
+import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
@@ -305,12 +306,17 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         });
         if (changed) ctx.updateMetadata({ segments: next });
     }, [segments, sharedContext.node.id]);
-    const commitSegmentChange = useCallback((updated: H3Segment, select = false) => {
+    const commitSegmentChange = useCallback(async (updated: H3Segment, select = false) => {
         updated = alignStoryboardReferenceOrder(updated);
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
         if (!previous) return false;
+        const previousPictures = refsForSubmission(previous).filter((ref) => ref.type === "image");
+        const updatedPictures = refsForSubmission(updated).filter((ref) => ref.type === "image");
+        const updatedPictureIds = new Set(updatedPictures.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));
+        const addsPicturesWithoutRemovingExisting = updatedPictures.length > previousPictures.length
+            && previousPictures.every((ref) => Boolean(ref.bindingId && updatedPictureIds.has(ref.bindingId)));
         const previousItems = storyboardTrackItems(previous);
         const previousIds = new Set(previousItems.map((item) => item.id));
         const addedStoryboards = storyboardTrackItems(updated).filter((item) => !previousIds.has(item.id));
@@ -322,7 +328,8 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             || Boolean((updated.productionClipProjection as Record<string, unknown> | undefined)?.targetId)
             || Boolean(metadata.productionOwnerKind && metadata.productionOwnerId || metadata.productionSceneId);
         const storyboardState = (segment: H3Segment) => JSON.stringify({ shots: segment.storyboardShots || [], refs: storyboardRefsForSegment(segment) });
-        if (isFormalClip && storyboardState(previous) !== storyboardState(updated)) {
+        const formalStoryboardChanged = isFormalClip && storyboardState(previous) !== storyboardState(updated);
+        if (formalStoryboardChanged) {
             // 已开分镜轨的正式 Clip：分镜图的落点是分镜轨格子（写制作稿关键帧），不是参考槽。
             // 未绑定到任何格子的分镜图进回写会被后端忽略（参考不在编译引用里），静默丢失；这里明确拦下。
             const boundIds = new Set((updated.storyboardShots || []).map((shot) => shot.referenceBindingId).filter(Boolean));
@@ -333,6 +340,30 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 return false;
             }
             if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
+        }
+        if (addsPicturesWithoutRemovingExisting) {
+            try {
+                const textTarget = { nodeId: ctx.node.id, segmentId: updated.id, field: "prompt" as const };
+                const document = ctx.textDocument(textTarget);
+                await document.flush();
+                const snapshot = document.getSnapshot();
+                if (!snapshot.ready || snapshot.blocked) {
+                    message.error(snapshot.error || "提示词尚未同步，无法保持 Picture 引用对应关系。");
+                    return false;
+                }
+                const remappedPrompt = remapPictureTags(snapshot.text, previousPictures, updatedPictures,
+                    (ref) => ref.bindingId, (ref) => ref.type === "image");
+                if (remappedPrompt !== snapshot.text && !await ctx.replaceText(textTarget, document.getDocumentId(), snapshot.text, remappedPrompt)) {
+                    message.error("参考图顺序更新时提示词发生并发修改，请重试。");
+                    return false;
+                }
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "同步 Picture 引用编号失败，参考未保存。");
+                return false;
+            }
+        }
+        if (formalStoryboardChanged) {
+            if (!ctx.production) return false;
             void ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> })
                 .then(result => { if (result.sourceSaved) message.success("分镜图已写入制作稿"); else message.error("制作台未保存分镜更改"); })
                 .catch(error => message.error(error instanceof Error ? error.message : String(error)));
@@ -553,20 +584,20 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (editingRef.ref.groupId && characterPatch) updated = applyCharacterGroupEdits(updated, editingRef.ref.groupId, characterPatch);
         commitSegmentChange(updated);
     };
-    const deleteReferenceGroup = () => {
+    const deleteReferenceGroup = async () => {
         if (!editingRef?.ref.groupId || !editingRefSegment) return;
-        if (commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId))) setEditingRef(null);
+        if (await commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId))) setEditingRef(null);
     };
     const removeEditingReference = () => {
         if (!editingRef) return;
         if (removeTimelineRef(editingRef.segmentId, editingRef.ref)) setEditingRef(null);
     };
-    const removeEditingStoryboardImage = () => {
+    const removeEditingStoryboardImage = async () => {
         if (!editingRef) return;
         const segment = segments.find((item) => item.id === editingRef.segmentId);
         if (!segment) return;
         const updated = removeStoryboardImageReference(segment, editingRef.ref);
-        if (updated !== segment && commitSegmentChange(updated)) setEditingRef(null);
+        if (updated !== segment && await commitSegmentChange(updated)) setEditingRef(null);
     };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;

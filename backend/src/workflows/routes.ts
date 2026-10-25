@@ -170,6 +170,20 @@ export function registerWorkflowRoutes(
     }
   });
 
+  // POST /api/workflows/convert-graph - 把任意工作流统一成 API 格式，并把 UI 原件回带（不落库）
+  // 供 CLI 等外部工具直接处理用户手上的 json：UI 格式转 API 用于运行/RunningHub 上传，UI 原件用于编辑器。
+  router.post("/api/workflows/convert-graph", async (req: Request, res: Response) => {
+    try {
+      const input = req.body?.workflow;
+      if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("缺少 workflow 对象");
+      const uiWorkflow = Array.isArray((input as { nodes?: unknown }).nodes) ? input as Record<string, unknown> : undefined;
+      const workflow = convertComfyWorkflowToApi(input);
+      res.json({ workflow, ...(uiWorkflow ? { uiWorkflow } : {}) });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   // GET /api/workflows/:name - 获取单个工作流（含 config）
   router.get("/api/workflows/:name", async (req: Request, res: Response) => {
     try {

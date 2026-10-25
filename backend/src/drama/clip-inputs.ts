@@ -875,7 +875,8 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             if (!member || !unit) continue;
             const sceneId = unit.sceneId || layoutSceneForClip(data, group);
             const scene = sceneId && data.director ? productionSceneEntries(data.director.source).find(item => item.id === sceneId) : undefined;
-            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
+            const groupId = sceneId ? layout.units.find(item => item.id === `scene:${sceneId}`)?.members.find(item => item.role === "scene")?.nodeId : undefined;
+            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id } : {}), ...(groupId ? { groupId } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
             const operation = { type: "add_node", id: nodeId, nodeType: member.nodeType, title: `${scene?.title || sceneId || "场次"} · H3`, position: member.position, width: member.size.width, height: member.size.height, metadata } as Extract<CanvasOperation, { type: "add_node" }>;
             pendingNodes.set(nodeId, operation);
             operations.push(operation);

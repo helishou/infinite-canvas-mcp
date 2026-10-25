@@ -139,8 +139,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try { res.json({ ok: true, continuity: service.getContinuity(req.params.episodeId, queryWithoutToken(req.query)) }); }
         catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/continuity/check`, (req, res) => {
-        try { res.json({ ok: true, check: service.checkContinuity(req.params.episodeId, req.body) }); }
+    router.post<Record<string, string>>(`${base}/continuity/check`, async (req, res) => {
+        try { res.json({ ok: true, check: await service.checkContinuity(req.params.episodeId, req.body) }); }
         catch (error) { handle(res, error); }
     });
     if (base === "/drama/episodes/:episodeId/production") router.post("/canvas/production/hash", (req, res) => {
@@ -162,15 +162,15 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             if (req.body?.action === "compile") {
                 const input = productionCompileSchema.parse(req.body.request);
                 res.json({ ok: true, preflight: await compilations.preflight(req.params.episodeId, input.expectedRevision, input.director, input.scope) });
-            } else res.json({ ok: true, preflight: service.preflight(req.params.episodeId, req.body) });
+            } else res.json({ ok: true, preflight: await service.preflight(req.params.episodeId, req.body) });
         }
         catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/prepare-targets`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/prepare-targets`, async (req, res) => {
         try {
             const input = productionWorkspaceSchemas.production_prepare_targets.omit({ kind: true, id: true }).parse(req.body);
             if (!runner) throw new Error("制作执行器不可用");
-            const prepared: ReturnType<EpisodeProductionRunner["prepareTargets"]> = runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId);
+            const prepared: Awaited<ReturnType<EpisodeProductionRunner["prepareTargets"]>> = await runner.prepareTargets(req.params.episodeId, input.expectedRevision, input.targets, input.operationId);
             const { layoutReceipt, ...production } = prepared;
             res.json({ ok: true, production: publicProductionRecord(production), ...(layoutReceipt ? { layoutReceipt } : {}), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
@@ -191,11 +191,11 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, promotion: service.promoteExistingSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/arrange-scene`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/arrange-scene`, async (req, res) => {
         try {
             const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), sceneId: z.string().min(1) }).parse(req.body);
             if (!runner) throw new Error("制作执行器不可用");
-            res.json({ ok: true, production: publicProductionRecord(runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId)), mediaSubmitted: false });
+            res.json({ ok: true, production: publicProductionRecord(await runner.arrangeScene(req.params.episodeId, input.sceneId, input.expectedRevision, input.operationId)), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
@@ -259,14 +259,14 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, ...service.exportMarkdown(req.params.episodeId, stage, version) });
         } catch (error) { handle(res, error); }
     });
-    router.get<Record<string, string>>(`${base}/impact`, (req, res) => {
+    router.get<Record<string, string>>(`${base}/impact`, async (req, res) => {
         try {
             const stage = req.query.stage;
             if (stage !== "script" && stage !== "shots" && stage !== "director") throw new Error("stage 必须为 script 或 shots");
-            res.json({ ok: true, impact: service.previewImpact(req.params.episodeId, stage) });
+            res.json({ ok: true, impact: await service.previewImpact(req.params.episodeId, stage) });
         } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/ops`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/ops`, async (req, res) => {
         const startedAt = performance.now();
         let serviceMs: number | undefined;
         const stages: Record<string, number> = {};
@@ -279,7 +279,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         }));
         try {
             const serviceStartedAt = performance.now();
-            const production = service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
+            const production = await service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
             serviceMs = Math.round(performance.now() - serviceStartedAt);
             res.json({ ok: true, production: publicProductionRecord(production) });
             queueMicrotask(() => refreshes.wake(req.params.episodeId));
@@ -294,25 +294,25 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json(production ? { ok: true, found: true, production: publicProductionRecord(production) } : { ok: true, found: false });
         } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/publish`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/publish`, async (req, res) => {
         try {
-            const production = service.publish(req.params.episodeId, req.body);
+            const production = await service.publish(req.params.episodeId, req.body);
             res.json({ ok: true, production: publicProductionRecord(production) });
         } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/restore`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/restore`, async (req, res) => {
         try {
             const { version, operationId, expectedRevision } = req.body || {};
             if (!Number.isInteger(version) || !Number.isInteger(expectedRevision) || typeof operationId !== "string" || !operationId) throw new Error("缺少有效版本、operationId 或 expectedRevision");
-            res.json({ ok: true, production: publicProductionRecord(service.restore(req.params.episodeId, version, operationId, expectedRevision)) });
+            res.json({ ok: true, production: publicProductionRecord(await service.restore(req.params.episodeId, version, operationId, expectedRevision)) });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/runs/:version`, (req, res) => {
         try { res.json({ ok: true, run: service.run(req.params.episodeId, Number(req.params.version)) }); } catch (error) { handle(res, error); }
     });
-    router.post<Record<string, string>>(`${base}/runs`, (req, res) => {
+    router.post<Record<string, string>>(`${base}/runs`, async (req, res) => {
         try {
-            const run = service.startBatch(req.params.episodeId, req.body);
+            const run = await service.startBatch(req.params.episodeId, req.body);
             res.json({ ok: true, run: batchReceipt(run) });
             if (run.status === "pending") void runner?.runBatch(req.params.episodeId, run.runId);
         } catch (error) { handle(res, error); }

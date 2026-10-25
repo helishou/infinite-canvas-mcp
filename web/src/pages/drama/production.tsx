@@ -1875,6 +1875,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     try {
       const planned = createManualDirectorAsset(source, {
         id: assetId, ...(entityId ? { entityId } : {}), subjectId, kind, name, description,
+        ...(kind === "character" ? {
+          voiceDescription: String(metadata.characterVoiceDescription || ""),
+          voice: { url: String(metadata.characterVoiceUrl || ""), name: String(metadata.characterVoiceName || ""), storageKey: String(metadata.characterVoiceStorageKey || ""), assetId: String(metadata.characterVoiceAssetId || "") },
+        } : {}),
         prompt: String(metadata.sceneColorCardPrompt || description || name), purpose: description || name,
         canvasScope: "episode", registerSubject: isSubjectPromptAssembly(source), ownerKind: "episode", ownerId: productionOwner.id,
       });
@@ -2083,7 +2087,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       const ops: ProductionOperation[] = [];
       for (const boundary of input.boundaries) {
         const index = segments.findIndex(segment => String(segment.id || "") === boundary.targetId);
-        if (index < 0) throw new Error(`正式制作 Clip 不存在：${boundary.targetId}`);
+        // 批量设置可能遇到源 Clip 已移除但画布尚存的旧 H3 投影；跳过它并继续保存有效边界。
+        if (index < 0) {
+          if (input.requireNext) throw new Error(`正式制作 Clip 不存在：${boundary.targetId}`);
+          continue;
+        }
         const next = segments[index + 1];
         if (!next) {
           if (input.requireNext) throw new Error("当前 H3 Clip 没有相邻的下一段，无法登记续段衔接");
@@ -2092,7 +2100,13 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const to = String(next.id || "");
         if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
         const previous = director.boundaries.find(edge => edge.from === boundary.targetId && edge.to === to);
-        if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim()) continue;
+        const canvasSegment = canvasNodes.flatMap(node => Array.isArray(node.metadata?.segments) ? node.metadata.segments : [])
+          .find(segment => String((segment.productionClipProjection as Record<string, unknown> | undefined)?.targetId || "") === boundary.targetId);
+        const projectionOutOfSync = canvasSegment && (
+          canvasSegment.tailFrameContinuation !== boundary.tailFrameContinuation
+          || canvasSegment.motionContextEnabled !== boundary.motionContextEnabled
+        );
+        if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim() && !projectionOutOfSync) continue;
         ops.push({ type: "set_director_boundary", boundary: {
           from: boundary.targetId, to, tailFrame: boundary.tailFrameContinuation, motionContext: boundary.motionContextEnabled,
           reason: "由场次 H3 节点续段衔接设置",

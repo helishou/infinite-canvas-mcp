@@ -1,24 +1,21 @@
 /**
  * 上传 RunningHub 前的收尾处理：在输出节点后面自动接上两个节点
  *
- * 图像输出（SaveImage / PreviewImage …）：
- *   SaveImage.images ──▶ Play Sound KJ(any_input) ──any_output──▶ Save Image To Local(images)
+ *   <输出节点> ──▶ Play Sound KJ(any_input) ──any_output──▶ Save Image To Local(images)
  *
- * 视频输出（SaveVideo / VHS_VideoCombine …）：
- *   SaveVideo.video ──▶ Play Sound KJ(any_input)          ← 收尾/落地产出，保证在视频编码之后执行
- *   视频帧来源.IMAGE ──▶ Save Image To Local(images)       ← 只吃 IMAGE，所以接同一条链上的帧来源
- *
- * 为什么视频不能像图像那样串成一条：
- * `SaveImageToLocal` 的 images 必须是 IMAGE（源码里 `images: ("IMAGE",)`，实现直接取 `images[0].shape`）；
- * 把 VIDEO / VHS_FILENAMES 经 any_output 灌进去会在运行时报错。所以视频链拆成两条——
- * Play Sound 接视频输出（任何类型都行），Save Image To Local 接视频帧来源（通常是 VAEDecode）。
+ * 图像与视频输出都是这一条链：`any_input/any_output` 是万能类型（`*`），视频输出的
+ * VIDEO / VHS_FILENAMES 也能接，用户明确要求 Save Image To Local 挂在 Play Sound 后面。
  *
  * 另外 `file_path` 不能留空：mixlab 的实现会走 `os.makedirs("")` 抛 FileNotFoundError，所以默认给 "output"。
  *
- * 只处理 UI 格式（nodes/links）；API 格式由 OpenAPI 内联提交，不经这条路径。
+ * 两种格式各一条入口：
+ *  - `appendRunningHubOutputTail()`：UI 格式（nodes/links），接在输出节点的输出槽上；
+ *  - `appendRunningHubApiTail()`：API 格式（class_type/inputs），没有 links 也没有输出槽信息，
+ *    改成接输出节点的**数据来源**（`SaveImage.images` / `SaveVideo.video` 指向的那个节点），
+ *    效果一样：Play Sound 先拿到产出，再把图交给 Save Image To Local。
+ *
  * 幂等：图里已经有这两个节点时原样返回，不重复插。
  */
-
 type Json = Record<string, any>;
 
 /** 图像输出（sink）节点：有 IMAGE 输出，可以直接串成一条链。 */
@@ -59,13 +56,22 @@ export type TailOptions = {
 export type TailResult = {
     workflow: Json;
     added: boolean;
-    reason?: "not-ui" | "already" | "no-sink" | "video-no-image";
+    reason?: "not-ui" | "already" | "no-sink";
     /** 接在哪个输出上：图像直接串链，视频拆两条。 */
     kind?: "image" | "video";
     /** 视频链是否也接上了 Save Image To Local（找不到帧来源时为 false）。 */
     attachedSave?: boolean;
     /** 新插入的两个节点 id（Play Sound KJ、Save Image To Local）。 */
     nodeIds?: [number, number];
+};
+
+/** API 格式（class_type/inputs）的注入结果；没有 links 表，只能按输入来源接线。 */
+export type ApiTailResult = {
+    graph: Json;
+    added: boolean;
+    reason?: "already" | "no-sink";
+    kind?: "image" | "video";
+    nodeIds?: [string, string];
 };
 
 /**
@@ -76,8 +82,6 @@ export type TailResult = {
 const DEFAULT_SAVE_DIR = "output";
 
 const DEFAULTS: Required<TailOptions> = { audioPath: "", mode: "always", volume: 0.2, duration: 5, filePath: DEFAULT_SAVE_DIR };
-/** 向上找帧来源的最大层数，避免在大合集工作流里翻遍全图。 */
-const MAX_UPSTREAM_DEPTH = 8;
 
 function obj(value: unknown): Json {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
@@ -153,44 +157,6 @@ function collectSinks(nodes: Json[]): { image: Sink[]; video: Sink[] } {
 }
 
 /**
- * 从 sink 的输入出发向上找最近的 IMAGE 输出。
- * 视频节点自己不吃 IMAGE（SaveVideo 吃 VIDEO），所以得顺着依赖链往回找真正产帧的那个节点。
- */
-function findImageSource(nodes: Json[], linksById: Map<number, any[]>, sink: Json): { nodeId: number; slot: number } | undefined {
-    const byId = new Map<number, Json>();
-    for (const node of nodes) byId.set(num(node.id), node);
-
-    const inputLinks = arr(sink.inputs).map(obj).map((input) => num(input.link, Number.NaN)).filter((id) => Number.isFinite(id));
-    let frontier: any[][] = inputLinks.map((id) => linksById.get(id)).filter(Boolean) as any[][];
-    const seen = new Set<number>();
-
-    for (let depth = 0; depth < MAX_UPSTREAM_DEPTH && frontier.length; depth++) {
-        const next: any[][] = [];
-        for (const row of frontier) {
-            const rowId = num(row[0], Number.NaN);
-            if (Number.isFinite(rowId)) {
-                if (seen.has(rowId)) continue;
-                seen.add(rowId);
-            }
-            const originId = num(row[1]);
-            const originSlot = num(row[2]);
-            const origin = byId.get(originId);
-            if (!origin || !isActive(origin)) continue;
-            const out = outputSlots(origin)[originSlot];
-            if (out && str(out.type) === "IMAGE") return { nodeId: originId, slot: originSlot };
-            for (const input of arr(origin.inputs).map(obj)) {
-                const link = num(input.link, Number.NaN);
-                if (!Number.isFinite(link)) continue;
-                const upstream = linksById.get(link);
-                if (upstream) next.push(upstream);
-            }
-        }
-        frontier = next;
-    }
-    return undefined;
-}
-
-/**
  * 给 UI 格式工作流补上云端收尾节点。
  * 返回新对象；原对象不被修改。
  */
@@ -214,10 +180,6 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
 
     const settings = { ...DEFAULTS, ...options };
     const links = arr(workflow.links).map((link) => (Array.isArray(link) ? [...link] : link));
-    const linksById = new Map<number, any[]>();
-    for (const row of links) {
-        if (Array.isArray(row)) linksById.set(num(row[0], Number.NaN), row);
-    }
 
     const nextNodeId = maxOf([num(workflow.last_node_id), ...nodes.map((node) => num(node.id))], nodes.length);
     const playId = nextNodeId + 1;
@@ -230,27 +192,13 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
     const sinkOutput = sinkOutputs[sink.slot] || {};
     const sinkOutputType = str(sinkOutput.type, sink.kind === "video" ? "VIDEO" : "IMAGE");
 
-    // Play Sound 挂在输出节点后面：视频接 VIDEO/Filenames，图像接 IMAGE。
+    // 输出节点 → Play Sound：视频接 VIDEO/Filenames，图像接 IMAGE。
     const linkIn = ++nextLinkId;
     sinkOutputs[sink.slot] = { ...sinkOutput, links: [...arr(sinkOutput.links), linkIn] };
     sinkNode.outputs = sinkOutputs;
 
-    // Save Image To Local 只吃 IMAGE：图像用同一条链，视频去找帧来源。
-    let saveSource: { nodeId: number; slot: number } | undefined;
-    if (sink.kind === "image") {
-        saveSource = { nodeId: playId, slot: 0 };
-    } else {
-        saveSource = findImageSource(nodes, linksById, sinkNode);
-    }
-    const linkSave = saveSource ? ++nextLinkId : Number.NaN;
-    if (saveSource && saveSource.nodeId !== playId) {
-        const source = nodes.find((node) => num(node.id) === saveSource!.nodeId);
-        if (source) {
-            const slots = outputSlots(source);
-            slots[saveSource.slot] = { ...slots[saveSource.slot], links: [...arr(slots[saveSource.slot]?.links), linkSave] };
-            source.outputs = slots;
-        }
-    }
+    // Play Sound → Save Image To Local：两种输出都是这一条，串完即止（不写回来源节点）。
+    const linkSave = ++nextLinkId;
 
     const pos = arr(sinkNode.pos);
     const size = arr(sinkNode.size);
@@ -274,8 +222,8 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
             { widget: { name: "volume" }, name: "volume", type: "FLOAT" },
             { widget: { name: "duration" }, name: "duration", type: "FLOAT" },
         ],
-        // 图像链：any_output 继续喂给 Save Image To Local；视频链就到它为止。
-        outputs: [{ name: "any_output", type: "*", links: sink.kind === "image" ? [linkSave] : [] }],
+        // any_output 是万能类型，后面直接挂 Save Image To Local。
+        outputs: [{ name: "any_output", type: "*", links: [linkSave] }],
         properties: { "Node name for S&R": TAIL_PLAY_SOUND, cnr_id: "comfyui-kjnodes" },
         widgets_values: [settings.audioPath, settings.mode, settings.volume, settings.duration],
         widgets_values_named: { audio_path: settings.audioPath, mode: settings.mode, volume: settings.volume, duration: settings.duration },
@@ -284,13 +232,14 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
     const saveNode: Json = {
         id: saveId,
         type: TAIL_SAVE_LOCAL,
-        pos: [baseX + (sink.kind === "video" ? 0 : 315 + 90), baseY + (sink.kind === "video" ? 170 : 0)],
+        // 排成一行：Play Sound 在前，Save Image To Local 紧接在它右边。
+        pos: [baseX + 315 + 90, baseY],
         size: [330, 120],
         flags: {},
         order: lastOrder + 2,
         mode: 0,
         inputs: [
-            { name: "images", type: "IMAGE", link: saveSource ? linkSave : null },
+            { name: "images", type: "IMAGE", link: linkSave },
             { widget: { name: "file_path" }, name: "file_path", type: "STRING" },
         ],
         outputs: [],
@@ -301,8 +250,8 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
 
     // [link_id, origin_id, origin_slot, target_id, target_slot, type]
     links.push([linkIn, sinkId, sink.slot, playId, 0, sinkOutputType]);
-    // 图像链的起点是 Play Sound 的 any_output（*），视频链的起点是真实的 IMAGE 输出。
-    if (saveSource) links.push([linkSave, saveSource.nodeId, saveSource.slot, saveId, 0, saveSource.nodeId === playId ? "*" : "IMAGE"]);
+    // 第二段从 Play Sound 的 any_output（*）出来，万能类型，视频输出也走这条。
+    links.push([linkSave, playId, 0, saveId, 0, "*"]);
 
     return {
         workflow: {
@@ -310,12 +259,101 @@ export function appendRunningHubOutputTail(workflow: Json, options: TailOptions 
             nodes: [...nodes, playNode, saveNode],
             links,
             last_node_id: saveId,
-            last_link_id: saveSource ? linkSave : linkIn,
+            last_link_id: linkSave,
         },
         added: true,
         kind: sink.kind,
-        attachedSave: Boolean(saveSource),
-        reason: sink.kind === "video" && !saveSource ? "video-no-image" : undefined,
+        attachedSave: true,
         nodeIds: [playId, saveId],
     };
 }
+
+/** API 格式里输出节点的数据输入名：取第一个是连线的那个当「上游产出」。 */
+const API_SINK_INPUT_KEYS = ["images", "video", "frames", "pixels", "samples", "source"] as const;
+
+/** `[nodeId, slot]` 形式的连线；API 格式里连线就长这样。 */
+function asApiLink(value: unknown): [string, number] | null {
+    return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "number"
+        ? [value[0], value[1]]
+        : null;
+}
+
+/** API 图里最大数字 id，用于给新节点编号；遇到非数字 key 就跳过。 */
+function maxApiNodeId(graph: Json): number {
+    let max = 0;
+    for (const key of Object.keys(graph)) {
+        const value = Number(key);
+        if (Number.isFinite(value) && value > max) max = value;
+    }
+    return max;
+}
+
+function nextFreeApiId(graph: Json, start: number): number {
+    let id = start;
+    while (Object.hasOwn(graph, String(id))) id += 1;
+    return id;
+}
+
+/**
+ * 给 API 格式工作流补上云端收尾节点。
+ *
+ * API 图不保存输出槽信息，但输出节点本身是有输出的 —— ComfyUI 原生 `SaveImage` 就是
+ * `RETURN_TYPES = ("IMAGE",) / RETURN_NAMES = ("images",)`，所以照样能接在它后面：
+ *
+ *   <输出节点> ──▶ Play Sound KJ ──▶ Save Image To Local
+ *
+ * 接头一律写 `[输出节点, 0]`（第一个输出槽），与 UI 版排布一致。
+ * 返回新对象；原对象不被修改。
+ */
+export function appendRunningHubApiTail(graph: Json, options: TailOptions = {}): ApiTailResult {
+    const source = obj(graph);
+    const ids = Object.keys(source);
+    if (!ids.length) return { graph: source, added: false, reason: "no-sink" };
+    const types = new Set(ids.map((id) => str(obj(source[id]).class_type)));
+    if (types.has(TAIL_PLAY_SOUND) || types.has(TAIL_SAVE_LOCAL)) return { graph: source, added: false, reason: "already" };
+
+    // 视频优先，和 UI 版保持一致：图里同时有图像输出也接视频那条。
+    const picked: { id: string; kind: "image" | "video" }[] = [];
+    for (const id of ids) {
+        const node = obj(source[id]);
+        const type = str(node.class_type);
+        const kind = VIDEO_SINK_TYPES.has(type) ? "video" : IMAGE_SINK_TYPES.has(type) ? "image" : "";
+        if (!kind) continue;
+        const inputs = obj(node.inputs);
+        // 只认真的接了数据的输出节点：输入全是常量说明它不是这条链的末端。
+        if (!API_SINK_INPUT_KEYS.some((name) => asApiLink(inputs[name]))) continue;
+        picked.push({ id, kind });
+    }
+    const sink = picked.find((item) => item.kind === "video") || picked[0];
+    if (!sink) return { graph: source, added: false, reason: "no-sink" };
+
+    const settings = { ...DEFAULTS, ...options };
+    const playId = String(nextFreeApiId(source, maxApiNodeId(source) + 1));
+    const saveId = String(nextFreeApiId(source, Number(playId) + 1));
+
+    const playNode: Json = {
+        class_type: TAIL_PLAY_SOUND,
+        inputs: {
+            // 接输出节点自己的第一个输出槽：SaveImage 的 images、SaveVideo 的 video、VHS 的 VHS_FILENAMES。
+            any_input: [sink.id, 0],
+            audio_path: settings.audioPath,
+            mode: settings.mode,
+            volume: settings.volume,
+            duration: settings.duration,
+        },
+        _meta: { title: TAIL_PLAY_SOUND },
+    };
+    const saveNode: Json = {
+        class_type: TAIL_SAVE_LOCAL,
+        inputs: { images: [playId, 0], file_path: settings.filePath },
+        _meta: { title: TAIL_SAVE_LOCAL },
+    };
+
+    return {
+        graph: { ...source, [playId]: playNode, [saveId]: saveNode },
+        added: true,
+        kind: sink.kind,
+        nodeIds: [playId, saveId],
+    };
+}
+

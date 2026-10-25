@@ -28,7 +28,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
@@ -2328,10 +2328,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         if (error) void message.warning(error);
     }, [redoDocument, message]);
 
-    const createAndOpenProject = useCallback(() => {
+    const createAndOpenProject = useCallback(async () => {
         const id = createProject(t("canvas.defaultTitle", { count: useCanvasStore.getState().projects.length + 1 }));
+        const project = useCanvasStore.getState().projects.find((item) => item.id === id);
+        if (!project) return message.error(t("canvas.projectPage.notFound"));
+        try {
+            await createBackendProject(project as unknown as Record<string, unknown>);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+            return;
+        }
         navigate(`/canvas/${id}`);
-    }, [createProject, navigate, t]);
+    }, [createProject, message, navigate, t]);
 
     const deleteCurrentProject = useCallback(() => {
         deleteProjects([projectId]);
@@ -5177,6 +5185,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             size: generationConfig.size,
                             seconds: generationConfig.videoSeconds,
                             resolution: generationConfig.vquality,
+                            runTarget: configSource?.metadata?.videoRunTarget,
                             params: configSource?.metadata?.comfyParams,
                             clientTaskId,
                             projectId,

@@ -19,7 +19,7 @@ const styleSource = () => {
     return source;
 };
 
-test("scoped approval hydrates style lock from verified media without rewriting source", t => {
+test("scoped approval hydrates style lock from verified media without rewriting source", async t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "style-approval-preflight-"));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const file = path.join(root, "style.png");
@@ -30,20 +30,20 @@ test("scoped approval hydrates style lock from verified media without rewriting 
     input.assets.STYLE_MOTHER = { status: "approved", version: source.style_lock.anchor_version,
         sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") };
     const before = structuredClone(input);
-    const result = preflightCompilationDirector(input, (id, label) => id === "STYLE_MOTHER" && label === "asset" ? file : undefined);
+    const result = await preflightCompilationDirector(input, (id, label) => id === "STYLE_MOTHER" && label === "asset" ? file : undefined);
     assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
     assert.deepEqual(input, before);
     fs.writeFileSync(file, "changed");
-    assert.throws(() => preflightCompilationDirector(input, () => file), /字节已变化/);
+    await assert.rejects(() => preflightCompilationDirector(input, () => file), /字节已变化/);
 });
 
-test("purpose and reference policy examples repair the same pinned source without changing it", () => {
+test("purpose and reference policy examples repair the same pinned source without changing it", async () => {
     for (const field of ["purpose", "reference_policy"] as const) {
         const source = styleSource();
         if (field === "purpose") delete source.asset_plan[0].purpose;
         else delete source.asset_cards[0].reference_policy;
         const input = director(source), before = structuredClone(input);
-        const result = preflightCompilationDirector(input);
+        const result = await preflightCompilationDirector(input);
         const issue = result.diagnostics.find(item => field === "purpose" ? item.path.endsWith(".purpose") : item.message.includes("reference_policy must explicitly")) as any;
         assert.ok(issue?.example, JSON.stringify(result.diagnostics));
         if (field === "purpose") {
@@ -54,41 +54,41 @@ test("purpose and reference policy examples repair the same pinned source withou
         assert.deepEqual(input, before);
         const repaired = structuredClone(source);
         Object.assign(field === "purpose" ? repaired.asset_plan[0] : repaired.asset_cards[0], issue.example);
-        assert.equal(preflightCompilationDirector(director(repaired)).compileReady, true);
+        assert.equal((await preflightCompilationDirector(director(repaired))).compileReady, true);
     }
 });
 
-test("story-only source is diagnosed as not yet compilable without launching a compiler", () => {
-    const result = preflightCompilationDirector(director({ version: 2, brief: "A story still being writing", script_scenes: [], asset_cards: [], ledger: { contract_version: 2 }, prompt_assembly: { version: 2 }, subject_registry: [] }));
+test("story-only source is diagnosed as not yet compilable without launching a compiler", async () => {
+    const result = await preflightCompilationDirector(director({ version: 2, brief: "A story still being writing", script_scenes: [], asset_cards: [], ledger: { contract_version: 2 }, prompt_assembly: { version: 2 }, subject_registry: [] }));
     assert.equal(result.compileReady, false);
     assert.ok(result.diagnostics.some(item => item.code === "COMPILE_STAGE_NOT_READY"));
 });
 
-test("reference description examples retain declared asset identity, version and upload order", () => {
+test("reference description examples retain declared asset identity, version and upload order", async () => {
     const source = styleSource();
     source.asset_plan.push({ id: "ROOM", kind: "scene", version: "v1.0", purpose: "Lock the documented room geometry.", status: "planned", depends_on: ["STYLE_MOTHER"] });
     source.asset_cards.push({ ...structuredClone(source.asset_cards[0]), id: "ROOM", asset_kind: "scene", recipe: "dark", reference_policy: "required",
         references: [{ image: 1, asset_id: "STYLE_MOTHER", asset_version: source.asset_plan[0].version, role: "style", subject: "approved rendering medium", preserve: "palette and material response", exclude: "identity and composition" }] });
     for (const field of ["subject", "preserve", "exclude"]) {
         const broken = structuredClone(source); delete broken.asset_cards[1].references[0][field];
-        const input = director(broken), before = structuredClone(input), result = preflightCompilationDirector(input);
+        const input = director(broken), before = structuredClone(input), result = await preflightCompilationDirector(input);
         const issue = result.diagnostics.find(item => item.message === "reference image 1: " + field + " description required") as any;
         assert.ok(issue?.example);
         assert.deepEqual(input, before);
         Object.assign(broken.asset_cards[1], issue.example);
         const ref = broken.asset_cards[1].references[0];
         assert.equal(ref.asset_id, "STYLE_MOTHER"); assert.equal(ref.asset_version, source.asset_plan[0].version); assert.equal(ref.image, 1);
-        assert.equal(preflightCompilationDirector(director(broken)).compileReady, true);
+        assert.equal((await preflightCompilationDirector(director(broken))).compileReady, true);
     }
 });
 
-test("pinned asset validators collect plan fields and style binding defects together", () => {
+test("pinned asset validators collect plan fields and style binding defects together", async () => {
     const source = styleSource();
     source.asset_plan.push({ id: "ROOM", kind: "scene", version: "v1.0", purpose: "The same rural room used across the film", status: "planned", depends_on: ["STYLE_MOTHER"] });
     source.asset_cards.push({ ...structuredClone(source.asset_cards[0]), id: "ROOM", asset_kind: "scene", references: [] });
     delete source.asset_plan[0].kind; delete source.asset_plan[0].version; delete source.asset_plan[0].purpose;
     const input = director(source), before = structuredClone(input);
-    const result = preflightCompilationDirector(input);
+    const result = await preflightCompilationDirector(input);
     const paths = result.diagnostics.map(item => item.path);
     for (const field of ["kind", "version", "purpose"]) assert.ok(paths.includes(`director.source.asset_plan.0.${field}`), JSON.stringify(result.diagnostics));
     assert.ok(result.diagnostics.some(item => item.code === "STYLE_REFERENCE_MISSING" && item.targetId === "ROOM"));
@@ -96,27 +96,27 @@ test("pinned asset validators collect plan fields and style binding defects toge
     assert.deepEqual(input, before);
 });
 
-test("planned style mother remains compilable without falsely requiring generated media", () => {
+test("planned style mother remains compilable without falsely requiring generated media", async () => {
     const input = director(styleSource()), before = structuredClone(input);
-    const result = preflightCompilationDirector(input);
+    const result = await preflightCompilationDirector(input);
     assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
     assert.deepEqual(input, before);
 });
 
-test("compilation can rebuild stale receipts and retain an unfinished video draft", () => {
+test("compilation can rebuild stale receipts and retain an unfinished video draft", async () => {
     const source = styleSource();
     const input = director(source);
     input.artifacts = [{ id: "old", kind: "image", targetId: "STYLE_MOTHER", prompt: "Old prompt to replace", sha256: "0".repeat(64), sourceHash: "1".repeat(64), status: "ready", references: [], receipt: { sourceHash: "1".repeat(64), promptHash: "0".repeat(64), engineRuntimeId: "old", validator: "old" } }];
-    assert.equal(preflightCompilationDirector(input).compileReady, true, "previous output receipts must not block recompiling authored source");
+    assert.equal((await preflightCompilationDirector(input)).compileReady, true, "previous output receipts must not block recompiling authored source");
     source.fps_num = 24; source.fps_den = 1;
     source.shots = [{ id: "SHOT_1", duration_frames: 96 }];
     source.segments = [{ id: "SEG001", mode: "T2VA", mode_lock: "T2VA", mode_selection_reason: "This establishing scene has no image-reference requirement.", shot_ids: ["SHOT_1"], summary: "A planned establishing view of the rural house." }];
-    const draft = preflightCompilationDirector(director(source));
+    const draft = await preflightCompilationDirector(director(source));
     assert.equal(draft.compileReady, true, JSON.stringify(draft.diagnostics));
     assert.ok(draft.diagnostics.some(item => item.code === "COMPILE_VIDEO_DRAFT" && item.severity === "warning"));
 });
 
-test("continuity boundary diagnostics remain visible but do not block prompt compilation", () => {
+test("continuity boundary diagnostics remain visible but do not block prompt compilation", async () => {
     const source = styleSource();
     source.fps_num = 24; source.fps_den = 1;
     source.shots = [{ id: "SHOT_A", duration_frames: 96 }, { id: "SHOT_B", duration_frames: 96 }];
@@ -126,14 +126,14 @@ test("continuity boundary diagnostics remain visible but do not block prompt com
     ];
     const input = director(source);
     input.boundaries = [];
-    const result = preflightCompilationDirector(input);
+    const result = await preflightCompilationDirector(input);
     const continuity = result.diagnostics.filter(item => item.code.includes("CONTINUITY"));
     assert.ok(continuity.length > 0, JSON.stringify(result.diagnostics));
     assert.ok(continuity.every(item => item.severity === "warning" && item.blockingActions?.length === 0), JSON.stringify(continuity));
     assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
 });
 
-test("a missing incoming continuity boundary remains a warning at compile preflight", () => {
+test("a missing incoming continuity boundary remains a warning at compile preflight", async () => {
     const source = styleSource();
     source.fps_num = 24; source.fps_den = 1;
     source.shots = [{ id: "SHOT_A", duration_frames: 96 }, { id: "SHOT_B", duration_frames: 96 }];
@@ -143,7 +143,7 @@ test("a missing incoming continuity boundary remains a warning at compile prefli
     ];
     const input = director(source);
     input.boundaries = [];
-    const result = preflightCompilationDirector(input);
+    const result = await preflightCompilationDirector(input);
     const missing = result.diagnostics.filter(item => item.code === "MISSING_CONTINUITY_BOUNDARY");
     assert.equal(missing.length, 1, JSON.stringify(result.diagnostics));
     assert.equal(missing[0].severity, "warning");

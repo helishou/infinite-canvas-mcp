@@ -105,13 +105,24 @@ const SCENE_PRESERVING_STYLES: Readonly<Record<string, string>> = {
     ].join(" "),
 };
 
+const SCENE_PRESERVING_INSTRUCTION = "Apply this style consistently as color grading and image texture to the specified scene. Preserve the described location, background, time of day, lighting direction, framing, character appearance and actions throughout every shot; scene and shot instructions take priority over the style treatment.";
+
+function withScenePreservingInstruction(text: string): string {
+    const style = text.trim();
+    if (!style || style.includes(SCENE_PRESERVING_INSTRUCTION)) return style;
+    return `${style} ${SCENE_PRESERVING_INSTRUCTION}`;
+}
+
 export const H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = ORIGINAL_H3_STYLE_TEMPLATES.map((template) => ({
     ...template,
-    text: SCENE_PRESERVING_STYLES[template.id] ?? template.text,
+    text: withScenePreservingInstruction(SCENE_PRESERVING_STYLES[template.id] ?? template.text),
 }));
 
 export function resolveH3StyleTemplates(custom: unknown): H3StyleTemplate[] {
-    const overrides = normalizeH3CustomStyleTemplates(custom);
+    const overrides = normalizeH3CustomStyleTemplates(custom).map((template) => ({
+        ...template,
+        text: withScenePreservingInstruction(template.text),
+    }));
     const byId = new Map(overrides.map((item) => [item.id, item]));
     return [
         ...H3_STYLE_TEMPLATES.map((item) => byId.get(item.id) || item),
@@ -124,7 +135,8 @@ export type H3StyleTemplateId = string;
 
 export function styleTemplateText(id: H3StyleTemplateId | null | undefined, custom: unknown = []): string {
     if (!id) return "";
-    return resolveH3StyleTemplates(custom).find((template) => template.id === id)?.text || "";
+    const text = resolveH3StyleTemplates(custom).find((template) => template.id === id)?.text || "";
+    return withScenePreservingInstruction(text);
 }
 
 export function isH3StyleTemplateId(id: unknown, custom: unknown = []): id is H3StyleTemplateId {
@@ -139,7 +151,13 @@ export function matchStyleTemplatePrefix(text: string, custom: unknown = []): { 
     const body = text.trim();
     if (!body) return null;
     // 模板之间有共享句，先按文本长度降序匹配最长的完整段落。
-    const candidates = [...resolveH3StyleTemplates(custom), ...ORIGINAL_H3_STYLE_TEMPLATES]
+    const candidates = [
+        ...resolveH3StyleTemplates(custom).flatMap((template) => [
+            { ...template, text: withScenePreservingInstruction(template.text) },
+            template,
+        ]),
+        ...ORIGINAL_H3_STYLE_TEMPLATES,
+    ]
         .sort((left, right) => right.text.length - left.text.length);
     for (const template of candidates) {
         const index = body.indexOf(template.text);

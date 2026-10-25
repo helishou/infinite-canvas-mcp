@@ -22,10 +22,11 @@ const hash = (value: unknown) => crypto.createHash("sha256").update(canonicalPro
  */
 export function compilationInputsUnchanged(
     identity: { engineRuntimeId: string; compilerInputFingerprint: string; baselineHash: string; scope?: CompilationScope; scopeHash?: string | undefined },
-    latest: { director?: DirectorProduction; input?: DirectorProduction; manifestHash: string },
+    latest: { director?: DirectorProduction; input?: DirectorProduction; manifestHash: string; activeRuntimeId?: string },
 ) {
     if (!latest.director || !latest.input) return false;
     if (latest.input.engine.runtimeId !== identity.engineRuntimeId) return false;
+    if (latest.activeRuntimeId && latest.activeRuntimeId !== identity.engineRuntimeId) return false;
     if (latest.manifestHash !== identity.compilerInputFingerprint) return false;
     return identity.scope
         ? compilationScopeInput(latest.input, identity.scope).inputHash === identity.scopeHash
@@ -548,7 +549,7 @@ export class ProductionCompilationService {
         const compileInput = resolveCompilerDirectorFiles(compileInputBase, references);
         const result = await new Promise<any>((resolve, reject) => {
             const worker = new Worker(`const { parentPort, workerData } = require("node:worker_threads");
-                (async () => { const engine = await import(workerData.module); parentPort.postMessage(engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
+                (async () => { const engine = await import(workerData.module); parentPort.postMessage(await engine.preflightCompilationDirector(workerData.director, (id, label) => workerData.references[id + "\\0" + label])); })().catch(error => parentPort.postMessage({ error: error.message }));`, { eval: true, workerData: { module: import.meta.resolve("@basketikun/canvas-agent/skills/acheng"), director: compileInput, references } });
             let delivered = false;
             worker.once("message", message => { delivered = true; message.error ? reject(new Error(message.error)) : resolve(message); }); worker.once("error", reject);
             worker.once("exit", code => { if (!delivered) reject(new Error(`预检执行单元退出 (${code})`)); });
@@ -626,7 +627,7 @@ export class ProductionCompilationService {
             artifact.receipt = { ...artifact.receipt, diagnostics: { ...receiptDiagnostics, blockers: [...new Set([...prior, ...messages])] } };
         }
     }
-    private applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[], targetIds?: string[]) {
+    private async applyContinuityGate(id: string, director: DirectorProduction, diagnostics: any[], targetIds?: string[]) {
         if ((director.source.ledger as any)?.contract_version !== 2 || typeof (this.service as any).continuityForDirector !== "function") return undefined;
         const artifacts = director.artifacts.filter(item => item.kind === "h3" && item.status === "ready" && (!targetIds || targetIds.includes(item.targetId)));
         let continuity = this.service.continuityForDirector(id, director);
@@ -635,7 +636,7 @@ export class ProductionCompilationService {
             // 编译前没有有效回执：自动执行一次正式连续性检查生成回执，再用新回执评估门禁；
             // 检查本身失败时回退为原有告警行为，不阻塞编译。
             try {
-                continuity = this.service.autoRecordContinuityForDirector(id, director);
+                continuity = await this.service.autoRecordContinuityForDirector(id, director);
                 autoChecked = true;
             } catch (error) {
                 console.warn("COMPILATION_CONTINUITY_AUTO_CHECK_FAILED", error instanceof Error ? `${error.name}: ${error.message}` : String(error));
@@ -732,7 +733,7 @@ export class ProductionCompilationService {
                         (async () => { const engine = await import(workerData.module);
                           const contract = await import(workerData.contractModule);
                           const resolveRef = (targetId, label) => workerData.references[targetId + "\\0" + label];
-                          const checked = engine.preflightCompilationDirector(workerData.director, resolveRef);
+                          const checked = await engine.preflightCompilationDirector(workerData.director, resolveRef);
                           const blocking = checked.diagnostics.filter(item => contract.diagnosticBlocksAction(item, "compile"));
                           const globalCodes = new Set(workerData.globalCompileBlockerCodes);
                           const global = blocking.filter(item => !item.targetId && globalCodes.has(item.code));
@@ -767,12 +768,13 @@ export class ProductionCompilationService {
                 compiled.diagnostics = [...job.diagnostics, ...compiled.diagnostics];
                 this.applyTargetCompileBlocks(compiled.director, compiled.diagnostics);
                 compiled.director = this.stabilizeCompiledDirector(compiled.director);
-                const continuityReceipt = this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics, projection?.targetIds);
+                const continuityReceipt = await this.applyContinuityGate(job.id, compiled.director, compiled.diagnostics, projection?.targetIds);
                 job.continuityReceipt = continuityReceipt;
                 const latest = this.service.get(job.id), latestDirector = latest.draft.director;
+                const latestRuntimeDirector = latestDirector ? this.compilationDirector(latestDirector) : undefined;
                 const latestDiagnostics: ProductionDiagnostic[] = [];
                 const latestInput = latestDirector && this.bindCanvasStyleAnchor(job.id,
-                    this.service.resolveSubjectPictureInputs(job.id, this.compilationDirector(latestDirector), job.scope?.targetIds, true, undefined, latestDiagnostics));
+                    this.service.resolveSubjectPictureInputs(job.id, this.compilationDirector(job.director), job.scope?.targetIds, true, undefined, latestDiagnostics));
                 let latestManifestHash = "";
                 const validationStarted = performance.now();
                 try { if (latestInput) latestManifestHash = await this.inputManifestFingerprint(job.id, job.owner, latestInput, job.scope, key, true); }
@@ -781,7 +783,7 @@ export class ProductionCompilationService {
                 const inputsUnchanged = compilationInputsUnchanged({
                     engineRuntimeId: job.director.engine.runtimeId, compilerInputFingerprint: job.compilerInputFingerprint ?? "",
                     baselineHash: job.baselineHash, scope: job.scope, scopeHash: job.scopeHash,
-                }, { director: latestDirector, input: latestInput, manifestHash: latestManifestHash });
+                }, { director: latestDirector, input: latestInput, manifestHash: latestManifestHash, activeRuntimeId: latestRuntimeDirector?.engine.runtimeId });
                 if (latestDirector) this.assertUnlockedTargets(latestDirector, job.scope);
                 if (!inputsUnchanged) {
                     job.status = "blocked";
@@ -911,7 +913,7 @@ export class ProductionCompilationService {
         if (expectedRevision > current.revision) throw new ProductionConflictError(current);
         if (!current.draft.director) throw new Error("缺少正式导演源稿");
         const preflightDirector = this.compilationDirector(candidate || current.draft.director);
-        const preflight = this.service.preflight(id, { action: "compile", request: { expectedRevision: current.revision, director: preflightDirector } });
+        const preflight = await this.service.preflight(id, { action: "compile", request: { expectedRevision: current.revision, director: preflightDirector } });
         const globalBlockers = preflight.diagnostics.filter(item => isGlobalCompilationBlocker(item));
         if (globalBlockers.length) throw new ProductionValidationError(globalBlockers);
         const operationId = `internal-prepare:${crypto.randomUUID()}`;
@@ -982,8 +984,8 @@ export class ProductionCompilationService {
             const preserved = structuredClone(latest); preserveCompilationProvenance(preserved);
             for (const assetId of packet.assetIds || []) if (packet.director.assets[assetId]) preserved.assets[assetId] = structuredClone(packet.director.assets[assetId]);
             const merged = { ...preserved, engine: packet.director.engine, artifacts: [...preserved.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
-            this.service.verifyCompilationBindings(id, merged);
-            const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
+            this.service.verifyCompilationBindings(id, merged, { allowUnreferencedAssetNodes: true });
+            const result = await this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
             const receipt = { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
             this.markApplied(this.packetJob(preparedId), receipt);
             return receipt;
@@ -992,8 +994,8 @@ export class ProductionCompilationService {
         const currentDirector = current.draft.director;
         if (!currentDirector || !packet.scope && hash(currentDirector) !== packet.baselineHash
             || packet.scope && compilationScopeInput(currentDirector, packet.scope).inputHash !== packet.scopeHash) throw new ProductionConflictError(current);
-        this.service.verifyCompilationBindings(id, packet.director);
-        const result = this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
+        this.service.verifyCompilationBindings(id, packet.director, { allowUnreferencedAssetNodes: true });
+        const result = await this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
         const receipt = { referenceSync: result.referenceSync, revision: result.revision, replayed: result.replayed === true, publishedVersion: result.publishedVersion, sourceHash: result.draft.director?.sourceHash, operationId: packet.operationId, mediaSubmitted: false };
         this.markApplied(this.packetJob(preparedId), receipt);
         return receipt;

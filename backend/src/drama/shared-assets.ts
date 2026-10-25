@@ -96,7 +96,8 @@ export function validateSharedAssetSourceIdentity(db: BackendDatabase, projectId
     const episode = db.getDramaEpisodeByCanvasId(projectId);
     const consumer = productionCanvasContext(db, projectId), canonical = productionCanvasContext(db, source.sourceProjectId);
     const name = source.assetId || source.sourceNodeId;
-    if (!episode || episode.dramaId !== source.dramaId || consumer.dramaId !== source.dramaId
+    const selfOwnedSharedCanvas = consumer.role === "shared-assets" && projectId === source.sourceProjectId && consumer.dramaId === source.dramaId;
+    if ((!selfOwnedSharedCanvas && (!episode || episode.dramaId !== source.dramaId || consumer.dramaId !== source.dramaId))
         || canonical.dramaId !== source.dramaId || canonical.role !== "shared-assets") {
         throw new Error(`共享素材「${name}」的分集或来源画布不属于当前剧目`);
     }

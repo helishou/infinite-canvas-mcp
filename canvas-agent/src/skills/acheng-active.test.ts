@@ -48,16 +48,16 @@ function fixture(t: test.TestContext) {
     return { home, old, next, activate, director };
 }
 
-test("old production contracts, preflight, compilation and continuity follow the active runtime", t => {
+test("old production contracts, preflight, compilation and continuity follow the active runtime", async t => {
     const f = fixture(t), before = structuredClone(f.director);
     const contract = getProductionContract(f.old.runtimeId);
     assert.equal(contract.engine.runtimeId, f.next.runtimeId);
     assert.match(contract.notice!, /deprecated/);
-    assert.ok(validateAchengSource(f.director, "edit").some(item => item.code === "ACTIVE_b"));
-    const preflight = preflightCompilationDirector(f.director);
+    assert.ok((await validateAchengSource(f.director, "edit")).some(item => item.code === "ACTIVE_b"));
+    const preflight = await preflightCompilationDirector(f.director);
     assert.equal(preflight.compileReady, true, JSON.stringify(preflight.diagnostics));
     assert.equal(preflight.engine?.runtimeId, f.next.runtimeId);
-    const continuity = auditAchengContinuity(f.director);
+    const continuity = await auditAchengContinuity(f.director);
     assert.equal(continuity.marker, "b");
     assert.equal(continuity.validatorRuntimeId, f.next.runtimeId);
     const result = compileAchengDirector(f.director, path.join(f.home, "output"));
@@ -71,21 +71,21 @@ test("old production contracts, preflight, compilation and continuity follow the
     f.activate(f.old);
     const captured = compileAchengDirector(f.director, path.join(f.home, "captured"), undefined, f.next.runtimeId);
     assert.equal(captured.director.engine.runtimeId, f.old.runtimeId);
-    assert.equal(preflightCompilationDirector(f.director, undefined, f.next.runtimeId).engine?.runtimeId, f.old.runtimeId);
+    assert.equal((await preflightCompilationDirector(f.director, undefined, f.next.runtimeId)).engine?.runtimeId, f.old.runtimeId);
     assert.equal(getProductionContract(f.next.runtimeId).engine.runtimeId, f.old.runtimeId);
 });
 
-test("missing and modified active runtimes diagnose failure without using a production's old runtime", t => {
+test("missing and modified active runtimes diagnose failure without using a production's old runtime", async t => {
     const f = fixture(t);
     fs.appendFileSync(path.join(f.next.path, "scripts", "canvas_source_contract.py"), "# tampered\n");
-    assert.ok(preflightDirector(f.director).diagnostics.some(item => item.code === "ENGINE_UNAVAILABLE"));
-    assert.equal(preflightCompilationDirector(f.director).compileReady, false);
+    assert.ok((await preflightDirector(f.director)).diagnostics.some(item => item.code === "ENGINE_UNAVAILABLE"));
+    assert.equal((await preflightCompilationDirector(f.director)).compileReady, false);
     assert.throws(() => getProductionContract(f.old.runtimeId), /已改变/);
     fs.unlinkSync(path.join(f.home, "skill-runtimes", "acheng-director", "active.json"));
-    assert.ok(preflightDirector(f.director).diagnostics.some(item => item.code === "ENGINE_UNAVAILABLE"));
+    assert.ok((await preflightDirector(f.director)).diagnostics.some(item => item.code === "ENGINE_UNAVAILABLE"));
 });
 
-test("an incompatible active source contract blocks compilation and preserves the old production", t => {
+test("an incompatible active source contract blocks compilation and preserves the old production", async t => {
     const f = fixture(t), before = structuredClone(f.director);
     const script = path.join(f.next.path, "scripts", "canvas_source_contract.py");
     const payload = { diagnostics: [{ code: "NEW_SOURCE_FIELD_REQUIRED", path: "director.source.new_field", message: "The active contract requires an authored field", severity: "error" }] };
@@ -93,7 +93,7 @@ test("an incompatible active source contract blocks compilation and preserves th
     fs.writeFileSync(script, text);
     const manifestFile = path.join(f.next.path, "canvas-engine.json"), manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
     manifest.files["scripts/canvas_source_contract.py"] = hash(text); fs.writeFileSync(manifestFile, JSON.stringify(manifest));
-    const result = preflightCompilationDirector(f.director);
+    const result = await preflightCompilationDirector(f.director);
     assert.equal(result.compileReady, false);
     assert.ok(result.diagnostics.some(issue => issue.code === "NEW_SOURCE_FIELD_REQUIRED"));
     assert.equal(result.engine?.runtimeId, f.next.runtimeId);

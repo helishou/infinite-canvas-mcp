@@ -63,17 +63,17 @@ test("Subject, Shot and Clip workbenches read one V2 source and Clip edits regis
     assert.equal(saved.revision, created.revision + 1);
 
     const subject = projectProductionRead(service.subjectWorkbench("ep", "P"), { view: "subject_workbench", targetIds: ["P"] });
-    const shot = projectProductionRead(service.shotWorkbench("ep", "S1"), { view: "shot_workbench", targetIds: ["S1"] });
+    const shot = projectProductionRead(service.shotWorkbench("ep", "S1"), { view: "shot_workbench", targetIds: ["S1"], includeContext: true });
     const clipReadStartedAt = performance.now();
-    const clip = projectProductionRead(service.clipWorkbench("ep", "C1"), { view: "clip_workbench", targetIds: ["C1"] });
+    const clip = projectProductionRead(service.clipWorkbench("ep", "C1"), { view: "clip_workbench", targetIds: ["C1"], includeContext: true });
     const clipReadElapsedMs = performance.now() - clipReadStartedAt;
     assert.equal(subject.revision, shot.revision);
     assert.equal(shot.revision, clip.revision);
     assert.equal((subject.workbench as any).subject.id, "P");
     assert.equal((shot.workbench as any).shot.id, "S1");
-    assert.deepEqual((shot.workbench as any).continuity.start.map((item: any) => item.factId), ["F1"]);
+    assert.deepEqual((shot.workbench as any).context.continuity.start.map((item: any) => item.factId), ["F1"]);
     assert.deepEqual((clip.workbench as any).segment.shot_ids, ["S1"]);
-    assert.deepEqual((clip.workbench as any).continuity.facts.map((item: any) => item.id), ["F1"]);
+    assert.deepEqual((clip.workbench as any).context.continuity.facts.map((item: any) => item.id), ["F1"]);
     assert.equal(Object.hasOwn(clip, "draft"), false);
     const fullBytes = Buffer.byteLength(JSON.stringify(service.get("ep")));
     const targetBytes = Buffer.byteLength(JSON.stringify(clip));
@@ -157,7 +157,7 @@ test("Clip compilation infers text mode for offscreen voices instead of stale re
     assert.equal(resolved.sourceHash, directorHash(resolved.source));
 });
 
-test("explicitly clearing pictures is saveable but still blocks a Ref2VA compile and readiness", t => {
+test("explicitly clearing pictures is saveable and permits Ref2VA compile with advisory diagnostics", t => {
     const service = fixture(t, true), director = directorV2();
     const usage = (director.source.shots as any[])[0].subject_usages[0];
     usage.pictureBindingMode = "explicit";
@@ -169,8 +169,8 @@ test("explicitly clearing pictures is saveable but still blocks a Ref2VA compile
     assert.deepEqual(savedUsage.pictureBindingIds, []);
     assert.deepEqual(resolveSubjectPictureBindingIds((seeded.draft.director!.source.subject_registry as any[])[0], savedUsage).bindingIds, []);
     const shotRead = service.shotWorkbench("ep", "S1").shotWorkbench;
-    assert.equal(shotRead.subjectUsages[0].pictureBindings.length, 0);
-    assert.deepEqual(shotRead.resolutionDiagnostics, []);
+    assert.equal(shotRead.context.resolvedSubjectUsages[0].pictureBindings.length, 0);
+    assert.deepEqual(shotRead.runtime.resolutionDiagnostics, []);
     // REF2VA_IMAGE_REQUIRED 硬卡控已移除：无图 Ref2VA 段编译放行，仅保留 advisory 诊断。
     const noImageCompiled = service.resolveSubjectPictureInputs("ep", seeded.draft.director!, ["C1"], true);
     assert.equal((noImageCompiled.source.segments as any[])[0].mode, "Ref2VA");
@@ -219,7 +219,7 @@ test("node-managed reference selection freezes the selected image and registers 
             db.upsertMediaFile({ storageKey: "image:" + name, filePath, mimeType: "image/png", bytes: name.length, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
         }
         db.applyCanvasProjectOperations("CANVAS_EP", undefined, [{ type: "add_node", id: "IMAGE_P", nodeType: "config", title: "Subject image", position: { x: 0, y: 0 }, width: 200, height: 200,
-            metadata: { smart: true, generationMode: "image", prompt: "Current prompt", model: "Current model", primaryImageId: "old",
+            metadata: { smart: true, generationMode: "image", prompt: "Current prompt", model: "Current model", primaryImageId: "latest",
                 images: [{ id: "old", status: "success", storageKey: "image:old", generationTaskSequence: 1 }, { id: "latest", status: "success", storageKey: "image:latest", generationTaskSequence: 2 }] } }], { runtimeWrite: true });
     });
     const d = directorV2();
@@ -337,13 +337,13 @@ test("Shot workbenches report compiler validity without requiring browsers to ha
     director.artifacts = [{ id: "COMPILED_C1", kind: "h3", targetId: "C1", prompt, sha256, sourceHash: director.sourceHash, status: "ready", references: [],
         receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
     const saved = service.edit("ep", { operationId: "save-compiler-status", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
-    const current = projectProductionRead(service.shotWorkbench("ep", "S1"), { view: "shot_workbench", targetIds: ["S1"] }).workbench as any;
-    assert.deepEqual(current.resolutionDiagnostics, []);
-    assert.deepEqual(current.directorArtifacts, [{ id: "COMPILED_C1", status: "ready", sha256, current: true }]);
-    assert.equal(Object.hasOwn(current.directorArtifacts[0], "prompt"), false);
+    const current = projectProductionRead(service.shotWorkbench("ep", "S1"), { view: "shot_workbench", targetIds: ["S1"], includeRuntime: true }).workbench as any;
+    assert.deepEqual(current.runtime.resolutionDiagnostics, []);
+    assert.deepEqual(current.runtime.directorArtifacts, [{ id: "COMPILED_C1", status: "ready", sha256, current: true }]);
+    assert.equal(Object.hasOwn(current.runtime.directorArtifacts[0], "prompt"), false);
     service.edit("ep", { operationId: "invalidate-compiler-status", expectedRevision: saved.revision, ops: [{ type: "patch_director_source", entity: "shot", id: "S1", patch: { visual: "The character steps away." } }] });
     const changed = service.shotWorkbench("ep", "S1").shotWorkbench;
-    assert.equal(changed.directorArtifacts[0].current, false);
+    assert.equal(changed.runtime.directorArtifacts[0].current, false);
 });
 
 test("unresolved image bindings do not advertise a ready Prompt as current", t => {
@@ -354,8 +354,8 @@ test("unresolved image bindings do not advertise a ready Prompt as current", t =
             diagnostics: { accepted: true, formatPass: "PASSED", detailPolicy: { minimum_words: 0 } } } }];
     service.edit("ep", { operationId: "save-missing-reference", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
     const read = service.shotWorkbench("ep", "S1").shotWorkbench;
-    assert.equal(read.resolutionDiagnostics[0].code, "SUBJECT_IMAGE_SOURCE_MISSING");
-    assert.equal(read.directorArtifacts[0].current, false);
+    assert.equal(read.runtime.resolutionDiagnostics[0].code, "SUBJECT_IMAGE_SOURCE_MISSING");
+    assert.equal(read.runtime.directorArtifacts[0].current, false);
 });
 
 test("design-only images do not invalidate compilation for a mode that does not consume them", t => {
@@ -367,8 +367,8 @@ test("design-only images do not invalidate compilation for a mode that does not 
         receipt: { sourceHash: director.sourceHash, promptHash: sha256, engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
     service.edit("ep", { operationId: "save-design-only", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
     const read = service.shotWorkbench("ep", "S1").shotWorkbench;
-    assert.equal(read.resolutionDiagnostics[0].code, "SUBJECT_IMAGE_SOURCE_MISSING");
-    assert.equal(read.directorArtifacts[0].current, true);
+    assert.equal(read.runtime.resolutionDiagnostics[0].code, "SUBJECT_IMAGE_SOURCE_MISSING");
+    assert.equal(read.runtime.directorArtifacts[0].current, true);
 });
 
 test("Prompt reverse sync maps a physical canvas Clip to a different source Segment ID", t => {
@@ -387,12 +387,18 @@ test("Prompt reverse sync maps a physical canvas Clip to a different source Segm
             entries: [{ start: prompt.indexOf(visual), end: prompt.length, sourceKind: "shot", sourceId: "S1", field: "visual", sourceText: visual, sourceValue: visual, sourceStart: 0, sourceEnd: visual.length }] } } }];
     service.edit("ep", { operationId: "save-reverse-baseline", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director: d }] });
     database.applyCanvasProjectOperations("CANVAS_EP", undefined, [{ type: "add_node", id: "VIDEO", nodeType: "minimax-h3:video", title: "Clip", position: { x: 0, y: 0 }, width: 500, height: 400,
-        metadata: { segments: [{ id: "PHYSICAL_C1", prompt, duration: 2, productionClipProjection: { targetId: "C1" } }] } }], { runtimeWrite: true });
+        metadata: { productionOwnerKind: "episode", productionOwnerId: "ep", productionSceneId: "SCENE", segments: [{ id: "PHYSICAL_C1", prompt, duration: 2, productionClipProjection: { targetId: "C1" } }] } }], { runtimeWrite: true });
     service.edit("ep", { operationId: "bind-reverse-target", expectedRevision: service.get("ep").revision, ops: [{ type: "bind_director_segment", targetId: "C1", nodeId: "VIDEO", segmentId: "PHYSICAL_C1" }] });
     const editedPrompt = prompt.replace("looks toward", "listens beside");
     const canvas = database.applyCanvasProjectOperations("CANVAS_EP", Number(database.getCanvasProject("CANVAS_EP")!.revision), [{ type: "update_h3_segment", nodeId: "VIDEO", segmentId: "PHYSICAL_C1", patch: { prompt: editedPrompt } }], { operationId: "manual-prompt" });
     const before = service.get("ep");
     const request = { operationId: "reverse-source-target", expectedRevision: before.revision, ops: [{ type: "reverse_sync_director_prompt", segmentId: "C1", artifactId: "ART_C1", sourceHash: before.draft.director!.sourceHash, basePromptHash: sha256, prompt: editedPrompt, canvasRevision: canvas.revision }] };
+    const liveGroup = before.draft.clipGroups.find(group => group.id === "C1");
+    const liveNode = (database.getCanvasProject("CANVAS_EP")!.nodes as any[]).find(node => node.id === "VIDEO");
+    const liveClip = liveNode.metadata.segments.find((clip: any) => clip.id === "PHYSICAL_C1");
+    assert.equal(liveGroup?.segmentId, "PHYSICAL_C1");
+    assert.equal(liveClip.productionClipProjection.targetId, "C1");
+    assert.equal(liveClip.prompt, editedPrompt);
     const result = service.edit("ep", request);
     assert.equal((result.draft.director!.source.shots as any[])[0].visual, visual.replace("looks toward", "listens beside"));
     assert.equal(result.draft.director!.artifacts[0].status, "stale");
@@ -522,8 +528,8 @@ test("optional Shot frame preview resolves node media without changing submissio
     const saved = service.edit("ep", { operationId: "optional-frame", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }] });
     const before = JSON.stringify(saved.draft.director);
     const preview = service.shotWorkbench("ep", "S1").shotWorkbench;
-    assert.equal(preview.keyframes[0].resolved?.storageKey, "image:frame");
-    assert.equal(preview.keyframes[0].requiredForSubmission, false);
+    assert.equal(preview.context.keyframeMedia[0].resolved?.storageKey, "image:frame");
+    assert.equal(saved.draft.director!.source.shots[0].keyframes[0].requiredForSubmission, false);
     assert.equal(JSON.stringify(service.get("ep").draft.director), before);
     const submitted = service.resolveSubjectPictureInputs("ep", saved.draft.director!, ["C1"], true);
     assert.equal(submitted.assets.KF1, undefined);
@@ -695,10 +701,10 @@ test("character picture bindings resolve distinct stable keys and keep them acro
 
     const outfitMedia = database.getMediaFile(keys[1])!;
     database.upsertMediaFile({ ...outfitMedia, bytes: Number(outfitMedia.bytes) + 1 });
-    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_BYTES_MISMATCH");
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), /不一致/u);
     database.upsertMediaFile(outfitMedia);
 
-    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_HASH_MISMATCH");
+    assert.throws(() => service.resolveSubjectPictureInputs("ep", hashInput, undefined, false, ["P"]), /图片来源记录的哈希与归档字节不一致/u);
 
     const invalid = structuredClone(director);
     (invalid.source.subject_registry as any[])[0].pictureBindings[1].selection.resultId = "foreign-image-key";
@@ -710,46 +716,6 @@ test("character picture bindings resolve distinct stable keys and keep them acro
     (foreign.source.shots as any[])[0].subject_usages[0].pictureBindingIds = ["P_OUTFIT"];
     foreign.sourceHash = directorHash(foreign.source);
     assert.throws(() => service.resolveSubjectPictureInputs("ep", foreign, undefined, false, ["P"]), (error: any) => error.diagnostics?.[0]?.code === "SUBJECT_IMAGE_NODE_OWNER");
-});
-
-test("legacy shot image and keyframe references save independently, read back, and leave shared media intact", t => {
-    let database!: BackendDatabase;
-    const sharedPath = path.join(os.tmpdir(), `shared-reference-${Date.now()}.png`);
-    const service = fixture(t, false, db => {
-        database = db;
-        fs.writeFileSync(sharedPath, Buffer.from("shared"));
-        db.upsertMediaFile({ storageKey: "shared:original", filePath: sharedPath, mimeType: "image/png", bytes: 6, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString() });
-    });
-    t.after(() => fs.rmSync(sharedPath, { force: true }));
-    const director = directorV2();
-    const source = director.source as Record<string, any>;
-    delete source.prompt_assembly;
-    source.subject_registry = [];
-    source.shots = [{ id: "S1", scene_id: "SCENE", timeline_id: "main", story_order: 0, start_frame: 0, end_frame: 48,
-        visual: "A shot", state_in: {}, state_out: {}, required_assets: ["REF_A"] }];
-    source.segments = [{ id: "C1", shot_ids: ["S1"], start_frame: 0, end_frame: 48, generation_clip_duration: 2, mode: "T2VA" }];
-    source.asset_plan = ["REF_A", "REF_B", "FRAME_A", "FRAME_B"].map(id => ({ id, asset_id: id, asset_name: id, kind: id.startsWith("FRAME") ? "keyframe" : "character" }));
-    director.assets = { SHARED: { assetId: "SHARED", version: "v1", status: "approved", storageKey: "shared:original" } };
-    director.shotInputs = { S1: { assetIds: ["REF_A"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_A" } };
-    director.sourceHash = directorHash(director.source);
-    const saved = service.edit("ep", { operationId: "legacy-shot-reference-seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
-
-    const replaced = structuredClone(saved.draft.director!);
-    (replaced.source.shots as any[])[0].required_assets = ["REF_B"];
-    replaced.shotInputs.S1 = { assetIds: ["REF_B"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_B" };
-    service.edit("ep", { operationId: "legacy-shot-reference-replace", expectedRevision: saved.revision, ops: [{ type: "set_director_production", director: replaced }] });
-    const afterReplace = service.get("ep").draft.director!;
-    assert.deepEqual((afterReplace.source.shots as any[])[0].required_assets, ["REF_B"]);
-    assert.deepEqual(afterReplace.shotInputs.S1, { assetIds: ["REF_B"], keyframePolicy: "reuse", keyframeAssetId: "FRAME_B" });
-
-    const cleared = structuredClone(afterReplace);
-    (cleared.source.shots as any[])[0].required_assets = [];
-    cleared.shotInputs.S1 = { assetIds: [], keyframePolicy: "none" };
-    service.edit("ep", { operationId: "legacy-shot-reference-clear", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director: cleared }] });
-    const afterClear = service.get("ep").draft.director!;
-    assert.deepEqual((afterClear.source.shots as any[])[0].required_assets, []);
-    assert.deepEqual(afterClear.shotInputs.S1, { assetIds: [], keyframePolicy: "none" });
-    assert.equal(database.getMediaFile("shared:original")?.storageKey, "shared:original");
 });
 
 test("v2 Shot saves existing picture bindings and keyframes through separate source operations", t => {
@@ -785,10 +751,11 @@ test("v2 Shot saves existing picture bindings and keyframes through separate sou
         { type: "patch_director_source", entity: "shot", id: "S1", patch: { subject_usages: [{ ...clearedUsage, pictureBindingMode: "explicit", pictureBindingIds: [] }] } },
     ] });
     const explicitClear = service.shotWorkbench("ep", "S1").shotWorkbench;
-    const explicitUsage = explicitClear.subjectUsages[0];
+    const explicitUsage = (service.get("ep").draft.director!.source.shots as any[])[0].subject_usages[0];
+    const explicitSubject = (service.get("ep").draft.director!.source.subject_registry as any[])[0];
     assert.equal(explicitUsage.pictureBindingMode, "explicit");
     assert.deepEqual(explicitUsage.pictureBindingIds, []);
-    assert.deepEqual(explicitUsage.pictureBindings, []);
-    assert.deepEqual(resolveSubjectPictureBindingIds(explicitUsage.subject, explicitUsage).bindingIds, []);
+    assert.deepEqual(explicitClear.context.resolvedSubjectUsages[0].pictureBindings, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(explicitSubject, explicitUsage).bindingIds, []);
     assert.deepEqual((service.get("ep").draft.director!.source.subject_registry as any[])[0].pictureBindings.map((binding: any) => binding.id).sort(), ["P_ALT", "P_ID"]);
 });

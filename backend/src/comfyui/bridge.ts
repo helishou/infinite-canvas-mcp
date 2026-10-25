@@ -381,16 +381,17 @@ export class ComfyUiBackend {
             if (controller.signal.aborted) return;
             await new Promise((resolve) => setTimeout(resolve, 2000));
             try {
-                const response = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal: controller.signal });
-                if (response.ok) {
-                    const history = await response.json() as Record<string, any>;
-                    const item = exactHistoryEntry(history, promptId);
+                const read = await readComfyHistory(comfyUrl, promptId, controller.signal);
+                if (read.kind === "history") {
+                    const item = exactHistoryEntry(read.history, promptId);
                     const statusStr = item?.status?.status_str;
                     if (statusStr === "error" || statusStr === "failed") throw new Error(extractComfyErrorMessage(item?.status));
                     const hasOutputs = !!(item?.outputs && typeof item.outputs === "object" && Object.keys(item.outputs).length > 0);
                     if (statusStr === "success" || item?.status?.completed || hasOutputs) {
                         if (!hasOutputs) throw new Error(`ComfyUI 执行结束但未产出任何输出，节点可能执行失败：${extractComfyErrorMessage(item?.status)}`);
                         const result = await inspectH3Result(attachH3ActualSubmission({ promptId, outputs: item!.outputs, media: await collectOutputMedia(item!.outputs, comfyUrl, this.deps.media, controller.signal), status: item!.status || {} }, submitted?.actualSubmission, promptId), this.deps.tasks.get(taskId)!.params, this.deps.media);
+                        const current = this.deps.tasks.get(taskId);
+                        if (controller.signal.aborted || !current || !["queued", "running"].includes(current.status)) return;
                         this.updateTask(taskId, { status: result.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result, ...(result.specification?.status === 'mismatch' ? { error: result.specification.issues.join('；') } : {}) });
                         this.deps.tasks.addEvent(taskId, "result", result);
                         return;
@@ -398,9 +399,8 @@ export class ComfyUiBackend {
                 }
             } catch (error) {
                 if (controller.signal.aborted) return;
-                // 瞬时网络错误（ComfyUI 抖动）继续等；确定性失败向上抛给 fail()
-                if (!(error instanceof Error) || /fetch failed|HTTP \d+|ECONN|socket/i.test(error.message)) continue;
-                throw error;
+                // 网络抖动和不完整 JSON 保留原 task/promptId 继续观察；确定性错误向上抛给 fail()。
+                if (!(error instanceof SyntaxError) && !isTransientComfyNetworkError(error)) throw error;
             }
             if (Date.now() - started > 60 * 60 * 1000) throw new Error(`恢复观察超时（1 小时）：目标 promptId ${promptId} 的 history 与 WebSocket 输出均不可用；未写入任何媒体，可从 ComfyUI 输出目录按 promptId 手动恢复。`);
         }
@@ -417,6 +417,8 @@ export class ComfyUiBackend {
             // GPU 显存交接：卸掉本地 LLM 引擎（:18080），让出整卡给 ComfyUI。
             // 条件式+幂等——交接脚本不存在或本地没启动 LLM 时就是 no-op，不影响生成。
             await freeLlmBeforeGenerate();
+            const completedTask = this.deps.tasks.get(task.id);
+            if (controller.signal.aborted || !completedTask || !["queued", "running"].includes(completedTask.status)) return;
             this.updateTask(task.id, { status: "running", progress: 0.05 });
             this.deps.tasks.addEvent(task.id, "status", { status: "running" });
             const result = preset.id === "minimax-h3" && task.params.autoSplit === true && typeof task.input.video === "string"
@@ -427,6 +429,8 @@ export class ComfyUiBackend {
                 executionCacheCleared = true;
             }
             const checked = await inspectH3Result(result, task.params, this.deps.media);
+            const current = this.deps.tasks.get(task.id);
+            if (controller.signal.aborted || !current || !["queued", "running"].includes(current.status)) return;
             this.updateTask(task.id, { status: checked.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result: checked, ...(checked.specification?.status === 'mismatch' ? { error: checked.specification.issues.join('；') } : {}) });
             this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
@@ -717,10 +721,9 @@ export class ComfyUiBackend {
                     console.warn(`[comfyui] WS 提前断开，退回 /history 轮询：${reason}`);
                     // 不再 throw，继续走下面的 /history 轮询
                 }
-                const historyResponse = await fetch(`${comfyUrl}/history/${encodeURIComponent(body.prompt_id)}`, { signal: controller.signal });
-                if (historyResponse.ok) {
-                    const history = await historyResponse.json() as Record<string, any>;
-                    const item = exactHistoryEntry(history, body.prompt_id);
+                const historyRead = await readComfyHistory(comfyUrl, body.prompt_id, controller.signal);
+                if (historyRead.kind === "history") {
+                    const item = exactHistoryEntry(historyRead.history, body.prompt_id);
                     const statusStr = item?.status?.status_str;
                     if (statusStr === "error" || statusStr === "failed") {
                         throw new Error(extractComfyErrorMessage(item?.status));
@@ -762,8 +765,8 @@ export class ComfyUiBackend {
                         missingHistoryCount = 0;
                         consecutiveMissingInQueue = 0;
                     }
-                } else {
-                    // /history/{prompt_id} 返回非 200（如 404）：与 item===undefined 同样对待。
+                } else if (historyRead.kind === "missing") {
+                    // A missing history entry is not proof that this prompt failed.
                     missingHistoryCount++;
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -841,7 +844,8 @@ export class ComfyUiBackend {
     }
 
     private fail(id: string, error: unknown) {
-        if (this.deps.tasks.get(id)?.status === "cancelled") return;
+        const current = this.deps.tasks.get(id);
+        if (!current || ["succeeded", "failed", "cancelled"].includes(current.status)) return;
         const message = error instanceof Error ? error.message : String(error);
         this.updateTask(id, { status: "failed", error: message });
         this.deps.tasks.addEvent(id, "error", { error: message });
@@ -2088,7 +2092,60 @@ function normalizeH3AspectRatio(value: string) {
     return normalized;
 }
 
-/** 带重试的 fetch：ComfyUI 刚执行完时输出文件可能还在落盘，瞬时 404 应重试而非放弃。 */
+const RETRYABLE_COMFY_HTTP_STATUSES = new Set([404, 408, 425, 429, 500, 502, 503, 504]);
+const TRANSIENT_COMFY_NETWORK_CODES = new Set([
+    "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN",
+    "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+]);
+
+function isRetryableComfyHttpStatus(status: number) {
+    return RETRYABLE_COMFY_HTTP_STATUSES.has(status);
+}
+
+/** ComfyUI/Undici 网络错误可能把具体 socket 错误放在 cause 链中。 */
+function isTransientComfyNetworkError(error: unknown) {
+    let current: unknown = error;
+    for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
+        const item = current as { code?: unknown; message?: unknown; cause?: unknown };
+        if (typeof item.code === "string" && TRANSIENT_COMFY_NETWORK_CODES.has(item.code)) return true;
+        if (typeof item.message === "string" && /fetch failed|socket hang up|network error|connection reset|connection refused|ECONN|ETIMEDOUT|timed? out|terminated|EAI_AGAIN|UND_ERR_/i.test(item.message)) return true;
+        current = item.cause;
+    }
+    return false;
+}
+
+export type ComfyHistoryRead = { kind: "history"; history: Record<string, any> } | { kind: "missing" } | { kind: "retry" };
+
+/** Read the exact submitted prompt's history without turning transport failures into task failures. */
+export async function readComfyHistory(comfyUrl: string, promptId: string, signal: AbortSignal): Promise<ComfyHistoryRead> {
+    if (signal.aborted) throw new Error("任务已取消");
+    let response: Response;
+    try {
+        response = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal });
+    } catch (error) {
+        if (signal.aborted) throw error;
+        if (isTransientComfyNetworkError(error)) return { kind: "retry" };
+        throw error;
+    }
+    if (response.status === 404) {
+        await response.body?.cancel().catch(() => undefined);
+        return { kind: "missing" };
+    }
+    if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        if (isRetryableComfyHttpStatus(response.status)) return { kind: "retry" };
+        throw new Error(`ComfyUI /history failed: HTTP ${response.status}`);
+    }
+    try {
+        return { kind: "history", history: await response.json() as Record<string, any> };
+    } catch (error) {
+        if (signal.aborted) throw error;
+        if (error instanceof SyntaxError || isTransientComfyNetworkError(error)) return { kind: "retry" };
+        throw error;
+    }
+}
+
+/** 有界重试：输出可能尚未落盘；临时服务错误也不能伪装成成功媒体。 */
 async function fetchWithRetry(url: string, signal: AbortSignal, attempts = 4, delayMs = 400): Promise<Response> {
     let lastError: unknown;
     for (let i = 0; i < attempts; i += 1) {
@@ -2096,10 +2153,14 @@ async function fetchWithRetry(url: string, signal: AbortSignal, attempts = 4, de
         try {
             const res = await fetch(url, { signal });
             if (res.ok) return res;
-            // 404 = 文件尚未落盘：重试等待；其它状态码直接返回交给上层处理
-            if (res.status === 404 && i < attempts - 1) { await new Promise((resolve) => setTimeout(resolve, delayMs)); continue; }
+            if (isRetryableComfyHttpStatus(res.status) && i < attempts - 1) {
+                await res.body?.cancel().catch(() => undefined);
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+                continue;
+            }
             return res;
         } catch (error) {
+            if (signal.aborted) throw new Error("任务已取消");
             lastError = error;
             if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
@@ -2139,7 +2200,10 @@ export async function collectOutputMedia(outputs: Record<string, any>, baseUrl: 
         const query = new URLSearchParams({ filename: String(item.filename), subfolder: String(item.subfolder || ""), type: String(item.type || "output") });
         const sourceUrl = `${baseUrl}/view?${query.toString()}`;
         const response = await fetchWithRetry(sourceUrl, signal);
-        if (!response.ok) return [{ url: sourceUrl, mimeType: mimeForOutput(item), filename: String(item.filename) }];
+        if (!response.ok) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new Error(`ComfyUI 输出归档失败：HTTP ${response.status}，文件 ${String(item.filename)}`);
+        }
         if (!response.body) throw new Error(`ComfyUI 输出没有媒体数据：${String(item.filename)}`);
         const stored = await mediaStore.storeStream(Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream), { name: String(item.filename), mimeType: mimeForOutput(item), category: "output" });
         return [{ url: mediaStore.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: String(item.filename), sourceUrl }];

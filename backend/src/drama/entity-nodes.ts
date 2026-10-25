@@ -70,6 +70,17 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
         if (!member) throw new Error("制作实体缺少正式画布布局");
         const node = nodes(project).find(node => node.id === member.nodeId);
         const nameKey = `${entity.kind}Name`, descriptionKey = `${entity.kind}Description`;
+        const characterRow = entity.kind === "character"
+            ? ((data.director!.source.character_registry as Array<Record<string, any>> || []).find(row => String(row.id || "") === entity.entityId))
+            : undefined;
+        const voice = characterRow?.voice && typeof characterRow.voice === "object" ? characterRow.voice : {};
+        const voiceProjection = characterRow && (Object.hasOwn(characterRow, "voice_description") || Object.hasOwn(characterRow, "voice") || Object.values(voice).some(Boolean)) ? {
+            characterVoiceDescription: String(characterRow.voice_description || ""),
+            characterVoiceUrl: String(voice.url || ""),
+            characterVoiceName: String(voice.name || ""),
+            characterVoiceStorageKey: String(voice.storageKey || ""),
+            characterVoiceAssetId: String(voice.assetId || ""),
+        } : {};
         const imageProjection = subjectImageForEntity(project, data.director!.source as Record<string, any>, owner, entity);
         const linkedPlan = planRows.find(plan => String(plan.entity_id || plan.id || plan.asset_id || "") === entity.entityId && plan.sharedSource);
         const sharedSource = linkedPlan?.sharedSource as { dramaId?: string; assetId?: string; sourceProjectId?: string; sourceNodeId?: string } | undefined;
@@ -78,10 +89,11 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
             : undefined;
         if (!node) return [{ type: "add_node", id: member.nodeId, nodeType: entity.kind, title: entity.name, position: member.position, width: member.size.width, height: member.size.height,
             metadata: { productionEntity: binding, [nameKey]: entity.name, [descriptionKey]: entity.description, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size,
-                ...(sharedAssetReference ? { sharedAssetReference } : {}), ...(imageProjection || {}) } }];
+                ...(sharedAssetReference ? { sharedAssetReference } : {}), ...voiceProjection, ...(imageProjection || {}) } }];
         if (node.type !== entity.kind) throw new Error("制作实体节点类型冲突，未覆盖原节点");
         if (node.metadata?.productionEntity && JSON.stringify(node.metadata.productionEntity) !== JSON.stringify(binding)) throw new Error("制作实体节点来源冲突");
         const metadata: Record<string, any> = { productionEntity: binding, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size };
+        Object.assign(metadata, voiceProjection);
         if (sharedAssetReference) metadata.sharedAssetReference = sharedAssetReference;
         if (imageProjection) Object.assign(metadata, imageProjection);
         const old = prior.get(`${entity.kind}:${entity.entityId}`);
@@ -152,7 +164,7 @@ export function removedSubjectEntityNodeOperations(project: Record<string, any>,
 }
 
 /** Reverse edits to definitions in the same ops transaction; media remains on its canvas node. */
-export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, before: Record<string, any>, after: Record<string, any>) {
+export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, before: Record<string, any>, after: Record<string, any>, options: { syncImageProjections?: boolean } = {}) {
     const empty = { updates: [] as Array<{ entityId: string; revision: number }>, operations: [] as CanvasOperation[] };
     if (!nodes(before).some(node => node.metadata?.productionEntity)) return empty;
     const episode = db.getDramaEpisodeByCanvasId(projectId);
@@ -196,11 +208,41 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
         }
         const nameKey = `${entity.kind}Name`, descriptionKey = `${entity.kind}Description`;
         const name = String(node.metadata?.[nameKey] || node.title || ""), description = String(node.metadata?.[descriptionKey] || "");
+        const character = entity.kind === "character"
+            ? (draft.director.source.character_registry as Array<Record<string, any>> || []).find(item => String(item.id || "") === entity.entityId)
+            : undefined;
+        const voiceDescription = String(node.metadata?.characterVoiceDescription || "");
+        const voiceFields = ["characterVoiceUrl", "characterVoiceName", "characterVoiceStorageKey", "characterVoiceAssetId"] as const;
+        const voice = {
+            url: String(node.metadata?.characterVoiceUrl || ""),
+            name: String(node.metadata?.characterVoiceName || ""),
+            storageKey: String(node.metadata?.characterVoiceStorageKey || ""),
+            assetId: String(node.metadata?.characterVoiceAssetId || ""),
+        };
+        const hasVoiceBinding = Object.values(voice).some(Boolean);
         const reference = node.metadata?.sharedAssetReference;
         if (reference?.writeThrough) {
             const oldName = String(old.metadata?.[nameKey] || old.title || ""), oldDescription = String(old.metadata?.[descriptionKey] || "");
-            if (name !== oldName && name !== entity.name || description !== oldDescription && description !== entity.description) throw new Error("共享资产相同字段已变化，请回读后再编辑");
-            // captureAssetEdits already wrote these fields through; shared propagation updated this episode's production source.
+            const referenceEdits = Object.keys(reference.edits || {});
+            if (referenceEdits.length) {
+                if (name !== oldName && name !== entity.name || description !== oldDescription && description !== entity.description) throw new Error("共享资产相同字段已变化，请回读后再编辑");
+                // Name and description may already be written through; continue below
+                // so voice edits in the same node operation reach the same source.
+            }
+            const patch: Record<string, any> = {};
+            if (name !== oldName && name !== entity.name) patch[entity.kind === "prop" ? "asset_name" : "name"] = name;
+            if (description !== oldDescription && description !== entity.description) {
+                const collection = entity.kind === "character" ? "character_registry" : entity.kind === "scene" ? "scene_registry" : "asset_plan";
+                const target = (draft.director.source[collection] as Record<string, any>[]).find(item => String(item.id || item.asset_id) === entity.entityId)!;
+                const value = target[entity.descriptionField];
+                patch[entity.descriptionField] = value && typeof value === "object" ? { ...value, description } : description;
+            }
+            if (character && voiceDescription !== String(old.metadata?.characterVoiceDescription || "") && voiceDescription !== String(character.voice_description || "")) patch.voice_description = voiceDescription;
+            if (character && voiceFields.some(field => String(node.metadata?.[field] || "") !== String(old.metadata?.[field] || ""))) patch.voice = hasVoiceBinding ? voice : null;
+            if (Object.keys(patch).length) {
+                applyDirectorSourcePatch(draft.director, entity.kind === "scene" ? "environment" : entity.kind === "prop" ? "asset" : "character", entity.entityId, patch);
+                changed = true;
+            }
             continue;
         }
         const patch: Record<string, any> = {};
@@ -215,13 +257,25 @@ export function syncEntityNodeEdits(db: BackendDatabase, projectId: string, befo
             const value = target[entity.descriptionField];
             patch[entity.descriptionField] = value && typeof value === "object" ? { ...value, description } : description;
         }
+        if (character && voiceDescription !== String(old.metadata?.characterVoiceDescription || "")) {
+            if (String(old.metadata?.characterVoiceDescription || "") !== String(character.voice_description || "")) throw new Error("制作实体声线说明已变化，请回读后再编辑");
+            patch.voice_description = voiceDescription;
+        }
+        if (character && voiceFields.some(field => String(node.metadata?.[field] || "") !== String(old.metadata?.[field] || ""))) {
+            const oldVoice = {
+                url: String(old.metadata?.characterVoiceUrl || ""), name: String(old.metadata?.characterVoiceName || ""),
+                storageKey: String(old.metadata?.characterVoiceStorageKey || ""), assetId: String(old.metadata?.characterVoiceAssetId || ""),
+            };
+            if (JSON.stringify(character.voice || null) !== JSON.stringify(Object.values(oldVoice).some(Boolean) ? oldVoice : null)) throw new Error("制作实体绑定声线已变化，请回读后再编辑");
+            patch.voice = hasVoiceBinding ? voice : null;
+        }
         if (Object.keys(patch).length) {
             applyDirectorSourcePatch(draft.director, entity.kind === "scene" ? "environment" : entity.kind === "prop" ? "asset" : "character", entity.entityId, patch);
             changed = true;
         }
     }
     const imageOperations: CanvasOperation[] = [];
-    for (const entity of productionEntities(draft.director.source, owner)) {
+    if (options.syncImageProjections !== false) for (const entity of productionEntities(draft.director.source, owner)) {
         const imageProjection = subjectImageForEntity(after, draft.director.source as Record<string, any>, owner, entity);
         if (!imageProjection) continue;
         const binding: ProductionEntityBinding = { ownerKind: owner.kind, ownerId: owner.id, kind: entity.kind, entityId: entity.entityId };

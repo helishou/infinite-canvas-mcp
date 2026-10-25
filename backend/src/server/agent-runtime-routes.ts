@@ -21,6 +21,8 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
         graph: objectBody(req.body?.graph),
         // 原始 UI 格式（nodes/links）：RunningHub 编辑器只认这个，API 格式解析不出节点。
         uiWorkflow: req.body?.uiWorkflow && typeof req.body.uiWorkflow === "object" && !Array.isArray(req.body.uiWorkflow) ? req.body.uiWorkflow as Record<string, unknown> : undefined,
+        // 本地已配置的字段：上传后要在云端档案里保持启用，不能让平台自动发现的全是空勾选。
+        localFields: Array.isArray(req.body?.localFields) ? req.body.localFields : undefined,
         site: siteOf(req),
     })) }));
     app.get("/agent/runninghub/workflows", (_req, res) => res.json({ ok: true, workflows: runningHub.listWorkflowProfiles() }));
@@ -28,6 +30,9 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
     app.delete("/agent/runninghub/workflows/:id", (req, res) => res.json({ ok: true, deleted: runningHub.removeWorkflowProfile(String(req.params.id)) }));
     app.get("/agent/runninghub/workflows/:id/tasks", (req, res) => res.json({ ok: true, tasks: runningHub.listWorkflowTasks(String(req.params.id)) }));
     app.post("/agent/runninghub/workflows/:id/resync", async (req, res) => res.json({ ok: true, workflow: await runningHub.refreshProfileGraph(String(req.params.id)) }));
+    // 把本地工作流的字段配置推给已有云端档案（历史上传的档案靠它补齐启用状态）。
+    // uiWorkflow 用来解开 GetNode/SetNode 这类连线输入，缺了它 `265::prompt` 这种字段会解析不到目标。
+    app.post("/agent/runninghub/workflows/:id/apply-local-fields", (req, res) => res.json({ ok: true, workflow: runningHub.applyLocalFieldsToProfile(String(req.params.id), Array.isArray(req.body?.localFields) ? req.body.localFields : [], req.body?.uiWorkflow) }));
     app.post("/agent/runninghub/workflows/:id/run", async (req, res) => { const task = await runningHub.runWorkflow(String(req.params.id), objectBody(req.body?.input), objectBody(req.body?.values), objectBody(req.body?.params), typeof req.body?.clientTaskId === "string" && req.body.clientTaskId.trim() ? req.body.clientTaskId.trim() : undefined); events?.publish({ type: "task.created", entityId: task.id, payload: task }); res.status(202).json({ ok: true, task }); });
       app.get("/agent/runninghub/tasks/:id", (req, res) => { runningHub.resume(req.params.id); return taskResponse(req.params.id, "runninghub:", stores, req, res); });
     app.post("/agent/runninghub/tasks/:id/cancel", (req, res) => { const task = runningHub.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });

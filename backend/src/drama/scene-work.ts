@@ -51,10 +51,11 @@ export function mergeSceneSource(current: DirectorProduction, work: SceneWork, r
         } else if (plan.canvas_scope !== "episode" || !plan.shot_ids?.length || plan.shot_ids.some((id: string) => !shotIds.has(id))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 专用资产须绑定本场镜头");
     }
     const priorIds = new Set(baseline.targetIds);
+    const priorAssetIds = new Set([...rows(baseline.director.source.asset_plan), ...rows(baseline.director.source.asset_cards)].map(objectId));
     const existingSegments = rows(current.source.segments).filter(item => !priorIds.has(objectId(item)));
     if (existingSegments.some(item => segmentIds.has(objectId(item)))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: Segment ID 已被其他场次使用");
     const localAssets = new Set(newPlans.filter(item => !sharedIds.has(objectId(item))).map(objectId));
-    if (rows(current.source.asset_plan).some(item => !priorIds.has(objectId(item)) && localAssets.has(objectId(item)))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 资产 ID 已被其他场次使用");
+    if (rows(current.source.asset_plan).some(item => !priorAssetIds.has(objectId(item)) && localAssets.has(objectId(item)))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 资产 ID 已被其他场次使用");
     for (const card of rows(source.asset_cards)) if (sharedIds.has(objectId(card))) {
         if (compilationHash(card) !== compilationHash(rows(current.source.asset_cards).find(item => objectId(item) === objectId(card)))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 共同资产卡不能修改");
     } else if (!localAssets.has(objectId(card))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 资产卡无本场资产");
@@ -65,7 +66,7 @@ export function mergeSceneSource(current: DirectorProduction, work: SceneWork, r
     const rank = (shotId: string) => order.findIndex(scene => scene.shotIds.includes(shotId));
     next.source.shots = rows(next.source.shots).sort((a, b) => rank(objectId(a)) - rank(objectId(b)));
     next.source.segments = rows(next.source.segments).sort((a, b) => rank(String(a.shot_ids?.[0])) - rank(String(b.shot_ids?.[0])));
-    for (const field of ["asset_plan", "asset_cards"]) next.source[field] = [...rows(current.source[field]).filter(item => sharedIds.has(objectId(item)) || !priorIds.has(objectId(item))), ...rows(source[field]).filter(item => !sharedIds.has(objectId(item)))];
+    for (const field of ["asset_plan", "asset_cards"]) next.source[field] = [...rows(current.source[field]).filter(item => sharedIds.has(objectId(item)) || !priorAssetIds.has(objectId(item))), ...rows(source[field]).filter(item => !sharedIds.has(objectId(item)))];
     const inputs = JSON.parse(result.shotInputsJson) as DirectorProduction["shotInputs"];
     if (Object.keys(inputs).some(id => !shotIds.has(id))) throw new Error("SCENE_WRITE_OUTSIDE_SCOPE: 镜头输入越界");
     next.shotInputs = { ...Object.fromEntries(Object.entries(current.shotInputs).filter(([id]) => otherShots.has(id))), ...inputs };
@@ -171,7 +172,7 @@ export class SceneWorkCoordinator {
             const { workPackage: _packet, workArtifacts: _artifacts, reviewPackages: _reviews, reviewArtifacts: _reviewArtifacts, ...summary } = work;
             try {
                 const projection = compilationScopeInput({ ...director, engine: work.inputEngine || director.engine }, { sceneId: work.sceneId });
-                const media = this.service.sceneReviewMedia(id, projection.targetIds.filter(targetId => director.assets[targetId]?.storageKey));
+                const media = this.service.sceneReviewMedia(id, Object.keys(projection.director.assets).filter(targetId => director.assets[targetId]?.storageKey));
                 const missing = requiredSceneAssets(projection.director, current.draft.settings.storyboardImageMode === "skip").some(id => !director.assets[id]?.storageKey);
                 const reviewAssetIds = missing ? media.filter(item => director.assets[item.targetId]?.status === "generated").map(item => item.targetId) : undefined;
                 return { ...summary, workArtifactHashes: work.workArtifacts?.map(item => item.artifactHash), reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash), reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
@@ -366,8 +367,8 @@ export class SceneWorkCoordinator {
         if (input.workId && !work) throw new Error("场次审核工作不存在");
         if (work && (work.stage !== "review" || !["awaiting_review", "paused"].includes(work.status))) throw new Error("SCENE_REVIEW_NOT_READY: 本场源稿或媒体尚未进入审核阶段");
         const projection = work ? compilationScopeInput(director, { sceneId: work.sceneId }) : undefined;
-        if (work && input.assetIds && input.assetIds.some(assetId => !projection!.targetIds.includes(assetId))) throw new Error("审核素材不属于当前场次");
-        const allMedia = work ? this.service.sceneReviewMedia(id, projection!.targetIds.filter(assetId => director.assets[assetId]?.storageKey)) : this.shared(id, true, input.assetIds).media;
+        if (work && input.assetIds && input.assetIds.some(assetId => !Object.hasOwn(projection!.director.assets, assetId))) throw new Error("审核素材不属于当前场次");
+        const allMedia = work ? this.service.sceneReviewMedia(id, Object.keys(projection!.director.assets).filter(assetId => director.assets[assetId]?.storageKey)) : this.shared(id, true, input.assetIds).media;
         const media = input.assetIds ? allMedia.filter(item => input.assetIds!.includes(item.targetId)) : allMedia;
         if (input.assetIds && (!input.assetIds.length || input.assetIds.some(assetId => !media.some(item => item.targetId === assetId)))) throw new Error("审核缺少真实素材");
         const inputHash = projection?.inputHash || this.shared(id, true, input.assetIds).inputHash;
@@ -416,7 +417,7 @@ export class SceneWorkCoordinator {
         const state = shared ? this.shared(id) : undefined;
         const director = this.service.get(id).draft.director!;
         const projection = compilationScopeInput(director, { sceneId: work.sceneId });
-        const allMedia = state?.media || this.service.sceneReviewMedia(id, projection.targetIds.filter(targetId => director.assets[targetId]?.storageKey));
+        const allMedia = state?.media || this.service.sceneReviewMedia(id, Object.keys(projection.director.assets).filter(targetId => director.assets[targetId]?.storageKey));
         const media = assetIds ? allMedia.filter(item => assetIds.includes(item.targetId)) : allMedia;
         const inputHash = state?.inputHash || productionReviewHash(projection.inputHash, allMedia);
         if (media.some(item => !String(item.mimeType).startsWith("image/"))) return this.update(id, work.workId, { status: "awaiting_review", error: "自动审核缺少此媒体类型的分析能力，请人工核对" });
@@ -499,7 +500,7 @@ export class SceneWorkCoordinator {
                         ...rows(projection.director.source.asset_plan).filter(item => item.canvas_scope !== "shared").map(item => `asset:${objectId(item)}`),
                         ...rows(projection.director.source.segments).map(item => `segment:${objectId(item)}`),
                     ];
-                    if (targets.length) this.runner.prepareTargets(id, fresh.revision, targets, `scene-layout:${workId}:${fresh.draft.director!.sourceHash}`);
+                    if (targets.length) await this.runner.prepareTargets(id, fresh.revision, targets, `scene-layout:${workId}:${fresh.draft.director!.sourceHash}`, { sceneId: work.sceneId, inputHash: projection.inputHash });
                 }
                 const prepared = this.service.get(id);
                 this.update(id, workId, { stage: "assets", status: "pending", recoveryPending: false, sourceHash: prepared.draft.director!.sourceHash, inputHash: compilationScopeInput(prepared.draft.director!, { sceneId: work.sceneId }).inputHash });
@@ -531,7 +532,7 @@ export class SceneWorkCoordinator {
             if (job.status !== "succeeded" || !job.preparedId) throw new Error(`编译 ${job.status}，请按诊断修改源稿`);
             await this.compilations.apply(id, this.owner, job.preparedId);
             current = this.service.get(id); work = current.draft.director!.workflow.sceneWorks![workId];
-            this.service.publish(id, { operationId: `scene-publish:${operationId}`, expectedRevision: current.revision, stage: "director", scope: { sceneId: work.sceneId } });
+            await this.service.publish(id, { operationId: `scene-publish:${operationId}`, expectedRevision: current.revision, stage: "director", scope: { sceneId: work.sceneId } });
             this.update(id, workId, { stage: work.stage === "assets" ? "review" : "produce", status: "pending", artifactIds: this.service.get(id).draft.director!.artifacts.filter(item => compilationScopeInput(this.service.get(id).draft.director!, { sceneId: work.sceneId }).targetIds.includes(item.targetId)).map(item => item.id) });
         }
         current = this.service.get(id); work = current.draft.director!.workflow.sceneWorks![workId];
@@ -553,9 +554,10 @@ export class SceneWorkCoordinator {
                 const runId = `scene-run:${workId}:${compilationHash({ target: target.id, hash: compilationScopeInput(current.published!.director!, { targetIds: [target.targetId] }).inputHash }).slice(0, 24)}`;
                 if (runIds.includes(runId)) continue;
                 const fresh = this.service.get(id);
-                this.runner.prepareTargets(id, fresh.revision, [target.id], `scene-prepare:${runId}`);
+                const sceneInputHash = compilationScopeInput(fresh.draft.director!, { sceneId: work.sceneId }).inputHash;
+                await this.runner.prepareTargets(id, fresh.revision, [target.id], `scene-prepare:${runId}`, { sceneId: work.sceneId, inputHash: sceneInputHash });
                 const prepared = this.service.get(id);
-                const batch = this.service.startBatch(id, { runId, idempotencyKey: runId, expectedRevision: prepared.revision, version: prepared.publishedVersion, targets: [target.id], scope: "selected" });
+                const batch = await this.service.startBatch(id, { runId, idempotencyKey: runId, expectedRevision: prepared.revision, version: prepared.publishedVersion, targets: [target.id], scope: "selected" });
                 for (const targetId of batch.targets) claimed.add(targetId);
                 runIds.push(runId); this.update(id, workId, { runIds, status: "awaiting_media" });
                 void this.runner.runBatch(id, runId);
@@ -584,7 +586,14 @@ export class SceneWorkCoordinator {
             else this.update(id, workId, { status: "awaiting_media", error: segmentTargets.flatMap(item => item.blockers).join("；") || "等待 H3 媒体任务" });
         }
     }
-    wake(id: string) { for (const work of Object.values(this.service.get(id).draft.director?.workflow.sceneWorks || {})) if (["pending", "awaiting_media"].includes(work.status)) void this.advance(id, work.workId); }
+    wake(id: string) {
+        this.continueSharedReview(id);
+        const director = this.service.get(id).draft.director;
+        for (const work of Object.values(director?.workflow.sharedReviewWorks || {}))
+            if (work.status === "pending") void this.advanceSharedReview(id, work.workId);
+        for (const work of Object.values(director?.workflow.sceneWorks || {}))
+            if (["pending", "awaiting_media"].includes(work.status)) void this.advance(id, work.workId);
+    }
     recover(id: string) {
         for (const audit of Object.values(this.service.get(id).draft.director?.workflow.sharedReviewWorks || {})) if (audit.status === "running") {
             if (fs.existsSync(this.file(audit.workId))) this.updateSharedWork(id, audit.workId, { status: "pending", recoveryPending: false });

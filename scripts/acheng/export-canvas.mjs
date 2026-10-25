@@ -12,7 +12,7 @@ const active = resolveAchengEngine();
 const engine = achengEngineIdentity(active);
 const source = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
 if (JSON.stringify(source).includes('"legacy_fixture"')) throw new Error('Historical fixtures cannot be submitted as new production');
-const sourceDiagnostics = validateAchengSource({ engine, source }, 'edit', active);
+const sourceDiagnostics = await validateAchengSource({ engine, source }, 'edit', active);
 if (sourceDiagnostics.some(item => item.severity === 'error')) throw new Error(JSON.stringify(sourceDiagnostics));
 if (fs.existsSync(out)) throw new Error('Output already exists; choose a new revision directory');
 fs.mkdirSync(out, { recursive: true });
@@ -58,7 +58,7 @@ for (const [kind, entries] of [['image', index.asset_prompts || index.assets || 
 const director = { schemaVersion: 1, engine: { commit: engine.commit, patchVersion: engine.patchVersion, runtimeId: engine.runtimeId, version: engine.version },
   source, sourceHash, modules: mapping.modules || {}, artifacts, assets: mapping.assets || {}, shotInputs: mapping.shotInputs || {}, boundaries: mapping.boundaries || [],
   executionAuthorized: mapping.executionAuthorized === true, unresolved: mapping.unresolved || [], workflow: mapping.workflow || {} };
-const preflight = preflightDirector(director, 'edit', active);
+const preflight = await preflightDirector(director, 'edit', active);
 fs.writeFileSync(path.join(out, 'preflight.json'), JSON.stringify(preflight, null, 2));
 if (!preflight.valid) throw new Error(`Canvas export preflight failed; diagnostics retained at ${path.join(out, 'preflight.json')}`);
 fs.writeFileSync(path.join(out, 'director.json'), JSON.stringify(director, null, 2));

@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- RunningHub failed-task history now displays available platform diagnostics: node name/ID, exception type, node details, and remote task ID, with the full error wrapping onto multiple lines. Verify validation errors, missing-input errors, generic errors without node details, and readability in light and dark themes.
+
 - Storage: new large task inputs and canvas operation history use lossless compression, while small and legacy records remain readable. The Backend `compress-snapshot-json` maintenance command previews by default; `--apply` converts legacy records after backup and verifies the original JSON bytes, while `--backup` reuses a snapshot only if it contains every candidate's original text. Use `--vacuum` while idle to reclaim free database pages. Verify idempotent reruns, no writes on a backup mismatch, transaction rollback on failure, and task filtering, model usage, canvas synchronization, history recovery and operation replay after restart. Media and history retention remain unchanged.
 
 - Local usage analytics: open several routes and scroll through semantic sections to create PV, MV and MC records. At `/analytics/local`, select date ranges and check the overview, daily trend, page/module summaries and event details; export the selected range as JSON. Confirm query strings, button text and input contents are absent from stored records, and that reports remain available after refresh in the same browser.

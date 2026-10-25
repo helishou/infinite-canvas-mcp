@@ -188,3 +188,74 @@ test("任务参数里的本地图只有 API 格式才作兜底", () => {
     assert.equal(localGraphOf({ runninghubGraph: { "1": { inputs: {} } } }), null);
     assert.equal(localGraphOf({}), null);
 });
+
+/**
+ * 真实案例（YZ 金鱼-MiniMax+H3-文武双全）：提示词不是直接写在 265 上，
+ * 而是 265.prompt ← 267 GetNode("提示词") ← 266 SetNode ← 263 Text.text。
+ */
+function promptChainUi() {
+    return {
+        last_node_id: 267,
+        last_link_id: 3,
+        nodes: [
+            { id: 263, type: "Text", pos: [0, 0], size: [240, 100], order: 0, mode: 0, inputs: [{ name: "text", type: "STRING", widget: { name: "text" }, link: null }], outputs: [{ name: "STRING", type: "STRING", links: [1] }], widgets_values: ["文戏武戏双全的提示词"] },
+            { id: 266, type: "SetNode", pos: [0, 200], size: [240, 60], order: 1, mode: 0, inputs: [{ name: "value", type: "*", link: 1 }], outputs: [{ name: "*", type: "*", links: [2] }], widgets_values: ["提示词"] },
+            { id: 267, type: "GetNode", pos: [0, 300], size: [240, 60], order: 2, mode: 0, inputs: [{ name: "value", type: "*", link: 2 }], outputs: [{ name: "*", type: "*", links: [3] }], widgets_values: ["提示词"] },
+            { id: 265, type: "TextEncodeQwenImageEditPlus", pos: [400, 0], size: [300, 160], order: 3, mode: 0, inputs: [{ name: "prompt", type: "STRING", link: 3 }], outputs: [], widgets_values: [] },
+        ],
+        links: [[1, 263, 0, 266, 0, "STRING"], [2, 266, 0, 267, 0, "*"], [3, 267, 0, 265, 0, "*"]],
+    };
+}
+
+test("提示词走 GetNode/SetNode 中转时，本地 265::prompt 要解析到 263::text 并点亮", async () => {
+    stubFetch((url) => url.endsWith("/api/workflow/upload") ? { code: 0, msg: "success", data: { id: "RH-PROMPT" } } : { code: 380, msg: "WORKFLOW_NOT_EXISTS" });
+    const backend = new RunningHubBackend(fakeTasks(), withSession(configured()));
+    const result = await backend.publishLocalWorkflow({
+        name: "文武双全",
+        graph: {},
+        uiWorkflow: promptChainUi(),
+        localFields: [{ node: "265", input: "prompt", name: "提示词", type: "string", isPrompt: true }],
+    });
+
+    const prompt = result.profile.fields.find((field) => field.fieldName === "text");
+    assert.ok(prompt, "云端档案里必须有 263::text 这个字段");
+    assert.equal(prompt?.nodeId, "263", "连线输入要下沉到真正可覆写的常量输入");
+    assert.equal(prompt?.enabled, true, "本地配过就要点亮，不能全是不勾选状态");
+    assert.equal(prompt?.label, "提示词", "本地起的名字要一起带上去");
+    assert.equal(prompt?.source, "prompt", "提示词标记要保留");
+    assert.equal(result.fieldMisses, 0, "能解析的字段不该算丢失");
+});
+
+test("解析不到的本地字段进 fieldMissNames，不静默消失", async () => {    stubFetch((url) => url.endsWith("/api/workflow/upload") ? { code: 0, msg: "success", data: { id: "RH-MISS" } } : { code: 380, msg: "WORKFLOW_NOT_EXISTS" });
+    const backend = new RunningHubBackend(fakeTasks(), withSession(configured()));
+    const result = await backend.publishLocalWorkflow({
+        name: "缺节点",
+        graph: {},
+        uiWorkflow: promptChainUi(),
+        localFields: [{ node: "999", input: "whatever", name: "不存在的字段", type: "string" }],
+    });
+
+    assert.equal(result.fieldMisses, 1);
+    assert.deepEqual(result.fieldMissNames, ["不存在的字段"]);
+});
+
+/** 磁盘上只有 API 格式（fantui2.1 就是这样）：没有 nodes，尾节点必须走 API 注入。 */
+const apiGraph = {
+    "748": { class_type: "VAEDecode", inputs: { samples: ["772", 0], vae: ["738", 0] } },
+    "772": { class_type: "KSampler", inputs: { seed: 666 } },
+    "797": { class_type: "SaveImage", inputs: { filename_prefix: "ComfyUI", images: ["748", 0] } },
+};
+
+test("没有 UI 原件、按 API 格式上传时也要接上 Play Sound KJ → Save Image To Local", async () => {
+    stubFetch((url) => url.endsWith("/api/workflow/upload") ? { code: 0, msg: "success", data: { id: "RH-API" } } : { code: 380, msg: "WORKFLOW_NOT_EXISTS" });
+    const backend = new RunningHubBackend(fakeTasks(), withSession(configured()));
+    const result = await backend.publishLocalWorkflow({ name: "fantui2.1", graph: apiGraph });
+
+    assert.equal(result.format, "api");
+    assert.equal(result.tail, "added-api", "API 图也要注入，不能静默跳过");
+    const types = Object.values(result.profile.workflowJson as Record<string, any>).map((node) => node.class_type);
+    assert.ok(types.includes("PlaySoundKJ"), "档案图里要有 Play Sound KJ");
+    assert.ok(types.includes("SaveImageToLocal"), "档案图里要有 Save Image To Local");
+    const play = Object.entries(result.profile.workflowJson as Record<string, any>).find(([, node]) => node.class_type === "PlaySoundKJ");
+    assert.deepEqual(play?.[1].inputs.any_input, ["797", 0], "接在输出节点自己的输出槽上");
+});

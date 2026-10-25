@@ -98,6 +98,8 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
             message.success(bindingProfile
                 ? t("runningHub.import.successBound", { name: uploaded.name, workflowId: id })
                 : t("runningHub.import.successCopy", { name: uploaded.name }));
+            // 同源本地工作流存在时，自定义字段配置会被继承过来——说清楚，避免以为又丢了一次。
+            if (uploaded.inheritedFrom) message.info(t("runningHub.import.inheritedFields", { source: uploaded.inheritedFrom }));
             setOpen(false);
             onImported(uploaded.name);
         } catch (reason) {

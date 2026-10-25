@@ -112,7 +112,7 @@ test("fingerprint changes for input, scope, engine and reference bytes; workflow
 });
 
 test("Subject picture binding asset IDs never replace stable Segment compilation targets", async t => {
-    const { service, director, compilations } = fixture(t);
+    const { root, service, director } = fixture(t);
     const candidate = structuredClone(director);
     candidate.source = {
         version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
@@ -124,12 +124,21 @@ test("Subject picture binding asset IDs never replace stable Segment compilation
         ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
     };
     candidate.sourceHash = directorHash(candidate.source);
+    let compiledTargets: string[] = [];
+    const compilations = new ProductionCompilationService(service, root, input => {
+        compiledTargets = ((input.source.segments || []) as Array<Record<string, unknown>>).map(segment => String(segment.id || ""));
+        const prompt = "A valid compiled Clip prompt";
+        return { director: { ...input, artifacts: compiledTargets.map(targetId => ({ id: `h3-${targetId}`, targetId, kind: "h3" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } })) },
+            exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    });
     const settled = new Promise<void>(resolve => { compilations.onSettled = () => resolve(); });
     const started = compilations.enqueue("episode", "episode", "stable-segment-scope", service.get("episode").revision, candidate);
     assert.ok(["queued", "running"].includes(started.status));
     await settled;
     const completed = compilations.getCompilation("episode", "episode", "stable-segment-scope");
     assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    assert.deepEqual(compiledTargets, ["CLIP"], "the stable Segment.id, never asset_id, is the compiler target");
 });
 
 test("unknown and compiler-origin failures, running jobs and legacy records never reuse", async t => {
@@ -294,12 +303,8 @@ test("unchanged full compilation reuses artifacts and a scoped edit compiles onl
     await run("initial", { targetIds: ["A", "B"] });
     await run("unchanged-full");
     assert.deepEqual(calls, [["A", "B"]], "an unscoped unchanged request must not invoke the compiler again");
-    const current = service.get("episode"), changed = structuredClone(current.draft.director!);
-    const originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
-    (changed.source.asset_cards as Array<{ id: string; prompt: string }>)[1].prompt = "revised B";
-    changed.sourceHash = directorHash(changed.source);
-    changed.artifacts.find(item => item.targetId === "B")!.status = "draft";
-    service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: changed }] });
+    const current = service.get("episode"), originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
+    await service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "asset_card", id: "B", patch: { prompt: "revised B" } }] });
     await run("partial", { targetIds: ["A", "B"] });
     assert.deepEqual(calls, [["A", "B"], ["B"]]);
     const after = service.get("episode").draft.director!;
@@ -353,7 +358,14 @@ test("repeated media bindings read bytes once per verification and still reject 
     assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed|内容已发生变化/);
     director.assets.B.sha256 = promptHash(bytes);
     director.assets.B.nodeId = "missing-node";
-    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/);
+    assert.doesNotThrow(() => service.verifyCompilationBindings("episode", director), "unreferenced cached asset metadata must not block a current compile after its source binding moves");
+    const prompt = "A current compiled prompt";
+    const digest = promptHash(prompt);
+    director.artifacts = [{ id: "h3-A", kind: "h3", targetId: "A", prompt, sha256: digest, sourceHash: director.sourceHash, status: "ready",
+        references: [{ label: "<Picture 1>", nodeId: "missing-node", storageKey, sha256: promptHash(bytes), role: "environment" }],
+        receipt: { sourceHash: director.sourceHash, promptHash: digest, engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/,
+        "a current compiled reference must still belong to its recorded canvas node");
 });
 
 test("scoped asset-only compilation applies with ledger v2 before video continuity is authored", async t => {
@@ -492,7 +504,7 @@ test("continuity issues remain target-level warnings while H3 prompts apply and 
         exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {},
     });
     const compilations = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
-    const preflight = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    const preflight = await service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
     assert.equal(preflight.valid, true);
     assert.ok(preflight.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
     const prepared = await compilations.prepare("episode", "episode", 2);
@@ -535,7 +547,7 @@ test("story-only compile is blocked before a compiler packet or task is created"
     const packets = path.join(root, "packets");
     const compilations = new ProductionCompilationService(service, packets, compiler);
     const before = service.get("episode");
-    const checked = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    const checked = await service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
     assert.equal(checked.valid, false); assert.equal(checked.compileReady, false);
     assert.equal(checked.diagnostics[0].code, "COMPILE_STAGE_NOT_READY");
     await assert.rejects(() => compilations.prepare("episode", "episode", 2), (error: any) => error.diagnostics?.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
@@ -545,7 +557,7 @@ test("story-only compile is blocked before a compiler packet or task is created"
     assert.equal(db.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='runtime_tasks'").get()?.n, 0);
 });
 
-test("missing identity media applies a compiled text draft while keeping generation unavailable", async t => {
+test("missing identity media leaves a draft prompt unapplied and generation unavailable", async t => {
     const { root, service, director } = fixture(t);
     director.source = {
         version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
@@ -573,14 +585,13 @@ test("missing identity media applies a compiled text draft while keeping generat
     const compilations = new ProductionCompilationService(service, path.join(root, "draft-packets"), compiler);
     const started = compilations.enqueue("episode", "episode", "missing-image-draft", revision);
     const job = await done(compilations, started.operationId);
-    assert.equal(job.status, "succeeded");
+    assert.equal(job.status, "blocked", JSON.stringify(job));
     const targetPage = compilations.getCompilation("episode", "episode", started.operationId, "targets", 0, 10);
     assert.equal(targetPage.items[0]?.status, "draft");
-    const applied = await compilations.apply("episode", "episode", job.preparedId!);
-    assert.equal(applied.mediaSubmitted, false);
+    assert.equal(service.get("episode").draft.director!.artifacts.some(item => item.targetId === "C1"), false, "a packet without any ready scoped output is not applicable");
     const stored = service.get("episode").draft.director!;
-    assert.equal(stored.artifacts.find(item => item.targetId === "C1")?.status, "draft");
-    assert.deepEqual(stored.artifacts.find(item => item.targetId === "C1")?.references, []);
+    assert.equal(stored.sourceHash, director.sourceHash);
+    assert.equal(stored.artifacts.find(item => item.targetId === "C1")?.status, undefined);
 });
 
 test("a compile without a valid receipt auto-runs the formal continuity check, then reuses that receipt", async t => {

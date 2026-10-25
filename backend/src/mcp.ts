@@ -210,6 +210,9 @@ const pluginDeclarationFingerprints = new WeakMap<PluginMcpRegistry, string>();
 type HttpMcpSession = {
   instance: BackendMcpInstance;
   transport: StreamableHTTPServerTransport;
+  clientInfo: { name: string; version: string } | null;
+  userAgent: string;
+  closeReason: "client_delete" | "backend_shutdown" | "transport_closed";
 };
 
 /**
@@ -306,14 +309,23 @@ export function registerBackendMcpHttpRoutes(
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (initializedSessionId) => {
+          const clientInfo = recordOf(recordOf(req.body).params).clientInfo;
+          const client = recordOf(clientInfo);
           sessions.set(initializedSessionId, {
             instance: instance!,
             transport,
+            clientInfo: clientInfo && typeof clientInfo === "object"
+              ? { name: String(client.name || ""), version: String(client.version || "") }
+              : null,
+            userAgent: String(req.get("user-agent") || ""),
+            closeReason: "transport_closed",
           });
           ensureDeclarationSync();
           logger.info("MCP HTTP 会话已连接", {
             sessionId: initializedSessionId,
             sessionCount: sessions.size,
+            client: sessions.get(initializedSessionId)?.clientInfo,
+            userAgent: sessions.get(initializedSessionId)?.userAgent,
           });
         },
       });
@@ -323,9 +335,12 @@ export function registerBackendMcpHttpRoutes(
         if (closedSessionId) sessions.delete(closedSessionId);
         void closed?.instance.server.close().catch(() => undefined);
         stopDeclarationSyncIfIdle();
-        logger.info("MCP HTTP 会话已断开", {
+        logger.info("MCP HTTP 会话已关闭", {
           sessionId: closedSessionId || null,
           sessionCount: sessions.size,
+          reason: closed?.closeReason || "transport_closed",
+          client: closed?.clientInfo || null,
+          userAgent: closed?.userAgent || null,
         });
       };
       transport.onerror = (error) =>
@@ -346,8 +361,13 @@ export function registerBackendMcpHttpRoutes(
       return;
     }
     try {
+      if (req.method === "DELETE") session.closeReason = "client_delete";
       await session.transport.handleRequest(req, res);
+      if (req.method === "DELETE" && sessions.get(sessionId) === session)
+        session.closeReason = "transport_closed";
     } catch (error) {
+      if (req.method === "DELETE" && sessions.get(sessionId) === session)
+        session.closeReason = "transport_closed";
       fail(res, error);
     }
   };
@@ -362,6 +382,8 @@ export function registerBackendMcpHttpRoutes(
       const active = [...sessions.values()];
       await Promise.allSettled(
         active.map(async ({ instance, transport }) => {
+          const session = sessions.get(transport.sessionId || "");
+          if (session) session.closeReason = "backend_shutdown";
           await transport.close().catch(() => undefined);
           await instance.server.close().catch(() => undefined);
         }),

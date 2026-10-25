@@ -202,7 +202,7 @@ test("scoped replay retains genuine foreign asset identities without expanding o
     assert.deepEqual(director, before);
 });
 
-test("one Clip keeps shared-block coverage, event references and replay context without compiling sibling Clips", () => {
+test("one Clip keeps shared-block coverage, event references and replay context without compiling sibling Clips", async () => {
     const d = scopedDirector(), runtime = resolveAchengEngine();
     d.engine = { commit: runtime.commit, patchVersion: runtime.patchVersion, runtimeId: runtime.runtimeId, version: runtime.version };
     const block = { id: "BLOCK", kind: "action", text: "The door opens and then closes." };
@@ -220,7 +220,7 @@ test("one Clip keeps shared-block coverage, event references and replay context 
     assert.ok(!projected.targetIds.includes("KA"));
     assert.deepEqual((projected.director.source.ledger as any).events.map((event: any) => event.id), ["E0", "E1"]);
     const normalized = scopedCompilerInput(projected.director, { targetIds: ["GB"] });
-    const checked = auditAchengContinuity(normalized, ["GB"]);
+    const checked = await auditAchengContinuity(normalized, ["GB"]);
     assert.equal(checked.status, "passed", JSON.stringify(checked.diagnostics));
     assert.equal(checked.trajectories.SB.start.F, "open");
     assert.deepEqual(d, before);

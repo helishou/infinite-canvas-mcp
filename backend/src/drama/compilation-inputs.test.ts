@@ -27,16 +27,16 @@ test("a compiler activated before the request does not invalidate its own result
     const activeInput = director({ runtimeId: "runtime-new" });
     assert.equal(compilationInputsUnchanged(
         { engineRuntimeId: "runtime-new", compilerInputFingerprint: "manifest", baselineHash: hash(draft) },
-        { director: draft, input: activeInput, manifestHash: "manifest" },
+        { director: draft, input: activeInput, manifestHash: "manifest", activeRuntimeId: "runtime-new" },
     ), true);
 });
 
 test("a runtime switched while the job runs still blocks", () => {
     const draft = director({ runtimeId: "runtime-old" });
-    const switched = director({ runtimeId: "runtime-third" });
+    const frozenInput = director({ runtimeId: "runtime-new" });
     assert.equal(compilationInputsUnchanged(
         { engineRuntimeId: "runtime-new", compilerInputFingerprint: "manifest", baselineHash: hash(draft) },
-        { director: draft, input: switched, manifestHash: "manifest" },
+        { director: draft, input: frozenInput, manifestHash: "manifest", activeRuntimeId: "runtime-third" },
     ), false);
 });
 

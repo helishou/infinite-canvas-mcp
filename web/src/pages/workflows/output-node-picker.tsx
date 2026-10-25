@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button, Checkbox, Empty } from "antd";
 import type { WorkflowGraphJson } from "./workflow-graph-view";
 
@@ -6,37 +7,49 @@ const OUTPUT_CLASS_HINTS = /Save|Preview|VHS|VideoCombine|ImageSave|Export/i;
 
 type Candidate = { nodeId: string; label: string; classType: string };
 
-function outputCandidates(graph: WorkflowGraphJson): Candidate[] {
+function outputCandidates(graph: WorkflowGraphJson, excludeSaveImageToLocal: boolean): Candidate[] {
     return Object.entries(graph || {}).map(([nodeId, node]) => ({
         nodeId,
         classType: node?.class_type || "",
         label: String((node as { _meta?: { title?: string } })?._meta?.title || node?.class_type || nodeId),
-    })).filter((item) => OUTPUT_CLASS_HINTS.test(item.classType) || OUTPUT_CLASS_HINTS.test(item.label));
+    })).filter((item) => {
+        if (excludeSaveImageToLocal && item.classType.toLowerCase() === "saveimagetolocal") return false;
+        return OUTPUT_CLASS_HINTS.test(item.classType) || OUTPUT_CLASS_HINTS.test(item.label);
+    });
 }
 
-export function normalizeOutputNodeSelection(value: string[], graph: WorkflowGraphJson) {
-    const available = new Set(outputCandidates(graph).map((item) => item.nodeId));
+export function normalizeOutputNodeSelection(value: string[], graph: WorkflowGraphJson, excludeSaveImageToLocal = false) {
+    const available = new Set(outputCandidates(graph, excludeSaveImageToLocal).map((item) => item.nodeId));
     return value.filter((nodeId) => available.has(nodeId));
+}
+
+export function pickerOutputNodeSelection(value: string[], graph: WorkflowGraphJson, excludeSaveImageToLocal = false, touched = false) {
+    const normalized = normalizeOutputNodeSelection(value, graph, excludeSaveImageToLocal);
+    const candidates = outputCandidates(graph, excludeSaveImageToLocal);
+    return !touched && normalized.length === 0 && candidates.length === 1 ? [candidates[0].nodeId] : normalized;
 }
 
 /**
  * 输出节点选择器。只列出看起来会产出文件的节点（Save/Preview/导出类），
- * 未指定时保持不过滤，因此这里默认全不选而不是默认全选。
+ * 多个候选时默认不过滤；只有一个候选时默认勾选它。
  */
 export function OutputNodePicker({
-    graph, value, onChange, disabled, title = "输出节点",
+    graph, value, onChange, disabled, title = "输出节点", excludeSaveImageToLocal = false,
 }: {
     graph: WorkflowGraphJson;
     value: string[];
     onChange: (next: string[]) => void;
     title?: string;
     disabled?: boolean;
+    excludeSaveImageToLocal?: boolean;
 }) {
-    const candidates = outputCandidates(graph);
-    const normalizedValue = normalizeOutputNodeSelection(value, graph);
+    const [touched, setTouched] = useState(false);
+    const candidates = outputCandidates(graph, excludeSaveImageToLocal);
+    const normalizedValue = pickerOutputNodeSelection(value, graph, excludeSaveImageToLocal, touched);
     const selected = new Set(normalizedValue);
     const toggle = (nodeId: string, checked: boolean) => {
         const next = checked ? [...normalizedValue, nodeId] : normalizedValue.filter((id) => id !== nodeId);
+        setTouched(true);
         onChange(next);
     };
 

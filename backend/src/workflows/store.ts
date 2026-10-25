@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { DATA_DIR } from "../config.js";
 import type { BackendDatabase } from "../db.js";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
+import { mergeInheritedFields } from "./workflow-field-inherit.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
@@ -302,12 +303,10 @@ export class WorkflowStore {
         if (!source) return { config };
         const sibling = this.getConfig(source);
         if (!sibling) return { config };
-        const identity = (field: WorkflowField) => `${String(field.node || "")}::${String(field.input || "")}`;
-        const seen = new Set((sibling.fields || []).map(identity));
         return {
             config: {
                 ...config,
-                fields: [...(sibling.fields || []), ...(config.fields || []).filter((field) => !seen.has(identity(field)))],
+                fields: mergeInheritedFields(sibling.fields || [], config.fields || []),
                 ...(sibling.outputNodes?.length ? { outputNodes: sibling.outputNodes } : {}),
                 ...(sibling.mediaInputs ? { mediaInputs: sibling.mediaInputs } : {}),
                 ...(sibling.miniCards ? { miniCards: sibling.miniCards } : {}),

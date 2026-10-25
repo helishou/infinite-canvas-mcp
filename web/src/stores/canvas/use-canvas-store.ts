@@ -159,6 +159,25 @@ function projectCanvasCommands(remote: CanvasProject) {
     }
     return { projection, conflicts };
 }
+
+/** Backend project receipts are full snapshots. Reuse unchanged canvas entities so a
+ * task update or an acknowledged edit only re-renders the nodes it actually changed. */
+function preserveCanvasEntityIdentity(current: CanvasProject, next: CanvasProject): CanvasProject {
+    const currentNodes = new Map(current.nodes.map((node) => [node.id, node]));
+    const nodes = next.nodes.map((node) => {
+        const previous = currentNodes.get(node.id);
+        return previous && (previous === node || JSON.stringify(previous) === JSON.stringify(node)) ? previous : node;
+    });
+    const currentConnections = new Map(current.connections.map((connection) => [connection.id, connection]));
+    const connections = next.connections.map((connection) => {
+        const previous = currentConnections.get(connection.id);
+        return previous && (previous === connection || JSON.stringify(previous) === JSON.stringify(connection)) ? previous : connection;
+    });
+    return nodes.every((node, index) => node === next.nodes[index])
+        && connections.every((connection, index) => connection === next.connections[index])
+        ? next
+        : { ...next, nodes, connections };
+}
 const pendingCommandEvents = new Map<string, unknown[]>();
 let deferredBackendEvents: unknown[] = [];
 let deferredBackendEventsWaiter: Promise<void> | null = null;
@@ -369,7 +388,7 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                 const { projection, conflicts } = projectCanvasCommands(base);
                 if (conflicts.length) setCanvasCommandConflict(project.id, base, "后续编辑与远端改动冲突，已保留命令", conflicts);
                 else if (current) useCanvasStore.setState((state) => ({
-                    projects: state.projects.map((item) => item.id === project.id ? { ...projection, viewport: current.viewport } : item),
+                    projects: state.projects.map((item) => item.id === project.id ? { ...preserveCanvasEntityIdentity(current, projection), viewport: current.viewport } : item),
                     backendRevisions: { ...state.backendRevisions, [project.id]: Number(base!.revision || 0) },
                 }));
                 replayPendingCommandEvents(project.id);
@@ -1344,7 +1363,9 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
                 return state;
             }
             const local = state.projects.find((project) => project.id === remote.id);
-            const remoteForStore = local ? { ...remote, viewport: local.viewport } : remote;
+            const remoteForStore = local
+                ? { ...preserveCanvasEntityIdentity(local, remote), viewport: local.viewport }
+                : remote;
             const remoteRevision = Number(remote.revision || value.revision || 0);
             const knownRevision = Number(local?.revision ?? nextRevisions[remote.id] ?? 0);
             if (remoteRevision < knownRevision) return state;
@@ -1372,7 +1393,7 @@ export function applyBackendCanvasEvent(event: unknown, preservePendingLocalChan
                         },
                     };
                 }
-                const rebased = { ...projection, updatedAt: local.updatedAt, viewport: local.viewport };
+                const rebased = { ...preserveCanvasEntityIdentity(local, projection), updatedAt: local.updatedAt, viewport: local.viewport };
                 syncBases.set(remote.id, remote);
                 setTimeout(scheduleCanvasSync, 0);
                 return {

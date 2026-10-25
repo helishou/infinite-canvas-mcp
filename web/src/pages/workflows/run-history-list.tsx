@@ -58,7 +58,7 @@ export function RunHistoryList({
                                     {entry.time ? <span className="shrink-0 text-xs text-stone-400">{entry.time}</span> : null}
                                 </div>
                                 {entry.prompt ? <p className="truncate text-xs text-stone-500" title={entry.prompt}>{entry.prompt}</p> : null}
-                                {entry.error ? <p className="truncate text-xs text-red-500" title={entry.error}>{entry.error}</p> : null}
+                                {entry.error ? <p className="whitespace-pre-wrap break-words text-xs text-red-500" title={entry.error}>{entry.error}</p> : null}
                                 {entry.texts?.length ? (
                                     <div className="mt-1 space-y-1">{entry.texts.map((text, i) => <pre key={i} className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-stone-50 p-2 text-[11px] dark:bg-stone-900">{text}</pre>)}</div>
                                 ) : null}

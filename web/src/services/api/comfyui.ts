@@ -45,6 +45,8 @@ type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "fai
 type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia; layout?: "sequence" | "hstack" | "vstack" } | null; error?: string | null };
 type VideoAudioExtractTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia & { bytes?: number; durationMs?: number } } | null; error?: string | null };
 
+const RETRYABLE_AGENT_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 export function resolveComfyImageSize(value: string) {
     const size = value.trim();
     // `auto` means preserve the source workflow's natural dimensions. The
@@ -98,8 +100,8 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
 
 /**
  * 轮询任务状态时容忍网络层瞬时失败（backend dev 是 tsx --watch，源码变更会让 backend 重启
- * 几秒；ComfyUI 任务本身不受影响）。此前一次 fetch 失败就把还在跑的任务判死为
- * "Failed to fetch"。HTTP 4xx/5xx 是确定性错误（token/404 等），不重试直接抛。
+ * 几秒；ComfyUI 任务本身不受影响）。网络失败和临时 HTTP 状态使用同一有限预算重试；
+ * 鉴权、参数错误、未知任务等确定性 HTTP 错误立即返回。
  */
 async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     let failures = 0;
@@ -107,7 +109,7 @@ async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortS
         try {
             return await fetchOnce();
         } catch (error) {
-            if (error instanceof AgentApiError) throw error;
+            if (error instanceof AgentApiError && !RETRYABLE_AGENT_HTTP_STATUSES.has(error.status)) throw error;
             failures += 1;
             if (failures > 15) throw error;
             await new Promise((resolve) => setTimeout(resolve, Math.min(1200 * failures, 5000)));

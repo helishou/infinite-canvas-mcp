@@ -41,7 +41,7 @@ export const directorPatchFields = {
     style: ["style_policy", "style_policy_reason", "anchor_asset_id", "style_anchor_node_id"],
     scene: ["scene_name", "heading", "location", "time_of_day", "text", "blocks"],
     environment: ["name", "description", "prompt_description"],
-    character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description"],
+    character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description", "voice"],
     asset_card: ["prompt", "seven_steps", "references", "reference_policy", "target_skill", "source_repository", "recipe", "mode", "transaction", "character_name", "state_label", "view_layout", "generation_status", "actual_settings", "output_file", "heavy_scene", "structure_lock", "style_anchor_purpose"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
     shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],

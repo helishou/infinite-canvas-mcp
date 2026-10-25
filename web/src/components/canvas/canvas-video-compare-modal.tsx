@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Modal, Select, Tooltip } from "antd";
-import { Columns2, Loader2, Pause, Play } from "lucide-react";
+import { Columns2, Loader2, Maximize2, Minimize2, Pause, Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { saveAs } from "file-saver";
 import { resolveBackendAgentEndpoint, runVideoConcatTask, type LocalReference } from "@/services/api/comfyui";
@@ -27,6 +27,7 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({});
     const [errors, setErrors] = useState<Record<string, boolean>>({});
     const [playing, setPlaying] = useState(false);
+    const [expanded, setExpanded] = useState(false);
     const [time, setTime] = useState(0);
     const timeRef = useRef(0);
     const videosRef = useRef(new Map<string, HTMLVideoElement>());
@@ -35,9 +36,10 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     const mediaSignature = items.map((item) => `${item.id}:${item.url}`).join("\n");
     const sourceDimensions = dimensions[comparison.source.id];
     const stackLayout = sourceDimensions && sourceDimensions.width > sourceDimensions.height ? "vstack" : "hstack";
-    const previewRows = stackLayout === "vstack" ? items.length : Math.ceil(items.length / 2);
-    const previewOverhead = stackLayout === "vstack" ? 260 : 320;
-    const previewFrameHeight = `max(120px, calc((82vh - ${previewOverhead}px) / ${Math.max(1, previewRows)}))`;
+    const displayLayout = expanded ? "hstack" : stackLayout;
+    const previewRows = displayLayout === "vstack" ? items.length : Math.ceil(items.length / 2);
+    const previewOverhead = displayLayout === "vstack" ? 260 : 320;
+    const previewFrameHeight = `max(120px, calc((${expanded ? "94vh" : "82vh"} - ${previewOverhead}px) / ${Math.max(1, previewRows)}))`;
     const candidateOptions = useMemo(() => comparison.candidates.map((item) => ({ value: item.id, label: item.title })), [comparison.candidates]);
     const totalDuration = Math.max(0, ...items.map((item) => durations[item.id] || (item.durationMs || 0) / 1000));
     useEffect(() => { setErrors({}); setDimensions({}); }, [mediaSignature]);
@@ -104,9 +106,14 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     }, [playing, syncAll, totalDuration]);
     useEffect(() => {
         const onHidden = () => { if (document.hidden) setPlaying(false); };
+        const onFullscreenChange = () => {
+            if (!document.fullscreenElement) setExpanded(false);
+        };
         document.addEventListener("visibilitychange", onHidden);
+        document.addEventListener("fullscreenchange", onFullscreenChange);
         return () => {
             document.removeEventListener("visibilitychange", onHidden);
+            document.removeEventListener("fullscreenchange", onFullscreenChange);
             for (const video of videosRef.current.values()) video.pause();
         };
     }, []);
@@ -122,6 +129,17 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
         if (timeRef.current >= totalDuration) seek(0);
         syncAll(timeRef.current, true, true);
         setPlaying(true);
+    };
+    const toggleFullscreen = () => {
+        if (document.fullscreenElement) {
+            void document.exitFullscreen();
+            setExpanded(false);
+            return;
+        }
+        const modal = document.querySelector<HTMLElement>(".canvas-video-compare-modal");
+        if (!modal) return;
+        setExpanded(true);
+        void modal.requestFullscreen().catch(() => setExpanded(false));
     };
 
     // 按首路视频方向自动选择并排方向；音轨取第一路（源视频）。
@@ -148,14 +166,16 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     }, [exporting, items, message, t]);
 
     return <Modal
-        title={t("canvas.videoCompare.title")}
+        title={<div className="flex items-center justify-between gap-4"><span>{t("canvas.videoCompare.title")}</span><Button type="text" icon={expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />} onClick={toggleFullscreen} aria-label={t(expanded ? "canvas.videoCompare.exitFullscreen" : "canvas.videoCompare.fullscreen")}>{t(expanded ? "canvas.videoCompare.exitFullscreen" : "canvas.videoCompare.fullscreen")}</Button></div>}
         open
+        className="canvas-video-compare-modal"
         centered
-        width="min(92vw, 1500px)"
+        width={expanded ? "100vw" : "min(92vw, 1500px)"}
+        style={expanded ? { top: 0, maxWidth: "none", paddingBottom: 0, margin: 0 } : undefined}
         footer={null}
         onCancel={onClose}
         destroyOnHidden
-        styles={{ body: { maxHeight: "82vh", overflowY: "auto" } }}
+        styles={{ body: { height: expanded ? "calc(100vh - 64px)" : undefined, maxHeight: expanded ? "none" : "82vh", overflowY: "auto" }, content: expanded ? { height: "100vh", display: "flex", flexDirection: "column", borderRadius: 0 } : undefined }}
     >
         <div className="flex flex-col gap-4" data-canvas-shortcuts-ignore>
             <label className="flex flex-col gap-2 text-sm">
@@ -173,14 +193,14 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
                     className="w-full"
                 />
             </label>
-            <div className={`grid ${stackLayout === "vstack" ? "gap-0" : "gap-3"}`} style={{ gridTemplateColumns: items.length > 1 && stackLayout === "hstack" ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
-                {items.map((item, index) => <div key={item.id} className={`min-w-0 overflow-hidden ${stackLayout === "vstack" ? "" : "rounded-lg border border-black/10 dark:border-white/10"}`}>
-                    {stackLayout === "hstack" ? <div className="flex items-center gap-2 px-3 py-2 text-sm">
+            <div className={`grid ${displayLayout === "vstack" ? "gap-0" : "gap-3"} ${expanded ? "flex-1 min-h-0" : ""}`} style={{ gridTemplateColumns: items.length > 1 && displayLayout === "hstack" ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
+                {items.map((item, index) => <div key={item.id} className={`min-w-0 overflow-hidden ${displayLayout === "vstack" ? "" : "rounded-lg border border-black/10 dark:border-white/10"}`}>
+                    {displayLayout === "hstack" ? <div className="flex items-center gap-2 px-3 py-2 text-sm">
                         <span className="min-w-0 flex-1 truncate" title={item.title}>{item.title}</span>
                         {index === 0 ? <span className="shrink-0 text-xs opacity-60">{t("canvas.videoCompare.source")}</span> : null}
                     </div> : null}
                     <div className="relative flex items-center justify-center bg-black" style={{ height: previewFrameHeight }}>
-                        {stackLayout === "vstack" ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-2 text-xs text-white">
+                        {displayLayout === "vstack" ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-2 text-xs text-white">
                             <span className="max-w-[75%] truncate rounded bg-black/55 px-2 py-1" title={item.title}>{item.title}</span>
                             {index === 0 ? <span className="shrink-0 rounded bg-black/55 px-2 py-1">{t("canvas.videoCompare.source")}</span> : null}
                         </div> : null}

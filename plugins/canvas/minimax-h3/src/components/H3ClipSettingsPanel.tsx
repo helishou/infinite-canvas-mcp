@@ -1,6 +1,6 @@
 import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
-import { Button, Input, message, Modal, Select, Switch } from "antd";
+import { Button, Input, message, Modal, Radio, Select, Switch } from "antd";
 import type { H3Segment } from "../types";
 import { createH3Id } from "../services/h3-id";
 import { exportH3Settings, importH3Settings } from "../services/h3-segment-utils";
@@ -101,6 +101,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     const motionGroup = h3MotionGroup(clips.length, selectedIndex, (index) => resolveH3Runtime(clips[index] as unknown as Record<string, unknown>, {}, metadata, defaults).params.motionContextEnabled === true);
     const selectedVideoModelEnabled = effectiveVideoModel.selectedVideoModelEnabled === true;
     const selectedVideoModel = String(effectiveVideoModel.selectedVideoModel || "");
+    const executionMode = ["auto", "local", "runninghub"].includes(String(effectiveVideoModel.minimaxEngine)) ? String(effectiveVideoModel.minimaxEngine) : "local";
     const patchVideoModelSettings = patchSettings;
     // 按钮 busy 只反映 H3 生成（ComfyUI 任务）状态：必须同时满足
     // 「runtimeTaskId 存在」且「status 处于运行态(queued/loading)」。
@@ -220,6 +221,18 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     };
     return <div className="minimax-clip-parameters">
         <div key="settings-header" className="minimax-section-label"><H3Icon name="sliders" /> <span>{h3Label(locale, "settings")}</span><span title={h3Label(locale, "selectedVideoModelHint")} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 16, fontWeight: 600, whiteSpace: "nowrap" }}><Switch size="small" checked={selectedVideoModelEnabled} disabled={!videoModels.length && !selectedVideoModelEnabled} onChange={(checked) => patchVideoModelSettings({ selectedVideoModelEnabled: checked })} /><span>{h3Label(locale, "selectedVideoModel")}</span></span>{selectedVideoModelEnabled ? <Select size="small" value={selectedVideoModel || undefined} options={videoModels} allowClear placeholder={h3Label(locale, videoModels.length ? "chooseVideoModel" : "noVideoModels")} onChange={(value) => patchVideoModelSettings({ selectedVideoModel: String(value || "") })} style={{ width: 220, flexShrink: 0 }} /> : null}<span className="nfh3-settings-transfer"><button type="button" title="导入参数设置" onClick={() => fileRef.current?.click()}><H3Icon name="restore" /></button><button type="button" title="导出参数设置" onClick={downloadSettings}><H3Icon name="download" /></button><button type="button" title="设为默认参数（新建 H3 节点将自动携带当前参数）" onClick={saveAsDefault}><H3Icon name="database" /></button><input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void readSettings(file); event.currentTarget.value = ""; }} /></span><small className="nfh3-transfer-message">{transferMessage}</small><small className="nfh3-panel-status">{status === "awaiting_confirmation" ? "待确认" : busy ? "运行中" : "就绪"}</small></div>
+        <div className="nfh3-execution-mode" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+            <strong>{h3Label(locale, "executionMode")}</strong>
+            <Radio.Group size="small" optionType="button" value={executionMode}
+                onChange={(event) => patchClipSettings({ minimaxEngine: event.target.value as "auto" | "local" | "runninghub" })}
+                options={[
+                    { label: h3Label(locale, "executionLocal"), value: "local" },
+                    { label: h3Label(locale, "executionRunningHub"), value: "runninghub" },
+                    { label: h3Label(locale, "executionHybrid"), value: "auto" },
+                ]}
+            />
+            <small style={{ flexBasis: "100%", opacity: 0.7 }}>{h3Label(locale, executionMode === "local" ? "executionLocalHint" : executionMode === "runninghub" ? "executionRunningHubHint" : "executionHybridHint")}</small>
+        </div>
         <div className={`nfh3-settings-scope${globalScope ? " is-global" : ""}`}>
             <div className="nfh3-settings-scope-control"><strong>{h3Label(locale, "settingsScope")}</strong><button type="button" className={!globalScope ? "active" : ""} aria-pressed={!globalScope} onClick={() => ctx.updateMetadata({ h3SettingsScope: "clip" })}>{h3Label(locale, "currentClip")}</button><button type="button" className={globalScope ? "active" : ""} aria-pressed={globalScope} onClick={() => ctx.updateMetadata({ h3SettingsScope: "global" })}>{h3Label(locale, "globalSettings")}</button></div>
             <p role="status">{h3Label(locale, globalScope ? "globalScopeNotice" : "clipScopeNotice")}</p>

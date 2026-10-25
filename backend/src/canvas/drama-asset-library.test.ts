@@ -154,6 +154,25 @@ test("shared prop references project and refresh their canonical prop image", ()
         assert.equal((db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "episode-umbrella").metadata.propImage.storageKey, "umbrella-v2");
     } finally { db.close(); }
 });
+test("episode canvas can reference a canonical shared asset from another drama", () => {
+    const { db, asset } = fixture();
+    try {
+        db.upsertCanvasFolder({ id: "other-drama", name: "另一部剧", isDrama: true, createdAt: new Date().toISOString() });
+        const shared = ensureProductionCanvas(db, "shared-assets", "other-drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "other-character", nodeType: "character", title: "跨剧目角色", metadata: {
+            characterName: "跨剧目角色", characterDescription: "来自另一部剧的共享角色", characterImages: [{ url: "/media/other.png", storageKey: "other-image" }], characterPrimaryIndex: 0,
+        } }], { runtimeWrite: true });
+        const source = { dramaId: "other-drama", assetId: "other-character-asset", sourceProjectId: shared.project.id, sourceNodeId: "other-character" };
+        db.upsertAssetRecord({ ...asset, id: source.assetId, dramaId: "other-drama", title: "跨剧目角色", data: {}, metadata: { sharedAssetSource: source } });
+
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "add_node", id: "cross-drama-ref", nodeType: "character", title: "跨剧目角色", metadata: { sharedAssetReference: source } }]);
+
+        const referenced = (db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "cross-drama-ref");
+        assert.equal(referenced.metadata.characterDescription, "来自另一部剧的共享角色");
+        assert.equal(referenced.metadata.characterImages[0].storageKey, "other-image");
+        assert.deepEqual(referenced.metadata.sharedAssetReference, source);
+    } finally { db.close(); }
+});
 test("orphaned shared-asset records auto-purge when unreferenced, stay while referenced, and surface as placeholders until swept", () => {
     const { db, asset } = fixture();
     try {

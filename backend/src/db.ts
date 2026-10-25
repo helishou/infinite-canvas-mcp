@@ -2387,7 +2387,7 @@ export class BackendDatabase {
                 connections: (project.connections as Record<string, any>[] || []).filter(edge => formalSourceIds.has(edge.toNodeId)),
             }) : undefined;
             const scriptBaseline = !context?.runtimeWrite && context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
-            const entityBaseline = !["production:scripts", "production:layout", "system:shared-library"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
+            const entityBaseline = !["production:scripts", "production:layout"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
@@ -2563,7 +2563,7 @@ export class BackendDatabase {
                 }
                 for (const operation of stale) { const result = applyCanvasProjectOperations(project, [operation]); committedOperations.push(operation); operationResults.push(...result); }
             }
-            const entitySync = entityBaseline ? syncEntityNodeEdits(this, id, entityBaseline, project) : { updates: [], operations: [] };
+            const entitySync = entityBaseline ? syncEntityNodeEdits(this, id, entityBaseline, project, { syncImageProjections: context?.source?.clientId !== "system:shared-library" }) : { updates: [], operations: [] };
             for (const operation of entitySync.operations) {
                 const result = applyCanvasProjectOperations(project, [operation]);
                 committedOperations.push(operation);

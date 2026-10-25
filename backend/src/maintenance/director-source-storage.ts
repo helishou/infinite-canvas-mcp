@@ -74,7 +74,7 @@ function inspectReadOnly(file: string) {
     } finally { db.close(); }
 }
 
-function main() {
+async function main() {
     const args = parseArgs(process.argv.slice(2));
     if (!fs.existsSync(DB_FILE)) throw new Error(`数据库不存在，拒绝创建空库: ${DB_FILE}`);
     if (!args.apply) { console.log(JSON.stringify(inspectReadOnly(DB_FILE), null, 2)); return; }
@@ -85,11 +85,10 @@ function main() {
         let result: unknown;
         if (args.sourceFile) {
             const source = JSON.parse(fs.readFileSync(args.sourceFile, "utf8")) as Record<string, unknown>;
-            result = service.migrateSubjectPromptV2(args.id!, args.expectedRevision!, args.operationId!, source);
+            result = await service.migrateSubjectPromptV2(args.id!, args.expectedRevision!, args.operationId!, source);
         } else result = service.applySingleSourceStorage(args.id!, args.expectedRevision!, args.operationId!);
         console.log(JSON.stringify({ ok: true, dryRun: false, backup, result }, null, 2));
     } finally { db.close(); }
 }
 
-try { main(); }
-catch (error) { console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }, null, 2)); process.exitCode = 1; }
+main().catch(error => { console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }, null, 2)); process.exitCode = 1; });

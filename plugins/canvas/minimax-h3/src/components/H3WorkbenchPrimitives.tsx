@@ -550,6 +550,7 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
     // 断流早退重试标记：弱网/后端不支持 Range 时媒体会在中途触发 ended（currentTime << duration），
     // 对同一 src 只自动重试一次，避免死循环。
     const endedRetrySrcRef = useRef<string | null>(null);
+    const fullscreenContinuationRef = useRef<string | null>(null);
     // 当前 active 视频播完：连续播放模式下，若 buffer 槽已预载好下一段，交叉淡入直接续播；否则走 advancePlayback 重载
     useEffect(() => {
         // 采样中的预览由 video.loop 自行循环，不进入成片换段或结束回写。
@@ -576,6 +577,24 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
             const next = nextUrlRef.current;
             const i = activeRef.current === 0 ? 1 : 0;
             const buf = videosRef.current[i];
+            // Native video fullscreen is attached to the <video> element itself. Switching
+            // to the warmed sibling leaves the browser showing the ended element (black).
+            // Keep that same element as the active slot and replace its source in place.
+            const isMediaFullscreen = document.fullscreenElement === media
+                || Boolean((media as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen);
+            if (continuous && next && isMediaFullscreen) {
+                const currentSlot = activeRef.current;
+                fullscreenContinuationRef.current = next;
+                loadedUrlRef.current[currentSlot] = next;
+                userPausedRef.current = false;
+                onEndedRef.current?.(true);
+                setSlotSrc((current) => {
+                    const updated = [...current] as [string, string];
+                    updated[currentSlot] = next;
+                    return updated;
+                });
+                return;
+            }
             if (continuous && next && buf && loadedUrlRef.current[i] === next) {
                 // 交叉淡入续播：buffer 槽直接接手播放。传 true 告知父组件「已经在播了」，
                 // 父组件据此不再递增 playRequest（否则下面那个 toggle 会把刚起播的下一段暂停）。
@@ -786,6 +805,10 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                         const local = !livePreview && slot === active ? Math.max(0, Math.min(playheadRef.current - timelineOffset, Number(event.currentTarget.duration || Infinity))) : 0;
                         if (Math.abs(event.currentTarget.currentTime - local) > 0.1) event.currentTarget.currentTime = local;
                         if (livePreview && slot === activeRef.current) void event.currentTarget.play().catch(() => undefined);
+                        if (slot === activeRef.current && fullscreenContinuationRef.current === slotSrc[slot]) {
+                            fullscreenContinuationRef.current = null;
+                            void event.currentTarget.play().catch(() => undefined);
+                        }
                         loadedUrlRef.current[slot] = slotSrc[slot];
                         setLoadFailed((current) => {
                             if (!current[slot]) return current;

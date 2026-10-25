@@ -442,6 +442,15 @@ export function startServer(
       if (previous && typeof previous === "object" && previous.layout !== undefined)
         settings.layout = previous.layout;
     }
+    // 生成参数保存是局部更新；保留由模板管理器维护、但普通参数表单不会提交的字段。
+    // 显式传入 [] 仍可清空，避免保存默认参数或 MCP 更新时静默丢失自定义模板。
+    const previous = stores.settings.get(H3_DEFAULTS_KEY) as Record<string, unknown> | null;
+    if (previous && typeof previous === "object") {
+      for (const key of ["styleTemplates", "deletedStyleTemplateIds"] as const) {
+        if (settings[key] === undefined && previous[key] !== undefined)
+          settings[key] = previous[key];
+      }
+    }
     stores.settings.set(H3_DEFAULTS_KEY, settings);
     events.publish({
       type: "settings.updated",

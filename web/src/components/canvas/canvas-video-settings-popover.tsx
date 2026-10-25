@@ -16,6 +16,8 @@ type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
     targetLabel?: string;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
+    runTargetOverride?: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
     comfyParams?: Record<string, unknown>;
@@ -23,7 +25,7 @@ type CanvasVideoSettingsPopoverProps = {
     referenceCount?: number;
 };
 
-export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, referenceCount = 0 }: CanvasVideoSettingsPopoverProps) {
+export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange, runTargetOverride, onRunTargetChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, referenceCount = 0 }: CanvasVideoSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -75,12 +77,15 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
         return () => { cancelled = true; };
     }, [workflowName]);
 
-    const customFields = (workflowDetail?.config?.fields || []).filter((field) =>
-        !isWorkflowImageField(field, workflowDetail?.workflow)
-        && !isWorkflowVideoField(field, workflowDetail?.workflow)
-        && !isWorkflowAudioField(field, workflowDetail?.workflow)
+    const activeWorkflowDetail = workflowDetail?.name === workflowName ? workflowDetail : null;
+    const customFields = (activeWorkflowDetail?.config?.fields || []).filter((field) =>
+        !isWorkflowImageField(field, activeWorkflowDetail?.workflow)
+        && !isWorkflowVideoField(field, activeWorkflowDetail?.workflow)
+        && !isWorkflowAudioField(field, activeWorkflowDetail?.workflow)
         && !field.isPrompt,
     );
+    const hasRunningHubBinding = Boolean(activeWorkflowDetail?.config?.runningHubProfileId);
+    const runTarget = runTargetOverride || activeWorkflowDetail?.config?.runTarget || "local";
 
     useEffect(() => {
         if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;
@@ -99,6 +104,7 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
     const panel = open && buttonRect ? <VideoSettingsPortal
         buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} targetLabel={targetLabel}
         config={config} onConfigChange={onConfigChange} customFields={customFields} customFieldValues={comfyParams}
+        showRunTarget={hasRunningHubBinding} runTarget={runTarget} onRunTargetChange={onRunTargetChange}
         onCustomFieldChange={onComfyParamsChange ? (id, value) => {
             const next = { ...(comfyParamsRef.current || {}), [id]: value };
             comfyParamsRef.current = next;
@@ -131,6 +137,9 @@ function VideoSettingsPortal({
     customFields,
     customFieldValues,
     onCustomFieldChange,
+    showRunTarget,
+    runTarget,
+    onRunTargetChange,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -142,6 +151,9 @@ function VideoSettingsPortal({
     customFields: NonNullable<Parameters<typeof VideoSettingsPanel>[0]["customFields"]>;
     customFieldValues?: Record<string, unknown>;
     onCustomFieldChange?: (id: string, value: unknown) => void;
+    showRunTarget: boolean;
+    runTarget: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
 }) {
     const style = {
         position: "fixed",
@@ -168,6 +180,6 @@ function VideoSettingsPortal({
             onClick={(event) => event.stopPropagation()}
         >
             <CanvasSettingsContext targetLabel={targetLabel} />
-            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" customFields={customFields} customFieldValues={customFieldValues} onCustomFieldChange={onCustomFieldChange} />
+            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" customFields={customFields} customFieldValues={customFieldValues} onCustomFieldChange={onCustomFieldChange} showRunTarget={showRunTarget} runTarget={runTarget} onRunTargetChange={onRunTargetChange} />
         </div></CanvasPortal>;
 }

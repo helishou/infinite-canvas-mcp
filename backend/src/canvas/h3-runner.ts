@@ -1167,11 +1167,12 @@ export class CanvasH3Runner {
             if (!this.videoDispatcher) throw new Error("自选视频模型执行器未初始化");
         }
         const selectedVideoDuration = Number(params.duration || segment.duration || 5);
+        const requestedEngine = h3ExecutionMode(params.minimaxEngine || params.engine || metadata.minimaxEngine);
         const selectedVideoParams = {
             mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: selectedVideoDuration,
             selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
         };
-        const requestedEngine = h3ExecutionMode(params.minimaxEngine || params.engine || metadata.minimaxEngine);
+        const selectedVideoRunTarget = requestedEngine === "auto" ? "hybrid" : requestedEngine === "runninghub" ? "cloud" : "local";
         Object.assign(params, {
             taskMode: runtimeTaskMode,
             mode: runtimeTaskMode,
@@ -1251,6 +1252,7 @@ export class CanvasH3Runner {
                     audioReferences: actualReferences.filter((reference) => String(reference.mediaType || reference.type || "").startsWith("audio")).map(videoModelReference),
                     workflowReferenceCount: actualReferences.length,
                     seconds: String(selectedVideoDuration),
+                    runTarget: selectedVideoRunTarget,
                     params: {
                         ...selectedVideoParams,
                         parentTaskId: parent.id,

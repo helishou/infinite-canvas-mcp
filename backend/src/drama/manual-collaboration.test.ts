@@ -16,6 +16,7 @@ import { captureCanvasInputs, effectiveTargetInput, inputHash } from './canvas-i
 import { mergeDirectorInput, adoptedDirectorFields } from './input-merge.js';
 import { emptyEpisodeProduction } from '@basketikun/canvas-agent/drama/production-contract';
 import type { CanvasGenerationService } from '../canvas/generation-service.js';
+import { directorHash, projectDirector, withoutDirectorProjection } from './director.js';
 
 function fixture(t: test.TestContext, persisted = false) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-manual-'));
@@ -28,20 +29,29 @@ function fixture(t: test.TestContext, persisted = false) {
     db.createCanvasProject({ id: 'canvas', nodes: [
         { id: 'reference', type: 'image', metadata: { storageKey: 'ref' } },
         { id: 'image', type: 'image', metadata: { prompt: 'My image prompt', model: 'test-image', comfyParams: { quality: 'high' } } },
-        { id: 'h3', type: 'minimax-h3', metadata: { segments: [{ id: 'clip', taskMode: 't2v', prompt: 'My edited dialogue and camera', duration: 5, aspectRatio: '16:9' }] } },
+        { id: 'h3', type: 'minimax-h3', metadata: { segments: [{ id: 'clip', taskMode: 't2v', prompt: 'My edited dialogue and camera', duration: 5, aspectRatio: '16:9', sampler: 'euler' }] } },
     ], connections: [{ id: 'ref-edge', fromNodeId: 'reference', toNodeId: 'image', order: 0 }] });
     db.upsertDramaEpisode({ id: 'ep', dramaId: 'drama', episodeNumber: 1, title: 'Episode', synopsis: '', canvasId: 'canvas' });
     const data = emptyEpisodeProduction();
     data.settings.imageModel = 'test-image';
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: 'main', start_frame: 0 }], initial: [], events: [], requirements: [], coverage: [] },
+        character_registry: [], subject_registry: [], scene_registry: [{ id: 'room', name: 'Room' }],
+        script_scenes: [{ id: 'scene', scene_id: 'room', scene_name: 'Room', text: 'A scene', beat_ids: ['beat'] }],
+        asset_plan: [{ asset_id: 'A', asset_name: 'Image', version: 'v1', depends_on: [] }, { asset_id: 'R', asset_name: 'Reference', version: 'v1', depends_on: [] }],
+        shots: [{ id: 'S', source_scene_id: 'scene', scene_id: 'room', story_beat_ids: ['beat'], timeline_id: 'main', story_order: 0,
+            duration_frames: 120, visual: 'A person in a room', camera: { framing: 'MS', attention_subject_ids: [] }, subject_usages: [],
+            keyframes: [{ id: 'KF', assetId: 'R', sourceNode: { projectId: 'canvas', nodeId: 'reference' }, selection: { mode: 'latest_success' }, anchor: 'opening', subjectIds: [], retain: [], exclude: [], requiredForSubmission: false }], utterance_refs: [] }],
+        segments: [{ id: 'G', timeline_id: 'main', shot_ids: ['S'], mode: 'T2VA' }] };
     data.director = { schemaVersion: 1, engine: { commit: 'a'.repeat(40), patchVersion: 'test', runtimeId: 'test', version: 'test' },
-        source: {
-            script_scenes: [{ id: 'scene', scene_id: 'room', scene_name: 'Room', text: 'A scene', beat_ids: ['beat'] }],
-            shots: [{ id: 'S', source_scene_id: 'scene', scene_id: 'room', story_beat_ids: ['beat'] }],
-            segments: [{ id: 'G', shot_ids: ['S'] }],
-        }, executionAuthorized: false, sourceHash: 'b'.repeat(64), artifacts: [], modules: {}, unresolved: [], workflow: {}, boundaries: [],
+        source, executionAuthorized: false, sourceHash: directorHash(source), artifacts: [], modules: {}, unresolved: [], workflow: {}, boundaries: [],
         assets: { A: { nodeId: 'image', version: 'v1', status: 'planned' }, R: { nodeId: 'reference', storageKey: 'ref', version: 'v1', status: 'generated' } }, shotInputs: {} };
-    data.clipGroups = [{ id: 'G', nodeId: 'h3', segmentId: 'clip', shotIds: ['S'], sourceVersion: 0 }];
-    db.db.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES ('ep',0,?,NULL,0,?)").run(JSON.stringify(data), new Date().toISOString());
+    projectDirector(data);
+    const canvas = db.getCanvasProject('canvas')!;
+    db.applyCanvasProjectOperations('canvas', Number(canvas.revision), [{ type: 'update_node', id: 'h3', metadata: { productionOwnerId: 'ep', productionOwnerKind: 'episode',
+        segments: [{ id: 'clip', taskMode: 't2v', prompt: 'My edited dialogue and camera', duration: 5, aspectRatio: '16:9', sampler: 'euler',
+            productionClipProjection: { targetId: 'G', sourceHash: data.director.sourceHash } }] } }], { runtimeWrite: true });
+    db.db.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES ('ep',0,?,NULL,0,?)").run(JSON.stringify(withoutDirectorProjection(data)), new Date().toISOString());
     const service = new EpisodeProductionService(db, events, undefined, false, () => {});
     const observer = new NativeProductionGeneration(db, stores, service, new EpisodeProductionService(db, events, undefined, true, () => {}), events);
     const project = () => stores.projects.get('canvas')!;
@@ -75,10 +85,10 @@ test('three-way merge preserves manual prompt and atomic references while updati
     assert.equal(mergeDirectorInput(current, next, undefined, groups).merged.prompt, 'manual');
 });
 
-test('batch snapshot is read-only, defaults to canvas, replays after edits, and resumes the original scope', t => {
+test('batch snapshot is read-only, defaults to canvas, replays after edits, and resumes the original scope', async t => {
     const f = fixture(t), before = JSON.stringify(f.project());
     const request = { runId: 'run', idempotencyKey: 'run', expectedRevision: 0, targets: ['asset:A', 'segment:G'], scope: 'selected' };
-    const checked = f.service.preflight('ep', { action: 'generate', request }) as any;
+    const checked = await f.service.preflight('ep', { action: 'generate', request }) as any;
     assert.equal(checked.valid, true, JSON.stringify(checked)); assert.equal(checked.readyTargets.length, 2);
     assert.equal(JSON.stringify(f.project()), before); assert.equal(f.service.listBatches('ep').length, 0);
     const batch = f.service.startBatch('ep', { ...request, expectedPlanHash: checked.planHash });
@@ -144,7 +154,7 @@ test('automatic batch overlaps independent images and preserves a successful tar
     const f = fixture(t);
     const production = f.service.get('ep');
     production.draft.director!.assets.B = { nodeId: 'image-b', version: 'v1', status: 'planned' };
-    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(production.draft));
+    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(withoutDirectorProjection(production.draft)));
     f.stores.projects.applyOperations('canvas', undefined, [{ type: 'add_node', id: 'image-b', nodeType: 'image', title: 'Image B', position: { x: 500, y: 0 }, width: 300, height: 220, metadata: { prompt: 'Independent image B', model: 'test-image' } }]);
 
     let activeStarts = 0, maxActiveStarts = 0;
@@ -209,14 +219,14 @@ test('migration adds nullable frozen snapshots, backs up persisted databases, an
     assert.ok(fs.readdirSync(f.directory).some(name => name.includes(`pre-schema-v32-to-v${DATABASE_SCHEMA_VERSION}`)));
 });
 
-test('field adoption is read-only in preflight and applies only selected director fields', t => {
+test('field adoption is read-only in preflight and applies only selected director fields', async t => {
     const f = fixture(t);
     f.stores.projects.applyOperations('canvas', undefined, [{ type: 'update_h3_segment', nodeId: 'h3', segmentId: 'clip', patch: {
         styleTemplateId: 'soft-light', productionClipProjection: { targetId: 'G', nextValues: { prompt: 'Director revision', styleTemplateId: 'modern-korean' }, fieldGroups: [['prompt'], ['styleTemplateId']] },
     } }], { runtimeWrite: true });
     const revision = Number(f.project().revision);
     const request = { operationId: 'adopt', expectedRevision: 0, ops: [{ type: 'adopt_director_fields', targetId: 'G', nodeId: 'h3', segmentId: 'clip', fields: ['prompt'], canvasRevision: revision }] };
-    assert.equal(f.service.preflight('ep', { action: 'edit', request }).valid, true);
+    assert.equal((await f.service.preflight('ep', { action: 'edit', request })).valid, true);
     assert.equal(f.project().revision, revision);
     f.service.edit('ep', request);
     const segment = (f.project().nodes as any[]).find(node => node.id === 'h3').metadata.segments[0];
@@ -272,7 +282,7 @@ test('manual model, sampler and explicit null style override defaults without ch
 test('generated image output continues without an approval step even under a legacy review policy', async t => {
     const f = fixture(t);
     f.data.settings.reviewPolicy = { mode: 'manual', shared: 'manual', scene: 'manual' };
-    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(f.data));
+    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(withoutDirectorProjection(f.data)));
     let calls = 0;
     const generation = { start: async (command: any) => {
         calls++;
@@ -308,7 +318,7 @@ test('the actual native H3 generation entry accepts the preview hash after addin
     service.observeProduction(f.observer);
     const input = { mode: 'video' as const, operation: 'h3-run' as const, projectId: 'canvas', nodeId: 'h3', segmentId: 'clip', params: { sampler: 'euler' } };
     const preview = service.previewH3(input);
-    assert.equal(preview.ready, true);
+    assert.equal(preview.ready, true, JSON.stringify(preview));
     const request = { ...input, expectedPlanHash: preview.planHash, idempotencyKey: 'native-preview-replay' };
     const task = await service.start(request);
     assert.equal(task.taskId, 'native-preview-replay');

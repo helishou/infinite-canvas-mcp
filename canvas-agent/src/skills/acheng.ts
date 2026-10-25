@@ -3,7 +3,7 @@ import { currentCompilationArtifact } from "../drama/compilation-scope.js";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { execFileSync, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
+import { execFile, execFileSync, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { directorModules, directorProductionSchema, productionOperationSchema, canonicalProduction, isSubjectPromptAssembly, resolveSubjectPictureBindingIds, productionContractVersion, productionPreflightRequestSchema, diagnosticBlocksAction, type DirectorProduction, type ProductionDiagnostic, type ProductionPreflight } from "../drama/production-contract.js";
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
@@ -199,6 +199,81 @@ export function runAchengPython(args: string[], options: ExecFileSyncOptionsWith
         const invocation = `& python ${args.map(literal).join(" ")}`;
         const command = `$OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=$OutputEncoding; [Console]::OutputEncoding=$OutputEncoding; $payload=[Console]::In.ReadToEnd(); if($payload.Length){$payload | ${invocation}}else{${invocation}}; exit $LASTEXITCODE`;
         return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], options);
+    }
+}
+
+const execFileAsync = (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding): Promise<string> => {
+    const { input, ...execOptions } = options;
+    const effectiveOptions = input === undefined ? execOptions : { ...execOptions, stdio: ["pipe", "pipe", "pipe"] as const };
+    return new Promise((resolve, reject) => {
+        const child = execFile(file, args, effectiveOptions, (error, stdout, stderr) => {
+            if (error) {
+                Object.assign(error, { stdout: stdout || "", stderr: stderr || "" });
+                reject(error);
+            } else resolve(String(stdout || ""));
+        });
+        if (input !== undefined) child.stdin?.end(input as string | Buffer);
+        else child.stdin?.end();
+    });
+};
+
+export async function resolveAchengPythonAsync(): Promise<string> {
+    if (process.env.ACHENG_PYTHON) {
+        if (!fs.existsSync(process.env.ACHENG_PYTHON)) throw new Error("Configured ACHENG_PYTHON executable does not exist");
+        return process.env.ACHENG_PYTHON;
+    }
+    if (discoveredPython) return discoveredPython;
+    const launchers = process.platform === "win32" ? [["py", "-3"], ["python"]] : [["python3"]];
+    for (const [launcher, ...flags] of launchers) {
+        try {
+            const candidate = (await execFileAsync(launcher, [...flags, "-c", "import sys; print(sys.executable)"], { windowsHide: true, encoding: "utf8" })).trim();
+            if (path.isAbsolute(candidate) && fs.existsSync(candidate)) {
+                discoveredPython = candidate;
+                discoveredPythonLauncher = [launcher, ...flags];
+                useDiscoveredPythonLauncher = process.platform === "win32" && candidate.toLowerCase().includes(`${path.sep}windowsapps${path.sep}`);
+                break;
+            }
+        } catch { /* Try the next installed launcher; never install or substitute an interpreter. */ }
+    }
+    if (!discoveredPython && process.platform === "win32") {
+        try {
+            const prefix = (await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "python -c 'import sys; print(sys.base_prefix)'"], { windowsHide: true, encoding: "utf8" })).trim();
+            const candidate = path.join(prefix, "python.exe");
+            if (path.isAbsolute(candidate) && fs.existsSync(candidate)) {
+                discoveredPython = candidate;
+                discoveredPythonLauncher = ["python"];
+                useDiscoveredPythonLauncher = candidate.toLowerCase().includes(`${path.sep}windowsapps${path.sep}`);
+            }
+        } catch { /* Report unavailable below; never install a replacement interpreter. */ }
+    }
+    if (!discoveredPython) throw new Error("Cannot resolve Acheng Python; set ACHENG_PYTHON to an existing Python executable");
+    if (!path.isAbsolute(discoveredPython) || !fs.existsSync(discoveredPython)) throw new Error("Resolved Acheng Python executable does not exist");
+    return discoveredPython;
+}
+
+/** runAchengPython 的异步镜像：同一 Windows 发现启动器 / PowerShell 回退链，但把 Python 子进程放异步，不阻塞调用方的事件循环。execFileAsync 的错误形状（spawn 失败 code=EPERM/ENOENT/EBUSY、非零退出 code=数字）与回退判断兼容，错误原样上抛。 */
+export async function runAchengPythonAsync(args: string[], options: ExecFileSyncOptionsWithStringEncoding): Promise<string> {
+    const python = await resolveAchengPythonAsync();
+    const runDiscoveredLauncher = async (): Promise<string | undefined> => {
+        if (!discoveredPythonLauncher) return undefined;
+        return await execFileAsync(discoveredPythonLauncher[0], [...discoveredPythonLauncher.slice(1), ...args], options);
+    };
+    if (process.platform === "win32" && !process.env.ACHENG_PYTHON && useDiscoveredPythonLauncher) return (await runDiscoveredLauncher())!;
+    try {
+        return await execFileAsync(python, args, options);
+    } catch (error: any) {
+        if (process.platform !== "win32" || process.env.ACHENG_PYTHON || !["EPERM", "ENOENT", "EBUSY"].includes(error.code)) throw error;
+        if (discoveredPythonLauncher) {
+            useDiscoveredPythonLauncher = true;
+            try { return (await runDiscoveredLauncher())!; }
+            catch (launcherError: any) {
+                if (!["EPERM", "ENOENT", "EBUSY"].includes(launcherError?.code)) throw launcherError;
+            }
+        }
+        const literal = (s: string) => `'${s.replace(/'/g, "''")}'`;
+        const invocation = `& python ${args.map(literal).join(" ")}`;
+        const command = `$OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=$OutputEncoding; [Console]::OutputEncoding=$OutputEncoding; $payload=[Console]::In.ReadToEnd(); if($payload.Length){$payload | ${invocation}}else{${invocation}}; exit $LASTEXITCODE`;
+        return await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], options);
     }
 }
 
@@ -404,7 +479,7 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
             diagnostics.push({ code: "COMPILER_GATE_FAILED", path: `audit.${gate.gate}`, message, severity: "warning", origin: "compiler", blocksCompilation: false, blockingActions: [] });
         }
     }
-    diagnostics.push(...preflightDirector(director, "edit", runtime).diagnostics.filter(d => diagnosticBlocksAction(d, "compile")));
+    diagnostics.push(...validateAchengSourceInCompileWorker(director, "edit", runtime).filter(d => diagnosticBlocksAction(d, "compile")));
     return { director, exitCode, diagnostics, audit, sourceAdjustments, acceptance: JSON.parse(readFile("delivery.acceptance.json").toString("utf8")) };
 }
 
@@ -594,9 +669,9 @@ export function achengEngineIdentity(runtime: AchengRuntime): DirectorProduction
 }
 
 /** Each new check follows the locally active runtime; its report records the actual validator. */
-export function auditAchengContinuity(director: DirectorProduction, targetIds?: string[], diagnosticOnly = false) {
+export async function auditAchengContinuity(director: DirectorProduction, targetIds?: string[], diagnosticOnly = false) {
     const runtime = resolveAchengEngine();
-    const response = runAchengPython(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "continuity_v2.py")], {
+    const response = await runAchengPythonAsync(["-B", "-X", "utf8", path.join(runtime.path, "scripts", "continuity_v2.py")], {
         cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source: director.source, target_ids: targetIds }),
     });
     return { ...JSON.parse(response), validatorRuntimeId: runtime.runtimeId, validatorEngine: achengEngineIdentity(runtime), diagnosticOnly };
@@ -606,7 +681,24 @@ export function auditAchengContinuity(director: DirectorProduction, targetIds?: 
 const sourceContractResponseCache = new Map<string, string>();
 export function resetAchengSourceValidationCache() { sourceContractResponseCache.clear(); }
 
-export function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope): ProductionDiagnostic[] {
+/** Compile workers may retain the synchronous validator because they are already isolated from the Backend event loop. */
+function validateAchengSourceInCompileWorker(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime: AchengRuntime): ProductionDiagnostic[] {
+    if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), continuityBoundaryDiagnostics(director, stage), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }].flat() as ProductionDiagnostic[];
+    const inputJson = JSON.stringify({ source: director.source, artifacts: director.artifacts || [], stage });
+    const scriptPath = path.join(runtime.path, "scripts", "canvas_source_contract.py");
+    const cacheKey = crypto.createHash("sha256").update(`${runtime.runtimeId}\\u0000${scriptPath}\\u0000${inputJson}`).digest("hex");
+    let response = sourceContractResponseCache.get(cacheKey);
+    if (response === undefined) {
+        response = runAchengPython(["-B", "-X", "utf8", scriptPath], { cwd: runtime.path, windowsHide: true, encoding: "utf8", input: inputJson });
+        if (sourceContractResponseCache.size >= 256) sourceContractResponseCache.clear();
+        sourceContractResponseCache.set(cacheKey, response);
+    }
+    const diagnostics: ProductionDiagnostic[] = JSON.parse(response).diagnostics;
+    for (const item of diagnostics) if (String(item.code).startsWith("CONTINUITY_")) item.severity = "warning";
+    return [...diagnostics, ...continuityBoundaryDiagnostics(director, stage)];
+}
+
+export async function validateAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope): Promise<ProductionDiagnostic[]> {
     if (!runtime.sourceContract) return [...ref2vaPromptDiagnostics(director, 2900), ...(scope ? [] : continuityBoundaryDiagnostics(director, stage)), { code: "SOURCE_CONTRACT_UNAVAILABLE", path: "director.engine", message: "Active runtime has no source contract; final checks remain with the compiler", severity: "unverified" }];
     const source = isSubjectPromptAssembly(director.source) && scope?.shotIds.length
         ? { ...director.source, _canvas_source_validation_scope: { shotIds: scope.shotIds } }
@@ -617,7 +709,7 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
     const cacheKey = crypto.createHash("sha256").update(`${runtime.runtimeId}\u0000${scriptPath}\u0000${inputJson}`).digest("hex");
     let response = sourceContractResponseCache.get(cacheKey);
     if (response === undefined) {
-        response = runAchengPython(["-B", "-X", "utf8", scriptPath], { cwd: runtime.path, windowsHide: true, encoding: "utf8", input: inputJson });
+        response = await runAchengPythonAsync(["-B", "-X", "utf8", scriptPath], { cwd: runtime.path, windowsHide: true, encoding: "utf8", input: inputJson });
         if (sourceContractResponseCache.size >= 256) sourceContractResponseCache.clear();
         sourceContractResponseCache.set(cacheKey, response);
     }
@@ -635,13 +727,13 @@ export function validateAchengSource(director: DirectorProduction, stage: "edit"
     return [...sourceDiagnostics, ...(scope ? [] : continuityBoundaryDiagnostics(director, stage))];
 }
 
-export function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope) {
-    const diagnostics = validateAchengSource(director, stage, runtime, scope).filter(item => diagnosticBlocksAction(item, stage));
+export async function assertAchengSource(director: DirectorProduction, stage: "edit" | "publish" | "generate", runtime = resolveAchengEngine(), scope?: AchengSourceValidationScope) {
+    const diagnostics = (await validateAchengSource(director, stage, runtime, scope)).filter(item => diagnosticBlocksAction(item, stage));
     if (diagnostics.length) throw new ProductionValidationError(diagnostics);
 }
 
 /** Read-only checks use the active compiler, or the runtime captured for this compilation request. */
-export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string): ProductionPreflight {
+export async function preflightCompilationDirector(raw: unknown, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string): Promise<ProductionPreflight> {
     let runtime: AchengRuntime;
     void selectedRuntimeId;
     try { runtime = resolveAchengEngine(); }
@@ -649,7 +741,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
         diagnostics: [{ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }] }; }
     const parsed = directorProductionSchema.safeParse(raw);
     // Previous receipts are replaced by compilation, so their staleness must not block rebuilding.
-    const result = preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit", runtime);
+    const result = await preflightDirector(parsed.success ? { ...parsed.data, artifacts: [] } : raw, "edit", runtime);
     result.compileReady = false;
     if (parsed.success) {
         const decisions = continuityBoundaryDiagnostics(parsed.data, "compile");
@@ -689,7 +781,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
         const args = runtime.liveCompiler
             ? ["-B", "-X", "utf8", runtime.liveCompiler.runnerPath, preflightScript, runtime.liveCompiler.directory, runtime.path]
             : ["-B", "-X", "utf8", preflightScript, runtime.path];
-        const response = runAchengPython(args, {
+        const response = await runAchengPythonAsync(args, {
             cwd: runtime.path, windowsHide: true, encoding: "utf8", input: JSON.stringify({ source }),
         });
         result.diagnostics.push(...JSON.parse(response).diagnostics);
@@ -703,7 +795,7 @@ export function preflightCompilationDirector(raw: unknown, resolveReferenceFile?
 }
 
 /** Shared file/Backend check. File checks cannot establish online ownership. */
-export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit", selectedRuntime?: AchengRuntime): ProductionPreflight {
+export async function preflightDirector(raw: unknown, stage: "edit" | "publish" | "generate" = "edit", selectedRuntime?: AchengRuntime): Promise<ProductionPreflight> {
     const diagnostics = schemaDiagnostics(directorProductionSchema, raw, "director");
     const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: null, revision: null, diagnostics, generationReady: false };
     if (diagnostics.length) return result;
@@ -715,7 +807,7 @@ export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "gen
         if (digest(artifact.prompt) !== artifact.sha256) diagnostics.push({ code: "PROMPT_HASH_MISMATCH", path: `director.artifacts.${index}.sha256`, targetId: artifact.targetId, message: "Prompt byte hash differs", severity: "error" });
         if (artifact.status === "ready" && (!currentCompilationArtifact(director, artifact) || artifact.receipt.promptHash !== artifact.sha256)) diagnostics.push({ code: "STALE_RECEIPT", path: `director.artifacts.${index}.receipt`, targetId: artifact.targetId, message: "Receipt differs from its source or prompt", severity: "error" });
     }
-    try { const runtime = selectedRuntime || resolveAchengEngine(); result.engine = achengEngineIdentity(runtime); diagnostics.push(...validateAchengSource(director, stage, runtime)); }
+    try { const runtime = selectedRuntime || resolveAchengEngine(); result.engine = achengEngineIdentity(runtime); diagnostics.push(...await validateAchengSource(director, stage, runtime)); }
     catch (error) { diagnostics.push({ code: "ENGINE_UNAVAILABLE", path: "director.engine", message: error instanceof Error ? error.message : String(error), severity: "error" }); }
     diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "director.assets", message: "Media ownership, approvals, model availability and current revision require Backend preflight", severity: "unverified" });
     result.valid = !diagnostics.some(item => diagnosticBlocksAction(item, stage));
@@ -723,7 +815,7 @@ export function preflightDirector(raw: unknown, stage: "edit" | "publish" | "gen
 }
 
 /** Offline formal-request envelope; missing Backend context stays unverified. */
-export function preflightProductionRequest(raw: unknown, production?: { revision: number; draft: { director?: DirectorProduction }; published?: { director?: DirectorProduction } | null; publishedVersion?: number }): ProductionPreflight {
+export async function preflightProductionRequest(raw: unknown, production?: { revision: number; draft: { director?: DirectorProduction }; published?: { director?: DirectorProduction } | null; publishedVersion?: number }): Promise<ProductionPreflight> {
     const diagnostics = schemaDiagnostics(productionPreflightRequestSchema, raw);
     const result: ProductionPreflight = { valid: false, contractVersion: productionContractVersion, engine: production?.draft.director?.engine || null, revision: production?.revision ?? null, diagnostics, generationReady: false };
     if (diagnostics.length) return result;
@@ -744,7 +836,7 @@ export function preflightProductionRequest(raw: unknown, production?: { revision
         } catch (error) { diagnostics.push({ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }); break; }
     }
     if (!diagnostics.some(item => diagnosticBlocksAction(item, input.action)) && director) {
-        const checked = input.action === "compile" ? preflightCompilationDirector(director) : preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
+        const checked = input.action === "compile" ? await preflightCompilationDirector(director) : await preflightDirector(director, input.action === "edit" ? "edit" : input.action === "publish" ? "publish" : "generate");
         diagnostics.push(...checked.diagnostics); result.engine = checked.engine;
         result.compileReady = input.action === "compile" && checked.compileReady;
     } else diagnostics.push({ code: "ONLINE_CONTEXT_UNVERIFIED", path: "production", message: "Current production and Backend checks remain unverified", severity: "unverified" });

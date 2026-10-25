@@ -32,6 +32,7 @@ export type CanvasVideoGenerationInput = {
     size?: string;
     seconds?: string;
     resolution?: string;
+    runTarget?: "local" | "cloud" | "hybrid";
     width?: number;
     height?: number;
     params?: Record<string, unknown>;
@@ -69,6 +70,7 @@ export class CanvasVideoDispatcher {
         return generationSettingsSnapshot(params, {
             ...(plan.workflow ? { workflow: plan.workflow } : {}),
             executor: plan.kind,
+            ...(plan.input.runTarget ? { runTarget: plan.input.runTarget } : {}),
             ...(plan.input.workflowReferenceCount !== undefined ? { workflowReferenceCount: plan.input.workflowReferenceCount } : {}),
         }, workflowFields);
     }
@@ -94,6 +96,8 @@ export class CanvasVideoDispatcher {
         const targetSize = targetNode || { width: 340, height: 190 };
         const task = this.stores.tasks.create(taskId, "canvas-video", input, {
             projectId: input.projectId, nodeId: input.nodeId, executor: plan.kind, model: input.model,
+            ...(plan.workflow ? { workflow: plan.workflow } : {}),
+            ...(input.runTarget ? { runTarget: input.runTarget } : {}),
             videoTargetSize: project ? { width: targetSize.width, height: targetSize.height } : undefined,
             ...(input.params?.parentTaskId ? { parentTaskId: input.params.parentTaskId } : {}),
             ...(input.params?.canvasBinding ? { canvasBinding: input.params.canvasBinding } : {}),
@@ -237,16 +241,27 @@ export class CanvasVideoDispatcher {
             this.track(taskId, childId);
             try {
                 // 平台提交、任务状态与媒体归档都交给 RunningHubBackend；视频档自身校验出视频结果。
+                const profile = runningHub.listWorkflowProfiles().find((item) => item.id === plan.runninghubProfileId);
+                if (!profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+                const localConfig = plan.workflow ? this.workflows.getConfig(plan.workflow) : null;
+                const localValues = workflowValues(plan.input, plan.workflow || "");
+                const values = bridgeLocalWorkflowValues(profile.fields || [], localConfig?.fields || [], localValues);
+                const [references, videos, audios] = await Promise.all([
+                    Promise.all((plan.input.references || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                    Promise.all((plan.input.videoReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                    Promise.all((plan.input.audioReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                ]);
                 const task = await runningHub.runWorkflow(plan.runninghubProfileId!, {
                     prompt: plan.input.prompt,
-                    references: plan.input.references || [],
-                    videoReferences: plan.input.videoReferences || [],
-                    audioReferences: plan.input.audioReferences || [],
-                }, { ...(plan.input.params || {}) }, {
+                    references,
+                    videos,
+                    audios,
+                }, values, {
                     parentTaskId: taskId,
                     projectId: plan.input.projectId,
                     nodeId: plan.input.nodeId,
                     model: plan.input.model,
+                    ...(localConfig?.outputNodes?.length ? { outputNodes: localConfig.outputNodes } : {}),
                     ...(plan.input.seconds ? { seconds: plan.input.seconds } : {}),
                     ...(plan.input.size ? { size: plan.input.size } : {}),
                     ...(plan.input.width && plan.input.height ? { width: plan.input.width, height: plan.input.height } : {}),
@@ -315,6 +330,20 @@ export class CanvasVideoDispatcher {
             if (resolved.binding.provider === "runninghub") {
                 if (!this.runningHub) throw new Error(`模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`);
                 return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: resolved.binding.profileId };
+            }
+            const workflowConfig = this.workflows.getConfig(resolved.binding.workflow);
+            const profileId = workflowConfig?.runningHubProfileId;
+            const requestedTarget = input.runTarget ?? workflowConfig?.runTarget ?? "local";
+            const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+            if (requestedTarget === "cloud" && !profileId) throw new Error("当前本地工作流没有绑定 RunningHub 工作流");
+            if (requestedTarget === "cloud" && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+            const localBusy = requestedTarget === "hybrid" && (
+                this.stores.tasks.list({ kind: "workflow", limit: 500 }).some((task) => ["queued", "running"].includes(task.status))
+                || this.stores.tasks.list({ kind: "canvas-video", limit: 500 }).some((task) => ["queued", "running"].includes(task.status) && task.executor === "workflow")
+            );
+            if ((requestedTarget === "cloud" || localBusy) && profileId && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+            if (profileId && profile && (requestedTarget === "cloud" || localBusy)) {
+                return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: profileId, workflow: resolved.binding.workflow };
             }
             return { input: withParams, kind: "workflow", workflow: resolved.binding.workflow };
         }
@@ -401,6 +430,42 @@ function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) {
 function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "audio" || field.node.split(",").some((id) => /(?:^|_)LoadAudio/.test((workflow[id] as any)?.class_type || "")); }
 function emptyWorkflowConfig(name: string): WorkflowConfig { return { title: name, backend: "", operation: "", description: "", fields: [] }; }
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
+    const values = { ...(input.params || {}) };
+    const configured = recordOf(values.selectedVideoModelFieldValues);
+    Object.assign(values, recordOf(configured[`${input.model}::${workflow}`] ?? configured[workflow]));
+    delete values.selectedVideoModelFieldValues;
+    // Keep generic canvas video settings available to RunningHub's node::input
+    // bridge. The local WorkflowExecutor applies these same fallback values before
+    // injecting its fields; without this, RH keeps profile.fieldValue (often 12s).
+    for (const key of ["seconds", "size", "resolution", "width", "height"] as const) {
+        if (values[key] === undefined && input[key] !== undefined) values[key] = input[key];
+    }
+    if (values.seconds === undefined && values.duration !== undefined) values.seconds = values.duration;
+    return values;
+}
+function bridgeLocalWorkflowValues(
+    runningHubFields: Array<{ id?: string; nodeId: string; fieldName: string; enabled?: boolean; source?: string }>,
+    localFields: WorkflowField[],
+    values: Record<string, unknown>,
+) {
+    const localValues = new Map<string, unknown>();
+    for (const field of localFields) {
+        const value = values[field.id] ?? field.default;
+        if (value === undefined || value === null) continue;
+        for (const nodeId of String(field.node || "").split(",").map((item) => item.trim()).filter(Boolean)) {
+            localValues.set(`${nodeId}::${field.input}`, value);
+        }
+    }
+    const bridged: Record<string, unknown> = {};
+    for (const field of runningHubFields) {
+        if (field.enabled === false || field.source && field.source !== "constant") continue;
+        const key = `${field.nodeId}::${field.fieldName}`;
+        const value = localValues.get(key);
+        if (value !== undefined) bridged[field.id || key] = value;
+    }
+    return bridged;
+}
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }
 function firstMedia(task: RuntimeTask) { const media = task.result?.media; const values = Array.isArray(media) ? media : media && typeof media === "object" ? [media] : []; const output = values.find((item: any) => String(item?.mimeType || "").startsWith("video/")) || values[0]; if (!output || typeof output !== "object") throw new Error("视频任务完成但没有返回媒体"); return output as Record<string, unknown>; }

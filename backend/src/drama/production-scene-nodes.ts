@@ -22,6 +22,17 @@ export function productionSceneCreationOperations(
     for (const sceneId of new Set(sceneIds)) {
         const scene = scenes.find(item => item.id === sceneId);
         if (!scene) continue;
+        const sceneUnit = layout.units.find(unit => unit.id === `scene:${sceneId}`);
+        const sceneMember = sceneUnit?.members.find(member => member.role === "scene");
+        const groupId = sceneMember?.nodeId;
+        if (sceneMember && !present.has(sceneMember.nodeId)) {
+            operations.push({ type: "add_node", id: sceneMember.nodeId, nodeType: "group",
+                title: scene.title || sceneId, position: sceneMember.position,
+                width: sceneMember.size.width, height: sceneMember.size.height,
+                metadata: { productionSceneId: sceneId, productionOwnerKind: owner.kind, productionOwnerId: owner.id,
+                    productionLayoutUnitId: sceneUnit!.id, productionLayoutBounds: sceneUnit!.bounds.size } });
+            present.add(sceneMember.nodeId);
+        }
         const videoUnit = layout.units.find(unit => unit.sceneId === sceneId && unit.members.some(member => member.role === "video"));
         const videoMember = videoUnit?.members.find(member => member.role === "video");
         const hasClip = production.clipGroups.some(group => productionSceneIdsForShots(scenes, group.shotIds).includes(sceneId));
@@ -29,7 +40,7 @@ export function productionSceneCreationOperations(
             operations.push({ type: "add_node", id: videoMember.nodeId, nodeType: "minimax-h3:video",
                 title: `${scene.title || sceneId} · H3`, position: videoMember.position,
                 width: videoMember.size.width, height: videoMember.size.height,
-                metadata: { ...createH3NodeMetadata(h3Defaults, { segments: [] }), segments: [], productionSceneId: sceneId,
+                metadata: { ...createH3NodeMetadata(h3Defaults, { segments: [] }), segments: [], productionSceneId: sceneId, ...(groupId ? { groupId } : {}),
                     productionOwnerKind: owner.kind, productionOwnerId: owner.id,
                     productionLayoutUnitId: videoUnit!.id, productionLayoutBounds: videoUnit!.bounds.size } });
             present.add(videoMember.nodeId);
@@ -38,7 +49,7 @@ export function productionSceneCreationOperations(
             if (!existing) continue;
             const metadata = existing.metadata && typeof existing.metadata === "object" ? existing.metadata : {};
             const metadataPatch = {
-                productionSceneId: sceneId, productionOwnerKind: owner.kind, productionOwnerId: owner.id,
+                productionSceneId: sceneId, ...(groupId ? { groupId } : {}), productionOwnerKind: owner.kind, productionOwnerId: owner.id,
                 productionLayoutUnitId: videoUnit?.id, productionLayoutBounds: videoUnit?.bounds.size,
             };
             const metadataChanged = Object.entries(metadataPatch).some(([key, value]) => JSON.stringify(metadata[key]) !== JSON.stringify(value));

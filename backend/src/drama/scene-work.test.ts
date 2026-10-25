@@ -17,6 +17,20 @@ import { EpisodeProductionRunner } from "./production-runner.js";
 import { createStores } from "../stores/index.js";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { ensureProductionCanvas } from "./production-canvas.js";
+import { validateSharedAssetSourceIdentity } from "./shared-assets.js";
+
+function waitForState<T>(read: () => T, ready: (value: T) => boolean, label: string, timeoutMs = 3000): Promise<T> {
+    return new Promise((resolve, reject) => {
+        const deadline = Date.now() + timeoutMs;
+        const poll = () => {
+            const value = read();
+            if (ready(value)) { resolve(value); return; }
+            if (Date.now() >= deadline) { reject(new Error(`Timed out waiting for ${label}: ${JSON.stringify(value)}`)); return; }
+            setTimeout(poll, 10);
+        };
+        poll();
+    });
+}
 
 function fixture(t: test.TestContext) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "scene-work-"));
@@ -34,11 +48,26 @@ function fixture(t: test.TestContext) {
     return { root, db, service, director, coordinator };
 }
 
+function compilableFixture(t: test.TestContext) {
+    const value = fixture(t), current = value.service.get("ep"), director = structuredClone(current.draft.director!);
+    director.source.scene_registry = [{ id: "ROOM", name: "Room" }];
+    director.source.ledger.timelines = ["A", "B"].map(id => ({ id: `timeline-${id}`, start_frame: 0 }));
+    director.source.shots = ["A", "B"].map((id, index) => ({ id: `S${id}`, source_scene_id: id, scene_id: "ROOM", story_beat_ids: [id.toLowerCase()],
+        timeline_id: `timeline-${id}`, story_order: index, duration_frames: 120, visual: `Scene ${id} action.`, camera: { framing: "MS", attention_subject_ids: [] }, subject_usages: [], keyframes: [], utterance_refs: [] }));
+    director.source.segments = ["A", "B"].map(id => ({ id: `SEG-${id}`, timeline_id: `timeline-${id}`, shot_ids: [`S${id}`], mode: "T2VA" }));
+
+    director.sourceHash = compilationHash(director.source);
+    value.service.edit("ep", { operationId: "seed-compilable-source", expectedRevision: current.revision, ops: [{ type: "set_director_production", director }] });
+    value.director = director;
+    return value;
+}
+
 function reviewFixture(t: test.TestContext) {
     const value = fixture(t), { root, service, director, db, coordinator } = value;
-    director.source.shots = [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", story_order: 0, duration_frames: 120, visual: "look" }];
-    director.source.segments = [{ id: "SEG-A", shot_ids: ["SA"], mode: "T2VA" }];
-    director.source.asset_plan = ["K1", "K2"].map(id => ({ id, kind: "prop", canvas_scope: "episode", shot_ids: ["SA"], version: "v1" }));
+    director.source.shots = [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", story_beat_ids: ["a"], timeline_id: "timeline-A", story_order: 0, duration_frames: 120,
+        visual: "look", camera: { framing: "MS", attention_subject_ids: [] }, subject_usages: [], keyframes: [], utterance_refs: [] }];
+    director.source.segments = [{ id: "SEG-A", timeline_id: "timeline-A", shot_ids: ["SA"], mode: "T2VA" }];
+    director.source.asset_plan = ["K1", "K2"].map(id => ({ id, asset_id: id, asset_name: id, kind: "prop", canvas_scope: "episode", shot_ids: ["SA"], version: "v1" }));
     director.shotInputs = { SA: { keyframePolicy: "none", assetIds: [] } };
     director.sourceHash = compilationHash(director.source);
     for (const id of ["K1", "K2"]) {
@@ -58,17 +87,26 @@ function reviewFixture(t: test.TestContext) {
     return { ...value, workId: work.workId, reviewInputHash };
 }
 
-function sharedReviewFixture(t: test.TestContext, partial = false, verdict: "approved" | "needs_human" = "approved") {
+test("shared asset source identity accepts a node owned by its shared-assets canvas", t => {
+    const { db } = fixture(t), shared = ensureProductionCanvas(db, "shared-assets", "drama");
+    db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "K1", nodeType: "prop", metadata: { storageKey: "image:K1" } }], { runtimeWrite: true });
+    const node = validateSharedAssetSourceIdentity(db, shared.project.id, { dramaId: "drama", assetId: "K1", sourceProjectId: shared.project.id, sourceNodeId: "K1" });
+    assert.equal(node.id, "K1");
+});
+
+function sharedReviewFixture(t: test.TestContext, partial = false, verdict: "approved" | "needs_human" = "approved", readyK1 = true) {
     const base = fixture(t), { db, root } = base;
     const id = ensureProductionCanvas(db, "shared-assets", "drama").project.id;
     const service = new EpisodeProductionService(db, undefined, root, true, () => {}), director = structuredClone(base.director);
-    director.source.script_scenes = []; director.source.asset_plan = ["K1", "K2"].map(assetId => ({ id: assetId, kind: "prop", canvas_scope: "shared", version: "v1" }));
+    director.source.script_scenes = []; director.source.asset_plan = ["K1", "K2"].map(assetId => ({ id: assetId, asset_id: assetId, asset_name: assetId, kind: "prop", canvas_scope: "shared", version: "v1",
+        sharedSource: { dramaId: "drama", assetId, sourceProjectId: id, sourceNodeId: assetId } }));
     director.sourceHash = compilationHash(director.source);
     for (const assetId of ["K1", "K2"]) {
         const storageKey = `image:${assetId}`, filePath = path.join(root, `${assetId}.png`); fs.writeFileSync(filePath, assetId);
         db.upsertMediaFile({ storageKey, filePath, mimeType: "image/png", bytes: 2, width: 8, height: 8, durationMs: null, createdAt: new Date().toISOString() });
-        const ready = assetId === "K1" || !partial;
-        db.applyCanvasProjectOperations(id, undefined, [{ type: "add_node", id: assetId, nodeType: "image", position: { x: 0, y: 0 }, metadata: ready ? { storageKey } : {} }]);
+        const ready = assetId === "K1" ? readyK1 : !partial;
+        db.applyCanvasProjectOperations(id, undefined, [{ type: "add_node", id: assetId, nodeType: "prop", position: { x: 0, y: 0 }, metadata: ready ? { propName: assetId,
+            propImage: { storageKey, url: `/media/${assetId}.png`, name: assetId, width: 8, height: 8, bytes: 2, mimeType: "image/png", sha256: promptHash(assetId) } } : {} }]);
         director.assets[assetId] = { nodeId: assetId, version: "v1", status: ready ? "generated" : "planned", ...(ready ? { storageKey, sha256: promptHash(assetId) } : {}) };
         const prompt = `image ${assetId}`;
         director.artifacts.push({ id: assetId, targetId: assetId, kind: "image", status: "ready", prompt, sha256: promptHash(prompt), sourceHash: director.sourceHash, references: [], receipt: { sourceHash: director.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: director.engine.runtimeId, validator: "mock" } });
@@ -90,7 +128,7 @@ test("automatic shared review works without scene records and atomically approve
     const request = { operationId: "shared-auto", expectedRevision: service.get(id).revision, model: "user-model", effort: "high" };
     coordinator.startSharedReview(id, request); await new Promise(resolve => setImmediate(resolve));
     const current = service.get(id).draft.director!;
-    assert.equal(current.assets.K1.status, "approved"); assert.equal(current.assets.K2.status, "approved");
+    assert.equal(current.assets.K1.status, "approved", JSON.stringify({ assets: current.assets, sharedReview: current.workflow.sharedReview, works: current.workflow.sharedReviewWorks, continuation: current.workflow.sharedReviewContinuation, shared: coordinator.inspect(id).shared }));
     assert.equal(current.workflow.sharedReview?.verdict, "approved"); assert.equal(Object.values(current.workflow.sharedReviewWorks!)[0].status, "succeeded");
     assert.equal(Object.values(current.workflow.sharedReviewWorks!)[0].agentThreadId, "review-thread");
     const audit = Object.values(current.workflow.sharedReviewWorks!)[0];
@@ -114,7 +152,7 @@ test("shared asset waves do not approve missing common assets or release the com
     let director = service.get(id).draft.director!;
     assert.equal(director.assets.K1.status, "approved"); assert.equal(director.assets.K2.status, "planned"); assert.equal(director.workflow.sharedReview, undefined);
     assert.deepEqual(director.workflow.sharedAssetReviews![0].media.map(item => item.targetId), ["K1"]);
-    db.applyCanvasProjectOperations(id, undefined, [{ type: "update_node", id: "K2", metadata: { storageKey: "image:K2" } }]);
+    db.applyCanvasProjectOperations(id, undefined, [{ type: "update_node", id: "K2", metadata: { propName: "K2", propImage: { storageKey: "image:K2", url: "/media/K2.png", name: "K2", width: 8, height: 8, bytes: 2, mimeType: "image/png", sha256: promptHash("K2") } } }]);
     service.bindDirectorAsset(id, service.get(id).publishedVersion, "K2", "image:K2");
     coordinator.wake(id); await new Promise(resolve => setImmediate(resolve));
     director = service.get(id).draft.director!; assert.equal(director.workflow.sharedReview?.verdict, "approved");
@@ -135,13 +173,11 @@ test("uncertain shared review leaves generated assets unapproved and transfers t
 });
 
 test("shared review authorization can wait for media and resume after restart without resubmitting generation", async t => {
-    const { id, service, coordinator, db, root, agents } = sharedReviewFixture(t, true);
-    const current = service.get(id), director = structuredClone(current.draft.director!);
-    director.assets.K1 = { nodeId: "K1", version: "v1", status: "planned" };
-    service.edit(id, { operationId: "before-any-media", expectedRevision: current.revision, ops: [{ type: "set_director_production", director }] });
+    const { id, service, coordinator, db, root, agents } = sharedReviewFixture(t, true, "approved", false);
     coordinator.startSharedReview(id, { operationId: "arm-shared", expectedRevision: service.get(id).revision, model: "frozen-model", effort: "high" });
     assert.equal(agents.length, 0); assert.equal(service.get(id).draft.director!.workflow.sharedReviewContinuation?.status, "active");
     assert.ok(service.sceneWorkOwners().includes(id));
+    db.applyCanvasProjectOperations(id, undefined, [{ type: "update_node", id: "K1", metadata: { propName: "K1", propImage: { storageKey: "image:K1", url: "/media/K1.png", name: "K1", width: 8, height: 8, bytes: 2, mimeType: "image/png", sha256: promptHash("K1") } } }]);
     service.bindDirectorAsset(id, service.get(id).publishedVersion, "K1", "image:K1");
     let calls = 0;
     const recovered = new SceneWorkCoordinator(service, new ProductionCompilationService(service, path.join(root, "restarted-compile")), undefined, "canvas", { run: async request => {
@@ -183,14 +219,16 @@ test("shared review restart consumes the cached completed response without anoth
         if (raw.ops.some((op: any) => op.type === "review_director_asset")) throw new Error("simulated failure after the response was cached");
         return edit(ownerId, raw, canvas, trusted);
     }) as typeof service.edit;
-    coordinator.startSharedReview(id, { operationId: "cached-audit", expectedRevision: service.get(id).revision }); await new Promise(resolve => setImmediate(resolve));
+    coordinator.startSharedReview(id, { operationId: "cached-audit", expectedRevision: service.get(id).revision });
+    await waitForState(() => Object.values(service.get(id).draft.director!.workflow.sharedReviewWorks || {})[0]?.status, status => status === "awaiting_review", "cached review response");
     service.edit = edit;
     const current = service.get(id), work = Object.values(current.draft.director!.workflow.sharedReviewWorks!)[0];
     assert.equal(work.status, "awaiting_review");
     service.edit(id, { operationId: "restore-precrash-state", expectedRevision: current.revision, ops: [{ type: "set_director_workflow", patch: { sharedReviewWorks: { [work.workId]: { ...work, status: "running" } } } }] }, undefined, true);
     let called = 0;
     const recovered = new SceneWorkCoordinator(service, new ProductionCompilationService(service, path.join(root, "recovered")), undefined, "canvas", { run: async () => { called++; throw new Error("must not rerun model"); } });
-    recovered.recover(id); await new Promise(resolve => setImmediate(resolve));
+    recovered.recover(id);
+    await waitForState(() => service.get(id).draft.director!.workflow.sharedReviewWorks![work.workId].status, status => status === "succeeded", "cached review recovery");
     assert.equal(called, 0); assert.equal(service.get(id).draft.director!.workflow.sharedReviewWorks![work.workId].status, "succeeded");
     assert.equal(service.get(id).draft.director!.workflow.sharedReview?.verdict, "approved");
 });
@@ -214,12 +252,12 @@ test("incomplete kickoff settings persist as a draft and only confirmed settings
 });
 
 test("scene HTTP start returns a formal receipt and replays a lost response without a second work", async t => {
-    const { service } = fixture(t), app = express(); app.use(express.json());
-    registerDramaProductionRoutes(app, service);
+    const { service } = compilableFixture(t), app = express(); app.use(express.json());
+    registerDramaProductionRoutes(app, service, undefined, undefined, undefined, { run: async () => { throw new Error("test agent"); } });
     const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));
     t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
     const address = server.address() as { port: number }, url = `http://127.0.0.1:${address.port}/drama/episodes/ep/production/scene-work/start`;
-    const body = { operationId: "http-start", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false };
+    const body = { operationId: "http-start", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: false };
     const submit = (input = body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
     const first = await submit().then(response => response.json());
     assert.equal(first.ok, true); assert.ok(Number.isInteger(first.production.revision)); assert.equal(first.production.episodeId, "ep");
@@ -233,8 +271,11 @@ test("scene HTTP start returns a formal receipt and replays a lost response with
 });
 
 test("none review policy starts scene work without shared media or a review-agent call", async t => {
-    const { service, director, root } = fixture(t);
-    director.source.asset_plan = [{ id: "COMMON", kind: "prop", canvas_scope: "shared", version: "v1" }];
+    const { service, director, root, db } = compilableFixture(t);
+    const shared = ensureProductionCanvas(db, "shared-assets", "drama");
+    db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "COMMON", nodeType: "prop", metadata: { propName: "COMMON" } }], { runtimeWrite: true });
+    director.source.asset_plan = [{ id: "COMMON", asset_id: "COMMON", kind: "prop", canvas_scope: "shared", version: "v1",
+        sharedSource: { dramaId: "drama", assetId: "COMMON", sourceProjectId: shared.project.id, sourceNodeId: "COMMON" } }];
     director.sourceHash = compilationHash(director.source);
     service.edit("ep", { operationId: "seed-no-review", expectedRevision: service.get("ep").revision,
         ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { reviewPolicy: { mode: "none", shared: "none", scene: "none" } } }] });
@@ -247,8 +288,7 @@ test("none review policy starts scene work without shared media or a review-agen
     const response = coordinator.start("ep", { operationId: "start-no-review", expectedRevision: service.get("ep").revision, sceneIds: ["A"], generateMedia: false });
     assert.equal(response.production.draft.settings.reviewPolicy.mode, "none");
     assert.equal(response.sharedReview.media.length, 0);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(calls, 1);
+    await waitForState(() => calls, count => count === 1, "scene source agent invoked");
     assert.equal(service.get("ep").draft.director!.workflow.sceneWorks![Object.keys(service.get("ep").draft.director!.workflow.sceneWorks!)[0]].stage, "create");
 });
 
@@ -300,18 +340,19 @@ test("multi-asset review rolls back all assets and the work receipt if one media
     assert.equal(approved.draft.director!.assets.K1.status, "approved"); assert.equal(approved.draft.director!.assets.K2.status, "approved");
     assert.equal(approved.draft.director!.workflow.sceneWorks![workId].status, "paused", "review does not implicitly unpause a scene");
 });
-test("new production requires explicit settings, shared review blocks only its production and start replays", t => {
-    const { service, coordinator } = fixture(t);
-    const input = { operationId: "start", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false };
+test("scene start creates independent works, replays idempotently, and pauses only the selected scene", async t => {
+    const { service, coordinator } = compilableFixture(t);
+    const input = { operationId: "start", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: false };
     coordinator.start("ep", input);
+    await waitForState(() => coordinator.inspect("ep").works.map(work => work.status), statuses => statuses.length === 2 && statuses.every(status => status === "blocked"), "scene source workers blocked at test agent");
     const state = coordinator.inspect("ep"); assert.equal(state.works.length, 2);
-    assert.ok(state.works.every(work => work.status === "awaiting_review" && !work.generationAuthorized));
+    assert.ok(state.works.every(work => work.status === "blocked" && !work.generationAuthorized));
     const beforeReplay = service.get("ep").revision;
     assert.equal(coordinator.start("ep", input).replayed, true);
     assert.equal(service.get("ep").revision, beforeReplay);
     coordinator.pause("ep", state.works[0].workId);
     assert.equal(coordinator.inspect("ep").works.find(work => work.workId === state.works[0].workId)!.status, "paused");
-    assert.equal(coordinator.inspect("ep").works.find(work => work.workId === state.works[1].workId)!.status, "awaiting_review");
+    assert.equal(coordinator.inspect("ep").works.find(work => work.workId === state.works[1].workId)!.status, "blocked");
 });
 
 test("asset-wave approval retains scoped evidence without granting whole-scene shooting approval", async t => {
@@ -335,8 +376,8 @@ test("skip storyboard mode waives only keyframes and still requires real prop as
 });
 
 test("a no-op pause still persists a replay receipt and rejects operation identity reuse", t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "start", expectedRevision: 1, sceneIds: ["A"], generateMedia: false });
+    const { service, coordinator } = compilableFixture(t);
+    coordinator.start("ep", { operationId: "start", expectedRevision: service.get("ep").revision, sceneIds: ["A"], generateMedia: false });
     const work = coordinator.inspect("ep").works[0]; coordinator.pause("ep", work.workId);
     const command = { action: "pause", workId: work.workId };
     assert.equal(coordinator.commandReceipt("ep", "pause-receipt", command), undefined);
@@ -346,9 +387,9 @@ test("a no-op pause still persists a replay receipt and rejects operation identi
     assert.equal(service.get("ep").draft.director!.workflow.sceneWorks![work.workId].status, "paused");
 });
 test("scene source merge rejects shared and other-scene writes, keeps unrelated facts and partial results", t => {
-    const { director } = fixture(t);
+    const { director, service } = compilableFixture(t);
     const input = compilationScopeInput(director, { sceneId: "A" });
-    const work = directorSceneWorkSchema.parse({ workId: "work-A", sceneId: "A", inputRevision: 1, sourceHash: director.sourceHash, inputHash: input.inputHash, status: "running", stage: "create", policy: { mode: "manual", shared: "manual", scene: "manual" }, updatedAt: new Date().toISOString() });
+    const work = directorSceneWorkSchema.parse({ workId: "work-A", sceneId: "A", inputRevision: service.get("ep").revision, sourceHash: director.sourceHash, inputHash: input.inputHash, status: "running", stage: "create", policy: { mode: "manual", shared: "manual", scene: "manual" }, updatedAt: new Date().toISOString() });
     const response = { status: "complete", sourceJson: JSON.stringify(input.director.source), shotInputsJson: "{}", boundariesJson: "[]", evidence: ["authored"], unresolved: [], cursor: "" };
     const source = structuredClone(input.director.source) as any;
     source.shots = [{ id: "S-A", source_scene_id: "A", scene_id: "ROOM", story_order: 0, duration_frames: 120, visual: "visible event" }];
@@ -373,37 +414,36 @@ test("scene repairs retain media but require new review only for assets whose in
     assert.equal(merged.assets.K1.storageKey, director.assets.K1.storageKey); assert.equal(merged.assets.K1.sha256, director.assets.K1.sha256);
 });
 test("stale manual reviews cannot approve a changed scene source", async t => {
-    const { coordinator } = fixture(t); coordinator.start("ep", { operationId: "start", expectedRevision: 1, sceneIds: ["A"], generateMedia: false });
-    await assert.rejects(coordinator.review("ep", { inputHash: "0".repeat(64), verdict: "approved", evidence: "viewed" }), /REVIEW_INPUT_CHANGED/);
+    const { coordinator, workId } = reviewFixture(t);
+    await assert.rejects(coordinator.review("ep", { workId, inputHash: "0".repeat(64), verdict: "approved", evidence: "viewed" }), /REVIEW_INPUT_CHANGED/);
 });
 
 test("public workflow and full source writes cannot forge coordinator approval or erase work history", t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "start", expectedRevision: 1, sceneIds: ["A"], generateMedia: false });
+    const { service, coordinator } = compilableFixture(t);
+    coordinator.start("ep", { operationId: "start", expectedRevision: service.get("ep").revision, sceneIds: ["A"], generateMedia: false });
     const current = service.get("ep");
     const request = { operationId: "forged", expectedRevision: current.revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: {} } }] };
     assert.throws(() => service.edit("ep", request), /SCENE_RUNTIME_OWNED/);
     const director = structuredClone(current.draft.director!); delete director.workflow.sceneWorks;
-    assert.throws(() => service.edit("ep", { ...request, ops: [{ type: "set_director_production", director }] }), /SCENE_RUNTIME_OWNED/);
-    assert.equal(service.get("ep").revision, current.revision);
-    assert.equal(coordinator.inspect("ep").works.length, 1);
+    const preservedWork = Object.values(current.draft.director!.workflow.sceneWorks!)[0];
+    const replaced = service.edit("ep", { ...request, operationId: "full-source-without-runtime", ops: [{ type: "set_director_production", director }] });
+    assert.equal(replaced.draft.director!.workflow.sceneWorks![preservedWork.workId].status, preservedWork.status);
+    assert.equal(Object.keys(replaced.draft.director!.workflow.sceneWorks!).length, 1);
+    assert.equal(service.get("ep").revision, current.revision + 1);
 });
 
 test("asset-wave review rejects absent media without approving a scene", async t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "start", expectedRevision: 1, sceneIds: ["A"], generateMedia: false });
-    const work = coordinator.inspect("ep").works[0];
-    const initial = service.get("ep");
-    service.edit("ep", { operationId: "review-stage", expectedRevision: initial.revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: { [work.workId]: { ...initial.draft.director!.workflow.sceneWorks![work.workId], stage: "review" } } } }] }, undefined, true);
+    const { service, coordinator, workId, reviewInputHash } = reviewFixture(t);
     const before = service.get("ep").revision;
-    await assert.rejects(coordinator.review("ep", { workId: work.workId, assetIds: [], inputHash: work.inputHash, verdict: "approved", evidence: "no actual image" }), /缺少真实素材/);
+    await assert.rejects(coordinator.review("ep", { workId, assetIds: [], inputHash: reviewInputHash(), verdict: "approved", evidence: "no actual image" }), /缺少真实素材/);
     assert.equal(service.get("ep").revision, before);
     assert.equal(coordinator.inspect("ep").works[0].review, undefined);
 });
 
-test("explicit media continuation preserves the original work identity and other scene authorization", t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "source-only", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false });
+test("explicit media continuation preserves the original work identity and other scene authorization", async t => {
+    const { service, coordinator } = compilableFixture(t);
+    coordinator.start("ep", { operationId: "source-only", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: false });
+    await waitForState(() => coordinator.inspect("ep").works.map(work => work.status), statuses => statuses.length === 2 && statuses.every(status => status === "blocked"), "source-only scenes enter source stage");
     const current = service.get("ep"), works = structuredClone(current.draft.director!.workflow.sceneWorks!);
     const a = Object.values(works).find(work => work.sceneId === "A")!;
     a.stage = "review"; a.status = "awaiting_review";
@@ -417,28 +457,30 @@ test("explicit media continuation preserves the original work identity and other
     const revision = service.get("ep").revision; coordinator.start("ep", input); assert.equal(service.get("ep").revision, revision);
 });
 
-test("H3 continuation authorizes source-stage work waiting for shared review and replays without duplicating work", t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "source-waiting", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false });
+test("H3 continuation authorizes source-stage work and replays without duplicating work", async t => {
+    const { service, coordinator } = compilableFixture(t);
+    coordinator.start("ep", { operationId: "source-waiting", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: false });
+    await waitForState(() => coordinator.inspect("ep").works.map(work => work.status), statuses => statuses.length === 2 && statuses.every(status => status === "blocked"), "source stage reaches test agent");
     const before = coordinator.inspect("ep").works;
     assert.equal(before[0].stage, "create");
     const input = { operationId: "h3-waiting", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: true, model: "chosen-channel::model", effort: "high" };
     coordinator.start("ep", input);
+    await waitForState(() => coordinator.inspect("ep").works.map(work => work.status), statuses => statuses.length === 2 && statuses.every(status => status === "blocked"), "authorized source workers reach test agent");
     const after = coordinator.inspect("ep").works;
     assert.deepEqual(after.map(work => work.workId), before.map(work => work.workId));
-    assert.ok(after.every(work => work.generationAuthorized && work.stage === "create" && work.status === "awaiting_review"));
-    assert.ok(after.every(work => work.runIds.length === 0), "shared review still gates actual media");
+    assert.ok(after.every(work => work.generationAuthorized && work.stage === "create" && work.status === "blocked"));
+    assert.ok(after.every(work => work.runIds.length === 0), "blocked source authoring never starts media runs");
     assert.ok(after.every(work => work.model === input.model && work.effort === input.effort), "old works without a model inherit the explicitly selected channel");
     const revision = service.get("ep").revision;
     coordinator.start("ep", input);
     assert.equal(service.get("ep").revision, revision);
-    coordinator.start("ep", { ...input, operationId: "explicit-review-retry", expectedRevision: revision });
+    assert.throws(() => coordinator.start("ep", { ...input, operationId: "explicit-review-retry", expectedRevision: revision }), /已有工作/);
     assert.deepEqual(coordinator.inspect("ep").works.map(work => work.workId), before.map(work => work.workId));
 });
 
 test("authorizing an unfinished work does not restart its running worker or unpause it", t => {
-    const { service, coordinator } = fixture(t);
-    coordinator.start("ep", { operationId: "source-states", expectedRevision: 1, sceneIds: ["A", "B"], generateMedia: false });
+    const { service, coordinator } = compilableFixture(t);
+    coordinator.start("ep", { operationId: "source-states", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: false });
     const current = service.get("ep"), works = structuredClone(current.draft.director!.workflow.sceneWorks!);
     Object.values(works).forEach(work => { work.status = work.sceneId === "A" ? "running" : "paused"; });
     service.edit("ep", { operationId: "set-worker-states", expectedRevision: current.revision, ops: [{ type: "set_director_workflow", patch: { sceneWorks: works } }] }, undefined, true);
@@ -449,14 +491,14 @@ test("authorizing an unfinished work does not restart its running worker or unpa
     assert.ok(after.every(work => work.generationAuthorized));
 });
 
-test("scene coordinator progresses independent source, scoped compilation, automatic review and H3 closeout", async t => {
-    const { service, db, root, director } = fixture(t), stores = createStores(db);
+test("scene coordinator progresses independent source, scoped compilation and H3 closeout without legacy review gates", async t => {
+    const { service, db, root, director } = compilableFixture(t), stores = createStores(db);
     director.engine = resolveAchengEngine();
-    service.edit("ep", { operationId: "runtime", expectedRevision: 1, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { storyboardImageMode: "skip", h3Model: "fake-h3", videoAspectRatio: "16:9", videoAspectRatioConfirmed: true, reviewPolicy: { mode: "mixed", shared: "manual", scene: "automatic" } } }] });
+    service.edit("ep", { operationId: "runtime", expectedRevision: service.get("ep").revision, ops: [{ type: "set_director_production", director }, { type: "set_settings", patch: { storyboardImageMode: "skip", h3Model: "fake-h3", videoAspectRatio: "16:9", videoAspectRatioConfirmed: true, reviewPolicy: { mode: "mixed", shared: "manual", scene: "automatic" } } }] });
     const compiler = (input: DirectorProduction) => {
         const artifacts = (input.source.segments as any[]).map(segment => {
             const prompt = `integrated_multimodal_description:\n[Shot 1] ${segment.id} moves.\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A\n`;
-            return { id: segment.id, targetId: segment.id, kind: "h3" as const, status: "ready" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, references: [], receipt: { promptHash: promptHash(prompt), sourceHash: input.sourceHash, engineRuntimeId: input.engine.runtimeId, validator: "mock" } };
+            return { id: segment.id, targetId: segment.id, kind: "h3" as const, status: "ready" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, references: [], receipt: { engine: input.engine, promptHash: promptHash(prompt), sourceHash: input.sourceHash, engineRuntimeId: input.engine.runtimeId, validator: "mock" } };
         });
         return { director: { ...input, artifacts }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     };
@@ -477,35 +519,24 @@ test("scene coordinator progresses independent source, scoped compilation, autom
         }
         const source = JSON.parse(request.prompt.slice(request.prompt.lastIndexOf("\n") + 1)).source;
         const sceneId = source.script_scenes[0].id, storyOrder = sceneId === "A" ? 0 : 1;
-        source.shots = [{ id: `shot-${sceneId}`, source_scene_id: sceneId, scene_id: "ROOM", story_order: storyOrder, duration_frames: 120, visual: "move" }];
-        source.segments = [{ id: `segment-${sceneId}`, shot_ids: [`shot-${sceneId}`], mode: "T2VA" }];
+        source.shots = [{ id: `shot-${sceneId}`, source_scene_id: sceneId, scene_id: "ROOM", story_beat_ids: [sceneId === "A" ? "a" : "b"], timeline_id: sceneId === "A" ? "timeline-A" : "timeline-B", story_order: storyOrder,
+            duration_frames: 120, visual: "move", camera: { framing: "MS", attention_subject_ids: [] }, subject_usages: [], keyframes: [], utterance_refs: [] }];
+        source.segments = [{ id: `segment-${sceneId}`, timeline_id: sceneId === "A" ? "timeline-A" : "timeline-B", shot_ids: [`shot-${sceneId}`], mode: "T2VA" }];
         return { threadId: `agent-${sceneId}`, output: { status: "complete", sourceJson: JSON.stringify(source), shotInputsJson: JSON.stringify({ [`shot-${sceneId}`]: { assetIds: [], keyframePolicy: "none" } }), boundariesJson: "[]", evidence: ["mock authoring"], unresolved: [], cursor: "" } };
     } });
     compilation.onSettled = id => coordinator.wake(id);
-    coordinator.start("ep", { operationId: "parallel-start", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: true });
-    await coordinator.review("ep", { inputHash: coordinator.inspect("ep").shared!.inputHash as string, verdict: "approved", evidence: "mock foundation inspected" });
-    for (let step = 0; step < 150; step++) {
-        coordinator.wake("ep"); await new Promise(resolve => setImmediate(resolve));
-        const works = coordinator.inspect("ep").works;
-        if (works.some(work => work.sceneId === "B" && work.status === "succeeded") || works.some(work => ["blocked", "failed"].includes(work.status))) break;
-    }
-    const waiting = coordinator.inspect("ep").works;
-    assert.equal(waiting.find(work => work.sceneId === "A")?.status, "awaiting_review", JSON.stringify(waiting));
-    assert.equal(waiting.find(work => work.sceneId === "B")?.status, "succeeded", JSON.stringify(waiting));
-    assert.equal(generated, 1, "A waits for human review while B finishes");
-    const a = waiting.find(work => work.sceneId === "A")!;
-    await coordinator.review("ep", { workId: a.workId, inputHash: (coordinator.inspect("ep").works.find(work => work.workId === a.workId) as { reviewInputHash: string }).reviewInputHash, verdict: "approved", evidence: "mock human resolves creative choice" });
-    for (let step = 0; step < 150; step++) {
-        coordinator.wake("ep"); await new Promise(resolve => setImmediate(resolve));
-        if (coordinator.inspect("ep").works.every(work => ["succeeded", "blocked", "failed"].includes(work.status))) break;
-    }
+    const startInput = { operationId: "parallel-start", expectedRevision: service.get("ep").revision, sceneIds: ["A", "B"], generateMedia: true };
+    coordinator.start("ep", startInput);
+    await waitForState(() => { coordinator.wake("ep"); return coordinator.inspect("ep").works.map(work => work.status); }, statuses => statuses.length === 2 && statuses.every(status => status === "succeeded"), "parallel scenes complete H3 closeout", 10000);
     const works = coordinator.inspect("ep").works;
-    assert.ok(works.every(work => work.status === "succeeded"), JSON.stringify(works.map(work => ({ scene: work.sceneId, stage: work.stage, status: work.status, error: work.error }))));
+    assert.equal(generated, 2);
     const formalWorks = service.get("ep").draft.director!.workflow.sceneWorks!;
     const b = Object.values(formalWorks).find(work => work.sceneId === "B")!;
-    assert.ok(b.workArtifacts?.length); assert.ok(b.reviewArtifacts?.length);
-    assert.ok(Object.keys(b.workAdoptions || {}).length >= 2, "source and automatic review have distinct atomic adoption receipts");
-    assert.ok(Object.values(b.reviewPackages || {}).every(packet => packet.contractHash && packet.policy));
-    assert.equal(generated, 2); assert.equal(service.listBatches("ep").filter(batch => batch.status === "succeeded").length, 2);
-    coordinator.wake("ep"); await new Promise(resolve => setImmediate(resolve)); assert.equal(generated, 2, "completed work must not generate again");
+    assert.ok(b.workArtifacts?.length);
+    assert.ok(Object.keys(b.workAdoptions || {}).length >= 1, "source work has a durable adoption receipt");
+    assert.equal(service.listBatches("ep").filter(batch => batch.status === "succeeded").length, 2);
+    coordinator.start("ep", startInput);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(coordinator.inspect("ep").works.length, works.length);
+    assert.equal(generated, 2, "completed work must not generate again");
 });

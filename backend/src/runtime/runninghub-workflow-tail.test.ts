@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { appendRunningHubOutputTail, TAIL_PLAY_SOUND, TAIL_SAVE_LOCAL } from "./runninghub-workflow-tail.js";
+import { appendRunningHubApiTail, appendRunningHubOutputTail, TAIL_PLAY_SOUND, TAIL_SAVE_LOCAL } from "./runninghub-workflow-tail.js";
 
 /** 造一个最小 UI 格式工作流：VAEDecode（IMAGE）→ SaveImage。 */
 function uiWorkflow() {
@@ -109,11 +109,10 @@ describe("runninghub-workflow-tail 图像输出", () => {
 });
 
 describe("runninghub-workflow-tail 视频输出", () => {
-    it("SaveVideo：Play Sound 接 VIDEO 输出，Save Image To Local 接上游帧来源", () => {
+    it("SaveVideo：Play Sound 接 VIDEO 输出，Save Image To Local 接 Play Sound 后面", () => {
         const result = appendRunningHubOutputTail(videoWorkflow());
         assert.equal(result.added, true);
         assert.equal(result.kind, "video");
-        assert.equal(result.attachedSave, true);
 
         const wf = result.workflow as any;
         const play = nodeOf(wf, TAIL_PLAY_SOUND)!;
@@ -121,20 +120,20 @@ describe("runninghub-workflow-tail 视频输出", () => {
         const saveVideo = nodeOf(wf, "SaveVideo")!;
         const decode = nodeOf(wf, "VAEDecode")!;
 
-        // Play Sound 在视频输出之后：VIDEO 类型
+        // 第一段：视频输出 → Play Sound（VIDEO 类型）
         const linkIn = play.inputs[0].link;
         assert.deepEqual(linkRow(wf, linkIn), [linkIn, 3, 0, play.id, 0, "VIDEO"]);
         assert.equal(saveVideo.outputs[0].links.length, 1);
-        assert.equal(play.outputs[0].links.length, 0, "视频链不把 any_output 串下去");
 
-        // Save Image To Local 接帧来源（VAEDecode.IMAGE），不是接 Play Sound
+        // 第二段：Play Sound.any_output（*）→ Save Image To Local.images
         const linkSave = local.inputs[0].link;
-        assert.deepEqual(linkRow(wf, linkSave), [linkSave, 1, 0, local.id, 0, "IMAGE"]);
-        assert.equal(decode.outputs[0].links.length, 2);
+        assert.deepEqual(linkRow(wf, linkSave), [linkSave, play.id, 0, local.id, 0, "*"]);
+        assert.deepEqual(play.outputs[0].links, [linkSave]);
         assert.equal(wf.last_link_id, linkSave);
+        assert.equal(decode.outputs[0].links.length, 1, "上游帧来源不该被改动");
     });
 
-    it("VHS_VideoCombine：Filenames 接 Play Sound，帧来源取其 images 上游", () => {
+    it("VHS_VideoCombine：Filenames 接 Play Sound，再串到 Save Image To Local", () => {
         const wf = {
             last_node_id: 2,
             last_link_id: 1,
@@ -150,27 +149,17 @@ describe("runninghub-workflow-tail 视频输出", () => {
         const play = nodeOf(out, TAIL_PLAY_SOUND)!;
         const local = nodeOf(out, TAIL_SAVE_LOCAL)!;
         assert.deepEqual(linkRow(out, play.inputs[0].link), [play.inputs[0].link, 2, 0, play.id, 0, "VHS_FILENAMES"]);
-        assert.deepEqual(linkRow(out, local.inputs[0].link), [local.inputs[0].link, 1, 0, local.id, 0, "IMAGE"]);
+        assert.deepEqual(linkRow(out, local.inputs[0].link), [local.inputs[0].link, play.id, 0, local.id, 0, "*"]);
+        assert.equal(nodeOf(out, "VAEDecode")!.outputs[0].links.length, 1, "VAEDecode 的输出保持只有 VHS 一条");
     });
 
-    it("视频上游找不到 IMAGE 时只接 Play Sound，并给出原因", () => {
-        const wf = {
-            last_node_id: 2,
-            last_link_id: 1,
-            nodes: [
-                { id: 1, type: "SomeVideoGen", pos: [0, 0], size: [200, 100], order: 0, mode: 0, inputs: [], outputs: [{ name: "VIDEO", type: "VIDEO", links: [1] }] },
-                { id: 2, type: "SaveVideo", pos: [300, 0], size: [300, 200], order: 1, mode: 0, inputs: [{ name: "video", type: "VIDEO", link: 1 }], outputs: [{ name: "video", type: "VIDEO", links: null }] },
-            ],
-            links: [[1, 1, 0, 2, 0, "VIDEO"]],
-        };
-        const result = appendRunningHubOutputTail(wf as any);
-        assert.equal(result.added, true);
-        assert.equal(result.reason, "video-no-image");
-        assert.equal(result.attachedSave, false);
-        const out = result.workflow as any;
-        const local = nodeOf(out, TAIL_SAVE_LOCAL)!;
-        assert.equal(local.inputs[0].link, null, "没有帧来源就留空，不硬连");
-        assert.ok(nodeOf(out, TAIL_PLAY_SOUND)!.inputs[0].link >= 0);
+    it("视频链的两个节点排成一行：Save Image To Local 在 Play Sound 右侧", () => {
+        const wf = appendRunningHubOutputTail(videoWorkflow()).workflow as any;
+        const play = nodeOf(wf, TAIL_PLAY_SOUND)!;
+        const local = nodeOf(wf, TAIL_SAVE_LOCAL)!;
+        assert.equal(local.pos[1], play.pos[1], "同一行");
+        assert.ok(local.pos[0] > play.pos[0], "Save Image To Local 应该在 Play Sound 后面");
+        assert.equal(play.pos[0], 600 + 300 + 80, "Play Sound 紧接视频输出节点右侧");
     });
 
     it("图像和视频输出同时存在时优先接视频输出", () => {
@@ -182,5 +171,61 @@ describe("runninghub-workflow-tail 视频输出", () => {
         const out = result.workflow as any;
         assert.equal(nodeOf(out, "SaveImage")!.outputs[0].links.length, 0, "SaveImage 不该被动到");
         assert.equal(nodeOf(out, "SaveVideo")!.outputs[0].links.length, 1);
+    });
+});
+
+/** 真实案例（fantui2.1）：磁盘上只有 API 格式，图里没有 links 也没有输出槽。 */
+function apiWorkflow() {
+    return {
+        "738": { class_type: "VAELoader", inputs: { vae_name: "ae.safetensors" } },
+        "748": { class_type: "VAEDecode", inputs: { samples: ["772", 0], vae: ["738", 0] } },
+        "772": { class_type: "KSampler", inputs: { seed: 666, model: ["773", 0] } },
+        "773": { class_type: "UNETLoader", inputs: { unet_name: "qwen.safetensors" } },
+        "797": { class_type: "SaveImage", inputs: { filename_prefix: "ComfyUI", images: ["748", 0] } },
+    } as Record<string, any>;
+}
+
+describe("runninghub-workflow-tail API 格式", () => {
+    it("接在输出节点自己的输出槽上，和 UI 版一样排在它后面", () => {
+        const result = appendRunningHubApiTail(apiWorkflow());
+        assert.equal(result.added, true);
+        assert.equal(result.kind, "image");
+        const graph = result.graph as any;
+        const [playId, saveId] = result.nodeIds!;
+
+        assert.equal(Object.keys(graph).length, 7, "原 5 个节点 + 2 个收尾节点");
+        assert.equal(graph[playId].class_type, TAIL_PLAY_SOUND);
+        assert.deepEqual(graph[playId].inputs.any_input, ["797", 0], "接输出节点自己的第一个输出槽，不是它的数据来源");
+        assert.equal(graph[playId].inputs.audio_path, "");
+        assert.equal(graph[playId].inputs.mode, "always");
+        assert.equal(graph[saveId].class_type, TAIL_SAVE_LOCAL);
+        assert.deepEqual(graph[saveId].inputs.images, [playId, 0]);
+        assert.equal(graph[saveId].inputs.file_path, "output", "空串会让 mixlab 的 makedirs 抛错");
+        assert.deepEqual(graph["797"].inputs.images, ["748", 0], "原输出节点不动");
+    });
+
+    it("API 图已有收尾节点时就跳过，不重复插", () => {
+        const graph = apiWorkflow();
+        graph["900"] = { class_type: TAIL_PLAY_SOUND, inputs: {} };
+        const result = appendRunningHubApiTail(graph);
+        assert.equal(result.added, false);
+        assert.equal(result.reason, "already");
+    });
+
+    it("API 图没有输出节点时如实报 no-sink", () => {
+        const graph = { "1": { class_type: "KSampler", inputs: { seed: 1 } } } as Record<string, any>;
+        const result = appendRunningHubApiTail(graph);
+        assert.equal(result.added, false);
+        assert.equal(result.reason, "no-sink");
+    });
+
+    it("新节点编号避开已占用的数字 id", () => {
+        const graph = apiWorkflow();
+        // 797 是最大 id，但 798 已被占用 → play 该用 799
+        graph["798"] = { class_type: "PreviewAny", inputs: { source: ["748", 0] } };
+        const result = appendRunningHubApiTail(graph);
+        const [playId, saveId] = result.nodeIds!;
+        assert.equal(playId, "799");
+        assert.equal(saveId, "800");
     });
 });

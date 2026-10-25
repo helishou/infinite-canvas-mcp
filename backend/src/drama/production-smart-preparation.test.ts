@@ -23,22 +23,22 @@ function fixture(t: test.TestContext, existing?: Record<string, any>) {
  const runner=new EpisodeProductionRunner(service,createStores(db),{} as any);
  return {db,service,runner,revision:saved.revision};
 }
-test("v2 prepares smart image producers and repeated preparation creates no duplicate node",t=>{
- const f=fixture(t); const result=f.runner.prepareTargets("ep",f.revision,["asset:A"],"prepare");
+test("v2 prepares smart image producers and repeated preparation creates no duplicate node",async t=>{
+ const f=fixture(t); const result=await f.runner.prepareTargets("ep",f.revision,["asset:A"],"prepare");
  const node=(f.db.getCanvasProject("canvas")!.nodes as any[]).find(n=>n.metadata?.productionAssetId==="A");
  assert.equal(node.type,"config");assert.equal(node.metadata.smart,true);assert.equal(node.metadata.generationMode,"image");
  const count=(f.db.getCanvasProject("canvas")!.nodes as any[]).length;
- const replay=f.runner.prepareTargets("ep",f.revision,["asset:A"],"prepare");
+ const replay=await f.runner.prepareTargets("ep",f.revision,["asset:A"],"prepare");
  assert.equal(replay.replayed,true);assert.equal(replay.revision,result.revision);assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).length,count);
 });
-test("only empty v2 production placeholders are repaired in place, keeping position and metadata",t=>{
+test("only empty v2 production placeholders are repaired in place, keeping position and metadata",async t=>{
  const f=fixture(t,{id:"pending",type:"image",position:{x:123,y:456},width:320,height:240,metadata:{productionAssetId:"A",prompt:"机械设定",custom:"保留"}});
- f.runner.prepareTargets("ep",f.revision,["asset:A"],"repair");
+ await f.runner.prepareTargets("ep",f.revision,["asset:A"],"repair");
  const node=(f.db.getCanvasProject("canvas")!.nodes as any[]).find(n=>n.id==="pending");
  assert.equal(node.type,"config");assert.equal(node.metadata.composerContent,"机械设定");assert.equal(node.metadata.custom,"保留");assert.deepEqual(node.position,{x:123,y:456});
 });
-test("an existing media node cannot be silently converted into a smart producer",t=>{
+test("an existing media node cannot be silently converted into a smart producer",async t=>{
  const f=fixture(t,{id:"media",type:"image",position:{x:1,y:2},metadata:{productionAssetId:"A",storageKey:"user-image"}});
- assert.throws(()=>f.runner.prepareTargets("ep",f.revision,["asset:A"],"invalid"),/SUBJECT_IMAGE_NODE_UPGRADE_REQUIRED/);
+ await assert.rejects(()=>f.runner.prepareTargets("ep",f.revision,["asset:A"],"invalid"),/SUBJECT_IMAGE_NODE_UPGRADE_REQUIRED/);
  const node=(f.db.getCanvasProject("canvas")!.nodes as any[]).find(n=>n.id==="media");assert.equal(node.type,"image");assert.equal(node.metadata.storageKey,"user-image");
 });

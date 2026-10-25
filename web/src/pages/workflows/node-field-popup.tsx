@@ -1,4 +1,5 @@
 import { useMemo, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 /** API 格式节点输入的原始键值对；连线型输入已由调用方过滤。 */
 export type NodeInputEntry = [string, unknown];
@@ -39,10 +40,16 @@ export function NodeFieldPopupShell({
     emptyText?: string;
 }) {
     const rows = useMemo(() => inputs.map(([key, rawValue]) => ({ key, rawValue, ...rowState(key) })), [inputs, rowState]);
-    return (
-        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/20" onClick={onClose}>
-            <div className="max-h-[70vh] w-[420px] overflow-y-auto rounded-lg border border-stone-200 bg-white p-4 shadow-xl dark:border-stone-700 dark:bg-stone-800" onClick={(event) => event.stopPropagation()}>
-                <div className="mb-3 flex items-center justify-between border-b border-stone-100 pb-2">
+    return createPortal(
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/20 p-4" onClick={onClose}>
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${classType || "Unknown"} #${nodeId}`}
+                className="flex max-h-[min(70vh,calc(100dvh-2rem))] w-[420px] max-w-full flex-col overflow-hidden rounded-lg border border-stone-200 bg-white p-4 shadow-xl dark:border-stone-700 dark:bg-stone-800"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <div className="mb-3 flex shrink-0 items-center justify-between border-b border-stone-100 pb-2">
                     <div>
                         <div className="font-medium">{classType || "Unknown"}</div>
                         <div className="text-xs text-stone-500">#{nodeId}</div>
@@ -51,9 +58,9 @@ export function NodeFieldPopupShell({
                 </div>
 
                 {rows.length === 0 ? (
-                    <div className="py-4 text-center text-xs text-stone-400">{emptyText}</div>
+                    <div className="min-h-0 overflow-y-auto py-4 text-center text-xs text-stone-400">{emptyText}</div>
                 ) : (
-                    <div className="space-y-2">
+                    <div className="min-h-0 space-y-2 overflow-y-auto">
                         {rows.map(({ key, rawValue, active, editor }) => (
                             <div key={key} className={`rounded border p-2 text-xs ${active ? "border-blue-300 bg-blue-50/50 dark:border-blue-700 dark:bg-blue-900/20" : "border-stone-200 dark:border-stone-700"}`}>
                                 <div className="flex items-center gap-2">
@@ -75,8 +82,9 @@ export function NodeFieldPopupShell({
                     </div>
                 )}
 
-                {footer ? <div className="mt-3">{footer}</div> : null}
+                {footer ? <div className="mt-3 shrink-0">{footer}</div> : null}
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }

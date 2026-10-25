@@ -18,7 +18,7 @@ import { RunningHubGraphPanel } from "./runninghub-graph-panel";
 import { runningHubProfileToConfig, runningHubRequestFromForm, RunningHubMediaConflict } from "./runninghub-run-adapter";
 import { bridgeLocalFormToProfile } from "./runninghub-field-bridge";
 import { runRunningHubWorkflow, cancelRunningHubTask } from "@/services/api/runninghub";
-import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, fetchRunningHubConfig, saveRunningHubWorkflow, type RunningHubSite, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
+import { fetchRunningHubWorkflows, fetchRunningHubWorkflowTasks, fetchRunningHubStatus, fetchRunningHubConfig, saveRunningHubWorkflow, applyRunningHubLocalFields, type RunningHubSite, type RunningHubWorkflowProfile } from "@/services/api/runninghub";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
 import { ComfyChannelsPanel, ComfyRuntimePanel } from "./comfy-management-panels";
@@ -88,7 +88,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     const aiConfig = useConfigStore((state) => state.config);
     const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
     const [profilesLoading, setProfilesLoading] = useState(false);
-    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean; url?: string; workflowTaskReplaySafe?: boolean } | null>(null);
+    // 把本地字段配置推到云端档案的进行中状态。
+    const [fieldSyncBusy, setFieldSyncBusy] = useState(false);
+    const [rhConfigured, setRhConfigured] = useState<{ hasApiKey: boolean; hasApiKeyBySite?: Partial<Record<Exclude<RunningHubSite, "default">, boolean>>; url?: string; workflowTaskReplaySafe?: boolean } | null>(null);
 
     const [rhTab, setRhTab] = useState<WorkbenchTab>("graph");
     const [rhBaseUrl, setRhBaseUrl] = useState("https://www.runninghub.ai");
@@ -408,6 +410,26 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         void fetchWorkflows();
     }, [fetchWorkflows]);
 
+    /**
+     * 把本地已配置的字段推给绑定的云端档案。
+     * 平台自动发现的字段默认全是未勾选；历史上传的档案靠这个补齐，本地改完字段也能再推一次。
+     */
+    const handleSyncFieldsToCloud = async (owner: WorkflowDetail, profile: RunningHubWorkflowProfile) => {
+        if (fieldSyncBusy) return;
+        setFieldSyncBusy(true);
+        try {
+            // 顺带把 UI 原件带上：`265::prompt` 这类连线输入要靠 GetNode 的变量名才能解开。
+            const pkg = await exportWorkflowPackage(owner.name).catch(() => null);
+            await applyRunningHubLocalFields(profile.id, owner.config.fields as unknown as Array<Record<string, unknown>>, pkg?.uiWorkflow);
+            await fetchProfiles();
+            message.success(t("microTools.workflow.fieldsSyncedToCloud"));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally {
+            setFieldSyncBusy(false);
+        }
+    };
+
     const handleUploadedToRunningHub = useCallback((profile: RunningHubWorkflowProfile, cloudRead: boolean, localName: string) => {
         void fetchProfiles().then(() => {
             setLibrary("runninghub");
@@ -550,13 +572,14 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
      */
     const handleRunProfile = async (form: Record<string, string>) => {
         if (!selectedProfile || savingRef.current.has(selectedProfile.id)) return;
-        if (!rhConfigured?.hasApiKey) {
+        const owner = selectedProfile;
+        const hasProfileKey = owner.site && owner.site !== "default" ? rhConfigured?.hasApiKeyBySite?.[owner.site] : rhConfigured?.hasApiKey;
+        if (!hasProfileKey) {
             message.warning(t("workflowRecovery.configureCloud"));
             return;
         }
-        const owner = selectedProfile;
         const taskId = crypto.randomUUID();
-        const outputs = normalizeOutputNodeSelection(rhOutputNodes, (owner.workflowJson || {}) as Parameters<typeof normalizeOutputNodeSelection>[1]);
+        const outputs = normalizeOutputNodeSelection(rhOutputNodes, (owner.workflowJson || {}) as Parameters<typeof normalizeOutputNodeSelection>[1], true);
         let submission: ReturnType<typeof runningHubRequestFromForm>;
         try { submission = runningHubRequestFromForm(owner, form); }
         catch (error) { message.error(error instanceof RunningHubMediaConflict ? t("workflowRecovery.mediaConflict", { kind: error.kind, index: error.index }) : String(error)); return; }
@@ -873,6 +896,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                                 graph={(selectedProfile.workflowJson || {}) as never}
                                                 value={rhOutputNodes}
                                                 onChange={(next) => setRhOutputSelections((current) => ({ ...current, [selectedProfile.id]: next }))}
+                                                excludeSaveImageToLocal
                                             />
                                         }
                                     />
@@ -967,6 +991,15 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                         }}
                                     >
                                         {t("microTools.workflow.openCloudConfig")}
+                                    </Button>
+                                    <Button
+                                        size="small"
+                                        icon={<RefreshCw className="size-3.5" />}
+                                        disabled={!boundProfile || !selected.config.fields.length}
+                                        loading={fieldSyncBusy}
+                                        onClick={() => boundProfile && void handleSyncFieldsToCloud(selected, boundProfile)}
+                                    >
+                                        {t("microTools.workflow.fieldsSyncToCloud")}
                                     </Button>
                                     <Button size="small" icon={<Download className="size-3.5" />} onClick={handleExport}>导出</Button>
                                     {selected.source?.syncState === "changed" && <Button size="small" icon={<RefreshCw className="size-3.5" />} loading={syncingSource === selected.name} disabled={Boolean(syncingSource) || savingOwners.has(selected.name)} onClick={() => void handleSyncComfySource(selected)}>{t("workflowLibraryActions.syncComfyUI")}</Button>}
