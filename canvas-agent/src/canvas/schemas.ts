@@ -326,9 +326,9 @@ export const toolInputSchemas = {
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(200)
       .optional()
-      .describe("最多返回多少个节点摘要，默认 100，最大 500"),
+      .describe("最多返回多少个节点摘要，默认 30，最大 200；节点较多时按需指定更大的 limit"),
   }),
   canvas_get_state: canvasProjectSchema.passthrough().extend({
     view: z.enum(["index", "graph"]).optional().describe("默认 index：全部节点的 ID、类型、标题及生成模式；graph：节点布局摘要和连线"),
@@ -340,9 +340,11 @@ export const toolInputSchemas = {
         "只取这些节点的完整数据及其相关连线；超出输出上限时返回节点摘要并标记 metadataTruncated。传 nodeIds 时忽略分页参数",
       ),
     nodeOffset: z.number().int().min(0).optional().describe("目录/图关系分页起点；返回 nextNodeOffset 时用该值继续读取"),
-    nodeLimit: z.number().int().min(1).optional().describe("可选的本次节点数上限；省略则尽量返回全部，超出 MCP 输出上限时自动分页"),
+    nodeLimit: z.number().int().min(1).optional().describe("本次节点数上限；默认 100 条。返回 nextNodeOffset 时用它继续分页，全部读取必须读到 nextNodeOffset 缺失"),
   }),
-  canvas_get_selection: canvasProjectSchema.passthrough(),
+  canvas_get_selection: canvasProjectSchema.passthrough().extend({
+    view: z.enum(["summary", "full"]).optional().describe("默认 summary 只返回选中节点的 id/type/title；需要节点正文或 metadata 时传 full，或使用 canvas_get_state(nodeIds) 定向读取"),
+  }),
   canvas_export_snapshot: canvasProjectSchema.passthrough(),
   canvas_apply_ops: canvasProjectSchema.extend({
     projectId: z.string().min(1).describe("必填目标画布 ID"),
@@ -734,6 +736,8 @@ export const toolInputSchemas = {
     episodeId: z.string().min(1).describe("分集 ID"),
     view: z.enum(["summary", "full"]).default("summary").describe("summary 返回分集身份、标题、梗概和画布 ID；full 额外返回完整剧情"),
     canvasView: z.enum(["ref", "full"]).default("ref").describe("view='full' 时的画布内容：ref 只返回画布 id、revision、节点/连线数并指向 canvas_get_state；full 内联整张画布，大画布可能超过单次输出上限"),
+    fullPlotChunkBytes: z.number().int().positive().max(65536).default(32768).describe("view='full' 时完整剧情的分块大小，默认 32768 字节"),
+    fullPlotCursor: z.string().optional().describe("用上次返回的 fullPlotChunk.nextCursor 续读完整剧情"),
   }),
   drama_create_episode: z.object({
     dramaId: z
@@ -777,10 +781,10 @@ export const toolInputSchemas = {
   ...productionToolSchemas,
   director_subagent: directorSubagentSchema,
   production_compile: productionCompileSubmissionSchema.omit({ director: true }).extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
-  production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().optional() }).strict(),
+  production_get_compilation: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), operationId: z.string().min(1), view: z.enum(["status", "targets", "diagnostics"]).default("status"), offset: z.number().int().nonnegative().default(0), pageSize: z.number().int().positive().max(50).default(20) }).strict(),
   production_apply_compilation: productionApplyCompilationSchema.extend({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
   production_translate_compiled_prompts: z.object({ kind: z.enum(["canvas", "episode"]), id: z.string().min(1), expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), targetIds: z.array(z.string().min(1)).min(1) }).strict(),
-  production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1) }),
+  production_diagnose_bindings: z.object({ kind: z.enum(["canvas", "episode", "scene"]), id: z.string().min(1), pageSize: z.number().int().positive().max(50).default(20), cursor: z.string().optional() }),
   production_diagnose_clips: z.object({
     projectId: z.string().min(1),
     nodeId: z.string().min(1).optional(),
@@ -793,14 +797,14 @@ export const toolInputSchemas = {
 export const toolDescriptions: Record<ToolName, string> = {
   ...collaborationDescriptions,
   site_navigate:
-    "跳转网站页面。Acheng 制作使用 production={kind,id,workId,runId?}，网页会按当前 Backend 正式工作目标打开导演工作区或实际媒体节点/Clip；不要凭聊天文字或自行拼路由选择阶段。其他页面可继续使用 path，例如 /image、/video、/prompts、/assets、/config。对 Backend 的制作读写可直接使用原生工具，不需要为了调用工具先打开画布。",
+    "在已连接的 Infinite Canvas 网页中跳转页面；没有已连接网页时会返回 BROWSER_NOT_CONNECTED，先连接网页。Acheng 制作使用 production={kind,id,workId,runId?}，网页会按当前 Backend 正式工作目标打开导演工作区或实际媒体节点/Clip；不要凭聊天文字或自行拼路由选择阶段。其他页面可继续使用 path，例如 /image、/video、/prompts、/assets、/config。对 Backend 的制作读写可直接使用原生工具，不需要为了调用工具先打开画布。",
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。制作时返回的 id 默认配合 site_navigate 的结构化 production 目标进入统一导演工作台；只有用户明确要求画布媒体操作时才打开 /canvas/:id。",
   canvas_inspect:
     "需要选择画布或检查已配置模型能力时使用。返回活动画布、选区、部分节点摘要、参考候选和生成目标；已知节点 ID 的操作可直接执行。",
   canvas_get_state:
-    "读取当前画布。projectId 未指定时优先使用本会话固定画布或浏览器聚焦画布；两者都没有且全库只有一张画布时，自动将它设为本会话活动画布。多张画布时需显式指定 projectId 或先选择活动画布。默认返回全部节点目录（id/type/title/generationMode），无需布局或连线时用此模式；view: graph 读取节点布局和连线。超限按 nextNodeOffset 分页。已知 nodeIds 时只取指定节点的完整数据和相关连线。完整目录可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
-  canvas_get_selection: "读取当前网页画布选中的节点。",
+    "读取当前画布。projectId 未指定时优先使用本会话固定画布或浏览器聚焦画布；两者都没有且全库只有一张画布时，自动将它设为本会话活动画布。多张画布时需显式指定 projectId 或先选择活动画布。默认按 100 个节点分页返回目录摘要（id/type/title/generationMode）；用 nextNodeOffset 继续读取到末页。view: graph 同样分页读取布局和相关连线。已知 nodeIds 时只取指定节点的完整数据和相关连线。完整目录读完后可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
+  canvas_get_selection: "读取当前网页画布选区。默认只返回选中节点摘要；需要完整节点正文时传 view='full'，或按返回的 nodeIds 用 canvas_get_state 定向读取。",
   canvas_export_snapshot: "导出 Backend 权威画布固定快照，返回 SHA256、字节数与鉴权下载路径；布局查看使用 canvas_get_state。",
   canvas_apply_ops:
     "批量操作画布。projectId、operationId、expectedRevision 必填；expectedRevision 是请求基线，不是全局写锁。无关字段自动合并，同字段按服务端提交顺序以后写入者为准。响应未知时保留原请求，用 mcp_get_command_receipt 查询。MCP 的 add_node 只允许智能节点，普通 text/image/video/audio 节点会被拒绝。H3 Clip 内容请使用专用工具；运行状态与结果仍由 Backend 管理。",
@@ -833,11 +837,11 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_select_nodes: "设置当前选中节点；空数组=清空选区。",
   canvas_image_input_manifest: "只读预检图片生成的实际输入顺序和 storageKey；角色有多张图时必须明确选图。返回指纹供 canvas_run_generation 锁定输入。",
   canvas_run_generation:
-    "触发指定节点生成。图片模式提交前解析真实参考图；多图 character 节点须通过 characterImageKeys 或节点已有选择指定具体图片，可传 expectedReferenceManifestHash 锁定预检清单。referenceNodeIds 会替换现有媒体参考连线；H3 节点可用 segmentId 单跑某分镜。",
+    "触发指定节点生成。图片模式提交前解析真实参考图；多图 character 节点须通过 characterImageKeys 或节点已有选择指定具体图片，可传 expectedReferenceManifestHash 锁定预检清单。referenceNodeIds 会替换现有媒体参考连线；H3 节点可用 segmentId 单跑某分镜。预检返回 ready=false 时先修复 blockingIssues，不要重提同一输入。",
   canvas_task_status:
     "即时查询 MCP 发起的画布生成任务。优先传 taskId 精确查询；传入 taskId 后忽略 projectId/nodeId 等过滤条件。不传 taskId 时默认使用当前活动画布，可用 nodeId 缩小范围。运行中任务建议使用 canvas_wait_tasks 等待收口；本工具用于即时查看，不会提交或重试任务。",
   canvas_task_cancel:
-    "取消指定 Backend 画布任务，并通过 Backend 统一取消其执行子任务。用于明确放弃本任务或清理已确认错误的排队任务；不取消其他任务。返回简短终态摘要。",
+    "取消指定 Backend 画布任务，并通过 Backend 统一取消其执行子任务。仅 queued/running 可取消；先用 canvas_task_status 按 taskId 确认状态。用于明确放弃本任务或清理已确认错误的排队任务；不取消其他任务。返回简短终态摘要。",
   canvas_wait_tasks:
     "按原 taskId 有界等待 Backend 任务。timedOut=true 表示本轮等待结束，pendingTaskIds 和 next 给出原任务的继续查询入口；不要重新提交生成。awaiting_confirmation 表示等待人工确认，先查看一采再由用户选择操作。",
   canvas_h3_confirmation:
@@ -855,7 +859,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   comfyui_get_task: "默认只读取本地 ComfyUI 任务状态摘要；需要完整任务和事件历史时传 view='full'。",
   comfyui_cancel_task: "取消本地 ComfyUI 任务。",
   workbench_image_get_config:
-    "读取生图工作台的当前参数和可选项（可用模型、质量、尺寸/宽高比、张数范围），在调用 workbench_image_generate 前先了解可选值。",
+    "需要已连接的 Infinite Canvas 网页来读取生图工作台当前参数和可选项（模型、质量、尺寸/宽高比、张数范围）；网页未连接时先连接再调用。",
   workbench_image_generate:
     "在生图工作台按需填入提示词并设置 model、quality、size（如 1:1 或 1024x1024）、count；提示词仅在当前工作流声明必填时必需。run 默认 true 会自动点击生成按钮。会自动跳转到生图工作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
   workbench_video_get_config:
@@ -877,21 +881,21 @@ export const toolDescriptions: Record<ToolName, string> = {
   drama_set_active_project:
     "设置当前活动剧目。传 dramaId 会固定本 MCP 会话的剧目；不传则解除固定并跟随网页当前活动画布所属剧目。",
   drama_get_episode:
-    "默认读取单个分集摘要（身份、标题、梗概和画布 ID）。view='full' 额外返回完整剧情；画布默认按 canvasView='ref' 只返回 id、revision、节点/连线数并指向 canvas_get_state，避免整张画布挤爆输出。确需内联整张画布时显式传 canvasView='full'，大画布可能超过单次输出上限。",
+    "默认读取单个分集摘要（身份、标题、梗概和画布 ID）。view='full' 时完整剧情按默认 32 KiB 分块返回，使用 fullPlotChunk.nextCursor 续读并核对 SHA-256；画布默认按 canvasView='ref' 只返回 id、revision、节点/连线数并指向 canvas_get_state。确需内联整张画布时显式传 canvasView='full'，大画布可能超过单次输出上限。",
   drama_create_episode:
     "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:
     "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
   drama_delete_episode:
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
-  production_get_contract: "查询本机当前激活引擎的制作合同。默认仅返回如何查询、可用 operationType/moduleId 和引擎身份；传 operationType 读取单操作 schema、示例和前置条件，传 moduleId 仅读取指定模块。仅在需要时用 includeRequests/includePatchFields/includeSourceContract 追加完整信息。runtimeId 已弃用且不选择执行版本。",
+  production_get_contract: "查询本机当前激活引擎的制作合同。默认仅返回如何查询、可用 operationType/moduleId 和引擎身份；传 operationType 读取单操作 schema、示例和前置条件，传 moduleId 只返回模块说明及文件摘要。读取模块正文时从 module.nextRead 复制 moduleId/moduleFile，默认按 32 KiB 用 cursor 分块。只有传精确 operationType 时才能追加 includeRequests/includePatchFields/includeSourceContract。runtimeId 已弃用且不选择执行版本。",
   ...productionWorkspaceDescriptions,
   ...productionToolDescriptions,
   director_subagent: directorSubagentDescription,
   production_compile: "后台编译 Backend 已保存的 Acheng 正式制作稿；不传入或覆盖导演源稿。operationId 必填，可用 scope.targetIds 一次编译多个目标，立即返回持久短回执。通过 production_get_compilation 查询原 operationId，succeeded 后应用 preparedId。blocked 是终态，先读取首条 blockingDiagnostic 并按 targetId/shotId/path 定位；只有确需完整诊断时再分页读取。来源为 compiler 时修编译器，不改创作稿。相同有效输入换 ID 会复用原回执，不重跑；输入或运行条件改变后再编译。超时沿原 ID 查询。不编辑、发布或生成媒体。",
-  production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；也可传 production_edit 的 operationId 一次汇总该编辑登记的多个 Clip 定向返修、引用同步和翻译状态。默认返回短状态、首条 blockingDiagnostic 和 nextAction；诊断/目标列表需 view 和 pageSize。queued/running 沿原 ID 查询，blocked/failed 不继续轮询同一终态；reusedFromOperationId 保留原阻塞身份。只读，不重跑编译。",
+  production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；也可传 production_edit 的 operationId 一次汇总该编辑登记的多个 Clip 定向返修、引用同步和翻译状态。默认返回短状态、首条 blockingDiagnostic 和 nextAction；诊断/目标列表按 offset 分页，默认每页 20 条、最多 50 条。queued/running 沿原 ID 查询，blocked/failed 不继续轮询同一终态；reusedFromOperationId 保留原阻塞身份。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。expectedRevision 是读取基线；只要目标的编译提示词哈希、节点归属和当前 H3 提示词快照未变，无关制作稿修订不会阻断翻译写回。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；画面描述、镜头/表演指令和发声指导（声线、情绪、语速、音量、停顿、画外音等）都翻成英文并轻度润色；只保留实际对白、歌词及明确引用的画面文字原文。对白标记外的中文发声指导即使复述对白片段也必须翻译，不能因为邻接对白而保留。目标输入实际变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
-  production_diagnose_bindings: "只读核对源资产版本、草稿绑定、发布版本绑定、节点活动媒体、归档字节哈希与消费者；明确指出新旧版本或活动媒体不一致，不修改数据。",
+  production_diagnose_bindings: "分页只读核对源资产版本、草稿/发布绑定、节点活动媒体、归档字节哈希与消费者；默认每页 20 条、最多 50 条，用 cursor 续读。",
   production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与当前权威编译产物：已发布且有编译正文时以发布稿为基线（baseline=published），否则以当前制作稿为基线（baseline=draft）；返回状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态与只读下一步。一次调用完成排障。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。正文「不同」可能来自译文或人工编辑，保持信息级，不单独代表失败；生成是否放行由就绪与执行入口的同一派生新鲜度判定（当前产物有效且现场 Clip 已应用该产物），不以正文相等为前提。",
 };

@@ -13,6 +13,7 @@ import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../runtime/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
 import { generationSettingsSnapshot } from "./generation-settings.js";
+import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -443,28 +444,6 @@ function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
     }
     if (values.seconds === undefined && values.duration !== undefined) values.seconds = values.duration;
     return values;
-}
-function bridgeLocalWorkflowValues(
-    runningHubFields: Array<{ id?: string; nodeId: string; fieldName: string; enabled?: boolean; source?: string }>,
-    localFields: WorkflowField[],
-    values: Record<string, unknown>,
-) {
-    const localValues = new Map<string, unknown>();
-    for (const field of localFields) {
-        const value = values[field.id] ?? field.default;
-        if (value === undefined || value === null) continue;
-        for (const nodeId of String(field.node || "").split(",").map((item) => item.trim()).filter(Boolean)) {
-            localValues.set(`${nodeId}::${field.input}`, value);
-        }
-    }
-    const bridged: Record<string, unknown> = {};
-    for (const field of runningHubFields) {
-        if (field.enabled === false || field.source && field.source !== "constant") continue;
-        const key = `${field.nodeId}::${field.fieldName}`;
-        const value = localValues.get(key);
-        if (value !== undefined) bridged[field.id || key] = value;
-    }
-    return bridged;
 }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }

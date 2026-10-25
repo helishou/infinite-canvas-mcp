@@ -29,7 +29,7 @@ test("canvas directory search and displayed counts include every former folder",
     assert.equal(visible(projects, "  canvas  ", matchesProjectQuery).length, 3);
     assert.deepEqual(visible(projects, "orphan", matchesProjectQuery), [projects[2]]);
     assert.deepEqual(visible(projects, "no match", matchesProjectQuery), []);
-    assert.match(source, /data-testid="canvas-directory-count">\{!hydrated \|\| !ownershipReady \? "—" : visibleProjects.length\}/);
+    assert.match(source, /data-testid="canvas-directory-count"[\s\S]{0,40}\{!hydrated \|\| !ownershipReady \? "—" : visibleProjects\.length\}/);
     assert.match(source, /ownershipUnavailable/);
     assert.match(source, /ownershipDescription/);
 });

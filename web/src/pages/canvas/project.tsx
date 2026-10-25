@@ -28,7 +28,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchBackendTask, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, retryBackendTask, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
@@ -5152,6 +5152,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             quality: generationConfig.quality,
                             count: loopContext ? 1 : count,
                             ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
+                            runTarget: configSource?.metadata?.imageRunTarget,
                             params: comfyParams,
                             ...(sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart ? {
                                 historySnapshot: { prompt, size: generationConfig.size, background: generationConfig.background, maskEdit: configSource?.metadata?.maskEdit },
@@ -5419,6 +5420,25 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             // 避免回溯到上游配置节点里的旧模型（例如“视频拼接”）而与面板显示不一致。
             const retryConfigSource = node.metadata?.model ? { ...sourceNode, metadata: { ...sourceNode.metadata, model: node.metadata.model } } : sourceNode;
             const smartMode = node.type === CanvasNodeType.Config && node.metadata?.smart ? node.metadata.generationMode || "image" : undefined;
+            const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image");
+            // A normal retry of a failed Backend image task should reuse the frozen
+            // task input. Reconstructing from current canvas metadata can lose the
+            // prompt or references on older/result nodes and send nothing useful.
+            if (!imageId && retryUseCanvasDispatcher && typeof node.metadata?.runtimeTaskId === "string") {
+                try {
+                    const { task } = await fetchBackendTask(node.metadata.runtimeTaskId);
+                    const input = task?.input;
+                    const belongsToNode = task?.projectId === projectId
+                        && (task.nodeId === node.id || input?.sourceNodeId === sourceNode.id);
+                    if (task?.kind === "canvas-image" && belongsToNode && ["failed", "cancelled"].includes(task.status)) {
+                        await retryBackendTask(task.id);
+                        return;
+                    }
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+                    return;
+                }
+            }
             const baseSavedImageMetadata = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image") ? node.metadata : undefined;
             // A smart image node follows its current incoming references by default.
             // Only an explicit history selection (or retrying a specific history slot)
@@ -5459,7 +5479,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
 
             const retrySourcePrompt = sourceNode.metadata?.composerContent || sourceNode.metadata?.prompt || node.metadata?.prompt || "";
-            const retryUseCanvasDispatcher = node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && smartMode === "image");
             const context = selectedImageHistory
                 ? null
                 : await (async () => {
@@ -5539,6 +5558,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             quality: generationConfig.quality,
                             count: 1,
                             ...(targetImageId ? { imageIds: [targetImageId] } : {}),
+                            runTarget: sourceNode.metadata?.imageRunTarget,
                             params: savedImageMetadata?.comfyParams ?? sourceNode.metadata?.comfyParams,
                             clientTaskId: retryClientTaskId,
                             projectId,

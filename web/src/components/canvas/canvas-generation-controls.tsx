@@ -82,6 +82,8 @@ export function CanvasGenerationControls({
                     onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                     onMissingConfig={() => openConfigDialog(true)}
                     onOpenChange={onImageSettingsOpenChange}
+                    runTargetOverride={node.metadata?.imageRunTarget}
+                    onRunTargetChange={(value) => onConfigChange(node.id, { imageRunTarget: value })}
                     comfyParams={comfyParams}
                     onComfyParamsChange={onComfyParamsChange}
                     onPromptRequiredChange={onImagePromptRequiredChange}

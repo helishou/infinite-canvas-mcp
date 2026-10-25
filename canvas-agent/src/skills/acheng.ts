@@ -609,7 +609,7 @@ export function getProductionContract(
     runtimeId?: string,
     operationType?: string,
     moduleId?: typeof directorModules[number],
-    includeDetails: { requests?: boolean; patchFields?: boolean; sourceContract?: boolean } = {},
+    includeDetails: { requests?: boolean; patchFields?: boolean; sourceContract?: boolean; moduleFile?: string; chunkBytes?: number; cursor?: string } = {},
 ) {
     if (!operationType && !moduleId && !includeDetails.requests && !includeDetails.patchFields && !includeDetails.sourceContract) {
         const operationTypes = productionOperationSchema.options.map(option => option.shape.type.value);
@@ -641,18 +641,47 @@ export function getProductionContract(
     const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
     const moduleRow = moduleId ? moduleRegistry.modules.find((item: any) => item.id === moduleId) : undefined;
     if (moduleId && !moduleRow) throw new Error(`Active Acheng runtime does not define module ${moduleId}`);
-    const moduleFiles = moduleRow ? [moduleRow.entry, ...moduleRow.reads].map((relative: string) => {
+    const modulePaths = moduleRow ? [...new Set([moduleRow.entry, ...moduleRow.reads] as string[])] : [];
+    const moduleFile = includeDetails.moduleFile;
+    if (moduleFile && !modulePaths.includes(moduleFile)) throw new Error(`Unknown module file for ${moduleId}: ${moduleFile}`);
+    const moduleFiles = moduleRow ? modulePaths.map((relative: string) => {
         const file = path.resolve(runtime.path, relative);
         if (!file.startsWith(`${path.resolve(runtime.path)}${path.sep}`)) throw new Error("Module resource escaped its runtime");
         const bytes = fs.readFileSync(file);
-        return { path: relative, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), content: bytes.toString("utf8") };
+        const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+        return { path: relative, sha256, bytes: bytes.length, characters: bytes.toString("utf8").length, ...(relative === moduleFile ? { content: bytes.toString("utf8") } : {}) };
     }) : undefined;
-    const full = !operationType;
-    const includeSourceContract = full || includeDetails.sourceContract;
-    return { ...productionOperationContract(operationType, includeDetails), engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
+    let moduleChunk: Record<string, unknown> | undefined;
+    if (moduleFile) {
+        const selected = moduleFiles!.find((file: any) => file.path === moduleFile)!;
+        const value = selected.content as string;
+        delete selected.content;
+        const bytes = new TextEncoder().encode(value), chunkBytes = Math.min(65536, Math.max(1, Math.floor(includeDetails.chunkBytes || 32768)));
+        const selection = JSON.stringify({ runtimeId: runtime.runtimeId, moduleId, moduleFile, sha256: selected.sha256 });
+        let offset = 0;
+        if (includeDetails.cursor) {
+            let cursor: any;
+            try { cursor = JSON.parse(decodeURIComponent(includeDetails.cursor)); } catch { throw new Error("INVALID_CURSOR"); }
+            if (cursor.selection !== selection) throw new Error("READ_CURSOR_EXPIRED: 运行版本或模块文件已变化，请重新读取模块目录");
+            offset = Number(cursor.offset);
+            if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("INVALID_CURSOR");
+        }
+        if (offset > bytes.length || (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80)) throw new Error("INVALID_CURSOR: 非 UTF-8 边界");
+        let end = Math.min(bytes.length, offset + chunkBytes);
+        while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+        if (end === offset && offset < bytes.length) throw new Error("CHUNK_TOO_SMALL: chunkBytes 无法容纳下一个字符");
+        moduleChunk = { path: moduleFile, sha256: selected.sha256, bytes: bytes.length, offset,
+            text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)),
+            nextCursor: end < bytes.length ? encodeURIComponent(JSON.stringify({ selection, offset: end })) : null };
+    }
+    const contract = operationType ? productionOperationContract(operationType, includeDetails) : { contractVersion: productionContractVersion };
+    const includeSourceContract = !operationType && !moduleId || includeDetails.sourceContract;
+    return { ...contract, engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
         ...(includeSourceContract ? { sourceContract: runtime.sourceContract, sourceContractNotice: runtime.sourceContract ? undefined : "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." } : {}),
         ...(includeSourceContract ? { ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900 } : {}),
-        ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus, files: moduleFiles } } : {}),
+        ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus,
+            files: moduleFiles, ...(moduleChunk ? { fileChunk: moduleChunk } : {}),
+            ...(!moduleFile && moduleFiles?.length ? { nextRead: { tool: "production_get_contract", input: { moduleId, moduleFile: moduleFiles[0].path, chunkBytes: 32768 } } } : {}) } } : {}),
         ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}) };
 }
 

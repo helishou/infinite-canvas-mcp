@@ -766,8 +766,17 @@ export const productionContractQuerySchema = z.object({
     includeRequests: z.boolean().optional().describe("operationType 已提供时，额外包含 edit/publish/compile/generate 请求 schema。"),
     includePatchFields: z.boolean().optional().describe("operationType 已提供时，额外包含完整 patchFields allowlist。"),
     includeSourceContract: z.boolean().optional().describe("operationType 已提供时，额外包含激活引擎的完整源稿校验合同。"),
+    moduleFile: z.string().min(1).optional().describe("读取 moduleId 对应的精确文件；不传时只返回模块文件目录和摘要。正文按 chunkBytes/cursor 分块。"),
+    chunkBytes: z.coerce.number().int().positive().max(65536).optional().describe("模块文件分块大小，默认 32768 字节，最大 65536。"),
+    cursor: z.string().optional().describe("沿上次模块文件返回的 cursor 续读。"),
 }).strict();
-export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().optional(), cursor: z.string().optional() }).strict();
+export function validateProductionContractQuery(input: z.infer<typeof productionContractQuerySchema>) {
+    const invalid = (field: string, reason: string) => { throw Object.assign(new Error(`${field}: ${reason}`), { code: "INVALID_INPUT" }); };
+    if ((input.includeRequests || input.includePatchFields || input.includeSourceContract) && !input.operationType) invalid("operationType", "完整合同附加项必须与精确 operationType 一起读取");
+    if (input.moduleFile && !input.moduleId) invalid("moduleId", "读取模块文件时必须提供 moduleId");
+    if ((input.chunkBytes !== undefined || input.cursor) && !input.moduleFile) invalid("moduleFile", "chunkBytes/cursor 只能用于精确 moduleFile 分块读取");
+}
+export const productionContinuityReadSchema = z.object({ snapshot: z.enum(["draft", "published"]).default("draft"), view: z.enum(["summary", "issues", "timeline", "shot"]).default("summary"), targetId: id.optional(), objectId: id.optional(), pageSize: z.coerce.number().int().positive().max(100).default(20), cursor: z.string().optional() }).strict();
 export const productionContinuityCheckSchema = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: id, snapshot: z.enum(["draft", "published"]).default("draft"), targetIds: z.array(id).optional() }).strict();
 // Keep requests unparsed at this boundary so invalid inputs produce diagnostics,
 // rather than disappearing into a transport-level schema error. Describe the

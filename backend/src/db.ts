@@ -3754,15 +3754,21 @@ export class BackendDatabase {
             ORDER BY created_at, id
         `).all(...dateFilter.params) as Array<Record<string, unknown>>;
         const observedTasks = collectObservedTaskLinks(taskObservationEvents);
-        const taskStatusQuery = this.db.prepare("SELECT status FROM tasks WHERE id = ?");
+        const taskStatusQuery = this.db.prepare("SELECT status, error FROM tasks WHERE id = ?");
         const taskStatusesByStatus = new Map<string, number>();
         const taskOutcomesByToolMap = new Map<string, number>();
+        const taskFailureCategories = new Map<string, number>();
         for (const link of observedTasks.links) {
-            const row = taskStatusQuery.get(link.taskId) as { status?: unknown } | undefined;
+            const row = taskStatusQuery.get(link.taskId) as { status?: unknown; error?: unknown } | undefined;
             const status = String(row?.status || "missing");
             taskStatusesByStatus.set(status, (taskStatusesByStatus.get(status) || 0) + 1);
             const key = `${link.tool}\u0000${status}`;
             taskOutcomesByToolMap.set(key, (taskOutcomesByToolMap.get(key) || 0) + 1);
+            if (["failed", "cancelled", "missing"].includes(status)) {
+                const category = status === "missing" ? "TASK_MISSING" : status === "cancelled" ? "TASK_CANCELLED" : structuredTaskErrorCode(row?.error) || "TASK_FAILED_UNCLASSIFIED";
+                const failureKey = `${link.tool}\u0000${category}`;
+                taskFailureCategories.set(failureKey, (taskFailureCategories.get(failureKey) || 0) + 1);
+            }
         }
         const recovery = this.db.prepare(`
             WITH terminal AS (
@@ -3953,6 +3959,7 @@ export class BackendDatabase {
             failuresByTool: failuresByTool.map((row) => ({ tool: String(row.tool || ""), code: String(row.code || "UNKNOWN"), count: Number(row.count || 0), latestTraceId: row.latest_trace_id ? String(row.latest_trace_id) : undefined })),
             taskStatuses: [...taskStatusesByStatus.entries()].map(([status, count]) => ({ status, count })).sort((left, right) => right.count - left.count || left.status.localeCompare(right.status)),
             taskOutcomesByTool: taskOutcomeMetrics,
+            taskFailureCategories: [...taskFailureCategories.entries()].map(([key, count]) => { const [tool, category] = key.split("\u0000"); return { tool, category, count }; }).sort((left, right) => right.count - left.count || left.tool.localeCompare(right.tool) || left.category.localeCompare(right.category)),
             taskAssociation: {
                 incomplete: observedTasks.incomplete,
                 note: observedTasks.incomplete
@@ -4505,19 +4512,32 @@ function collectObservedTaskLinks(rows: Array<Record<string, unknown>>) {
     let incomplete = false;
     for (const row of rows) {
         const output = parseJsonObject(row.output_summary_json);
-        const createdTaskIds = Array.isArray(output.createdTaskIds)
+        const createdTaskIds = isTaskCreationTool(String(row.tool || "")) && Array.isArray(output.createdTaskIds)
             ? [...new Set(output.createdTaskIds.map(String).filter(Boolean))]
             : [];
-        const scalarTaskId = row.task_id ? String(row.task_id) : "";
+        const scalarTaskId = isTaskCreationTool(String(row.tool || "")) && row.task_id ? String(row.task_id) : "";
         const taskIds = [...new Set([...createdTaskIds, ...(scalarTaskId ? [scalarTaskId] : [])])];
         const declaredCount = typeof output.taskCount === "number" ? output.taskCount : undefined;
-        if (declaredCount != null && declaredCount > taskIds.length)
+        if (isTaskCreationTool(String(row.tool || "")) && declaredCount != null && declaredCount > taskIds.length)
             incomplete = true;
         for (const taskId of taskIds) {
             if (!links.has(taskId)) links.set(taskId, { taskId, tool: String(row.tool || "unknown") });
         }
     }
     return { links: [...links.values()], incomplete };
+}
+
+function isTaskCreationTool(tool: string) {
+    return new Set(["canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio", "canvas_generate_image_batch", "canvas_run_generation"]).has(tool);
+}
+
+function structuredTaskErrorCode(error: unknown): string | undefined {
+    if (typeof error !== "string" || !error) return undefined;
+    try {
+        const parsed = JSON.parse(error);
+        const code = parsed && typeof parsed.code === "string" ? parsed.code : parsed && typeof parsed.errorCode === "string" ? parsed.errorCode : "";
+        return /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : undefined;
+    } catch { return undefined; }
 }
 
 function metricRow(row: Record<string, unknown>) {

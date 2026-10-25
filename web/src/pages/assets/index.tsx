@@ -12,6 +12,7 @@ import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-sto
 import { getMediaBlob, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { cn } from "@/lib/utils";
 import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
+import { PageHeader } from "@/components/layout/page-header";
 import { MediaImage } from "@/components/media/media-image";
 import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette-editor";
 import { findCharacterVoiceAsset, hasCharacterVoiceSource, resolveCharacterVoiceName } from "@/lib/character-voice";
@@ -683,10 +684,12 @@ export default function AssetsPage() {
             </aside>
             <main className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6 lg:px-8">
                 <div className="mx-auto max-w-[1440px]">
-                    <div className="pb-5">
-                        <header className="flex flex-wrap items-center justify-between gap-3">
-                            <h1 className="ui-page-title min-w-0">{t("assets.title")}</h1>
-                            <div className="flex flex-wrap items-center gap-2">
+                    <PageHeader
+                        className="pb-5"
+                        width="gallery"
+                        title={t("assets.title")}
+                        actions={
+                            <>
                                 <Dropdown
                                     rootClassName="ui-controls"
                                     trigger={["click"]}
@@ -700,8 +703,9 @@ export default function AssetsPage() {
                                     <Button loading={transferBusy} icon={<ArrowDownUp className="size-4" />}>{t("assets.workspace.transferMenu")}</Button>
                                 </Dropdown>
                                 <Button type="primary" icon={<Plus className="size-4" />} onClick={openCreate}>{t("assets.add")}</Button>
-                            </div>
-                        </header>
+                            </>
+                        }
+                    />
 
                         <section aria-label={t("assets.workspace.findAssets")} data-resource-group="filters" className="mt-4 space-y-3">
                             <Input.Search
@@ -826,7 +830,7 @@ export default function AssetsPage() {
 
                     <div className="flex flex-col gap-4 sm:gap-6">
                         {missingSourceAssets.length > 0 && <Alert type="warning" showIcon message={t("assets.sharedAssetMissingSummary", { count: missingSourceAssets.length, names: missingSourceAssets.map(asset => asset.title || asset.id).join("、") })} />}
-                        <div className="grid gap-4 sm:gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                        <div data-card-grid className="grid gap-4 sm:gap-5 sm:grid-cols-2 xl:grid-cols-4">
                             {visibleAssets.map((asset) => (
                                 <AssetCard
                                     key={asset.id}
@@ -871,7 +875,6 @@ export default function AssetsPage() {
                                 }}
                             />
                         </div>
-                    </div>
                 </div>
             </main>
 

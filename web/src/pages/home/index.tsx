@@ -9,6 +9,7 @@ import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
+import { PageHeader } from "@/components/layout/page-header";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { cn } from "@/lib/utils";
@@ -170,32 +171,36 @@ function HomeWorkbench() {
         </section>
     );
 
+    const pageActions = (
+        <>
+            {hasWork ? creationActions : null}
+            <Button icon={<ListChecks className="size-4" />} onClick={() => setTasksOpen(true)}>
+                {t("home.workbench.tasks")}
+            </Button>
+            <Button
+                type="primary"
+                disabled={!hydrated || !data.connected}
+                icon={<Plus className="size-4" />}
+                onClick={() => {
+                    setName(t("canvas.defaultTitle", { count: projects.length + 1 }));
+                    setCreating(true);
+                }}
+            >
+                {t("canvas.create")}
+            </Button>
+        </>
+    );
+
     return (
         <main className="ui-controls min-h-full bg-background text-foreground" data-testid="home-workbench">
-            <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-8 lg:px-12">
-                <div className="mb-5 flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-                    <div className="min-w-0">
-                        <h1 className="ui-page-title">{t(hasWork ? "home.workbench.title" : "productionCanvas.entryTitle")}</h1>
-                        {!hasWork && <p className="ui-body mt-1 text-muted-foreground">{t("landing.canvasSubtitle")}</p>}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                        {hasWork && creationActions}
-                        <Button icon={<ListChecks className="size-4" />} onClick={() => setTasksOpen(true)}>
-                            {t("home.workbench.tasks")}
-                        </Button>
-                        <Button
-                            type="primary"
-                            disabled={!hydrated || !data.connected}
-                            icon={<Plus className="size-4" />}
-                            onClick={() => {
-                                setName(t("canvas.defaultTitle", { count: projects.length + 1 }));
-                                setCreating(true);
-                            }}
-                        >
-                            {t("canvas.create")}
-                        </Button>
-                    </div>
-                </div>
+            <div className="mx-auto max-w-[1440px] px-4 pt-6 pb-24 sm:px-6 lg:px-8">
+                <PageHeader
+                    className="mb-5"
+                    width="gallery"
+                    title={t(hasWork ? "home.workbench.title" : "productionCanvas.entryTitle")}
+                    description={!hasWork ? t("landing.canvasSubtitle") : undefined}
+                    actions={pageActions}
+                />
                 {!hasWork && creationActions}
                 {data.connected && (data.errors.length > 0 || data.dramaError) && (
                     <Alert

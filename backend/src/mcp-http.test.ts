@@ -505,6 +505,9 @@ test("production tools publish full operation schemas and forward read-only pref
   for (const name of ["production_hash_source", "production_get_contract", "production_preflight", "production_preflight"]) assert.ok(tools.some(item => item.name === name));
   const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
   assert.deepEqual(hashSchema.required, ["source"]);
+  const preflightSchema = tools.find(item => item.name === "production_preflight")!.inputSchema;
+  assert.match(JSON.stringify(preflightSchema), /diagnostics/);
+  assert.match(JSON.stringify(preflightSchema), /targets/);
   const hashed = textPayload(await client.callTool({ name: "production_hash_source", arguments: { source: { brief: "hash the full authored source" } } }));
   assert.equal(hashed.hash, "a".repeat(64));
   assert.deepEqual(hashed.source, { brief: "hash the full authored source" });
@@ -517,10 +520,13 @@ test("production tools publish full operation schemas and forward read-only pref
   const request = { operationId: "op", expectedRevision: 4, ops: [{ type: "set_director_brief", brief: {} }] };
   for (const [name, owner] of [["production_preflight", { kind: "canvas", id: "canvas" }], ["production_preflight", { kind: "episode", id: "episode" }]] as const) {
     const response = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request } }));
-    assert.equal(response.preflight.diagnostics[0].path, "request.ops.0.brief");
-    assert.deepEqual(response.preflight.diagnostics[0].example, { brief: "A complete authored brief." });
+    assert.equal(response.preflight.counts.diagnostics, 1);
+    assert.equal(response.preflight.diagnostics, undefined);
+    const detail = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request, view: "diagnostics" } }));
+    assert.equal(detail.preflight.items[0].path, "request.ops.0.brief");
+    assert.deepEqual(detail.preflight.items[0].example, { brief: "A complete authored brief." });
   }
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
 });
 
 test("production_initialize_from_current_demand submits one revisioned initialization op and reuses its receipt", async t => {
@@ -707,32 +713,19 @@ test("canvas_task_status with taskId ignores unrelated project and node filters"
   assert.equal(payload.tasks[0].taskId, "task-1");
 });
 
-test("返回体超过上限时直接报错并给出可恢复建议", async (t) => {
+test("选区默认摘要读取，完整节点通过 canvas_get_state 定向读取", async (t) => {
   const events: Array<Record<string, unknown>> = [];
   const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_selection", arguments: { projectId: "canvas-oversized" } });
   const payload = textPayload(result);
 
-  assert.equal(result.isError, true, "超限必须报错而不是把大返回体交给模型");
-  assert.equal(payload.error.code, "OUTPUT_TOO_LARGE");
-  assert.equal(payload.error.recoverable, true);
-  assert.ok(payload.suggestedAction.action, "必须给出缩小返回体的建议");
-  // 返回体本身必须很小：不能为了报错再把大对象带回来
-  assert.ok(JSON.stringify(result).length < 4000, `错误响应应保持精简，实际 ${JSON.stringify(result).length}`);
-
-  // 观测事件应记为失败，并带上实际大小
-  const failed = events.find((event) => event.event === "tool.failed");
-  assert.ok(failed, "应记录 tool.failed 事件");
-  assert.equal(failed.errorCode, "OUTPUT_TOO_LARGE");
-  const outputSummary = failed.outputSummary as Record<string, unknown>;
-  assert.equal(outputSummary.outputBytesLimit, 512 * 1024, "应记录上限字节数");
-  assert.ok(Number(outputSummary.outputBytes) > 512 * 1024, "应记录超限时的实际字节数");
-  assert.ok(
-    Number(outputSummary.outputChars) > 1_000_000 && Number(outputSummary.outputChars) < 1_100_000,
-    `outputChars 必须是字符数口径（约 1.05M），实际 ${outputSummary.outputChars}`,
-  );
-  assert.ok(!events.some((event) => event.event === "tool.succeeded"), "超限不得记为成功");
+  assert.notEqual(result.isError, true, "默认摘要不应受选中节点正文大小影响");
+  assert.equal(payload.nodeCount, 1);
+  assert.equal(payload.nodes[0].id, "node-huge");
+  assert.equal("metadata" in payload.nodes[0], false);
+  assert.equal(payload.nextRead.tool, "canvas_get_state");
+  assert.deepEqual(events.map((event) => event.event), ["tool.started", "tool.succeeded"]);
 });
 
 test("assets_list 默认读取摘要并分页，完整媒体通过 assets_get 定向读取", async (t) => {
@@ -981,20 +974,20 @@ test("canvas_get_state 默认回完整节点目录，而不是布局和 metadata
   assert.equal(JSON.stringify(payload).includes("generationSnapshot"), false);
 });
 
-test("canvas_get_state 在现有规模画布默认返回全部目录，graph 返回布局和连线", async (t) => {
+test("canvas_get_state 默认按 100 项分页返回目录，graph 返回布局和相关连线", async (t) => {
   const reads: string[] = [];
   const backendUrl = await mockManyNodesBackend(t, 449, 12, (path) => reads.push(path));
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
   const payload = textPayload(result);
   assert.notEqual(result.isError, true);
-  assert.equal(payload.nodes.length, 449);
+  assert.equal(payload.nodes.length, 100);
   assert.equal(payload.connectionCount, 488);
   assert.equal("connections" in payload, false);
-  assert.equal(payload.truncated, false);
-  assert.equal(payload.nextNodeOffset, undefined);
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.nextNodeOffset, 100);
   const graph = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", view: "graph" } }));
-  assert.equal(graph.connections.length, 488);
+  assert.ok(graph.connections.length > 0 && graph.connections.length < 488);
   assert.equal(graph.nodes[0].position.x, 0);
   assert.equal(typeof graph.nodes[0].width, "number");
   assert.ok(Buffer.byteLength(JSON.stringify(payload), "utf8") < Buffer.byteLength(JSON.stringify(graph), "utf8"));
@@ -1065,7 +1058,7 @@ test("canvas_get_state 超过输出上限时自动分页并可取完全部节点
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const ids: string[] = [];
   let nodeOffset = 0;
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; page < 20; page++) {
     const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeOffset } });
     const payload = textPayload(result);
     assert.notEqual(result.isError, true);
@@ -1217,7 +1210,9 @@ test("drama episode MCP forwards separate synopsis and fullPlot fields", async (
     name: "drama_update_episode",
     arguments: { episodeId: "episode-1", synopsis: "新版梗概", fullPlot: "新版完整剧情" },
   }));
-  assert.equal(updated.episode.fullPlot, "新版完整剧情");
+  assert.equal(updated.episode.id, "episode-1");
+  assert.deepEqual(updated.updatedFields, ["synopsis", "fullPlot"]);
+  assert.equal(updated.nextRead.tool, "drama_get_episode");
   assert.deepEqual(received.map(({ synopsis, fullPlot }) => ({ synopsis, fullPlot })), [
     { synopsis: "一集梗概", fullPlot: "从开场到结尾的完整剧情" },
     { synopsis: "新版梗概", fullPlot: "新版完整剧情" },
@@ -1238,13 +1233,8 @@ test("unmapped 4xx input failures map to readable codes instead of CANVAS_TOOL_F
     if (String(req.query.targetIds ?? "") === "SEG-bad") res.status(400).json({ ok: false, error: "分块读取必须选定一个产物" });
     else res.json({ ok: true, production: { revision: 1, draft: {} }, artifacts: [] });
   });
-  // 缺参时后端返回序列化的 Zod issue 数组（放进 error 字符串字段），不是客户端 z.ZodError → INVALID_INPUT。
   app.get("/production/contract", (req, res) => {
-    if (!req.query.moduleId) res.status(400).json({
-      ok: false,
-      error: JSON.stringify([{ code: "invalid_type", expected: "string", received: "undefined", path: ["moduleId"], message: "Required" }], null, 2),
-    });
-    else res.json({ ok: true, contract: { moduleId: String(req.query.moduleId) } });
+    res.json({ ok: true, contract: { moduleId: typeof req.query.moduleId === "string" ? req.query.moduleId : null } });
   });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -1264,5 +1254,5 @@ test("unmapped 4xx input failures map to readable codes instead of CANVAS_TOOL_F
   assert.equal(artifact.suggestedAction.tool, "production_get_artifact_index");
 
   const contract = textPayload(await client.callTool({ name: "production_get_contract", arguments: {} }));
-  assert.equal(contract.error.code, "INVALID_INPUT");
+  assert.equal(contract.contract.moduleId, null, "省略范围参数时应返回轻量查询指南");
 });

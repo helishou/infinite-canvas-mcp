@@ -3,6 +3,7 @@ import { Activity, Download, Plus, RefreshCw, Search } from "lucide-react";
 import { Alert, App, Button, Card, Checkbox, DatePicker, Input, Select, Space, Statistic, Table, Tabs, Tag, Typography } from "antd";
 import dayjs, { type Dayjs } from "dayjs";
 
+import { PageHeader } from "@/components/layout/page-header";
 import { numberSorter, sortRows, stringSorter, type SortOrder } from "@/lib/mcp-observability/table-sort";
 import { clientToViewBox, trendHoverIndex } from "@/lib/mcp-observability/trend-hover";
 import { deleteMcpOptimizationMarker, fetchMcpObservabilityReport, fetchMcpObservabilityTrace, fetchMcpOptimizationMarkers, saveMcpOptimizationMarker, type McpOptimizationMarker, type McpObservabilityEvent, type McpObservabilityReport } from "@/services/api/mcp-observability";
@@ -193,6 +194,38 @@ export default function McpObservabilityPage() {
     const [byToolSort, setByToolSort] = useState<{ key: string; order: SortOrder }>({ key: "calls", order: "descend" });
     const sortedToolComparison = useMemo(() => sortRows(toolComparison, comparisonSort.key, comparisonSort.order, toolColumnCompare(comparisonSort.key)), [toolComparison, comparisonSort]);
     const sortedByTool = useMemo(() => sortRows(report?.byTool ?? [], byToolSort.key, byToolSort.order, toolColumnCompare(byToolSort.key)), [report?.byTool, byToolSort]);
+    /**
+     * 诊断原先按 code×tool 平铺成一堆同义 Alert，最严重的问题会被淹没。
+     * 这里按 code 合并：保留最高 severity 的判断文案、聚合影响工具与失败次数，
+     * 「最大返回」只在该 code 能定位到具体工具时给出，避免拿全量口径冒充单工具。
+     */
+    const diagnosticRows = useMemo(() => {
+        const rank: Record<string, number> = { error: 0, warning: 1, info: 2, success: 3 };
+        const merged = new Map<string, { code: string; severity: string; title: string; advice: string; tools: Set<string> }>();
+        for (const item of report?.diagnostics ?? []) {
+            const current = merged.get(item.code);
+            if (!current) {
+                merged.set(item.code, { code: item.code, severity: item.severity, title: item.title, advice: item.detail, tools: new Set(item.tool ? [item.tool] : []) });
+                continue;
+            }
+            if (rank[item.severity] < rank[current.severity]) {
+                current.severity = item.severity;
+                current.title = item.title;
+            }
+            if (item.detail.length > current.advice.length) current.advice = item.detail;
+            if (item.tool) current.tools.add(item.tool);
+        }
+        return [...merged.values()].map((row) => {
+            const failures = (report?.failuresByTool ?? []).filter((item) => item.code === row.code);
+            const tools = new Set([...row.tools, ...failures.map((item) => item.tool)]);
+            const failureCount = failures.reduce((sum, item) => sum + item.count, 0) || (report?.errors ?? []).find((item) => item.code === row.code)?.count || 0;
+            const maxOutput = tools.size
+                ? Math.max(...[...tools].map((tool) => report?.byTool.find((item) => item.tool === tool)?.maxOutputChars ?? 0)) || null
+                : null;
+            return { key: row.code, code: row.code, severity: row.severity, title: row.title, advice: row.advice, tools: [...tools], count: failureCount, maxOutput };
+        }).sort((a, b) => rank[a.severity] - rank[b.severity]);
+    }, [report?.diagnostics, report?.failuresByTool, report?.errors, report?.byTool]);
+    const topDiagnostic = diagnosticRows[0];
     const dataRangeStartIso = () => dateRange[0].startOf("day").toISOString();
     const dataRangeEndIso = () => dateRange[1].endOf("day").toISOString();
 
@@ -283,34 +316,31 @@ export default function McpObservabilityPage() {
 
     return (
         <main className="h-full overflow-y-auto bg-background">
-            <div className="mx-auto max-w-7xl space-y-5 px-6 py-6">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <Activity className="size-5" />
-                            <h1 className="text-xl font-semibold">MCP 诊断</h1>
-                        </div>
-                        <p className="mt-1 text-sm text-muted-foreground">查看本机 MCP 工具调用、失败恢复和任务状态；这里只保存脱敏摘要。</p>
-                    </div>
-                    <Space wrap>
-                        <DatePicker.RangePicker
-                            allowClear={false}
-                            value={dateRange}
-                            onChange={(value) => {
-                                if (!value?.[0] || !value?.[1]) return;
-                                const next = [value[0].startOf("day"), value[1].startOf("day")] as [Dayjs, Dayjs];
-                                setDateRange(next);
-                                void loadReport(next);
-                            }}
-                        />
-                        <Button icon={<Download className="size-4" />} disabled={!report} onClick={exportReport}>导出</Button>
-                        <Button icon={<RefreshCw className="size-4" />} loading={loading} onClick={() => void loadReport()}>
-                            刷新
-                        </Button>
-                    </Space>
-                </div>
-
-                <Alert type="info" showIcon title="数据仅保存在本地 Backend SQLite；日期范围与紧邻的上一等长周期自动比较，无需手工导入基线。" />
+            <div className="mx-auto max-w-7xl space-y-5 px-4 py-6 sm:px-6 lg:px-8">
+                <PageHeader
+                    width="data"
+                    icon={<Activity className="size-5" />}
+                    title="MCP 诊断"
+                    description="查看本机 MCP 工具调用、失败恢复和任务状态；数据仅保存在本地 Backend SQLite，日期范围与紧邻的上一等长周期自动比较，无需手工导入基线。这里只保存脱敏摘要。"
+                    actions={
+                        <Space wrap>
+                            <DatePicker.RangePicker
+                                allowClear={false}
+                                value={dateRange}
+                                onChange={(value) => {
+                                    if (!value?.[0] || !value?.[1]) return;
+                                    const next = [value[0].startOf("day"), value[1].startOf("day")] as [Dayjs, Dayjs];
+                                    setDateRange(next);
+                                    void loadReport(next);
+                                }}
+                            />
+                            <Button icon={<Download className="size-4" />} disabled={!report} onClick={exportReport}>导出</Button>
+                            <Button icon={<RefreshCw className="size-4" />} loading={loading} onClick={() => void loadReport()}>
+                                刷新
+                            </Button>
+                        </Space>
+                    }
+                />
                 {report?.taskAssociation?.incomplete ? <Alert type="warning" showIcon title="任务关联数据不完整" description={report.taskAssociation.note} /> : null}
 
                 <Tabs
@@ -318,19 +348,7 @@ export default function McpObservabilityPage() {
                     items={[
                         { key: "overview", label: "概览与效果", children: (
                             <div className="space-y-5">
-                <section className="space-y-3">
-                    <div>
-                        <h2 className="text-base font-medium">诊断结论</h2>
-                        <p className="mt-0.5 text-sm text-muted-foreground">根据所选日期范围的可靠性、延迟和返回体变化自动判断优化效果。</p>
-                    </div>
-                    <div className="grid gap-3 lg:grid-cols-2">
-                        {(report?.diagnostics ?? []).map((item) => (
-                            <Alert key={`${item.code}-${item.tool ?? "all"}`} type={item.severity} showIcon title={item.title} description={item.detail} />
-                        ))}
-                    </div>
-                </section>
-
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                <div data-testid="mcp-kpi" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                     <Card loading={loading}>
                         <Statistic title="已完成调用" value={report?.calls.completed ?? 0} suffix={report?.calls.incomplete ? `（${report.calls.incomplete} 未完成）` : undefined} />
                     </Card>
@@ -353,6 +371,57 @@ export default function McpObservabilityPage() {
                         <Statistic title="建议采纳率" value={percent(report?.recovery.followRate ?? null)} suffix={report ? `采纳后成功 ${percent(report.recovery.followedSuccessRate ?? null)} · ${report.recovery.observation === "same_session_adjacent_terminal_call" ? "同会话相邻调用" : "未采集口径"}` : undefined} />
                     </Card>
                 </div>
+
+                <section className="space-y-3">
+                    <div>
+                        <h2 className="text-base font-medium">诊断结论</h2>
+                        <p className="mt-0.5 text-sm text-muted-foreground">根据所选日期范围的可靠性、延迟和返回体变化自动判断优化效果。</p>
+                    </div>
+                    <div className="grid gap-3 lg:grid-cols-2">
+                        {diagnosticRows.length ? (
+                            <>
+                                <div className="lg:col-span-2">
+                                    <Alert
+                                        type={(topDiagnostic.severity === "info" ? "info" : topDiagnostic.severity) as "success" | "info" | "warning" | "error"}
+                                        showIcon
+                                        title={`${topDiagnostic.title}${diagnosticRows.length > 1 ? `（另有 ${diagnosticRows.length - 1} 项诊断，见下表）` : ""}`}
+                                        description={topDiagnostic.advice}
+                                    />
+                                </div>
+                                <div className="lg:col-span-2">
+                                    <Table
+                                        size="small"
+                                        rowKey="key"
+                                        pagination={false}
+                                        dataSource={diagnosticRows}
+                                        expandable={{
+                                            expandedRowRender: (row) => <p className="text-xs leading-5 text-muted-foreground">{row.advice}</p>,
+                                        }}
+                                        columns={[
+                                            {
+                                                title: "诊断",
+                                                dataIndex: "title",
+                                                render: (value: string, row) => (
+                                                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                                                        <Tag className="!m-0" color={row.severity === "error" ? "red" : row.severity === "warning" ? "orange" : row.severity === "success" ? "green" : "default"}>{row.severity}</Tag>
+                                                        <span className="min-w-0 break-words">{value}</span>
+                                                    </span>
+                                                ),
+                                            },
+                                            { title: "工具", dataIndex: "tools", render: (value: string[]) => (value.length ? value.join("、") : "全部工具") },
+                                            { title: "次数", dataIndex: "count", align: "right", render: (value: number) => value || "—" },
+                                            { title: "最大返回", dataIndex: "maxOutput", align: "right", render: (value: number | null) => chars(value) },
+                                        ]}
+                                    />
+                                </div>
+                            </>
+                        ) : (
+                            <div className="lg:col-span-2">
+                                <Alert type="success" showIcon title="本次范围内没有触发诊断规则" />
+                            </div>
+                        )}
+                    </div>
+                </section>
 
                 <Card title="耗时口径">
                     <div className="grid gap-4 sm:grid-cols-2">

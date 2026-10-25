@@ -6,7 +6,7 @@ import { logger } from "../utils/logger.js";
 import { buildCanvasToolRequest } from "./operations.js";
 import type { ToolName } from "./schemas.js";
 import { compactNode, isToolName, parseToolInput } from "./tools.js";
-import { summarizeCanvasState } from "./state-summary.js";
+import { canvasNodeIndex, summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
 type PendingRequest = { clientId: string; delivery?: { requestId: string; name: ToolName; input: Record<string, unknown> }; resolve: (value: unknown) => void; reject: (error: Error) => void };
@@ -548,7 +548,12 @@ export class CanvasSession {
         }
         if (name === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
-            return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
+            const selected = (this.canvasState?.nodes || []).filter((node) => ids.has(node.id));
+            if (input.view === "full") return { nodes: selected };
+            const nodes = selected.map((node) => canvasNodeIndex(node as unknown as Record<string, unknown>));
+            return { nodeCount: nodes.length, nodes, nextRead: nodes.length ? {
+                tool: "canvas_get_state", input: { projectId: this.canvasState?.projectId, nodeIds: nodes.map((node) => node.id) },
+            } : undefined };
         }
         if (!this.clients.size) throw new Error("当前没有已连接画布");
         const request = buildCanvasToolRequest(name, input, this.canvasState);

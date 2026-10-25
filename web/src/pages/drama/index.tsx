@@ -9,6 +9,7 @@ import { applyBackendCanvasOperations, ensureSharedAssetCanvas, startCanvasGener
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
 import { ModelPicker } from "@/components/model-picker";
+import { PageSectionHeader } from "@/components/layout/page-header";
 import { useConfigStore } from "@/stores/use-config-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { cn } from "@/lib/utils";
@@ -16,7 +17,7 @@ import { cn } from "@/lib/utils";
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
-export default function DramaPage({ searchQuery, compactEmpty = false }: { searchQuery?: string; compactEmpty?: boolean } = {}) {
+export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean } = {}) {
     const { t } = useTranslation();
     const hydrated = useCanvasStore((state) => state.hydrated);
     const createFolder = useCanvasStore((state) => state.createFolder);
@@ -101,15 +102,23 @@ export default function DramaPage({ searchQuery, compactEmpty = false }: { searc
 
     return (
         <section className="text-foreground" aria-label={t("projects.drama")}>
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-5">
-                {searchQuery === undefined ? <Input className="!w-full sm:!w-80" size="large" allowClear prefix={<Search className="mr-1 size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} /> : <div><h2 className="text-lg font-medium tracking-tight">{t("projects.drama")}</h2><p className="mt-1 text-xs text-muted-foreground">{t("projects.dramaDescription")}</p></div>}
-                <Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
-            </div>
+            {searchQuery === undefined ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-5">
+                    <Input className="!w-full sm:!w-80" size="large" allowClear prefix={<Search className="mr-1 size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} />
+                    <Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
+                </div>
+            ) : (
+                <PageSectionHeader
+                    title={headingHidden ? undefined : t("projects.directoryTitles.drama")}
+                    description={headingHidden ? undefined : t("projects.dramaDescription")}
+                    actions={<Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>}
+                />
+            )}
             <section className="mt-6">
                 {!hydrated ? (
                     <div role="status" className="flex min-h-72 items-center justify-center rounded-xl border border-border bg-card/50 text-sm text-muted-foreground">{t("canvas.loading")}</div>
                 ) : dramaFolders.length ? (
-                    <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                    <div data-card-grid className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]">
                         {shownDramaFolders.map((folder) => <DramaCard key={folder.id} folder={folder} episodes={episodesByDrama[folder.id]} onOpen={() => setActiveView(folder.id)} t={t} />)}
                         {!shownDramaFolders.length && <p className="rounded-xl border border-border bg-card/50 px-6 py-20 text-center text-sm text-muted-foreground sm:col-span-2 xl:col-span-3">{t("landing.noSeriesMatches")}</p>}
                     </div>
@@ -167,11 +176,18 @@ function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; epis
     }, [folder.coverStorageKey]);
     const boundCanvases = episodes?.filter((episode) => episode.canvasId).length;
     return <button type="button" className="group flex h-full flex-col overflow-hidden rounded-xl border border-border bg-card text-left transition-colors hover:border-primary/40 focus-visible:outline-primary" onClick={onOpen}>
-        <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-border bg-muted/50">
-            {coverUrl ? <img src={coverUrl} alt={folder.name} className="h-full w-full object-cover" loading="lazy" /> : <div className="grid h-full place-items-center text-primary/60"><Clapperboard className="size-10 stroke-[1.2]" /></div>}
-
-            <span className="absolute bottom-3 left-4 rounded-md border border-border/50 bg-card/95 px-2 py-1 text-[11px] font-medium text-foreground">{episodes ? t("drama.episodeCount", { count: episodes.length }) : t("projects.episodesUnavailable")}</span>
-        </div>
+        {coverUrl ? (
+            <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-border bg-muted/50">
+                <img src={coverUrl} alt={folder.name} className="h-full w-full object-cover" loading="lazy" />
+                <span className="absolute bottom-3 left-4 rounded-md border border-border/50 bg-card/95 px-2 py-1 text-[11px] font-medium text-foreground">{episodes ? t("drama.episodeCount", { count: episodes.length }) : t("projects.episodesUnavailable")}</span>
+            </div>
+        ) : (
+            // 没有封面就不占 16:9：集数 badge 与图标合成一行紧凑卡头。
+            <div className="flex items-center gap-2 border-b border-border px-5 py-3">
+                <Clapperboard className="size-6 shrink-0 stroke-[1.2] text-primary/60" aria-hidden="true" />
+                <span className="rounded-md border border-border/60 px-2 py-0.5 text-[11px] font-medium text-muted-foreground">{episodes ? t("drama.episodeCount", { count: episodes.length }) : t("projects.episodesUnavailable")}</span>
+            </div>
+        )}
         <div className="flex w-full flex-1 flex-col p-5">
             <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">

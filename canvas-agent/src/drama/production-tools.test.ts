@@ -17,11 +17,11 @@ import { productionToolNames, productionToolRequest, productionToolSchemas, exec
 const cases: Record<string, { input?: Record<string, unknown>; method: string; suffix: string }> = {
     production_preflight: { input: { action: "generate", request: { expectedRevision: 2 } }, method: "POST", suffix: "/preflight" },
     production_get: { method: "GET", suffix: "?view=summary&snapshot=draft" },
-    production_get_source: { input: { sourceSection: "shots" }, method: "GET", suffix: "?view=source&snapshot=draft&sourceSection=shots&pageSize=50" },
-    production_get_artifact_index: { method: "GET", suffix: "?view=artifact_index&snapshot=draft&pageSize=50" },
+    production_get_source: { input: { sourceSection: "shots" }, method: "GET", suffix: "?view=source&snapshot=draft&sourceSection=shots&pageSize=20" },
+    production_get_artifact_index: { method: "GET", suffix: "?view=artifact_index&snapshot=draft&pageSize=20" },
     production_get_artifact: { input: { targetId: "seg/1" }, method: "GET", suffix: "?view=artifacts&snapshot=draft&targetIds=seg%2F1&chunkBytes=32768" },
-    production_get_workbench: { input: { targetId: "seg/1", view: "clip_workbench" }, method: "GET", suffix: "?view=clip_workbench&snapshot=draft&targetIds=seg%2F1&includeContext=false&includeRuntime=false" },
-    production_get_readiness: { method: "GET", suffix: "/readiness" },
+    production_get_workbench: { input: { targetId: "seg/1", view: "clip_workbench" }, method: "GET", suffix: "?view=clip_workbench&snapshot=draft&targetIds=seg%2F1&chunkBytes=32768&includeContext=false&includeRuntime=false" },
+    production_get_readiness: { method: "GET", suffix: "/readiness?source=draft&view=summary&pageSize=20" },
     production_start_run: { input: { runId: "r", idempotencyKey: "original", expectedRevision: 2, targets: ["segment:s"], inputBasis: "canvas", expectedCanvasRevision: 7 }, method: "POST", suffix: "/runs" },
     production_get_batch: { input: { runId: "r" }, method: "GET", suffix: "/batches/r" },
     production_pause_run: { input: { runId: "r" }, method: "POST", suffix: "/batches/r/pause" },
@@ -29,8 +29,8 @@ const cases: Record<string, { input?: Record<string, unknown>; method: string; s
     production_retire_run: { input: { runId: "r", reason: "user ended paused batch" }, method: "POST", suffix: "/batches/r/retire" },
     production_list_versions: { method: "GET", suffix: "/versions" },
     production_get_version: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=summary&snapshot=draft" },
-    production_get_version_source: { input: { version: 2, sourceSection: "shots" }, method: "GET", suffix: "/versions/2?view=source&snapshot=published&sourceSection=shots&pageSize=50" },
-    production_get_version_artifact_index: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=artifact_index&snapshot=published&pageSize=50" },
+    production_get_version_source: { input: { version: 2, sourceSection: "shots" }, method: "GET", suffix: "/versions/2?view=source&snapshot=published&sourceSection=shots&pageSize=20" },
+    production_get_version_artifact_index: { input: { version: 2 }, method: "GET", suffix: "/versions/2?view=artifact_index&snapshot=published&pageSize=20" },
     production_get_version_artifact: { input: { version: 2, targetId: "seg/1" }, method: "GET", suffix: "/versions/2?view=artifacts&snapshot=published&targetIds=seg%2F1&chunkBytes=32768" },
     production_preview_impact: { input: { stage: "director" }, method: "GET", suffix: "/impact?stage=director" },
     production_edit: { input: { operationId: "original", expectedRevision: 2, ops: [{ type: "set_director_brief", brief: "中文\n原文" }] }, method: "POST", suffix: "/ops" },
@@ -96,5 +96,42 @@ test("production preflight preserves structured shared-asset binding diagnostics
         assert.equal(path, "/drama/episodes/ep/production/preflight");
         return payload;
     } }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 } });
-    assert.equal(result, payload, "the production tool forwards Backend diagnostics without stripping their details");
+    assert.deepEqual((result as any).preflight.counts, { diagnostics: 1, readyTargets: 0, blockedTargets: 0, warnings: 0 });
+    assert.equal((result as any).preflight.diagnostics, undefined);
+    const full: any = await executeProductionTool({ get: async () => { throw new Error("Unexpected GET"); }, post: async () => payload }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics" });
+    assert.equal(full.preflight.items[0].details.expectedSourceNodeId, "shared-role");
+});
+
+test("production preflight pages bind cursors to request and revision", async () => {
+    let revision = 7;
+    const payload = () => ({ preflight: { valid: false, revision, diagnostics: Array.from({ length: 47 }, (_, i) => ({ code: `D${i}`, message: `diagnostic-${i}`, severity: "warning" })) } });
+    const post = async () => payload();
+    const first: any = await executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics" });
+    assert.equal(first.preflight.items.length, 20);
+    const second: any = await executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics", cursor: first.preflight.nextCursor });
+    assert.equal(second.preflight.items[0].code, "D20");
+    assert.equal(second.preflight.items.length, 20);
+    const third: any = await executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics", cursor: second.preflight.nextCursor });
+    assert.deepEqual([...first.preflight.items, ...second.preflight.items, ...third.preflight.items].map((item: any) => item.code), Array.from({ length: 47 }, (_, i) => `D${i}`));
+    await assert.rejects(() => executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 4 }, view: "diagnostics", cursor: first.preflight.nextCursor }), /READ_CURSOR_EXPIRED/);
+    revision++;
+    await assert.rejects(() => executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics", cursor: first.preflight.nextCursor }), /READ_CURSOR_EXPIRED/);
+});
+
+test("production preflight returns oversized diagnostics through the same tool in verified chunks", async () => {
+    const payload = { preflight: { valid: false, revision: 3, diagnostics: [{ code: "LARGE", message: "敏感正文".repeat(25000) }] } };
+    const post = async () => payload;
+    const page: any = await executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics" });
+    assert.equal(JSON.stringify(page).length < 100000, true);
+    assert.equal(page.preflight.items.length, 0);
+    let cursor = page.preflight.nextCursor, assembled = "", firstHash = "";
+    while (cursor) {
+        const chunk: any = await executeProductionTool({ get: async () => ({}), post }, "production_preflight", { kind: "episode", id: "ep", action: "compile", request: { expectedRevision: 3 }, view: "diagnostics", cursor, chunkBytes: 32768 });
+        assert.equal(Buffer.byteLength(chunk.preflight.diagnosticChunk.text, "utf8") <= 32768, true);
+        firstHash ||= chunk.preflight.diagnosticChunk.sha256;
+        assert.equal(chunk.preflight.diagnosticChunk.sha256, firstHash);
+        assembled += chunk.preflight.diagnosticChunk.text;
+        cursor = chunk.preflight.diagnosticChunk.nextCursor;
+    }
+    assert.equal(JSON.parse(assembled).message, "敏感正文".repeat(25000));
 });

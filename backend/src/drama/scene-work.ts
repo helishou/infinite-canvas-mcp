@@ -158,7 +158,7 @@ export class SceneWorkCoordinator {
         }
         return prior;
     }
-    inspect(id: string) {
+    inspect(id: string, view: "summary" | "full" = "summary") {
         const current = this.service.get(id), director = current.draft.director;
         if (!director) return { revision: current.revision, works: [], shared: null };
         const sharedWorks = Object.values(director.workflow.sharedReviewWorks || {}).map(work => {
@@ -166,7 +166,13 @@ export class SceneWorkCoordinator {
             return { ...summary, reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash) };
         });
         let shared: Record<string, unknown>;
-        try { const selection = this.sharedSelection(id), value = this.shared(id, true, selection); shared = { reviewAssetIds: selection, reviewCurrent: !selection && director.workflow.sharedReview?.inputHash === value.inputHash && director.workflow.sharedReview?.verdict === "approved", reviews: director.workflow.sharedAssetReviews, continuation: director.workflow.sharedReviewContinuation, reviewWorks: sharedWorks, inputHash: value.inputHash, review: director.workflow.sharedReview, source: director.source, media: value.media.map(({ filePath: _file, ...item }) => item) }; }
+        try {
+            const selection = this.sharedSelection(id), value = this.shared(id, true, selection);
+            shared = { reviewAssetIds: selection, reviewCurrent: !selection && director.workflow.sharedReview?.inputHash === value.inputHash && director.workflow.sharedReview?.verdict === "approved",
+                reviews: director.workflow.sharedAssetReviews, continuation: director.workflow.sharedReviewContinuation, reviewWorks: sharedWorks,
+                inputHash: value.inputHash, review: director.workflow.sharedReview, mediaCount: value.media.length,
+                ...(view === "full" ? { source: director.source, media: value.media.map(({ filePath: _file, ...item }) => item) } : { sourceHash: director.sourceHash }) };
+        }
         catch (error) { shared = { continuation: director.workflow.sharedReviewContinuation, reviewWorks: sharedWorks, error: error instanceof Error ? error.message : String(error) }; }
         const works = Object.values(director.workflow.sceneWorks || {}).map(work => {
             const { workPackage: _packet, workArtifacts: _artifacts, reviewPackages: _reviews, reviewArtifacts: _reviewArtifacts, ...summary } = work;
@@ -175,7 +181,9 @@ export class SceneWorkCoordinator {
                 const media = this.service.sceneReviewMedia(id, Object.keys(projection.director.assets).filter(targetId => director.assets[targetId]?.storageKey));
                 const missing = requiredSceneAssets(projection.director, current.draft.settings.storyboardImageMode === "skip").some(id => !director.assets[id]?.storageKey);
                 const reviewAssetIds = missing ? media.filter(item => director.assets[item.targetId]?.status === "generated").map(item => item.targetId) : undefined;
-                return { ...summary, workArtifactHashes: work.workArtifacts?.map(item => item.artifactHash), reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash), reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds, source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) };
+                return { ...summary, workArtifactHashes: work.workArtifacts?.map(item => item.artifactHash), reviewArtifactHashes: work.reviewArtifacts?.map(item => item.artifactHash), reviewInputHash: productionReviewHash(projection.inputHash, media), inputChanged: projection.inputHash !== work.inputHash && projection.legacyInputHash !== work.inputHash, reviewAssetIds,
+                    sourceHash: director.sourceHash, mediaCount: media.length,
+                    ...(view === "full" ? { source: projection.director.source, media: media.map(({ filePath: _file, ...item }) => item) } : {}) };
             } catch (error) { return { ...summary, error: error instanceof Error ? error.message : String(error) }; }
         });
         return { revision: current.revision, works, shared };

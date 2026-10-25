@@ -141,6 +141,8 @@ export type CanvasNodeMetadata = {
     texts?: CanvasNodeText[];
     primaryTextId?: string;
     seconds?: string;
+    /** Per-node override for an image workflow that has a RunningHub binding. */
+    imageRunTarget?: "local" | "cloud" | "hybrid";
     /** Per-node override for a video workflow that has a RunningHub binding. */
     videoRunTarget?: "local" | "cloud" | "hybrid";
     vquality?: string;

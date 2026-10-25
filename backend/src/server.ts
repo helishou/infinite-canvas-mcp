@@ -990,6 +990,44 @@ export function startServer(
     const episodes = db.listDramaEpisodes(dramaId);
     res.json({ ok: true, dramaId, episodes });
   });
+  app.get("/dramas/:dramaId/scenes", (req, res) => {
+    const dramaId = String(req.params.dramaId || "");
+    const drama = stores.canvasFolders.list().find((item) => item.id === dramaId && item.isDrama);
+    if (!drama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    const episodeId = typeof req.query.episodeId === "string" ? req.query.episodeId.trim() : "";
+    const includeOrphaned = req.query.includeOrphaned === "true";
+    const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(req.query.pageSize) || 20)));
+    const where = ["s.drama_id = ?", ...(!includeOrphaned ? ["s.episode_id IS NOT NULL"] : []), ...(episodeId ? ["s.episode_id = ?"] : [])].join(" AND ");
+    const params = [dramaId, ...(episodeId ? [episodeId] : [])];
+    const total = Number((db.db.prepare(`SELECT COUNT(*) AS count FROM drama_scene_instances s WHERE ${where}`).get(...params) as { count?: number } | undefined)?.count || 0);
+    const rows = db.db.prepare(`SELECT s.id, s.episode_id, s.source_scene_key, s.environment_id, s.scene_order, s.title, s.source_hash, s.status, s.created_at, s.updated_at, c.canvas_id
+      FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id
+      WHERE ${where} ORDER BY s.scene_order, s.id LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
+    const scenes = rows.map((row) => ({
+      id: String(row.id), dramaId, episodeId: row.episode_id ?? null, sourceSceneKey: row.source_scene_key,
+      environmentId: row.environment_id ?? null, order: Number(row.scene_order || 0), title: row.title,
+      sourceHash: row.source_hash, status: row.status, canvasId: row.canvas_id ?? null,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }));
+    res.json({ ok: true, dramaId, scenes, page, pageSize, total, nextPage: page * pageSize < total ? page + 1 : null });
+  });
+  app.get("/drama/scenes/:sceneId", (req, res) => {
+    const row = db.db.prepare(`SELECT s.id, s.drama_id, s.episode_id, s.source_scene_key, s.environment_id, s.scene_order, s.title, s.source_hash, s.status, s.created_at, s.updated_at, c.canvas_id
+      FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id WHERE s.id = ?`).get(String(req.params.sceneId || "")) as Record<string, unknown> | undefined;
+    if (!row) return void res.status(404).json({ ok: false, code: "SCENE_NOT_FOUND", error: "制作场次不存在" });
+    const dramaId = String(row.drama_id || "");
+    const drama = stores.canvasFolders.list().find((item) => item.id === dramaId && item.isDrama);
+    const episodeId = row.episode_id == null ? null : String(row.episode_id);
+    const episode = episodeId ? db.getDramaEpisode(episodeId) : null;
+    res.json({ ok: true, scene: {
+      id: String(row.id), dramaId, dramaName: drama?.name || null, episodeId,
+      episodeTitle: episode?.title || null, sourceSceneKey: row.source_scene_key,
+      environmentId: row.environment_id ?? null, order: Number(row.scene_order || 0),
+      title: row.title, sourceHash: row.source_hash, status: row.status,
+      canvasId: row.canvas_id ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
+    } });
+  });
   // 剧目级自定义资产：LUT、字体、参考文档、压缩包等任意二进制文件。
   app.get("/drama/projects/:dramaId/assets", (req, res) => {
     const dramaId = String(req.params.dramaId || "");
@@ -1139,6 +1177,33 @@ export function startServer(
     if (view === "summary") {
       const { fullPlot: _fullPlot, ...summary } = episode;
       return void res.json({ ok: true, episode: summary });
+    }
+    if (req.query.plotChunkBytes !== undefined) {
+      const chunkBytes = Number(req.query.plotChunkBytes);
+      if (!Number.isInteger(chunkBytes) || chunkBytes < 1 || chunkBytes > 65536)
+        return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "plotChunkBytes 必须为 1 到 65536 之间的整数" });
+      const fullPlot = String(episode.fullPlot || ""), bytes = new TextEncoder().encode(fullPlot);
+      const sha256 = crypto.createHash("sha256").update(fullPlot, "utf8").digest("hex");
+      const selection = JSON.stringify({ episodeId: episode.id, updatedAt: episode.updatedAt, sha256, chunkBytes });
+      let offset = 0;
+      if (typeof req.query.plotCursor === "string") {
+        let cursor: Record<string, unknown>;
+        try { cursor = JSON.parse(decodeURIComponent(req.query.plotCursor)); } catch { return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标格式无效" }); }
+        if (cursor.selection !== selection) return void res.status(409).json({ ok: false, code: "READ_CURSOR_EXPIRED", error: "分集正文或版本已变化，请重新读取" });
+        offset = Number(cursor.offset);
+        if (!Number.isSafeInteger(offset) || offset < 0) return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标偏移无效" });
+      }
+      if (offset > bytes.length || (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80))
+        return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标不是 UTF-8 边界" });
+      let end = Math.min(bytes.length, offset + chunkBytes);
+      while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+      if (end === offset && offset < bytes.length) return void res.status(400).json({ ok: false, code: "CHUNK_TOO_SMALL", error: "plotChunkBytes 无法容纳下一个字符" });
+      const { fullPlot: _fullPlot, ...episodeSummary } = episode;
+      const nextCursor = end < bytes.length ? encodeURIComponent(JSON.stringify({ selection, offset: end })) : null;
+      return void res.json({ ok: true, episode: episodeSummary, fullPlotChunk: {
+        sha256, bytes: bytes.length, offset,
+        text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor,
+      }, ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView) });
     }
     res.json({
       ok: true,

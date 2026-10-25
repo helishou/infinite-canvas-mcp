@@ -44,6 +44,17 @@ export function AgentPanel() {
     const [creativeEntryOpen, setCreativeEntryOpen] = useState(false);
     const welcomeOpen = homePage && chatOpen && creativeEntryOpen;
     useEffect(() => { if (homePage) setWelcomeDismissed(false); }, [homePage]);
+    // 首屏气泡只用来点名入口：页头滚出视口后自动收起，避免一直压住卡片底部操作。
+    useEffect(() => {
+        if (!homePage || welcomeDismissed || chatOpen) return;
+        const header = document.querySelector("[data-page-header]");
+        if (!header) return;
+        const observer = new IntersectionObserver(([entry]) => {
+            if (!entry?.isIntersecting) setWelcomeDismissed(true);
+        });
+        observer.observe(header);
+        return () => observer.disconnect();
+    }, [homePage, welcomeDismissed, chatOpen]);
     useEffect(() => {
         if (!homePage || !chatOpen) return;
         setWelcomeDismissed(true);
@@ -95,7 +106,7 @@ export function AgentPanel() {
         <Button type={panelTab === "object" ? "primary" : "text"} size="small" aria-pressed={panelTab === "object"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }}>{t("productionCanvas.object")}</Button>
         <Button type={panelTab === "director" ? "primary" : "text"} size="small" aria-pressed={panelTab === "director"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>Agent</Button>
     </div> : null;
-    const launcher = <div className={`fixed bottom-4 right-0 flex max-w-[calc(100vw-12px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
+    const launcher = <div className={`fixed bottom-4 right-4 flex max-w-[calc(100vw-24px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
         {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
             <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r border-border bg-card" />
             <button type="button" className="rounded-lg px-2 py-1.5 text-sm leading-relaxed transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>

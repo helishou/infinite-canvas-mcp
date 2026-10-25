@@ -99,10 +99,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         }
         const artifacts = input.view === "artifact_index" ? selectedArtifacts.map((artifact: any) => {
             const { prompt, references = [], ...a } = artifact;
+            const staleReason = a.status === "stale" ? artifactStaleReason?.(artifact) || "marked_stale" : undefined;
             return {
                 id: a.id, targetId: a.targetId, kind: a.kind, status: a.status, sha256: a.sha256, sourceHash: a.sourceHash,
                 promptBytes: new TextEncoder().encode(typeof prompt === "string" ? prompt : "").length, referenceCount: references.length,
-                ...(a.status === "stale" ? { staleReason: artifactStaleReason?.(artifact) || "marked_stale" } : {}),
+                ...(staleReason !== undefined ? { staleReason: staleReason.length > 240 ? `${staleReason.slice(0, 239)}…` : staleReason, ...(staleReason.length > 240 ? { staleReasonTruncated: true } : {}) } : {}),
             };
         }) : selectedArtifacts;
         return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...(input.pageSize ? { artifacts: paginate(artifacts) } : { artifacts }) };

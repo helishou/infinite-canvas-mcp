@@ -95,7 +95,11 @@ export function createStableBackendProxy({ port, targetPort, readyWaitMs = DEFAU
         server,
         setBackendReady(value) {
             backendReady = Boolean(value);
-            if (!backendReady) return;
+            if (!backendReady) {
+                for (const dispatch of [...waiting]) dispatch.reject();
+                for (const socket of [...tunnels]) socket.destroy();
+                return;
+            }
             for (const dispatch of [...waiting]) dispatch();
         },
         setListenHost(nextHost) {

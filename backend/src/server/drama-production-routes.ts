@@ -5,7 +5,7 @@ import { ZodError } from "zod";
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
-import { productionWorkspaceSchemas, productionContractQuerySchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWorkspaceSchemas, productionContractQuerySchema, validateProductionContractQuery } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
@@ -108,7 +108,11 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/scene-work`, (req, res) => {
-        try { const { id, coordinator } = sceneOwner(req.params.episodeId); res.json({ ok: true, state: coordinator.inspect(id) }); }
+        try {
+            const view = z.enum(["summary", "full"]).default("summary").parse(queryWithoutToken(req.query).view);
+            const { id, coordinator } = sceneOwner(req.params.episodeId);
+            res.json({ ok: true, state: coordinator.inspect(id, view) });
+        }
         catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/compilations/:operationId`, (req, res) => {
@@ -130,7 +134,23 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/bindings`, (req, res) => {
-        try { res.json({ ok: true, bindings: service.diagnoseBindings(req.params.episodeId) }); }
+        try {
+            const bindings = service.diagnoseBindings(req.params.episodeId);
+            if (req.query.pageSize === undefined) return void res.json({ ok: true, bindings });
+            const pageSize = z.coerce.number().int().positive().max(50).default(20).parse(req.query.pageSize);
+            const assets = Array.isArray(bindings.assets) ? bindings.assets : [];
+            const selection = JSON.stringify({ owner: req.params.episodeId, revision: bindings.revision, sourceHash: bindings.sourceHash, pageSize });
+            let offset = 0;
+            if (typeof req.query.cursor === "string") {
+                let cursor: Record<string, unknown>;
+                try { cursor = JSON.parse(decodeURIComponent(req.query.cursor)); } catch { throw Object.assign(new Error("INVALID_CURSOR"), { code: "INVALID_CURSOR" }); }
+                if (cursor.selection !== selection) throw Object.assign(new Error("READ_CURSOR_EXPIRED: 绑定诊断状态已变化，请重新读取"), { code: "READ_CURSOR_EXPIRED" });
+                offset = z.number().int().nonnegative().parse(cursor.offset);
+            }
+            const page = assets.slice(offset, offset + pageSize), nextOffset = offset + page.length;
+            const nextCursor = nextOffset < assets.length ? encodeURIComponent(JSON.stringify({ selection, offset: nextOffset })) : null;
+            res.json({ ok: true, bindings: { ...bindings, assets: page, totalAssets: assets.length, assetOffset: offset, pageSize, nextCursor } });
+        }
         catch (error) { handle(res, error); }
     });
     // Web 端 request() 会在 query 上追加 ?token= 鉴权键；strict schema 不认它，先剥掉。
@@ -153,7 +173,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const input = productionContractQuerySchema.parse({ ...queryWithoutToken(req.query),
                 includeRequests: req.query.includeRequests === "true", includePatchFields: req.query.includePatchFields === "true", includeSourceContract: req.query.includeSourceContract === "true" });
-            res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId, { requests: input.includeRequests, patchFields: input.includePatchFields, sourceContract: input.includeSourceContract }) });
+            validateProductionContractQuery(input);
+            res.json({ ok: true, contract: getProductionContract(input.runtimeId, input.operationType, input.moduleId, { requests: input.includeRequests, patchFields: input.includePatchFields, sourceContract: input.includeSourceContract, moduleFile: input.moduleFile, chunkBytes: input.chunkBytes, cursor: input.cursor }) });
         }
         catch (error) { handle(res, error); }
     });
@@ -233,7 +254,39 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             const source = z.enum(["draft", "published"]).default("draft").parse(req.query.source);
             const runId = typeof req.query.runId === "string" ? req.query.runId : undefined;
-            res.json({ ok: true, readiness: service.workflowReadiness(req.params.episodeId, source, runId) });
+            const view = z.enum(["full", "summary", "targets"]).default("full").parse(req.query.view);
+            const pageSize = z.coerce.number().int().positive().max(50).default(20).parse(req.query.pageSize);
+            const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+            const readiness = service.workflowReadiness(req.params.episodeId, source, runId);
+            if (view === "full") return void res.json({ ok: true, readiness });
+            const targets = Array.isArray(readiness.targets) ? readiness.targets : [];
+            const selection = JSON.stringify({ owner: req.params.episodeId, revision: readiness.revision, source, view, pageSize });
+            let offset = 0;
+            if (cursor) {
+                let decoded: Record<string, unknown>;
+                try { decoded = JSON.parse(decodeURIComponent(cursor)); } catch { throw Object.assign(new Error("INVALID_CURSOR"), { code: "INVALID_CURSOR" }); }
+                if (decoded.selection !== selection) throw Object.assign(new Error("READ_CURSOR_EXPIRED: 制作就绪状态已变化，请重新读取摘要"), { code: "READ_CURSOR_EXPIRED" });
+                offset = z.number().int().nonnegative().parse(decoded.offset);
+            }
+            const counts = Object.fromEntries(["ready", "blocked", "needs_review", "complete"].map(status => [status, targets.filter(target => target.status === status).length]));
+            if (view === "summary") {
+                const modules = Object.fromEntries(Object.entries(readiness.modules || {}).map(([name, value]) => {
+                    const module = value && typeof value === "object" ? value as Record<string, unknown> : {};
+                    return [name, { ...(typeof module.status === "string" ? { status: module.status } : {}), unresolvedCount: Array.isArray(module.unresolved) ? module.unresolved.length : 0 }];
+                }));
+                const { targets: _targets, modules: _modules, unresolved, sceneWorks, ...rest } = readiness;
+                return void res.json({ ok: true, readiness: {
+                    ...rest, view, targetCount: targets.length, targetCounts: counts,
+                    modules, unresolvedCount: Array.isArray(unresolved) ? unresolved.length : 0,
+                    unresolvedPreview: Array.isArray(unresolved) ? unresolved.slice(0, 10) : [],
+                    sceneWorkCount: sceneWorks && typeof sceneWorks === "object" ? Object.keys(sceneWorks).length : 0,
+                    nextRead: { tool: "production_get_readiness", input: { kind: base.startsWith("/canvas") ? "canvas" : "episode", id: req.params.episodeId, source, view: "targets", pageSize } },
+                } });
+            }
+            const page = targets.slice(offset, offset + pageSize), nextOffset = offset + page.length;
+            const nextCursor = nextOffset < targets.length ? encodeURIComponent(JSON.stringify({ selection, offset: nextOffset })) : null;
+            const { targets: _targets, ...rest } = readiness;
+            res.json({ ok: true, readiness: { ...rest, view, targetCount: targets.length, targetCounts: counts, targets: page, targetOffset: offset, pageSize, nextCursor } });
         } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/scene-archives`, (req, res) => {

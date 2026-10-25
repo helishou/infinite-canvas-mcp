@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
-import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -848,7 +848,16 @@ async function executeDirectCanvasTool(
   }
   if (name === "canvas_get_selection") {
     const project = await fetchCanvasProjectSelection(config, projectId);
-    return { nodes: nodesOf(project as Record<string, unknown>) };
+    const nodes = nodesOf(project as Record<string, unknown>);
+    if (input.view === "full") return { nodes };
+    const selected = nodes.map((node) => ({
+      id: String(node.id || ""),
+      type: String(node.type || ""),
+      ...(typeof node.title === "string" ? { title: node.title.slice(0, 240), ...(node.title.length > 240 ? { titleTruncated: true, titleLength: node.title.length } : {}) } : {}),
+    }));
+    return { nodeCount: selected.length, nodes: selected, nextRead: selected.length ? {
+      tool: "canvas_get_state", input: { projectId, nodeIds: selected.map((node) => node.id) },
+    } : undefined };
   }
   if (name === "canvas_export_snapshot") {
     return backendApi.post(`/canvas/projects/${encodeURIComponent(projectId)}/mcp-export`, {});
@@ -1198,8 +1207,8 @@ function registerBackendCanvasTools(
           });
           return textResult(name === "mcp_get_command_receipt" ? value : withTraceId(value, traceId));
         } catch (error) {
-          const details = classifyToolError(error, rawInput, state);
-          const errorContext = mcpToolErrorContext(error, rawInput, state);
+          const details = classifyToolError(error, rawInput, state, name);
+          const errorContext = mcpToolErrorContext(error, rawInput, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -1449,9 +1458,12 @@ function registerBackendCanvasTools(
     },
     async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas.drama_get_episode.parse(rawInput);
-      return textResult(
-        await backendApi.getDramaEpisode(input.episodeId.trim(), input.view, input.view === "full" ? input.canvasView : undefined),
-      );
+      const result = input.view === "full"
+        ? await backendApi.get(`/drama/episodes/${encodeURIComponent(input.episodeId.trim())}?${new URLSearchParams({ view: "full", canvasView: input.canvasView, plotChunkBytes: String(input.fullPlotChunkBytes), ...(input.fullPlotCursor ? { plotCursor: input.fullPlotCursor } : {}) })}`)
+        : await backendApi.getDramaEpisode(input.episodeId.trim(), input.view);
+      if (input.view !== "full") return textResult(result);
+      enforceToolOutputLimit("drama_get_episode", result);
+      return textResult(result);
     },
   );
   server.registerTool(
@@ -1483,7 +1495,19 @@ function registerBackendCanvasTools(
     async (rawInput: Record<string, unknown>) => {
       const input = dramaUpdateEpisodeSchema.parse(rawInput);
       const { episodeId, ...patch } = input;
-      return textResult(await backendApi.updateDramaEpisode(episodeId, patch));
+      const result = await backendApi.updateDramaEpisode(episodeId, patch) as Record<string, any>;
+      const episode = recordOf(result.episode);
+      return textResult({
+        ok: result.ok !== false,
+        episode: {
+          id: String(episode.id || episodeId),
+          episodeNumber: episode.episodeNumber,
+          title: episode.title,
+          canvasId: episode.canvasId ?? null,
+        },
+        updatedFields: Object.keys(patch),
+        nextRead: { tool: "drama_get_episode", input: { episodeId, view: "summary" } },
+      });
     },
   );
   server.registerTool(
@@ -1520,7 +1544,10 @@ function registerBackendCanvasTools(
   for (const name of productionWorkspaceToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const request = productionWorkspaceRequest(name, raw)!;
-      return textResult(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw }));
+      const result = request.method === "GET" ? await backendApi.get(request.path) : await backendApi.post(request.path, request.body);
+      if (name === "production_check_continuity") return textResult(continuityCheckReceipt(result, raw));
+      if (name === "production_get_continuity") return textResult(continuityReadProjection(result, raw));
+      return textResult(request.method === "GET" ? result : productionWriteReceipt(result, { tool: name, input: raw }));
     });
   }
   for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_translate_compiled_prompts", "production_diagnose_bindings"] as const) {
@@ -1534,7 +1561,11 @@ function registerBackendCanvasTools(
         const params = new URLSearchParams({ view: query.view, offset: String(query.offset), ...(query.pageSize ? { pageSize: String(query.pageSize) } : {}) });
         return textResult(await backendApi.get(`${base}/compilations/${encodeURIComponent(query.operationId)}?${params}`));
       }
-      if (name === "production_diagnose_bindings") return textResult(await backendApi.get(`${base}/bindings`));
+      if (name === "production_diagnose_bindings") {
+        const query = toolInputSchemas.production_diagnose_bindings.parse(rawInput);
+        const params = new URLSearchParams({ pageSize: String(query.pageSize), ...(query.cursor ? { cursor: query.cursor } : {}) });
+        return textResult(await backendApi.get(`${base}/bindings?${params}`));
+      }
       if (name === "production_apply_compilation") {
         const apply = toolInputSchemas.production_apply_compilation.parse(rawInput);
         return textResult(await backendApi.post(`${base}/apply-compilation`, { preparedId: apply.preparedId }));
@@ -1559,6 +1590,7 @@ function registerBackendCanvasTools(
   });
   server.registerTool("production_get_contract", { description: toolDescriptions.production_get_contract, inputSchema: toolInputSchemas.production_get_contract }, async rawInput => {
     const input = toolInputSchemas.production_get_contract.parse(rawInput);
+    validateProductionContractQuery(input);
     const query = new URLSearchParams();
     if (input.runtimeId) query.set("runtimeId", input.runtimeId);
     if (input.operationType) query.set("operationType", input.operationType);
@@ -1566,6 +1598,9 @@ function registerBackendCanvasTools(
     if (input.includeRequests) query.set("includeRequests", "true");
     if (input.includePatchFields) query.set("includePatchFields", "true");
     if (input.includeSourceContract) query.set("includeSourceContract", "true");
+    if (input.moduleFile) query.set("moduleFile", input.moduleFile);
+    if (input.chunkBytes) query.set("chunkBytes", String(input.chunkBytes));
+    if (input.cursor) query.set("cursor", input.cursor);
     const contract = await backendApi.get(`/production/contract?${query}`);
     enforceToolOutputLimit("production_get_contract", contract);
     return textResult(contract);
@@ -2487,7 +2522,7 @@ async function inspectCanvasContext(
       ? projectState.selectedNodeIds.map(String)
       : [],
   );
-  const nodeLimit = Math.max(1, Math.min(500, Number(input.nodeLimit || 100)));
+  const nodeLimit = Math.max(1, Math.min(200, Number(input.nodeLimit || 30)));
   const summaries = nodes.slice(0, nodeLimit).map(nodeSummary);
   const aiConfig = await backend.getAiConfig();
   const models = configuredModels(aiConfig);
@@ -2869,6 +2904,56 @@ function textResult(value: unknown) {
   };
 }
 
+function continuityCheckReceipt(value: unknown, input: Record<string, unknown>) {
+  const envelope = recordOf(value);
+  const check = recordOf(envelope.check || value);
+  const diagnostics = Array.isArray(check.diagnostics) ? check.diagnostics : [];
+  const selectedTargets = Array.isArray(check.selectedTargets) ? check.selectedTargets : Array.isArray(input.targetIds) ? input.targetIds : [];
+  const kind = String(input.kind || "episode"), id = String(input.id || "");
+  return {
+    ok: envelope.ok !== false,
+    operationId: String(check.operationId || input.operationId || ""),
+    replayed: check.replayed === true,
+    status: String(check.verdict || check.status || "unknown"),
+    snapshot: String(check.snapshot || input.snapshot || "draft"),
+    revision: typeof check.revision === "number" ? check.revision : undefined,
+    sourceHash: typeof check.sourceHash === "string" ? check.sourceHash : undefined,
+    selectedTargetCount: selectedTargets.length,
+    diagnosticCounts: {
+      total: diagnostics.length,
+      blocking: diagnostics.filter((item: unknown) => recordOf(item).severity !== "warning").length,
+      warnings: diagnostics.filter((item: unknown) => recordOf(item).severity === "warning").length,
+    },
+    nextRead: { tool: "production_get_continuity", input: { kind, id, snapshot: String(check.snapshot || input.snapshot || "draft"), view: "issues", pageSize: 20 } },
+  };
+}
+
+function continuityReadProjection(value: unknown, input: Record<string, unknown>) {
+  const envelope = recordOf(value), continuity = recordOf(envelope.continuity || value), report = recordOf(continuity.report);
+  const selectedTargets = Array.isArray(report.selectedTargets) ? report.selectedTargets : [];
+  const nextInput: Record<string, unknown> = { ...input, pageSize: Number(input.pageSize || 20) };
+  if (continuity.nextCursor) nextInput.cursor = continuity.nextCursor;
+  const projected = { ...continuity };
+  delete projected.report;
+  return {
+    ...envelope,
+    continuity: {
+      ...projected,
+      ...(Object.keys(report).length ? { reportSummary: {
+        operationId: report.operationId,
+        verdict: report.verdict,
+        checkedAt: report.checkedAt,
+        sourceHash: report.sourceHash,
+        runtimeId: report.runtimeId,
+        selectedTargetCount: selectedTargets.length,
+        diagnosticCount: Array.isArray(report.diagnostics) ? report.diagnostics.length : 0,
+        stale: report.stale === true,
+      } } : {}),
+      nextRead: { tool: "production_get_continuity", input: nextInput },
+    },
+  };
+}
+
 /** MCP 工具返回体硬上限（字节）。超过即报错，避免单次调用把模型上下文挤爆：
  *  实测 canvas_get_state 单次可返回 2.2M 字符（≈55 万 tokens），而 0.5 MiB 约合 13 万 tokens 的上限。
  *  可用环境变量 MCP_MAX_TOOL_OUTPUT_BYTES 覆盖；设为 0 表示关闭该保护。 */
@@ -2931,7 +3016,7 @@ function toolErrorResult(
   input: Record<string, unknown>,
   state: McpSessionState,
   traceId?: string,
-  classified = classifyToolError(error, input, state),
+  classified = classifyToolError(error, input, state, tool),
 ) {
   const { message, code, suggestedAction } = classified;
   return {
@@ -2956,7 +3041,7 @@ function toolErrorResult(
               requestedProjectId: input.projectId || null,
               requestedTaskId: input.taskId || null,
             },
-            errorContext: mcpToolErrorContext(error, input, state).outputSummary,
+            errorContext: mcpToolErrorContext(error, input, state, tool).outputSummary,
             suggestedAction,
           },
         ),
@@ -3065,6 +3150,7 @@ function mcpToolErrorContext(
   error: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
+  tool = "",
 ): Partial<McpObservabilityEventInput> {
   const backendError = backendErrorInfo(error);
   const taskIds = errorTaskIds(error);
@@ -3090,7 +3176,7 @@ function mcpToolErrorContext(
       errorKind: backendError.kind,
       httpStatus: backendError.status,
       message: safeErrorMessage(error),
-      createdTaskIds: taskIds,
+      createdTaskIds: new Set(["canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio", "canvas_generate_image_batch", "canvas_run_generation"]).has(tool) ? taskIds : [],
       waitsForTasks: input.waitForCompletion === true || Array.isArray(input.taskIds),
       ...(Object.keys(preflight).length ? { preflight } : {}),
       ...(revision ? { ...revision } : {}),
@@ -3102,6 +3188,7 @@ function classifyToolError(
   error: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
+  toolName = "",
 ) {
   const backendError = backendErrorInfo(error);
   const message =
@@ -3124,6 +3211,11 @@ function classifyToolError(
     backendError.code === "TASK_NOT_FOUND" ||
     (backendError.status === 404 && /task|任务/i.test(message)) ||
     /生成任务不存在|任务不存在|task not found/i.test(message);
+  const assetMissing = backendError.code === "ASSET_NOT_FOUND" || /素材不存在|asset not found/i.test(message);
+  const taskNotCancellable = /任务状态\s*[^，。;；]*不可取消|task (?:is )?not cancellable|cannot cancel (?:a )?(?:completed|failed|cancelled) task/i.test(message);
+  const productionRunNotFound = /找不到生产运行|production run .*not found/i.test(message);
+  const productionRunEnded = /生产运行已结束|production run (?:has )?already ended/i.test(message);
+  const productionRunNotResumable = /生产运行不能继续|production run cannot be resumed/i.test(message);
   const missingNode =
     backendError.code === "NODE_NOT_FOUND" ||
     /(?:节点|node|生成目标).*(?:不存在|not found)|找不到(?:画布)?节点/i.test(
@@ -3135,7 +3227,10 @@ function classifyToolError(
   // 会一路落到 CANVAS_TOOL_FAILED，把“查了不存在的 ID”伪装成通用工具故障。
   const missingEpisode =
     backendError.code === "EPISODE_NOT_FOUND" || /分集不存在|episode not found/i.test(message);
+  const missingScene = backendError.code === "SCENE_NOT_FOUND" || /(?:正式)?场次不存在|scene not found/i.test(message);
   const h3ClipOccupied = backendError.code === "H3_CLIP_OCCUPIED";
+  const staleH3Preview = backendError.code === "STALE_H3_PREVIEW" || /STALE_H3_PREVIEW|生成预检已过期/.test(message);
+  const browserDisconnected = /当前没有已连接网页|no connected (?:webpage|browser)/i.test(message);
   // 分块/定向读取没选到合法产物（“分块读取必须选定一个产物”），是入参约束而非后端崩溃。
   const artifactTargetMissing =
     backendError.code === "ARTIFACT_NOT_FOUND" || /必须选定一个产物|no artifact was selected|must select an artifact/i.test(message);
@@ -3143,7 +3238,7 @@ function classifyToolError(
     backendError.code === "MODEL_REQUIRED" ||
     (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
   const conflict =
-    backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
+    backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线|版本已变化/.test(message);
   // Backend 以 HTTP 4xx 返回的 Zod 校验体（形如 [{"code":"invalid_type","expected":"string","received":"undefined"}]）
   // 不是客户端 z.ZodError，但语义同样是入参缺失/非法，归入 INVALID_INPUT 而不是 CANVAS_TOOL_FAILED。
   const embeddedValidationIssues =
@@ -3153,7 +3248,7 @@ function classifyToolError(
   const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT" || embeddedValidationIssues;
   const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
-  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED"].includes(backendError.code || "") ? backendError.code : undefined;
+  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED", "STALE_H3_PREVIEW"].includes(backendError.code || "") ? backendError.code : undefined;
   const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
@@ -3163,6 +3258,16 @@ function classifyToolError(
   const payloadOverflow = error instanceof McpPayloadOverflowError;
   const code = cancelled
     ? "MCP_CALL_CANCELLED"
+    : taskNotCancellable
+      ? "TASK_NOT_CANCELLABLE"
+    : productionRunNotFound
+      ? "PRODUCTION_RUN_NOT_FOUND"
+    : productionRunEnded
+      ? "PRODUCTION_RUN_ALREADY_ENDED"
+    : productionRunNotResumable
+      ? "PRODUCTION_RUN_NOT_RESUMABLE"
+    : staleH3Preview
+      ? "STALE_H3_PREVIEW"
     : commandCode
     ? commandCode
     : payloadOverflow
@@ -3195,6 +3300,10 @@ function classifyToolError(
                         ? "BACKEND_INVALID_RESPONSE"
                         : missingEpisode
                           ? "EPISODE_NOT_FOUND"
+          : missingScene
+            ? "SCENE_NOT_FOUND"
+            : browserDisconnected
+              ? "BROWSER_NOT_CONNECTED"
                           : artifactTargetMissing
                             ? "ARTIFACT_NOT_FOUND"
                             : backendError.status && backendError.status >= 500
@@ -3206,6 +3315,16 @@ function classifyToolError(
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
     ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
+    : staleH3Preview
+      ? { tool: "h3_preview_run", input: Object.fromEntries(["projectId", "nodeId", "nodeIds", "segmentId", "endSegmentId", "runFromCurrent", "skipCompleted", "forceRegenerate", "params"].filter(key => input[key] !== undefined).map(key => [key, input[key]])), action: "尚未创建生成任务。先用相同范围和参数重新预检，再用新 planHash 与原 idempotencyKey 提交。" }
+    : browserDisconnected
+      ? { action: "先在当前 Codex 会话连接 Infinite Canvas 网页，再重试此页面工具；Backend 原生 MCP 工具不依赖网页连接。" }
+    : assetMissing
+      ? { tool: "assets_list", input: { page: 1, pageSize: 20 }, action: "素材 ID 可能已删除或来自旧列表；刷新素材目录后使用其中的精确 ID。" }
+    : taskNotCancellable
+      ? { tool: toolName.startsWith("h3_") ? "h3_get_task" : "canvas_task_status", input: { taskId: String(input.taskId || "") }, action: "任务已到终态，取消不会改变结果；查询终态即可。" }
+    : productionRunNotFound || productionRunEnded || productionRunNotResumable
+      ? { tool: "production_get_batch", input: { kind: String(input.kind || "episode"), id: String(input.id || ""), runId: String(input.runId || "") }, action: "先核对原批次状态；已结束或不存在的 runId 不能暂停/继续，也不要创建替代 runId。" }
     : domainCode === "REFERENCE_INVALID"
     ? { tool: "h3_get_clip_references", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
     : domainCode === "MEDIA_IDENTITY_MISMATCH"
@@ -3232,6 +3351,10 @@ function classifyToolError(
       ? { tool: "canvas_list_projects", input: {} }
       : missingTask && projectId
         ? { tool: "canvas_task_status", input: { projectId } }
+    : conflict && toolName.startsWith("production_")
+      ? input.kind === "scene"
+        ? { tool: "production_get_scene_production", input: { sceneId: String(input.id || ""), view: "summary" }, action: "回读当前场次 revision 与目标状态后再准备或提交。" }
+        : { tool: "production_get", input: { kind: String(input.kind || "episode"), id: String(input.id || "") }, action: "回读当前制作稿 revision 和目标状态后再准备或提交。" }
     : missingNode || conflict
       ? {
           tool: "canvas_inspect",
@@ -3252,13 +3375,13 @@ function classifyToolError(
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = productionDiagnostics.length > 0 || h3ClipOccupied || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
+  const recoverable = productionDiagnostics.length > 0 || staleH3Preview || browserDisconnected || assetMissing || taskNotCancellable || productionRunNotFound || productionRunEnded || productionRunNotResumable || h3ClipOccupied || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || missingScene || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);
     return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : typeof item.path === "string" ? { path: item.path } : {}), ...(typeof recordOf(item.blockingRun).runId === "string" ? { blockingRun: item.blockingRun } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
   }) : [];
-  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : domainCode || invalidInput ? "after_input_change" : undefined;
+  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
   return {
     code,
     message,
@@ -3336,8 +3459,8 @@ function installMcpToolObservability(
               kind: typeof errorRecord.errorKind === "string" ? errorRecord.errorKind : undefined,
             },
           );
-          const details = classifyToolError(error, input, state);
-          const errorContext = mcpToolErrorContext(error, input, state);
+          const details = classifyToolError(error, input, state, name);
+          const errorContext = mcpToolErrorContext(error, input, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -3375,8 +3498,8 @@ function installMcpToolObservability(
         }
         return withTraceIdInToolResult(result, traceId);
       } catch (error) {
-        const details = classifyToolError(error, input, state);
-        const errorContext = mcpToolErrorContext(error, input, state);
+        const details = classifyToolError(error, input, state, name);
+        const errorContext = mcpToolErrorContext(error, input, state, name);
         await recordMcpObservabilityEvent(recordEvent, {
           sessionId: state.clientId,
           traceId,
@@ -3491,10 +3614,13 @@ function mcpToolResultContext(
       )
     : [];
   const firstTask = tasks[0] || {};
-  const createdTaskIds = [...new Set([
+  // Only submission tools own task creation. A taskId returned by status,
+  // wait, cancel, or ComfyUI lookup is a reference, not a creation receipt.
+  const createsTasks = new Set(["canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio", "canvas_generate_image_batch", "canvas_run_generation"]).has(String(tool || ""));
+  const createdTaskIds = createsTasks ? [...new Set([
     ...tasks.map((task) => String(task.taskId || "")).filter(Boolean),
     ...(typeof result.taskId === "string" ? [result.taskId] : []),
-  ])];
+  ])] : [];
   const operationResults = Array.isArray(result.operationResults)
     ? result.operationResults
     : [];
@@ -3507,7 +3633,7 @@ function mcpToolResultContext(
     outputSummary: {
       ok: result.ok !== false,
       outputChars: serializedChars(value),
-      taskCount: createdTaskIds.length || (result.taskId ? 1 : 0),
+      taskCount: createdTaskIds.length,
       createdTaskIds,
       waitsForTasks: tool === "canvas_wait_tasks" || Boolean(result.wait) || input.waitForCompletion === true,
       operationCount: operationResults.length,

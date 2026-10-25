@@ -10,6 +10,7 @@ import { setImageBlob } from "@/services/image-storage";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import { CanvasDraftsButton } from "@/components/canvas/canvas-drafts-button";
+import { PageHeader, PageSectionHeader } from "@/components/layout/page-header";
 import type { CanvasExportFile } from "@/types/canvas-export";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -113,31 +114,28 @@ export default function ProjectsPage() {
 
     return (
         <main className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground" data-testid="project-directory">
-            <header className="shrink-0 border-b border-border px-4 py-5 sm:px-6 lg:px-8">
-                <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4">
-                    <div>
-                        <h1 className="text-2xl font-medium tracking-tight">{t("projects.title")}</h1>
-                        <p className="mt-1 text-sm text-muted-foreground">{t("projects.description")}</p>
-                    </div>
-                    <Input className="!w-full sm:!w-80" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("projects.search")} placeholder={t("projects.search")} value={searchQuery} onChange={event => changeSearch(event.target.value)} />
-                </div>
-            </header>
+            <PageHeader
+                className="shrink-0 border-b border-border px-4 py-6 sm:px-6 lg:px-8"
+                width="gallery"
+                title={t(`projects.directoryTitles.${directoryType}`)}
+                description={t("projects.description")}
+                actions={<Input className="!w-full sm:!w-80" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("projects.search")} placeholder={t("projects.search")} value={searchQuery} onChange={event => changeSearch(event.target.value)} />}
+            />
             <div className="flex min-h-0 w-full flex-1">
                 <div className="min-w-0 flex-1 overflow-y-auto">
                     <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} />}
+                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} headingHidden={directoryType === "drama"} />}
                         {showCanvases && <>
-                        <header className="flex flex-wrap items-center justify-between gap-5 border-b border-border pb-6">
-                            <div>
-                                <h2 className="flex items-center gap-2 text-lg font-medium tracking-tight">{t("projects.canvas")}<span className="text-xs font-normal text-muted-foreground" data-testid="canvas-directory-count">{!hydrated || !ownershipReady ? "—" : visibleProjects.length}</span></h2>
-                                <p className="mt-1 text-xs text-muted-foreground">{t("projects.canvasDescription")}</p>
-                            </div>
-                            <div className="flex flex-wrap items-center justify-end gap-2">
+                        <PageSectionHeader
+                            title={t("projects.canvas")}
+                            count={<span data-testid="canvas-directory-count">{!hydrated || !ownershipReady ? "—" : visibleProjects.length}</span>}
+                            description={t("projects.canvasDescription")}
+                            actions={<>
                                 <CanvasDraftsButton />
                                 <Button loading={transfer === "import"} disabled={!hydrated || transfer !== null} icon={<FileUp className="size-4" />} onClick={() => inputRef.current?.click()}>{t("canvas.import")}</Button>
                                 <Button disabled={!hydrated} type="primary" icon={<Plus className="size-4" />} onClick={createAndEnter}>{t("canvas.create")}</Button>
-                            </div>
-                        </header>
+                            </>}
+                        />
 
                         {selectedIds.length ? (
                             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
@@ -155,7 +153,7 @@ export default function ProjectsPage() {
                         {!hydrated || ownershipLoading ? (
                             <section className="flex min-h-[360px] items-center justify-center rounded-xl border border-border bg-card/50 text-sm text-muted-foreground">{t("canvas.loading")}</section>
                         ) : visibleProjects.length ? (
-                            <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                            <div data-card-grid className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(320px,1fr))]">
                                 {visibleProjects.map((project) => <CanvasProjectCard key={project.id} project={project} />)}
                             </div>
                         ) : (

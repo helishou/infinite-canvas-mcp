@@ -18,6 +18,7 @@
       "h3_run_clip",
       "h3_get_task",
       "h3_cancel_task",
+      "h3_preview_run",
       "h3_update_clip",
       "h3_move_clip",
       "h3_bind_existing_character_groups",

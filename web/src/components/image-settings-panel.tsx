@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { ConfigProvider, Switch } from "antd";
+import { ConfigProvider, Radio, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -53,6 +53,9 @@ type ImageSettingsPanelProps = {
     customFields?: WorkflowField[];
     customFieldValues?: Record<string, unknown>;
     onCustomFieldChange?: (id: string, value: unknown) => void;
+    showRunTarget?: boolean;
+    runTarget?: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
     hideStandardImageOptions?: boolean;
     /** ComfyUI 模型但没解析出工作流字段：提示原因，同时保持标准项可见。 */
     workflowParamsMissing?: boolean;
@@ -75,6 +78,9 @@ export function ImageSettingsPanel({
     customFields,
     customFieldValues,
     onCustomFieldChange,
+    showRunTarget = false,
+    runTarget = "local",
+    onRunTargetChange,
     hideStandardImageOptions = false,
     workflowParamsMissing = false,
     workflowParamsBlockedByScenario = false,
@@ -117,6 +123,25 @@ export function ImageSettingsPanel({
                     <div className="space-y-2.5" role="group" aria-label={t("settingsPanels.image.workflowFields")}>
                         <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
+                    </div>
+                ) : null}
+                {showRunTarget ? (
+                    <div className="space-y-1.5" role="group" aria-label={t("settingsPanels.image.runTarget")}>
+                        <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.runTarget")}</SettingTitle>
+                        <Radio.Group
+                            size="small"
+                            optionType="button"
+                            value={runTarget}
+                            onChange={(event) => onRunTargetChange?.(event.target.value)}
+                            options={[
+                                { label: t("settingsPanels.image.runTargetLocal"), value: "local" },
+                                { label: t("settingsPanels.image.runTargetCloud"), value: "cloud" },
+                                { label: t("settingsPanels.image.runTargetHybrid"), value: "hybrid" },
+                            ]}
+                        />
+                        <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
+                            {t(runTarget === "hybrid" ? "settingsPanels.image.runTargetHintHybrid" : runTarget === "cloud" ? "settingsPanels.image.runTargetHintCloud" : "settingsPanels.image.runTargetHintLocal")}
+                        </div>
                     </div>
                 ) : null}
                 {workflowParamsMissing ? (

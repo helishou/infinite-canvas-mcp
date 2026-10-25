@@ -6,6 +6,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
+import { PageHeader } from "@/components/layout/page-header";
 import { MediaImage } from "@/components/media/media-image";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
@@ -609,7 +610,23 @@ export default function ImagePage() {
 
     return (
         <div className="ui-controls flex h-full min-w-0 flex-col overflow-hidden bg-background text-foreground">
-            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+            <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:px-8 lg:py-6">
+            <PageHeader
+                className="shrink-0"
+                width="gallery"
+                title={t("imageWorkbench.title")}
+                actions={
+                    <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
+                        <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
+                            {t("workbench.logs")}
+                        </Button>
+                        <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
+                            {t("workbench.settings")}
+                        </Button>
+                    </div>
+                }
+            />
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 lg:overflow-hidden lg:grid-rows-[minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 min-w-0 overflow-y-auto border-r border-border pr-5 xl:block">
                     <LogPanel
                         logs={logs}
@@ -624,23 +641,7 @@ export default function ImagePage() {
 
                 <section className="grid min-w-0 gap-5 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
                     <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
-                        <div>
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                    <h1 className="ui-page-title text-foreground">{t("imageWorkbench.title")}</h1>
-                                </div>
-                                <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
-                                    <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
-                                        {t("workbench.logs")}
-                                    </Button>
-                                    <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                        {t("workbench.settings")}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-6 space-y-6">
+                        <div className="space-y-6">
                             <section aria-label={t("workbench.groups.input")}>
                                 <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
                                     <label htmlFor="image-workbench-prompt" className="ui-group-title">
@@ -797,13 +798,17 @@ export default function ImagePage() {
                                 )}
                             </div>
                         ) : (
-                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-0">
-                                <ImagePlus className="mb-4 size-8 text-muted-foreground/65" />
-                                <Empty image={false} description={t("imageWorkbench.empty")} />
+                            <div data-testid="workbench-empty" className="flex items-center gap-3 rounded-lg bg-muted/45 px-4 py-4">
+                                <ImagePlus className="size-5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
+                                <p className="min-w-0 text-sm text-muted-foreground">
+                                    {t("imageWorkbench.empty")}
+                                    <span className="ml-1 text-xs opacity-80">{t("workbench.emptyHint")}</span>
+                                </p>
                             </div>
                         )}
                     </div>
                 </section>
+            </div>
             </main>
             <input
                 ref={fileInputRef}

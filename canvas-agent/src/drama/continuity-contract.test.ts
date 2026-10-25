@@ -7,7 +7,7 @@ import { applyDirectorSourcePatch } from "./production-validation.js";
 test("continuity reads are owner scoped and cursor-bearing", () => {
     assert.deepEqual(productionWorkspaceRequest("production_get_continuity", { kind: "episode", id: "ep", view: "issues", snapshot: "draft", pageSize: 20 }).path,
         "/drama/episodes/ep/production/continuity?snapshot=draft&view=issues&pageSize=20");
-    assert.equal(productionWorkspaceRequest("production_get_continuity", { kind: "scene", id: "scene" }).path, "/drama/scenes/scene/production/continuity?snapshot=draft&view=summary");
+    assert.equal(productionWorkspaceRequest("production_get_continuity", { kind: "scene", id: "scene" }).path, "/drama/scenes/scene/production/continuity?snapshot=draft&view=summary&pageSize=20");
 });
 
 test("ledger source patch changes the authored source and never accepts projected shot snapshots", () => {

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { App, Alert, Button, Checkbox, Input, InputNumber, Radio, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
 import { Upload as UploadIcon, Cloud, Download, Play, RefreshCw, Trash2, Workflow, ExternalLink, UploadCloud } from "lucide-react";
 import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { PageHeader } from "@/components/layout/page-header";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, syncWorkflowFromComfyUI, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
 import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
@@ -463,6 +464,16 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         }
     };
 
+    const loadDetailRef = useRef(handleLoadDetail);
+    loadDetailRef.current = handleLoadDetail;
+    /** 首次进入时选中列表首项，避免右侧长期停在虚线空面板；用户已选或已删时不覆盖。 */
+    const autoSelectedRef = useRef(false);
+    useEffect(() => {
+        if (autoSelectedRef.current || detailLoading || selected || libraryLoading || !workflows.length) return;
+        autoSelectedRef.current = true;
+        void loadDetailRef.current(workflows[0].name);
+    }, [detailLoading, libraryLoading, selected, workflows]);
+
     const handleSyncComfySource = async (owner: WorkflowDetail) => {
         if (!owner.source || owner.source.syncState !== "changed" || syncingSource) return;
         setSyncingSource(owner.name);
@@ -821,11 +832,14 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     );
 
     return (
-        <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-3 py-4 sm:px-6">
-            <div className="shrink-0">
-                <h1 className="flex items-center gap-2 text-xl font-semibold"><Workflow className="size-5" /> {t("microTools.workflow.workspaceTitle")}</h1>
-                <p className="mt-0.5 text-xs text-stone-500">{t("microTools.workflow.workspaceDescription")}</p>
-            </div>
+        <main className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-4 py-6 sm:px-6 lg:px-8">
+            <PageHeader
+                className="shrink-0"
+                width="data"
+                icon={<Workflow className="size-5" />}
+                title={t("microTools.workflow.workspaceTitle")}
+                description={t("microTools.workflow.workspaceDescription")}
+            />
 
             {detailLoading ? <Spin size="small" /> : null}
             {detailError ? <Alert type="error" description={detailError} /> : null}
@@ -835,8 +849,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                 onChange={setSection}
                 items={[
                     { key: "workflows", label: "工作流库" },
-                    { key: "models", label: t("microTools.workflow.localModels") },
-                    { key: "runtime", label: "运行环境" },
+                    { key: "config", label: "模型与运行" },
                 ]}
             />
 
@@ -1088,8 +1101,14 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                     )}
                     </div>
                     {libraryColumn}
-                </div> : section === "models" ? <ComfyChannelsPanel /> : <ComfyRuntimePanel />}
+                </div> : (
+                    // 「模型与运行」把原来的本地模型、运行环境两个页签并成一块，保留直达但少一层切换。
+                    <div className="space-y-6">
+                        <ComfyChannelsPanel />
+                        <ComfyRuntimePanel />
+                    </div>
+                )}
             </div>
-        </div>
+        </main>
     );
 }

@@ -47,7 +47,7 @@ export function AppTopNav() {
 
     return (
         <>
-            <header className="relative z-[60] shrink-0 border-b border-border bg-background" data-workspace-header data-canvas-shortcuts-ignore>
+            <header className="relative z-[60] shrink-0 border-b border-border bg-background" data-workspace-header data-canvas-shortcuts-ignore data-analytics-module="app-top-nav">
                 <div className={cn("mx-auto flex max-w-[1600px] items-center justify-between gap-2 px-3 sm:gap-3 sm:px-4 lg:gap-5 lg:px-8", navigation.compact ? "h-12" : "h-16")}>
                     <div className="flex min-w-0 items-center">
                         <Link to="/" aria-label={t("meta.title")} className="flex shrink-0 items-center gap-2 text-sm font-semibold leading-none tracking-tight text-foreground transition hover:text-primary">

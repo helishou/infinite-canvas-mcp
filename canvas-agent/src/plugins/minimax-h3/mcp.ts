@@ -127,10 +127,10 @@ const TOOLS: PluginMcpToolWire[] = [
     H3_GET_CLIP_TOOL,
     {
         id: "h3_get_clip_prompt", annotations: { readOnlyHint: true },
-        version: "1.0.0",
+        version: "1.1.0",
         name: "H3 读取片段提示词",
-        description: "按需读取指定 H3 Clip 的语义提示词和最终编译提示词。",
-        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
+        description: "默认只返回 H3 Clip 语义/编译提示词长度与 SHA-256；用 view='semantic' 或 'compiled' 读取指定正文，默认每次 32 KiB，按 cursor 续读并按 sha256 核对。",
+        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, view: { type: "string", enum: ["summary", "semantic", "compiled"] }, chunkBytes: { type: "integer", minimum: 1, maximum: 65536, default: 32768 }, cursor: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
     },
     {
         id: "h3_get_clip_references", annotations: { readOnlyHint: true },
@@ -166,9 +166,9 @@ const TOOLS: PluginMcpToolWire[] = [
         },
     },
     {
-        id: 'h3_preview_run', version: '1.0.0', name: 'H3 执行预检', annotations: { readOnlyHint: true },
-        description: '只读预检与正式运行相同的范围和参数，返回最终生效值、来源、预计尺寸、参考映射、阻断项及 planHash；不写草稿、不生成。提交时传 expectedPlanHash，过期版本或默认值变化会拒绝。',
-        inputJsonSchema: { type: 'object', properties: { projectId: { type: 'string' }, nodeId: { type: 'string' }, nodeIds: { type: 'array', items: { type: 'string' } }, segmentId: { type: 'string' }, endSegmentId: { type: 'string' }, runFromCurrent: { type: 'boolean' }, skipCompleted: { type: 'boolean' }, forceRegenerate: { type: 'boolean' }, params: { type: 'object' } }, required: ['projectId'] },
+        id: 'h3_preview_run', version: '1.1.0', name: 'H3 执行预检', annotations: { readOnlyHint: true },
+        description: '默认只返回 ready/blocked 目标、阻断项计数和 planHash；需要模型参数、参考映射与尺寸详情时传 view=full，按 clip 分页并用 cursor 续读。正式运行传同一 planHash 到 expectedPlanHash；预检过期时刷新后沿用原 idempotencyKey 提交。',
+        inputJsonSchema: { type: 'object', properties: { projectId: { type: 'string' }, nodeId: { type: 'string' }, nodeIds: { type: 'array', items: { type: 'string' } }, segmentId: { type: 'string' }, endSegmentId: { type: 'string' }, runFromCurrent: { type: 'boolean' }, skipCompleted: { type: 'boolean' }, forceRegenerate: { type: 'boolean' }, params: { type: 'object' }, view: { type: 'string', enum: ['summary', 'full'] }, pageSize: { type: 'integer', minimum: 1, maximum: 20, default: 10 }, cursor: { type: 'string' } }, required: ['projectId'] },
     },
     {
         id: "h3_get_defaults", annotations: { readOnlyHint: true },
@@ -570,7 +570,31 @@ export const pluginMcp: PluginMcpModule = {
         return {
             h3_preview_run: async (input) => {
                 if (!context.backend.previewH3Generation) throw new Error('Backend 缺少 H3 执行预检能力');
-                return context.backend.previewH3Generation({ ...input, mode: 'video', operation: 'h3-run' } as import('../../canvas/generation-contract.js').CanvasGenerationCommand);
+                const { view = 'summary', pageSize: rawPageSize, cursor, ...runInput } = input;
+                const pageSize = Math.min(20, Math.max(1, Number(rawPageSize) || 10));
+                const preview = await context.backend.previewH3Generation({ ...runInput, mode: 'video', operation: 'h3-run' } as import('../../canvas/generation-contract.js').CanvasGenerationCommand);
+                const clips = Array.isArray(preview.clips) ? preview.clips : [];
+                const diagnostics = Array.isArray(preview.blockedTargets) ? preview.blockedTargets : Array.isArray(preview.diagnostics) ? preview.diagnostics : [];
+                const counts = Object.fromEntries([...new Set(diagnostics.map(item => String((item as Record<string, unknown>).code || 'UNKNOWN')))].map(code => [code, diagnostics.filter(item => String((item as Record<string, unknown>).code || 'UNKNOWN') === code).length]));
+                const selection = JSON.stringify({ projectId: runInput.projectId, nodeId: runInput.nodeId, nodeIds: runInput.nodeIds, segmentId: runInput.segmentId, endSegmentId: runInput.endSegmentId, runFromCurrent: runInput.runFromCurrent, skipCompleted: runInput.skipCompleted, forceRegenerate: runInput.forceRegenerate, params: runInput.params, revision: preview.revision, planHash: preview.planHash, pageSize });
+                if (view !== 'full') return {
+                    ready: preview.ready, projectId: runInput.projectId, revision: preview.revision, planHash: preview.planHash,
+                    targetCount: clips.length, readyTargets: preview.readyTargets, blockedTargetCount: diagnostics.length,
+                    diagnosticCounts: counts, blockedTargets: diagnostics,
+                    nextRead: clips.length ? { tool: 'h3_preview_run', input: { ...runInput, view: 'full', pageSize } } : undefined,
+                };
+                let offset = 0;
+                if (cursor) {
+                    let decoded: Record<string, unknown>;
+                    try { decoded = JSON.parse(decodeURIComponent(String(cursor))); } catch { throw new Error('INVALID_CURSOR'); }
+                    if (decoded.selection !== selection) throw new Error('READ_CURSOR_EXPIRED: 预检内容或目标范围已变化，请重新读取 summary');
+                    offset = Number(decoded.offset);
+                    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('INVALID_CURSOR');
+                }
+                const page = clips.slice(offset, offset + pageSize), nextOffset = offset + page.length;
+                const nextCursor = nextOffset < clips.length ? encodeURIComponent(JSON.stringify({ selection, offset: nextOffset })) : null;
+                const { clips: _clips, diagnostics: _diagnostics, blockedTargets: _blockedTargets, ...summary } = preview;
+                return { ...summary, targetCount: clips.length, blockedTargets: diagnostics, clips: page, clipOffset: offset, pageSize, nextCursor };
             },
             h3_get_defaults: async () => context.backend.getH3Defaults(),
             h3_set_defaults: async (input) => {
@@ -968,7 +992,38 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip_prompt: async (input) => {
                 const { projectId, nodeId, segmentId, revision, timings, snapshot } = await readH3Clip(context, input);
-                return { ok: true, projectId, nodeId, segmentId, revision, prompt: snapshot!.prompt, timings };
+                const prompt = snapshot!.prompt;
+                const semantic = prompt.semantic, compiled = prompt.compiled;
+                const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+                if (!input.view || input.view === "summary") return {
+                    ok: true, projectId, nodeId, segmentId, revision,
+                    prompt: {
+                        semantic: { characters: semantic.length, bytes: Buffer.byteLength(semantic, "utf8"), sha256: hash(semantic) },
+                        compiled: { characters: compiled.length, bytes: Buffer.byteLength(compiled, "utf8"), sha256: hash(compiled) },
+                    },
+                    nextRead: { tool: "h3_get_clip_prompt", input: { projectId, nodeId, segmentId, view: "compiled", chunkBytes: 32768 } },
+                    timings,
+                };
+                const view = input.view === "semantic" ? "semantic" : "compiled";
+                const value = view === "semantic" ? semantic : compiled;
+                const chunkBytes = Math.min(65536, Math.max(1, Number(input.chunkBytes) || 32768));
+                const selection = JSON.stringify({ projectId, nodeId, segmentId, revision, view, sha256: hash(value) });
+                let offset = 0;
+                if (input.cursor) {
+                    let cursor: Record<string, unknown>;
+                    try { cursor = JSON.parse(decodeURIComponent(String(input.cursor))); } catch { throw new Error("INVALID_CURSOR"); }
+                    if (cursor.selection !== selection) throw new Error("READ_CURSOR_EXPIRED: Clip 内容或版本已变化，请从当前版本重新读取");
+                    offset = Number(cursor.offset);
+                    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("INVALID_CURSOR");
+                }
+                const bytes = new TextEncoder().encode(value);
+                if (offset > bytes.length || (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80)) throw new Error("INVALID_CURSOR: 非 UTF-8 边界");
+                let end = Math.min(bytes.length, offset + chunkBytes);
+                while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+                if (end === offset && offset < bytes.length) throw new Error("CHUNK_TOO_SMALL: chunkBytes 无法容纳下一个字符");
+                const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end));
+                const nextCursor = end < bytes.length ? encodeURIComponent(JSON.stringify({ selection, offset: end })) : null;
+                return { ok: true, projectId, nodeId, segmentId, revision, view, sha256: hash(value), bytes: bytes.length, offset, text, nextCursor, timings };
             },
             h3_get_clip_references: async (input) => {
                 const { projectId, nodeId, segmentId, revision, timings, snapshot } = await readH3Clip(context, input);

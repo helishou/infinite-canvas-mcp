@@ -6,6 +6,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
+import { PageHeader } from "@/components/layout/page-header";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
@@ -456,7 +457,23 @@ export default function VideoPage() {
 
     return (
         <div className="flex h-full min-w-0 flex-col overflow-hidden bg-background text-foreground">
-            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+            <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:px-8 lg:py-6">
+            <PageHeader
+                className="shrink-0"
+                width="gallery"
+                title={t("videoWorkbench.title")}
+                actions={
+                    <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
+                        <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
+                            {t("workbench.logs")}
+                        </Button>
+                        <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
+                            {t("workbench.settings")}
+                        </Button>
+                    </div>
+                }
+            />
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 lg:overflow-hidden xl:grid-cols-[260px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 min-w-0 overflow-y-auto border-r border-border pr-5 xl:block">
                     <LogPanel
                         logs={logs}
@@ -471,19 +488,7 @@ export default function VideoPage() {
 
                 <section className="grid min-w-0 gap-5 lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
                     <div className="thin-scrollbar flex min-w-0 flex-col rounded-xl border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                            <h1 className="text-xl font-semibold tracking-tight text-foreground">{t("videoWorkbench.title")}</h1>
-                            <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
-                                <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
-                                    {t("workbench.logs")}
-                                </Button>
-                                <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                    {t("workbench.settings")}
-                                </Button>
-                            </div>
-                        </div>
-
-                        <div className="mt-6 space-y-6">
+                        <div className="space-y-6">
                             <section aria-label={t("workbench.groups.input")}>
                                 <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
                                     <label htmlFor="video-workbench-prompt" className="text-sm font-semibold">
@@ -625,13 +630,17 @@ export default function VideoPage() {
                                 )}
                             </div>
                         ) : (
-                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-[360px]">
-                                <VideoIcon className="mb-4 size-8 text-muted-foreground/65" />
-                                <Empty image={false} description={t("videoWorkbench.empty")} />
+                            <div data-testid="workbench-empty" className="flex items-center gap-3 rounded-lg bg-muted/45 px-4 py-4">
+                                <VideoIcon className="size-5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
+                                <p className="min-w-0 text-sm text-muted-foreground">
+                                    {t("videoWorkbench.empty")}
+                                    <span className="ml-1 text-xs opacity-80">{t("workbench.emptyHint")}</span>
+                                </p>
                             </div>
                         )}
                     </div>
                 </section>
+            </div>
             </main>
             <input
                 ref={fileInputRef}

@@ -30,6 +30,7 @@ import {
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { commandFingerprint } from "./collaboration.js";
 import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "./generation-settings.js";
+import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 
 export type CanvasImageReference = {
@@ -58,6 +59,7 @@ export type CanvasImageGenerationInput = {
   height?: number;
   quality?: string;
   count?: number;
+  runTarget?: "local" | "cloud" | "hybrid";
   imageIds?: string[];
   loopOutput?: CanvasGenerationCommand["loopOutput"];
   params?: Record<string, unknown>;
@@ -170,6 +172,7 @@ export class CanvasImageDispatcher {
         nodeId: normalized.nodeId,
         executor: plan.executor,
         model: normalized.model,
+        ...(normalized.runTarget ? { runTarget: normalized.runTarget } : {}),
         size:
           normalized.size ||
           `${normalized.width || 1024}x${normalized.height || 1024}`,
@@ -239,6 +242,7 @@ export class CanvasImageDispatcher {
                   quality: normalized.quality || "auto",
                   count: Math.max(1, Math.min(4, Math.floor(normalized.count || 1))),
                   executor: plan.executor,
+                  ...(normalized.runTarget ? { runTarget: normalized.runTarget } : {}),
                 }, workflowFields),
             ...(normalized.loopInputImages?.length ? { loopInputImages: normalized.loopInputImages.map((image) => ({ name: image.name, mimeType: image.mimeType, storageKey: image.storageKey, url: image.url })) } : {}),
           },
@@ -574,6 +578,25 @@ export class CanvasImageDispatcher {
         ...normalized,
         params: { ...resolved.params, ...this.canvasComfyParams(input), ...params },
       };
+      const workflowConfig = this.workflows.getConfig(resolved.binding.workflow);
+      const profileId = workflowConfig?.runningHubProfileId;
+      const requestedTarget = input.runTarget ?? workflowConfig?.runTarget ?? "local";
+      const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+      if (requestedTarget === "cloud" && !profileId) throw new Error("当前本地工作流没有绑定 RunningHub 工作流");
+      if (requestedTarget === "cloud" && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+      const localBusy = requestedTarget === "hybrid" && (
+        this.stores.tasks.list({ kind: "workflow", limit: 500 }).some((task) => ["queued", "running"].includes(task.status))
+        || this.stores.tasks.list({ kind: "canvas-image", limit: 500 }).some((task) => ["queued", "running"].includes(task.status) && task.executor === "comfy-workflow")
+      );
+      if ((requestedTarget === "cloud" || localBusy) && profileId && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+      if (profileId && profile && (requestedTarget === "cloud" || localBusy)) {
+        return {
+          executor: "runninghub-workflow",
+          input: planInput,
+          runninghubProfileId: profileId,
+          workflow: resolved.binding.workflow,
+        };
+      }
       return {
         executor: "comfy-workflow",
         input: planInput,
@@ -619,7 +642,7 @@ export class CanvasImageDispatcher {
       const result = plan.executor === "builtin-comfy" && plan.preset
         ? await this.dispatchBuiltin(plan.input, taskId, plan.preset, suffix)
         : plan.executor === "runninghub-workflow" && plan.runninghubProfileId
-          ? await this.dispatchRunningHub(plan.input, taskId, plan.runninghubProfileId, suffix)
+          ? await this.dispatchRunningHub(plan.input, taskId, plan.runninghubProfileId, suffix, plan.workflow)
           : plan.executor === "comfy-workflow" && plan.workflow
             ? await this.dispatchWorkflow(plan.input, taskId, plan.workflow, suffix)
             : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })();
@@ -766,45 +789,9 @@ export class CanvasImageDispatcher {
   ) {
     const detail = await this.workflows.get(workflowName);
     const fields = detail.config?.fields || [];
-    const fieldValues: Record<string, unknown> = { ...(input.params || {}) };
+    const { fieldValues, dimensions, expectedRatio } = imageWorkflowFieldValues(input, fields, input.params || {});
     // Prompt is optional at the workflow level. Only an explicitly mapped prompt
-    // field consumes input.prompt in the loop below; image/parameter-only flows
-    // must still run when a generic canvas caller carries a leftover prompt.
-    const dimensions = requestedImageDimensions(input);
-    const expectedRatio = requestedImageRatio(input);
-    for (const field of fields) {
-      if (
-        field.type === "text" &&
-        (field.isPrompt || field.id.toLowerCase() === "prompt")
-      )
-        fieldValues[field.id] = input.prompt;
-      if (field.input === "width" || field.input === "height") {
-        const value = field.input === "width" ? dimensions?.width : dimensions?.height;
-        if (value && fieldValues[field.id] !== undefined && Number(fieldValues[field.id]) !== value) throw new Error(`工作流字段「${field.name || field.input}」与目标尺寸冲突：已保存 ${fieldValues[field.id]}，目标 ${value}；请先修改工作流参数`);
-        if (value && fieldValues[field.id] === undefined) fieldValues[field.id] = value;
-      }
-      if (field.input === "aspect_ratio" && field.type === "dropdown" && expectedRatio !== null) {
-        // 目标优先：已保存画幅与目标不一致时自动改写为匹配目标比例的选项，不再拦截任务；
-        // 选项表里没有能匹配目标的比例时保留已保存值，交给工作流自身运行。
-        const explicit = fieldValues[field.id];
-        if (explicit !== undefined) {
-          const selected = imageRatioFromText(String(explicit));
-          if (selected === null || Math.abs(selected - expectedRatio) >= 0.01 || !field.options?.includes(String(explicit))) {
-            const mapped = field.options?.find((option) => {
-              const ratio = imageRatioFromText(option);
-              return ratio !== null && Math.abs(ratio - expectedRatio) < 0.01;
-            });
-            if (mapped) fieldValues[field.id] = mapped;
-          }
-        } else {
-          const option = field.options?.find((value) => {
-            const match = /^(\d+)\s*:\s*(\d+)/.exec(value);
-            return match && Math.abs(Number(match[1]) / Number(match[2]) - expectedRatio) < 0.01;
-          });
-          if (option) fieldValues[field.id] = option;
-        }
-      }
-    }
+    // field consumes input.prompt; image/parameter-only flows may carry a leftover prompt.
     for (const field of fields.filter((field) => ["aspect_ratio", "width", "height"].includes(field.input))) {
       if (fieldValues[field.id] === undefined) continue;
       for (const nodeId of field.node.split(",")) {
@@ -865,18 +852,29 @@ export class CanvasImageDispatcher {
     taskId: string,
     profileId: string,
     suffix = "",
+    workflowName?: string,
   ) {
     const runningHub = this.runningHub;
     if (!runningHub) throw new Error("Backend 未初始化 RunningHub 执行器，无法运行绑定的 RunningHub 工作流");
     const references = executionImageInputs(input);
-    const values: Record<string, unknown> = { ...(input.params || {}) };
+    const localConfig = workflowName ? this.workflows.getConfig(workflowName) : null;
+    const localFields = localConfig?.fields || [];
+    const { fieldValues: localValues } = imageWorkflowFieldValues(input, localFields, input.params || {});
+    const profile = runningHub.listWorkflowProfiles().find((item) => item.id === profileId);
+    if (!profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+    const values = workflowName
+      ? bridgeLocalWorkflowValues(profile.fields || [], localFields, localValues)
+      : localValues;
     const childTaskId = `runninghub-child-${taskId}${suffix}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
     try {
       const task = await runningHub.runWorkflow(
         profileId,
-        { prompt: input.prompt, references, loopInputImages: input.loopInputImages },
+        {
+          prompt: input.prompt,
+          references: await Promise.all(references.map(async (reference) => this.stores.media.url(await this.materializeReference(await this.modelReference(reference, taskId))))),
+        },
         values,
         {
           parentTaskId: taskId,
@@ -1167,6 +1165,49 @@ function requestedImageDimensions(input: Pick<CanvasImageGenerationInput, "width
 function imageRatioFromText(value: string) {
   const match = /^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)(?:\b|\s|$)/.exec(value.trim());
   return match && Number(match[2]) > 0 ? Number(match[1]) / Number(match[2]) : null;
+}
+
+function imageWorkflowFieldValues(
+  input: CanvasImageGenerationInput,
+  fields: WorkflowField[],
+  initialValues: Record<string, unknown>,
+) {
+  const fieldValues: Record<string, unknown> = { ...initialValues };
+  const dimensions = requestedImageDimensions(input);
+  const expectedRatio = requestedImageRatio(input);
+  for (const field of fields) {
+    // Prompt is optional at the workflow level; only mapped prompt fields consume it.
+    if (field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt")) {
+      fieldValues[field.id] = input.prompt;
+    }
+    if (field.input === "width" || field.input === "height") {
+      const value = field.input === "width" ? dimensions?.width : dimensions?.height;
+      if (value && fieldValues[field.id] !== undefined && Number(fieldValues[field.id]) !== value) {
+        throw new Error(`工作流字段「${field.name || field.input}」与目标尺寸冲突：已保存 ${fieldValues[field.id]}，目标 ${value}；请先修改工作流参数`);
+      }
+      if (value && fieldValues[field.id] === undefined) fieldValues[field.id] = value;
+    }
+    if (field.input === "aspect_ratio" && field.type === "dropdown" && expectedRatio !== null) {
+      const explicit = fieldValues[field.id];
+      if (explicit !== undefined) {
+        const selected = imageRatioFromText(String(explicit));
+        if (selected === null || Math.abs(selected - expectedRatio) >= 0.01 || !field.options?.includes(String(explicit))) {
+          const mapped = field.options?.find((option) => {
+            const ratio = imageRatioFromText(option);
+            return ratio !== null && Math.abs(ratio - expectedRatio) < 0.01;
+          });
+          if (mapped) fieldValues[field.id] = mapped;
+        }
+      } else {
+        const option = field.options?.find((value) => {
+          const match = /^(\d+)\s*:\s*(\d+)/.exec(value);
+          return match && Math.abs(Number(match[1]) / Number(match[2]) - expectedRatio) < 0.01;
+        });
+        if (option) fieldValues[field.id] = option;
+      }
+    }
+  }
+  return { fieldValues, dimensions, expectedRatio };
 }
 
 function requestedImageRatio(input: Pick<CanvasImageGenerationInput, "width" | "height" | "size">) {
