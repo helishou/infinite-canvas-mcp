@@ -235,12 +235,12 @@ function LogRow({ item, theme, onToggle }: { item: DisplayLog; theme: (typeof ca
                     <Icon className={`mt-0.5 size-4 shrink-0 ${tone}`} style={tone ? undefined : { color: theme.node.muted }} />
                     <div className="min-w-0 flex-1">
                         <div className="flex min-w-0 items-center gap-2">
-                            <span className="shrink-0 font-mono text-[10px] leading-5" style={{ color: theme.node.faint }}>
+                            <span className="shrink-0 font-mono text-[11px] leading-5" style={{ color: theme.node.faint }}>
                                 {item.time}
                             </span>
                             <span className="truncate text-sm font-medium leading-5">{item.title}</span>
                             {item.count > 1 ? (
-                                <span className="shrink-0 text-[10px] leading-4" style={{ color: theme.node.muted }}>
+                                <span className="shrink-0 text-[11px] leading-4" style={{ color: theme.node.muted }}>
                                     {t("agent.logs.repeated", { count: item.count })}
                                 </span>
                             ) : null}
@@ -255,7 +255,7 @@ function LogRow({ item, theme, onToggle }: { item: DisplayLog; theme: (typeof ca
                 </div>
             </summary>
             <div className="pb-3 pl-[34px] pr-2">
-                <div className="mb-1 text-[10px] font-medium" style={{ color: theme.node.faint }}>
+                <div className="mb-1 text-[11px] font-medium" style={{ color: theme.node.faint }}>
                     {t("agent.logs.details")}
                 </div>
                 <pre className="thin-scrollbar max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md border p-2.5 font-mono text-[11px] leading-5" style={{ borderColor: theme.node.stroke, background: theme.node.panel, color: theme.node.text }}>

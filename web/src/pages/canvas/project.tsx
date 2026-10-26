@@ -172,6 +172,34 @@ type CanvasClipboardContent = {
     value: string;
 };
 
+function composeStitchCanvas(source: ImageBitmap, target: ImageBitmap, direction: "horizontal" | "vertical"): HTMLCanvasElement | null {
+    const horizontal = direction === "horizontal";
+    // Align the touching edges: horizontal stitching shares vertical edges (height),
+    // while vertical stitching shares horizontal edges (width).
+    const stitchEdgeSize = horizontal ? Math.max(source.height, target.height) : Math.max(source.width, target.width);
+    const sourceScale = stitchEdgeSize / (horizontal ? source.height : source.width);
+    const targetScale = stitchEdgeSize / (horizontal ? target.height : target.width);
+    const sourceSize = { width: Math.round(source.width * sourceScale), height: Math.round(source.height * sourceScale) };
+    const targetSize = { width: Math.round(target.width * targetScale), height: Math.round(target.height * targetScale) };
+    const width = horizontal ? sourceSize.width + targetSize.width : Math.max(sourceSize.width, targetSize.width);
+    const height = horizontal ? Math.max(sourceSize.height, targetSize.height) : sourceSize.height + targetSize.height;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, width, height);
+    if (horizontal) {
+        context.drawImage(source, 0, 0, sourceSize.width, sourceSize.height);
+        context.drawImage(target, sourceSize.width, 0, targetSize.width, targetSize.height);
+    } else {
+        context.drawImage(source, 0, 0, sourceSize.width, sourceSize.height);
+        context.drawImage(target, 0, sourceSize.height, targetSize.width, targetSize.height);
+    }
+    return canvas;
+}
+
 const CANVAS_TOOL_PREFERENCE_KEY = "canvas.toolPreference";
 
 function readCanvasToolPreference(): "select" | "pan" {
@@ -554,7 +582,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const extractingAudioNodeIdsRef = useRef(new Set<string>());
     const [nodeImageSettingsOpen, setNodeImageSettingsOpen] = useState(false);
     const [dialogNodeId, setDialogNodeId] = useState<string | null>(null);
-    const [generationLogsOpen, setGenerationLogsOpen] = useState(false);
     const [objectHistory, setObjectHistory] = useState<ProductionObject | null>(null);
     useEffect(() => {
         const selected = (event: Event) => { if ((event as CustomEvent<{ canvasId: string }>).detail?.canvasId === projectId) setObjectHistory(null); };
@@ -566,6 +593,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
+    const [stitchSourceNodeId, setStitchSourceNodeId] = useState<string | null>(null);
+    const [stitchPreview, setStitchPreview] = useState<{ source: CanvasNodeData; target: CanvasNodeData; sourceUrl: string; targetUrl: string; direction: "horizontal" | "vertical"; reversed: boolean } | null>(null);
+    const [stitchPreviewDataUrl, setStitchPreviewDataUrl] = useState("");
+    const [stitchingImages, setStitchingImages] = useState(false);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
@@ -593,6 +624,20 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [sceneCanvasImagePick, setSceneCanvasImagePick] = useState<{ id: string; slot: "image" | "colorCard"; image: NonNullable<CanvasNodeMetadata["sceneImage"]> } | null>(null);
     const [propImagePickerActive, setPropImagePickerActive] = useState(false);
     const [propCanvasImagePick, setPropCanvasImagePick] = useState<{ id: string; image: NonNullable<CanvasNodeMetadata["propImage"]> } | null>(null);
+
+    const beginImageStitch = useCallback((node: CanvasNodeData) => {
+        if (!canvasNodeImage(node)) return;
+        setStitchPreview(null);
+        setStitchSourceNodeId(node.id);
+        setDialogNodeId(null);
+        setSelectedNodeIds(new Set([node.id]));
+    }, [setSelectedNodeIds]);
+
+    const exitImageStitchSelection = useCallback(() => {
+        const sourceId = stitchSourceNodeId;
+        setStitchSourceNodeId(null);
+        if (sourceId) setSelectedNodeIds(new Set([sourceId]));
+    }, [setSelectedNodeIds, stitchSourceNodeId]);
 
     const nodesRef = useRef(nodes);
     const orderedGroupCollageBusyRef = useRef(new Set<string>());
@@ -1374,7 +1419,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         // 轻量概览节点不会消费配置输入或 @ 参考资源；密集画布中只为即将挂载完整内容的节点计算它们。
         if (viewport.k >= 0.24 && !denseOverviewMode) return visibleNodes;
         // 拖动/缩放期间预览坐标来自瞬态订阅源，保守保留完整输入计算，避免状态切换时丢面板内容。
-        if (isNodeDragging || isNodeResizing || refPickActive || characterImagePickerActive) return visibleNodes;
+        if (isNodeDragging || isNodeResizing || refPickActive || characterImagePickerActive || stitchSourceNodeId) return visibleNodes;
 
         const detailIds = new Set<string>();
         if (singleSelectedNodeId) detailIds.add(singleSelectedNodeId);
@@ -1388,6 +1433,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [
         activeNodeId,
         characterImagePickerActive,
+        stitchSourceNodeId,
         connectingParams?.nodeId,
         denseOverviewMode,
         dialogNodeId,
@@ -3694,6 +3740,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             shotTime: result.cuts[index]?.time ?? 0,
                             shotScore: result.cuts[index]?.score ?? 0,
                             sourceVideoNodeId: node.id,
+                            // 成员归属必须在建组时一起写：只写 groupSlots 时，任何一次复制/拖拽都会让账本和归属漂开。
+                            groupId,
                         },
                     };
                 });
@@ -4122,7 +4170,27 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [propImagePickerActive, t]);
 
     const handleSelectReference = useCallback(
-        (sourceNodeId: string) => {
+        async (sourceNodeId: string) => {
+            if (stitchSourceNodeId) {
+                if (sourceNodeId === stitchSourceNodeId) return;
+                const source = nodesRef.current.find((node) => node.id === stitchSourceNodeId);
+                const target = nodesRef.current.find((node) => node.id === sourceNodeId);
+                const sourceImage = source ? canvasNodeImage(source) : null;
+                const targetImage = target ? canvasNodeImage(target) : null;
+                if (!source || !target || !sourceImage || !targetImage) return;
+                try {
+                    const [sourceUrl, targetUrl] = await Promise.all([
+                        resolveImageUrl(sourceImage.storageKey, sourceImage.content || ""),
+                        resolveImageUrl(targetImage.storageKey, targetImage.content || ""),
+                    ]);
+                    if (!sourceUrl || !targetUrl) throw new Error(t("common.imageReadFailed"));
+                    setStitchPreview({ source, target, sourceUrl, targetUrl, direction: "vertical", reversed: false });
+                    setStitchSourceNodeId(null);
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("common.imageReadFailed"));
+                }
+                return;
+            }
             if (pendingVideoComparison) {
                 if (!compareCandidateIds.has(sourceNodeId)) return;
                 setVideoComparison({ ...pendingVideoComparison, initialSelectedIds: [sourceNodeId] });
@@ -4155,8 +4223,53 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
             selectNodeReference(sourceNodeId);
         },
-        [characterImagePickerActive, compareCandidateIds, pendingVideoComparison, pluginReferencePickNodeId, propImagePickerActive, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectPropCanvasImage, selectSceneCanvasImage],
+        [characterImagePickerActive, compareCandidateIds, message, pendingVideoComparison, pluginReferencePickNodeId, propImagePickerActive, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectPropCanvasImage, selectSceneCanvasImage, stitchSourceNodeId, t],
     );
+
+    useEffect(() => {
+        if (!stitchSourceNodeId) return;
+        const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current || event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            exitImageStitchSelection();
+        };
+        window.addEventListener("keydown", exit, true);
+        return () => window.removeEventListener("keydown", exit, true);
+    }, [exitImageStitchSelection, stitchSourceNodeId]);
+
+    useEffect(() => {
+        if (!stitchPreview) {
+            setStitchPreviewDataUrl("");
+            return;
+        }
+        let cancelled = false;
+        let bitmaps: ImageBitmap[] = [];
+        setStitchPreviewDataUrl("");
+        void (async () => {
+            const [sourceResponse, targetResponse] = await Promise.all([fetch(stitchPreview.sourceUrl), fetch(stitchPreview.targetUrl)]);
+            if (!sourceResponse.ok || !targetResponse.ok) throw new Error(t("common.imageReadFailed"));
+            const [sourceBlob, targetBlob] = await Promise.all([sourceResponse.blob(), targetResponse.blob()]);
+            const decoded = await Promise.all([createImageBitmap(sourceBlob), createImageBitmap(targetBlob)]);
+            if (cancelled) {
+                decoded.forEach((bitmap) => bitmap.close());
+                return;
+            }
+            bitmaps = decoded;
+            const canvas = stitchPreview.reversed
+                ? composeStitchCanvas(decoded[1], decoded[0], stitchPreview.direction)
+                : composeStitchCanvas(decoded[0], decoded[1], stitchPreview.direction);
+            if (!canvas) throw new Error(t("common.imageReadFailed"));
+            const dataUrl = canvas.toDataURL("image/png");
+            if (!cancelled) setStitchPreviewDataUrl(dataUrl);
+        })().catch((error) => {
+            if (!cancelled) message.error(error instanceof Error ? error.message : t("common.imageReadFailed"));
+        });
+        return () => {
+            cancelled = true;
+            bitmaps.forEach((bitmap) => bitmap.close());
+        };
+    }, [message, stitchPreview, t]);
 
     useEffect(() => {
         if (!characterImagePickerActive) return;
@@ -4503,6 +4616,55 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         },
         [imageToolUrl, message, t],
     );
+
+    const stitchImageNodes = useCallback(async () => {
+        if (!stitchPreview || stitchingImages) return;
+        setStitchingImages(true);
+        let sourceBitmap: ImageBitmap | null = null;
+        let targetBitmap: ImageBitmap | null = null;
+        try {
+            const [sourceResponse, targetResponse] = await Promise.all([fetch(stitchPreview.sourceUrl), fetch(stitchPreview.targetUrl)]);
+            if (!sourceResponse.ok || !targetResponse.ok) throw new Error(t("common.imageReadFailed"));
+            const [sourceBlob, targetBlob] = await Promise.all([sourceResponse.blob(), targetResponse.blob()]);
+            [sourceBitmap, targetBitmap] = await Promise.all([createImageBitmap(sourceBlob), createImageBitmap(targetBlob)]);
+            const canvas = stitchPreview.reversed
+                ? composeStitchCanvas(targetBitmap, sourceBitmap, stitchPreview.direction)
+                : composeStitchCanvas(sourceBitmap, targetBitmap, stitchPreview.direction);
+            if (!canvas) throw new Error(t("common.imageReadFailed"));
+            const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error(t("common.imageReadFailed"))), "image/png"));
+            const uploaded = await uploadImage(blob);
+            const size = fitNodeSize(uploaded.width, uploaded.height);
+            const nodeId = `image-stitch-${nanoid()}`;
+            const position = {
+                x: Math.max(stitchPreview.source.position.x + stitchPreview.source.width, stitchPreview.target.position.x + stitchPreview.target.width) + 96,
+                y: Math.min(stitchPreview.source.position.y, stitchPreview.target.position.y),
+            };
+            const output: CanvasNodeData = {
+                id: nodeId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.projectPage.stitchTitle", {
+                    first: (stitchPreview.reversed ? stitchPreview.target : stitchPreview.source).title || t("assets.kinds.image"),
+                    second: (stitchPreview.reversed ? stitchPreview.source : stitchPreview.target).title || t("assets.kinds.image"),
+                }),
+                position,
+                width: size.width,
+                height: size.height,
+                metadata: { ...imageMetadata(uploaded) },
+            };
+            setNodes((previous) => [...previous, output]);
+            setConnections((previous) => [...previous, { id: nanoid(), fromNodeId: stitchPreview.source.id, toNodeId: nodeId }, { id: nanoid(), fromNodeId: stitchPreview.target.id, toNodeId: nodeId }]);
+            setSelectedNodeIds(new Set([nodeId]));
+            setSelectedConnectionId(null);
+            setStitchPreview(null);
+            message.success(t("canvas.projectPage.stitchSuccess"));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("common.imageReadFailed"));
+        } finally {
+            sourceBitmap?.close();
+            targetBitmap?.close();
+            setStitchingImages(false);
+        }
+    }, [message, setConnections, setSelectedConnectionId, setSelectedNodeIds, setNodes, stitchPreview, stitchingImages, t]);
 
     const maskEditImageNode = useCallback(
         async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
@@ -6271,7 +6433,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const pickerTargetName = nodeById.get(pendingVideoComparison?.source.id || (characterImagePickerActive ? characterEditNodeId : sceneImagePickerActive ? sceneEditNodeId : propImagePickerActive ? propEditNodeId : pluginReferencePickNodeId || referencePickerNodeId) || "")?.title;
 
     return (
-        <main className="relative flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+        <main data-canvas-project-id={projectId} data-canvas-active={active} className="relative flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
             <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
             <section className="canvas-workspace-column relative min-w-0 flex-1 overflow-hidden">
                 {missingTarget && <p role="status" className="absolute left-4 top-14 z-20 rounded bg-background px-3 py-2 text-xs text-muted-foreground">{t("director.canvasOverlay.targetMissing")}</p>}
@@ -6297,7 +6459,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     projectId={projectId}
-                    onOpenGenerationLogs={() => setGenerationLogsOpen(true)}
                     collaborators={collaborators}
                 />
                 <div className="canvas-stage" data-canvas-stage>
@@ -6350,9 +6511,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         ) : null
                     }
                     onCanvasMouseDown={(event) => {
-                        if (!refPickActive && !characterImagePickerActive) handleCanvasMouseDown(event);
+                        if (!refPickActive && !characterImagePickerActive && !stitchSourceNodeId) handleCanvasMouseDown(event);
                     }}
-                    onCanvasDeselect={refPickActive || characterImagePickerActive ? undefined : deselectCanvas}
+                    onCanvasDeselect={refPickActive || characterImagePickerActive || stitchSourceNodeId ? undefined : deselectCanvas}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}
                 >
@@ -6409,7 +6570,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 isConnecting={Boolean(connectingParams)}
                                 isConnectionSource={connectingParams?.nodeId === node.id}
                                 referenceSelectionState={
-                                    pendingVideoComparison
+                                    stitchSourceNodeId
+                                        ? node.id === stitchSourceNodeId
+                                            ? "target"
+                                            : canvasNodeImage(node) ? "available" : "disabled"
+                                        : pendingVideoComparison
                                         ? node.id === pendingVideoComparison.source.id
                                             ? "target"
                                             : compareCandidateIds.has(node.id) ? "available" : "disabled"
@@ -6549,6 +6714,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         </button>
                     ) : null}
                 {connectingParams && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" onClick={cancelPendingConnectionCreate}>{t("canvasChrome.connecting", { name: nodeById.get(connectingParams.nodeId)?.title || connectingParams.nodeId })}<span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
+                    {stitchSourceNodeId && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitImageStitchSelection}>{t("canvas.projectPage.stitchSelectHint")}<span className="max-w-40 truncate">{nodeById.get(stitchSourceNodeId)?.title}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
                 <CanvasRealtimePresenceLayer projectId={projectId} nodeById={nodeById} viewport={viewport} />
 
                 <CanvasNodeHoverToolbar
@@ -6584,6 +6750,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
+                    onStitch={beginImageStitch}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAutoLevels={(node) => void autoLevelsImageNode(node)}
@@ -6699,7 +6866,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                 <CanvasDialogHost>
                     <CanvasNodeInfoModal key="node-info" node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} onRename={handleNodeTitleChange} />
-                    {generationLogsOpen ? <CanvasGenerationLogDialog key="generation-logs" open projectId={projectId} onClose={() => setGenerationLogsOpen(false)} /> : null}
                     {objectHistory ? <CanvasGenerationLogDialog key="object-history" open projectId={objectHistory.canvasId} nodeId={objectHistory.nodeId} segmentId={objectHistory.segmentId} objectTitle={objectHistory.clipIndex ? t("productionCanvas.clip", { number: objectHistory.clipIndex }) : objectHistory.title} currentStorageKey={String(productionRecord && nodes.find(node => node.id === objectHistory.nodeId) ? productionObjectState(productionRecord, objectHistory, nodes.find(node => node.id === objectHistory.nodeId)!).storageKey || "" : "")} onSelectResult={(log, output) => window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: objectHistory.owner, object: objectHistory, action: "select-result", history: { generationLogId: log.id, storageKey: output.storageKey, mimeType: output.mimeType } } }))} onClose={() => setObjectHistory(null)} /> : null}
                     {pluginManagerOpen ? <CanvasPluginManagerModal key="plugin-manager" open onClose={() => setPluginManagerOpen(false)} /> : null}
 
@@ -6755,6 +6921,37 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     /> : null}
 
                     {videoComparison ? <CanvasVideoCompareModal key="video-comparison" comparison={videoComparison} onClose={() => setVideoComparison(null)} /> : null}
+
+                    {stitchPreview ? (
+                        <Modal
+                            key="image-stitch-preview"
+                            title={t("canvas.projectPage.stitchPreviewTitle")}
+                            open
+                            centered
+                            width={760}
+                            onCancel={() => setStitchPreview(null)}
+                            footer={
+                                <>
+                                    <Button onClick={() => setStitchPreview(null)} disabled={stitchingImages}>{t("common.cancel")}</Button>
+                                    <Button type="primary" loading={stitchingImages} onClick={() => void stitchImageNodes()}>{t("canvas.projectPage.stitchConfirm")}</Button>
+                                </>
+                            }
+                        >
+                            <div className="mb-4 flex items-center justify-between gap-3">
+                                <div className="min-w-0 truncate text-sm opacity-70">{stitchPreview.reversed ? `${stitchPreview.target.title} + ${stitchPreview.source.title}` : `${stitchPreview.source.title} + ${stitchPreview.target.title}`}</div>
+                                <div className="flex shrink-0 gap-2">
+                                    <Button type={stitchPreview.direction === "vertical" ? "primary" : "default"} onClick={() => setStitchPreview((current) => current ? { ...current, direction: "vertical" } : current)}>{t("canvas.projectPage.stitchVertical")}</Button>
+                                    <Button type={stitchPreview.direction === "horizontal" ? "primary" : "default"} onClick={() => setStitchPreview((current) => current ? { ...current, direction: "horizontal" } : current)}>{t("canvas.projectPage.stitchHorizontal")}</Button>
+                                    <Button onClick={() => setStitchPreview((current) => current ? { ...current, reversed: !current.reversed } : current)}>{t("canvas.projectPage.stitchSwap")}</Button>
+                                </div>
+                            </div>
+                            <div className="flex max-h-[55vh] min-h-56 items-center justify-center overflow-auto rounded-lg p-3" style={{ background: theme.node.panel }}>
+                                {stitchPreviewDataUrl ? (
+                                    <img src={stitchPreviewDataUrl} alt={t("canvas.projectPage.stitchPreviewTitle")} className="max-h-[50vh] max-w-full object-contain" />
+                                ) : <span className="text-sm opacity-60">{t("common.loading")}</span>}
+                            </div>
+                        </Modal>
+                    ) : null}
 
                     <Modal key="clear-confirm"
                         title={t("canvas.projectPage.clearTitle")}

@@ -108,7 +108,7 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
     const imageSlot = (slot: "image" | "colorCard", value: SceneImage | null, inputRef: RefObject<HTMLInputElement | null>, required = false) => (
         <div className="space-y-2">
             <div className="flex items-center justify-between">
-                <span className="text-xs text-stone-500">{slot === "image" ? t("canvas.scene.image") : t("canvas.scene.colorCard")}{required ? " *" : ""}</span>
+                <span className="text-xs text-muted-foreground">{slot === "image" ? t("canvas.scene.image") : t("canvas.scene.colorCard")}{required ? " *" : ""}</span>
                 <div className="flex gap-1">
                     <Button size="small" icon={<ImagePlus className="size-3.5" />} onClick={() => onPickCanvasImage(slot)}>{t("canvas.scene.addFromCanvas")}</Button>
                     <Button size="small" icon={<UploadIcon className="size-3.5" />} onClick={() => inputRef.current?.click()}>{t("common.upload")}</Button>
@@ -124,12 +124,12 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
                 </div>
             </div>
             {value ? (
-                <div className="relative overflow-hidden rounded-lg border border-stone-200 dark:border-stone-700">
+                <div className="relative overflow-hidden rounded-lg border border-border">
                     <AntImage src={value.url} alt={value.name} preview={{ src: value.url }} className="!h-36 !w-full !object-cover" />
-                    <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white">{value.name}</span>
+                    <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[11px] text-white">{value.name}</span>
                 </div>
             ) : (
-                <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-400 dark:border-stone-700">{required ? t("assets.sceneImageRequired") : t("assets.sceneNoColorCard")}</div>
+                <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-border text-xs text-muted-foreground ">{required ? t("assets.sceneImageRequired") : t("assets.sceneNoColorCard")}</div>
             )}
             <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={(event) => { void uploadSceneImage(event.target.files?.[0], slot); event.target.value = ""; }} />
         </div>
@@ -139,18 +139,18 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
         <Modal open={open && !selectingCanvasImage} onCancel={onClose} footer={null} width={720} destroyOnHidden title={t("canvas.scene.editTitle")}>
             <div className="space-y-4">
                 <label className="block space-y-1">
-                    <span className="text-xs text-stone-500">{t("canvas.scene.name")}</span>
+                    <span className="text-xs text-muted-foreground">{t("canvas.scene.name")}</span>
                     <Input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t("canvas.scene.namePlaceholder")} />
                 </label>
                 {imageSlot("image", image, imageInputRef, true)}
                 <label className="block space-y-1">
-                    <span className="text-xs text-stone-500">{t("canvas.scene.description")}</span>
+                    <span className="text-xs text-muted-foreground">{t("canvas.scene.description")}</span>
                     <Input.TextArea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder={t("canvas.scene.descriptionPlaceholder")} />
                 </label>
                 {imageSlot("colorCard", colorCard, colorCardInputRef)}
                 <SceneColorPaletteEditor colors={colorPalette} onChange={setColorPalette} hasColorCard={Boolean(colorCard)} reextracting={extractingPalette} onReextract={() => { if (colorCard) void extractPalette(colorCard); }} />
                 <label className="block space-y-1">
-                    <span className="text-xs text-stone-500">{t("canvas.scene.colorCardPrompt")}</span>
+                    <span className="text-xs text-muted-foreground">{t("canvas.scene.colorCardPrompt")}</span>
                     <Input.TextArea rows={3} value={colorCardPrompt} onChange={(event) => setColorCardPrompt(event.target.value)} placeholder={t("canvas.scene.colorCardPromptPlaceholder")} />
                 </label>
             </div>

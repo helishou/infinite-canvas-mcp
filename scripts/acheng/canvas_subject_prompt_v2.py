@@ -66,6 +66,34 @@ def entity_text(source, subject):
     return name, description
 
 
+def _subject_prompt_description(source, subject, uses, fallback):
+    """Prefer an authored clothing description for the selected outfit, then the entity description."""
+    clothing_purposes = {"wardrobe", "clothing", "costume", "outfit"}
+    assets = {str(item.get("asset_id") or item.get("id") or ""): item for item in rows(source.get("asset_plan"))}
+    snapshots = source.get("_canvas_subject_picture_sources") or {}
+    for _shot_id, _picture_label, binding in uses:
+        binding_id = str(binding.get("id") or "")
+        asset_id = str(binding.get("assetId") or binding.get("asset_id") or "")
+        snapshot = snapshots.get(binding_id, {})
+        asset = assets.get(asset_id, {})
+        purpose_values = [binding.get("role"), binding.get("purpose")]
+        purpose_values.extend(binding.get("provides") if isinstance(binding.get("provides"), list) else [])
+        purpose_values.extend([snapshot.get("role"), asset.get("kind")])
+        if not clothing_purposes.intersection(str(value).strip().casefold() for value in purpose_values if value):
+            continue
+        # A character asset can provide both identity and outfit references; its
+        # general description is still the character fallback, not an outfit description.
+        sources = [binding, snapshot]
+        if str(asset.get("kind") or "").strip().casefold() in clothing_purposes:
+            sources.append(asset)
+        for row in sources:
+            for key in ("outfitDescription", "clothingDescription", "description", "prompt_description", "appearance", "prompt"):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return fallback
+
+
 def _subject_retention_attributes(kind, retain, exclude):
     """Keep generated retention language aligned with the referenced entity type."""
     defaults = {
@@ -101,14 +129,26 @@ def _subject_retention_attributes(kind, retain, exclude):
     return selected_retain or [default_retain], selected_exclude or [default_exclude]
 
 
-def _subject_retention_scope(subject_id, clip_shot_ids, shots, reference_shot_ids=None):
+def _subject_presentation(subject, usage):
+    """Treat a scene used for environment reference as visible background content."""
+    presentation = str(usage.get("presentation") or "")
+    entity_kind = str((subject or {}).get("entityRef", {}).get("kind") or "")
+    purposes = usage.get("referencePurpose") or []
+    if isinstance(purposes, str):
+        purposes = [purposes]
+    if presentation == "state_context" and entity_kind == "scene" and "environment" in [str(value) for value in purposes]:
+        return "visible"
+    return presentation if presentation in {"visible", "offscreen_voice"} else "state_context"
+
+
+def _subject_retention_scope(subject_id, clip_shot_ids, shots, reference_shot_ids=None, subject=None):
     """Report visible appearances separately from off-screen continuity uses."""
     visible, context, offscreen_voice = [], [], []
     for shot_number, shot_id in enumerate(clip_shot_ids, 1):
         if reference_shot_ids is not None and shot_id not in reference_shot_ids:
             continue
         shot = next((item for item in shots if str(item.get("id")) == str(shot_id)), {})
-        presentations = [str(usage.get("presentation") or "") for usage in rows(shot.get("subject_usages"))
+        presentations = [_subject_presentation(subject, usage) for usage in rows(shot.get("subject_usages"))
                          if str(usage.get("subjectId") or "") == str(subject_id)]
         number = "[Shot " + str(shot_number) + "]"
         if "visible" in presentations:
@@ -129,16 +169,23 @@ def _subject_retention_scope(subject_id, clip_shot_ids, shots, reference_shot_id
 
 def binding_ids(subject, usage, *, allow_missing=False):
     bindings = rows(subject.get("pictureBindings"))
-    explicit = [str(value) for value in usage.get("pictureBindingIds", [])]
-    if explicit:
+    explicit = [str(value) for value in usage.get("pictureBindingIds") or []]
+    # An empty explicit selection is a deliberate "no picture" choice and must
+    # not fall back to a purpose default. Keep parity with
+    # resolveSubjectPictureBindingIds in canvas-agent.
+    if usage.get("pictureBindingMode") == "explicit" or explicit:
         return explicit
-    if usage.get("presentation") != "visible":
-        return []
     requirements = {str(item.get("factId")): str(item.get("value")) for item in rows(usage.get("stateRequirements"))}
     purposes = usage.get("referencePurpose") or ["identity"]
-    # Visible scene Subjects inherit a purpose-matched environment default.
-    # State-context usages remain explicit-only via the visibility check above.
-    if (subject.get("entityRef") or {}).get("kind") == "scene" and "environment" not in [str(value) for value in purposes]:
+    scene_environment = (subject.get("entityRef") or {}).get("kind") == "scene" and "environment" in [str(value) for value in purposes]
+    # Scene environment references are visible background inputs even when the
+    # Subject itself is carried as state context. Other non-visible usages
+    # remain explicit-only. Keep parity with resolveSubjectPictureBindingIds in
+    # canvas-agent; Backend derives Ref2VA for these usages on the same rule.
+    if usage.get("presentation") != "visible" and not (usage.get("presentation") == "state_context" and scene_environment):
+        return []
+    # Visible scene Subjects inherit a purpose-matched environment default only.
+    if (subject.get("entityRef") or {}).get("kind") == "scene" and not scene_environment:
         return []
     selected = []
     for purpose in dict.fromkeys(map(str, purposes)):
@@ -492,17 +539,19 @@ def _infer_segment_mode(source, segment):
                 or any(frame.get("requiredForSubmission", True) and frame.get("anchor") == "composition" for frame in rows(shot.get("keyframes"))):
             return "Ref2VA"
         for usage in rows(shot.get("subject_usages")):
-            if str(usage.get("subjectId")) in subjects and (usage.get("presentation") == "visible" or usage.get("pictureBindingIds")):
-                subject = subjects[str(usage.get("subjectId"))]
-                explicit = string_rows(usage.get("pictureBindingIds"))
-                bindings = rows(subject.get("pictureBindings"))
-                entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
-                if entity_ref.get("kind") == "scene" and not explicit:
-                    continue
-                if explicit and any(str(binding.get("id")) in explicit for binding in bindings):
+            subject_id = str(usage.get("subjectId"))
+            subject = subjects.get(subject_id)
+            if not subject:
+                continue
+            explicit = string_rows(usage.get("pictureBindingIds"))
+            if explicit:
+                if any(str(binding.get("id")) in explicit for binding in rows(subject.get("pictureBindings"))):
                     return "Ref2VA"
-                if not explicit and usage.get("presentation") == "visible" and binding_ids(subject, usage, allow_missing=True):
-                    return "Ref2VA"
+                continue
+            # Purpose-default references (visible Subjects and state-context
+            # scene environments) also need Ref2VA to carry their image.
+            if binding_ids(subject, usage, allow_missing=True):
+                return "Ref2VA"
     return "T2VA"
 
 
@@ -821,8 +870,9 @@ def adapt_production(production, *, draft=False):
             exclude = [_LEGACY_EXCLUDE.get(v, v) for v in exclude]
             entity_kind = str((subject.get("entityRef") or {}).get("kind") or "asset")
             retain, exclude = _subject_retention_attributes(entity_kind, retain, exclude)
-            retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots, shot_scope)
+            retention_scope, visually_present = _subject_retention_scope(subject_id, shot_ids, shots, shot_scope, subject)
             label = subject_labels[subject_id]
+            has_identity_reference = False
             if str((subject.get("entityRef") or {}).get("kind") or "") == "character" and labels:
                 picture_roles = []
                 for _sid, picture_label, binding in uses:
@@ -830,16 +880,19 @@ def adapt_production(production, *, draft=False):
                     if not purpose:
                         purpose_values = binding.get("provides") if isinstance(binding.get("provides"), list) else []
                         purpose = str(purpose_values[0]) if purpose_values else "reference"
+                    has_identity_reference = has_identity_reference or purpose.casefold() in {"identity", "character_identity"}
                     purpose_label = {"wardrobe": "outfit", "clothing": "outfit", "costume": "outfit"}.get(purpose, purpose)
                     entry = purpose_label + ": " + picture_label
                     if entry not in picture_roles:
                         picture_roles.append(entry)
-                definition = label + " is " + name + "; " + ", ".join(picture_roles) + "."
+                selected_description = _subject_prompt_description(source, subject, uses, description)
+                description_text = ("; appearance: " + selected_description) if selected_description else ""
+                definition = label + " is " + name + description_text + "; " + ", ".join(picture_roles) + "."
             else:
                 _core_def = description or name
                 definition = label + " is " + _core_def + ", represented by " + ", ".join(labels) + "."
             if visually_present:
-                retention_level = "partially_preserved"
+                retention_level = "fully_preserved" if entity_kind == "character" and has_identity_reference else "partially_preserved"
                 retention_detail = "retain " + ", ".join(retain) + "; exclude " + ", ".join(exclude)
             else:
                 # A state-context Subject informs the shot without appearing in
@@ -905,10 +958,11 @@ def adapt_production(production, *, draft=False):
         all_transformed_shots.extend(transformed_shots)
 
         first_shot = transformed_shots[0]
-        # A production-level brief describes the whole work, not this Clip.
-        # Only an authored Segment summary may populate the Ref2VA summary;
-        # otherwise use a neutral fallback scoped to this Clip's Shots.
+        # Reuse the authored production creative notes when this Clip has no
+        # dedicated summary, so the existing frontend field controls Ref2VA's summary.
         summary = str(segment.get("summary") or "")
+        if not summary:
+            summary = str(source.get("brief") or "").strip()
         if not summary:
             summary = "A continuous scene of " + str(len(shot_ids)) + " authored camera Shot(s)."
         if not summary.startswith("["):
@@ -1290,19 +1344,6 @@ def render_continuity_text_v2(shot, production):
     return _render_state_end(production, production.get("_continuity_report") or {}, shot, rows(production.get("subject_registry")))
 
 
-def _referenced_scene_ids(production, shot):
-    scenes = {str(item.get("id") or "") for item in rows(production.get("scene_registry"))}
-    subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
-    referenced = []
-    for usage in rows(shot.get("subject_usages")):
-        subject = subjects.get(str(usage.get("subjectId") or ""), {})
-        entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
-        scene_id = str(entity_ref.get("id") or "")
-        if entity_ref.get("kind") == "scene" and scene_id in scenes and scene_id not in referenced:
-            referenced.append(scene_id)
-    return referenced
-
-
 def _subject_presence_index(production, segment, shots):
     """Compact repeated, explicit Subject presentation into one scoped index.
 
@@ -1327,8 +1368,7 @@ def _subject_presence_index(production, segment, shots):
             label = labels_by_entity.get(entity_id)
             if not subject_id or not label:
                 continue
-            raw_presentation = str(usage.get("presentation") or "")
-            status = raw_presentation if raw_presentation in {"visible", "offscreen_voice"} else "state_context"
+            status = _subject_presentation(subject, usage)
             if subject_id in ambiguous_subjects:
                 continue
             if subject_id in seen_in_shot:
@@ -1459,7 +1499,7 @@ def _shot_camera_index(production, segment, shots):
     return candidate, suppressed
 
 
-def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None, scene_ids_to_render=None,
+def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_lines=None,
                     suppressed_presence=None, suppressed_camera=None):
     camera = shot.get("camera") if isinstance(shot.get("camera"), dict) else {}
     fps_num, fps_den = int(production.get("fps_num", 24)), int(production.get("fps_den", 1))
@@ -1473,14 +1513,7 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
     else:
         header = "[Shot " + str(shot_number) + "] At " + start_time + ", covering " + start_time + "–" + end_time + " within this Clip."
     parts = [header]
-    scenes = {str(item.get("id") or ""): item for item in rows(production.get("scene_registry"))}
     subjects = {str(item.get("id")): item for item in rows(production.get("subject_registry"))}
-    referenced_scene_ids = (_referenced_scene_ids(production, shot)
-                            if scene_ids_to_render is None else scene_ids_to_render)
-    for scene_id in referenced_scene_ids:
-        scene_name, scene_description = entity_text(production, {"entityRef": {"kind": "scene", "id": scene_id}})
-        if scene_description:
-            parts.append("Scene setting: " + (scene_name + ": " if scene_name else "") + scene_description)
     for state_line in state_lines or []:
         parts.append(state_line)
     framing = str(camera.get("framing") or "").strip()
@@ -1504,8 +1537,8 @@ def _shot_prompt_v2(production, segment, shot, shot_number, speakers, *, state_l
         label = subject_labels.get(entity_id)
         if not label:
             continue
-        presentation = str(usage.get("presentation") or "")
-        status = presentation if presentation in {"visible", "offscreen_voice"} else "state_context"
+        presentation = _subject_presentation(subject, usage)
+        status = presentation
         if (str(shot.get("id") or ""), str(usage.get("subjectId") or ""), status) in (suppressed_presence or set()):
             continue
         if presentation == "visible":
@@ -1628,14 +1661,10 @@ def compile_prompt_v2(production, segment, *, draft=False):
     subjects = rows(production.get("subject_registry"))
     detail_rows = []
     carried_state = {}
-    previous_scene_ids = []
     presence_index, suppressed_presence = _subject_presence_index(production, segment, shots)
     camera_index, suppressed_camera = _shot_camera_index(production, segment, shots)
     for index, shot in enumerate(shots):
         shot_id = str(shot.get("id"))
-        current_scene_ids = _referenced_scene_ids(production, shot)
-        scene_ids_to_render = [scene_id for scene_id in current_scene_ids if scene_id not in previous_scene_ids]
-        previous_scene_ids = current_scene_ids
         start_state = _state_snapshot(production, report, shot, subjects, "start")
         end_state = _state_snapshot(production, report, shot, subjects, "end")
         if index == 0:
@@ -1651,7 +1680,7 @@ def compile_prompt_v2(production, segment, *, draft=False):
         if changes_by_end:
             state_lines.append("State changes by shot end: " + "; ".join(changes_by_end))
         detail_rows.append(_shot_prompt_v2(production, segment, shot, index + 1, speakers,
-                                           state_lines=state_lines, scene_ids_to_render=scene_ids_to_render,
+                                           state_lines=state_lines,
                                            suppressed_presence=suppressed_presence, suppressed_camera=suppressed_camera))
         carried_state.update(start_state)
         carried_state.update(end_state)

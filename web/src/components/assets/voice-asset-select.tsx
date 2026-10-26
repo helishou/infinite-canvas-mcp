@@ -60,7 +60,7 @@ export function VoiceAssetSelect({ assets, value, preview, placeholder, allowCle
                 <button
                     type="button"
                     aria-label={t(playing ? "assets.character.stopVoicePreview" : "assets.character.previewVoice")}
-                    className={compact ? "grid size-7 shrink-0 place-items-center rounded text-stone-500 hover:bg-black/5 hover:text-stone-900 dark:hover:bg-white/10 dark:hover:text-stone-100" : ""}
+                    className={compact ? "grid size-7 shrink-0 place-items-center rounded text-muted-foreground hover:bg-black/5 hover:text-foreground dark:hover:bg-white/10 dark:hover:text-foreground" : ""}
                     onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                     onClick={(event) => { event.stopPropagation(); void togglePreview(item); }}
                 >

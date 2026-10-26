@@ -51,6 +51,8 @@ export function useRunningHubUpload({
             else if (result.tail === "no-sink") message.warning(t("runningHub.upload.tailNoSink"));
             // 本地字段在云端图里找不到可写位置（连线输入没解开）时如实报出来，别让配置静默消失。
             if (result.fieldMisses > 0) message.warning(t("runningHub.upload.fieldMissed", { count: result.fieldMisses, fields: (result.fieldMissNames || []).join("、") }));
+            // Anything Everywhere 是纯前端广播，RunningHub 没有这个插件：上传前已把广播展开成真实连线。
+            if (result.broadcastNodes > 0) message.info(t("runningHub.upload.broadcastFlattened", { nodes: result.broadcastNodes, links: result.broadcastLinks }));
             onUploaded(result.profile, result.cloudRead, name);
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));

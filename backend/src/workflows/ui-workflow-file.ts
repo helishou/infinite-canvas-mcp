@@ -13,10 +13,18 @@ import path from "node:path";
 
 type Parsed = Record<string, unknown>;
 
-/** 去掉副本后缀：`xxx (1)`、`xxx（2）`、`xxx - 副本`、`xxx_1`、`xxx-2`。 */
+/**
+ * 去掉文件名里的派生后缀：
+ * - `-api` / `_api`：本应用导入 RunningHub 工作流时会存成 `xxx-api.json`，
+ *   而 ComfyUI 编辑器里的原件叫 `xxx.json`，不剥掉这个后缀就永远匹配不上（会退回 API 格式上传）；
+ * - 副本后缀：`xxx (1)`、`xxx（2）`、`xxx - 副本`、`xxx_1`、`xxx-2`。
+ *
+ * 顺序很重要：`终极资产图 (1)-api` 要先剥 `-api`，才会露出结尾的 ` (1)`。
+ */
 export function normalizeWorkflowStem(fileName: string): string {
     return fileName
         .replace(/\.json$/i, "")
+        .replace(/\s*[-_]api\s*$/i, "")
         .replace(/\s*[(（]\d+[)）]\s*$/u, "")
         .replace(/\s*-\s*副本(\s*[(（]\d+[)）])?\s*$/u, "")
         .replace(/\s*[_\-]\d+\s*$/, "")

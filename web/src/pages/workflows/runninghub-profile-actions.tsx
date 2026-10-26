@@ -250,7 +250,7 @@ export function RunningHubProfileActions({
                 confirmLoading={busy}
                 destroyOnClose
             >
-                <p className="mb-3 text-sm text-stone-500">
+                <p className="mb-3 text-sm text-muted-foreground">
                     {t("workflowLibraryActions.addCloudDescription")}
                 </p>
                 {profiles.length ? (

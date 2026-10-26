@@ -951,12 +951,23 @@ export function startServer(
     const dramaId = String(req.params.dramaId || "");
     if (!db.isDramaProject(dramaId))
       return void res.status(404).json({ ok: false, error: "剧目不存在" });
-    for (const asset of stores.assets.list({ kind: "drama-file", dramaId })) {
+    const freeCanvasIds: string[] = Array.isArray(req.body?.freeCanvasIds)
+      ? [...new Set<string>((req.body.freeCanvasIds as unknown[]).filter((id): id is string => typeof id === "string" && id.length > 0))]
+      : [];
+    const deletedCanvasIds: string[] = [...new Set([...db.listDramaCanvasIds(dramaId), ...freeCanvasIds])];
+    const dramaFiles = stores.assets.list({ kind: "drama-file", dramaId });
+    let deleted: number;
+    try {
+      deleted = db.deleteDramaProject(dramaId, freeCanvasIds);
+    } catch (error) {
+      return void res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    for (const asset of dramaFiles) {
       const storageKey = typeof asset.data.storageKey === "string" ? asset.data.storageKey : "";
       stores.assets.delete(asset.id);
       if (storageKey) stores.media.delete(storageKey);
     }
-    const deleted = stores.canvasFolders.deleteDrama(dramaId);
+    for (const canvasId of deletedCanvasIds) events.publishCanvasSnapshot({ entityId: canvasId, payload: { deleted: 1 } });
     events.publishCanvasFolder({ entityId: dramaId, payload: { deleted } });
     res.json({ ok: true, deleted });
   });

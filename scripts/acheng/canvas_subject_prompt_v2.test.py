@@ -45,11 +45,61 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
         self.assertEqual(retain, ["the established environment, architecture, spatial layout, and materials"])
         self.assertEqual(exclude, ["character identity, costume, and unrelated foreground subjects"])
 
-    def test_state_context_scene_image_requires_and_respects_explicit_picture_binding(self):
-        subject = {"id": "SUB_SCENE", "pictureBindings": [{"id": "SCENE_ENV", "provides": ["environment"], "defaultFor": ["environment"]}]}
-        usage = {"subjectId": "SUB_SCENE", "presentation": "state_context", "referencePurpose": ["environment"], "pictureBindingIds": ["SCENE_ENV"]}
+    def test_state_context_scene_environment_uses_default_like_shared_contract(self):
+        subject = {"id": "SUB_SCENE", "entityRef": {"kind": "scene", "id": "SCENE"},
+                   "pictureBindings": [{"id": "SCENE_ENV", "provides": ["environment"], "defaultFor": ["environment"]}]}
+        usage = {"subjectId": "SUB_SCENE", "presentation": "state_context", "referencePurpose": ["environment"]}
         self.assertEqual(binding_ids(subject, usage), ["SCENE_ENV"])
-        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingIds": []}), [])
+        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingIds": ["SCENE_ENV"]}), ["SCENE_ENV"])
+        # Explicit mode with an empty list is an intentional "no picture" choice.
+        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingMode": "explicit"}), [])
+        # Only scene environments may use a default outside visible presentation.
+        self.assertEqual(binding_ids(subject, {**usage, "referencePurpose": ["identity"]}), [])
+        character = {"id": "SUB_CHAR", "entityRef": {"kind": "character", "id": "CHAR"},
+                     "pictureBindings": [{"id": "CHAR_IMG", "provides": ["identity"], "defaultFor": ["identity"]}]}
+        self.assertEqual(binding_ids(character, {"subjectId": "SUB_CHAR", "presentation": "state_context", "referencePurpose": ["identity"]}), [])
+        self.assertEqual(binding_ids(character, {"subjectId": "SUB_CHAR", "presentation": "visible", "referencePurpose": ["identity"]}), ["CHAR_IMG"])
+
+    def test_state_context_scene_default_image_compiles_into_the_clip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "scene.png"
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=")
+            image.write_bytes(image_bytes)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            source = {
+                "prompt_assembly": {"version": 2}, "fps_num": 24, "fps_den": 1,
+                "scene_registry": [{"id": "PALACE", "name": "Palace", "prompt_description": "A dim palace hall."}],
+                "subject_registry": [{
+                    "id": "SUB_SCENE", "kind": "scene", "entityRef": {"kind": "scene", "id": "PALACE", "ownerKind": "episode", "ownerId": "EP"},
+                    "pictureBindings": [{"id": "SCENE_IMG", "assetId": "SCENE_ASSET", "provides": ["environment"],
+                                         "retain": ["palace layout"], "exclude": ["people"], "defaultFor": ["environment"]}],
+                }],
+                "asset_plan": [], "asset_cards": [],
+                "shots": [{
+                    "id": "SHOT_1", "timeline_id": "main", "story_order": 0, "duration_frames": 96, "visual": "A quiet hall.",
+                    "subject_usages": [{"subjectId": "SUB_SCENE", "presentation": "state_context", "pictureBindingIds": [],
+                                        "referencePurpose": ["environment"], "continuityFactIds": [], "stateRequirements": []}],
+                    "keyframes": [], "utterance_refs": [],
+                }],
+                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"]}],
+                "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
+                           "initial": [], "events": [], "requirements": [], "coverage": []},
+                "_canvas_subject_picture_sources": {
+                    "SCENE_IMG": {"assetId": "SCENE_ASSET", "subjectId": "SUB_SCENE", "kind": "subject", "role": "environment",
+                                  "file": str(image), "sha256": digest, "storageKey": "image:scene", "nodeId": "SCENE_NODE",
+                                  "retain": ["palace layout"], "exclude": ["people"], "defaultFor": ["environment"]},
+                },
+            }
+            self.assertEqual(_infer_segment_mode(source, source["segments"][0]), "Ref2VA")
+            projected = adapt_production(source)
+            segment = projected["segments"][0]
+            self.assertEqual([reference["asset_id"] for reference in segment["references"]], ["SCENE_ASSET"])
+            self.assertEqual(segment["subjects"][0]["retention"],
+                             "<Subject 1> (appears in [Shot 1]): partially_preserved - retain palace layout; exclude people.")
+            prompt = compile_prompt_v2(projected, segment)
+            self.assertIn("<Picture 1>", prompt)
+            self.assertIn("<Subject 1> is visible in this Shot.", prompt)
+            self.assertNotIn("continuity context only and is not visible", prompt)
 
     def test_entity_descriptions_deduplicate_identical_fields_but_keep_distinct_details(self):
         source = {"character_registry": [{"id": "CHAR_A", "name": "A", "prompt_description": "same appearance",
@@ -198,18 +248,20 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             prompt = compile_prompt_v2(projected, segment)
             self.assertLess(prompt.index("subject_definitions:"), prompt.index("summary:"))
             self.assertIn("[Shot 1]", prompt)
-            self.assertIn("Scene setting: Chicken coop: A mud-brick coop with a straw nest behind a small opening.", prompt)
-            # Picture-bound character definitions stay label-based without appearance disclaimers.
+            self.assertEqual(segment["summary"], "[reference generation] A child investigates a real egg.")
+            self.assertNotIn("Scene setting:", prompt)
+            self.assertEqual(prompt.count("A mud-brick coop with a straw nest behind a small opening."), 1)
+            # Picture-bound character definitions include authored appearance and keep reference labels.
             char_entry = next(item for item in segment["subjects"] if item.get("entity_id") == "CHILD")
-            self.assertEqual(char_entry["definition"], "<Subject 1> is Child; identity: <Picture 1>.")
-            self.assertEqual(char_entry["retention"], "<Subject 1> (appears in [Shot 1]): partially_preserved - <Picture 1>.")
-            self.assertNotIn("blue cotton shirt", char_entry["definition"])
+            self.assertEqual(char_entry["definition"], "<Subject 1> is Child; appearance: A small child in a blue cotton shirt.; identity: <Picture 1>.")
+            self.assertEqual(char_entry["retention"], "<Subject 1> (appears in [Shot 1]): fully_preserved - <Picture 1>.")
+            self.assertIn("A small child in a blue cotton shirt.", char_entry["definition"])
             scene_entry = next(item for item in segment["subjects"] if item.get("entity_id") != "CHILD")
             self.assertIn("A mud-brick coop with a straw nest", scene_entry["definition"])
-            self.assertIn("continuity context for [Shot 1]; not visible", scene_entry["retention"])
-            self.assertIn("weak_reference", scene_entry["retention"])
+            self.assertIn("appears in [Shot 1]", scene_entry["retention"])
+            self.assertIn("partially_preserved", scene_entry["retention"])
             self.assertNotIn("character identity and costume", scene_entry["retention"])
-            self.assertIn("<Subject 2> (continuity context for [Shot 1]; not visible): weak_reference", prompt)
+            self.assertIn("<Subject 2> (appears in [Shot 1]): partially_preserved", prompt)
             source_map = build_source_map(prompt, projected["_canvas_subject_v2_source_maps"]["CLIP_1"])
             self.assertEqual(source_map["sourceHash"], "a" * 64)
             self.assertTrue(any(item["sourceId"] == "SHOT_1" and item["field"] == "visual" for item in source_map["entries"]))
@@ -236,9 +288,8 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
             per_shot = adapt_production(per_shot_source)
             per_shot_prompt = compile_prompt_v2(per_shot, per_shot["segments"][0])
             per_shot_details = per_shot_prompt.split("detailed_description:\n", 1)[1]
-            second_shot_prompt = per_shot_details.split("[Shot 2] At", 1)[1]
-            self.assertIn("Scene setting:", per_shot_details.split("[Shot 2] At", 1)[0])
-            self.assertNotIn("Scene setting:", second_shot_prompt)
+            self.assertNotIn("Scene setting:", per_shot_details)
+            self.assertEqual(per_shot_prompt.count("A mud-brick coop with a straw nest behind a small opening."), 1)
 
             # Missing lock prose is not an approval gate. A valid mode is inferred
             # from authored visible Subject references and frozen image inputs.

@@ -91,8 +91,8 @@ function MediaFieldUpload({ fieldId, value, kind, onChange, onUploadingChange }:
                 kind === "audio"
                     ? <audio src={previewUrl} controls className="w-full" />
                     : kind === "video"
-                        ? <video src={previewUrl} controls className="max-h-64 w-full rounded border border-stone-200 dark:border-stone-700" />
-                        : <div className="inline-block"><img src={previewUrl} alt="" className="h-24 w-24 rounded border border-stone-200 object-cover dark:border-stone-700" /></div>
+                        ? <video src={previewUrl} controls className="max-h-64 w-full rounded border border-border" />
+                        : <div className="inline-block"><img src={previewUrl} alt="" className="h-24 w-24 rounded border border-border object-cover " /></div>
             )}
         </div>
     );
@@ -141,7 +141,7 @@ export function RunTab({
             {outputPicker ? <div className="mb-4">{outputPicker}</div> : null}
             {hint || toolbar ? (
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                    {hint ? <p className="text-xs text-stone-500">{hint}</p> : <span />}
+                    {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : <span />}
                     {toolbar}
                 </div>
             ) : null}
@@ -201,14 +201,14 @@ export function RunPanel({ config, onRun, running, disabled, cancelPending, resu
         <div className="space-y-4">
             <p className="text-xs text-muted-foreground">{t("microTools.workflow.scope")}</p>
             {config.fields.length === 0 ? (
-                <div className="text-center text-sm text-stone-500">{emptyText ?? "请先点击节点配置字段后再运行"}</div>
+                <div className="text-center text-sm text-muted-foreground">{emptyText ?? "请先点击节点配置字段后再运行"}</div>
             ) : (
                 <div className="space-y-3">
                     {groupWorkflowFields(config.fields).map(group => <section key={group.key} aria-label={t(`microTools.workflow.${group.key}`)} className="space-y-3">
                         <h3 className="text-sm font-medium text-foreground">{t(`microTools.workflow.${group.key}`)}</h3>
                     {group.fields.map((field) => (
                         <div key={fieldKey(field)}>
-                            <label className="mb-1 flex items-center gap-2 text-xs text-stone-500">
+                            <label className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
                                 {field.name || field.id}
                                 <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
                             </label>
@@ -242,7 +242,7 @@ export function RunPanel({ config, onRun, running, disabled, cancelPending, resu
 
             {running ? (
                 <div className="space-y-2">
-                    <div className="flex items-center justify-between text-xs text-stone-600">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
                         <span>{statusText || "执行中…"}</span>
                         <span className="tabular-nums">{progress === undefined ? "进度未知" : `${Math.round(Math.min(1, Math.max(0, progress)) * 100)}%`}</span>
                     </div>
@@ -260,16 +260,16 @@ export function RunPanel({ config, onRun, running, disabled, cancelPending, resu
                     <h4 className="mb-2 text-sm font-medium">执行结果</h4>
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         {result.media.map((item, i) => (
-                            <div key={i} className="overflow-hidden rounded border border-stone-200 dark:border-stone-700">
+                            <div key={i} className="overflow-hidden rounded border border-border">
                                 {item.mimeType?.startsWith("video/") ? <video src={item.url} controls className="w-full" /> : item.mimeType?.startsWith("audio/") ? <audio src={item.url} controls className="w-full p-2" /> : item.mimeType?.startsWith("image/") ? <img src={item.url} alt={item.filename} className="w-full" /> : <a href={item.url} download={item.filename} className="block break-all p-3 text-blue-600">下载 {item.filename || "输出文件"}</a>}
-                                <p className="truncate px-2 py-1 text-xs text-stone-500">{item.filename}</p>
+                                <p className="truncate px-2 py-1 text-xs text-muted-foreground">{item.filename}</p>
                             </div>
                         ))}
                     </div>
                 </div>
             )}
 
-            {result?.texts?.length ? <div className="space-y-2"><h4 className="text-sm font-medium">文本输出</h4>{result.texts.map((item, index) => <pre key={`${item.nodeId}-${index}`} className="whitespace-pre-wrap rounded border border-stone-200 bg-stone-50 p-3 text-xs dark:border-stone-700 dark:bg-stone-800">{item.content}</pre>)}</div> : null}
+            {result?.texts?.length ? <div className="space-y-2"><h4 className="text-sm font-medium">文本输出</h4>{result.texts.map((item, index) => <pre key={`${item.nodeId}-${index}`} className="whitespace-pre-wrap rounded border border-border bg-muted p-3 text-xs dark:bg-muted">{item.content}</pre>)}</div> : null}
 
             {result && result.error && <div className="rounded bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20">错误: {result.error}</div>}
         </div>

@@ -43,15 +43,19 @@ export const nodeForAsset = libraryAssetNode;
 export function syncSharedCanvasAssetRecords(db: BackendDatabase, projectId: string, project: CanvasProject | null = rawProject(db, projectId)) {
     const drama = db.db.prepare("SELECT folder_id FROM drama_projects WHERE shared_asset_canvas_id=?").get(projectId) as { folder_id: string } | undefined;
     if (!drama || !project) return 0;
-    const existingByNode = new Map(db.listSharedAssetRecordsForProject(projectId).flatMap(asset => {
+    const existingByNode = new Map<string, Asset[]>();
+    for (const asset of db.listSharedAssetRecordsForProject(projectId)) {
         const source = sourceOf(asset);
-        return source?.dramaId === drama.folder_id && source.sourceProjectId === projectId ? [[source.sourceNodeId, asset] as const] : [];
-    }));
+        if (source?.dramaId !== drama.folder_id || source.sourceProjectId !== projectId) continue;
+        existingByNode.set(source.sourceNodeId, [...(existingByNode.get(source.sourceNodeId) || []), asset]);
+    }
     const now = String(project.updatedAt || new Date().toISOString());
     let addedOrUpdated = 0;
     for (const node of nodes(project)) {
         if (!sharedProductionNodeKinds.has(node.type) || node.metadata?.sharedAssetReference) continue;
-        const existing = existingByNode.get(node.id);
+        const nodeAssets = existingByNode.get(node.id) || [];
+        const preferredId = String(node.metadata?.sharedLibraryAssetId || "");
+        const existing = nodeAssets.find(asset => asset.id === preferredId) || nodeAssets[0];
         const id = existing?.id || sharedNodeAssetId(drama.folder_id, node.id);
         const source: SharedAssetSource = { dramaId: drama.folder_id, assetId: id, sourceProjectId: projectId, sourceNodeId: node.id };
         if (existing?.kind === node.type && existing.title === String(node.title || "")
@@ -65,6 +69,35 @@ export function syncSharedCanvasAssetRecords(db: BackendDatabase, projectId: str
         addedOrUpdated++;
     }
     return addedOrUpdated;
+}
+
+/**
+ * A shared source node is one library item even when old writes left multiple asset IDs
+ * pointing at it. Keep the row referenced by the source node when projecting list views;
+ * the other IDs remain readable for existing production references.
+ */
+export function canonicalSharedAssetIds(db: BackendDatabase, entries: Array<{ id: string; metadata?: Record<string, unknown>; createdAt?: string }>) {
+    const groups = new Map<string, Array<{ id: string; metadata?: Record<string, unknown>; createdAt?: string }>>();
+    for (const entry of entries) {
+        const source = entry.metadata?.sharedAssetSource as SharedAssetSource | undefined;
+        if (!source?.dramaId || !source.sourceProjectId || !source.sourceNodeId) continue;
+        const key = `${source.dramaId}\0${source.sourceProjectId}\0${source.sourceNodeId}`;
+        groups.set(key, [...(groups.get(key) || []), entry]);
+    }
+
+    const visibleIds = new Set(entries.map(entry => entry.id));
+    const projectCache = new Map<string, CanvasProject | null>();
+    for (const group of groups.values()) {
+        if (group.length < 2) continue;
+        const source = group[0].metadata?.sharedAssetSource as SharedAssetSource;
+        if (!projectCache.has(source.sourceProjectId)) projectCache.set(source.sourceProjectId, rawProject(db, source.sourceProjectId));
+        const node = nodes(projectCache.get(source.sourceProjectId) || null).find(item => item.id === source.sourceNodeId);
+        const preferredId = String(node?.metadata?.sharedLibraryAssetId || "");
+        const preferred = group.find(entry => entry.id === preferredId)
+            || [...group].sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || a.id.localeCompare(b.id))[0];
+        for (const entry of group) if (entry.id !== preferred.id) visibleIds.delete(entry.id);
+    }
+    return visibleIds;
 }
 
 function effectiveSourceNode(node: AssetNode, kind: string): AssetNode {
@@ -110,8 +143,8 @@ export function projectAsset(db: BackendDatabase, asset: Asset): Asset {
     if (!node) return missingSharedSourceAsset(asset, "source_node_missing");
     const m = effectiveSourceNode(node, asset.kind).metadata || {};
     let data: Record<string, any> = {};
-    if (asset.kind === "character") data = { name: node.title, englishName: m.characterEnglishName || "", description: m.characterDescription || "", images: m.characterImages || [], primaryIndex: m.characterPrimaryIndex || 0, voice: m.characterVoiceUrl || "", voiceName: m.characterVoiceName || "", voiceDescription: m.characterVoiceDescription || "", voiceStorageKey: m.characterVoiceStorageKey, voiceAssetId: m.characterVoiceAssetId || "" };
-    else if (asset.kind === "scene") data = { name: node.title, description: m.sceneDescription || "", image: m.sceneImage || { url: "", storageKey: "", name: node.title || "", width: 0, height: 0, bytes: 0, mimeType: "" }, colorCard: m.sceneColorCard, colorPalette: m.sceneColorPalette, colorCardPrompt: m.sceneColorCardPrompt || "" };
+    if (asset.kind === "character") data = { name: m.characterName || node.title, englishName: m.characterEnglishName || "", description: m.characterDescription || "", images: m.characterImages || [], primaryIndex: m.characterPrimaryIndex || 0, voice: m.characterVoiceUrl || "", voiceName: m.characterVoiceName || "", voiceDescription: m.characterVoiceDescription || "", voiceStorageKey: m.characterVoiceStorageKey, voiceAssetId: m.characterVoiceAssetId || "" };
+    else if (asset.kind === "scene") data = { name: m.sceneName || node.title, description: m.sceneDescription || "", image: m.sceneImage || { url: "", storageKey: "", name: node.title || "", width: 0, height: 0, bytes: 0, mimeType: "" }, colorCard: m.sceneColorCard, colorPalette: m.sceneColorPalette, colorCardPrompt: m.sceneColorCardPrompt || "" };
     else if (asset.kind === "prop") data = { name: m.propName || node.title, description: m.propDescription || "", image: m.propImage || { url: "", storageKey: "", name: node.title || "", width: 0, height: 0, bytes: 0, mimeType: "" } };
     else if (asset.kind === "text") data = { content: m.content || "" };
     else data = { ...(asset.kind === "image" ? { dataUrl: m.content || "" } : { url: m.content || "" }), storageKey: m.storageKey, width: m.naturalWidth, height: m.naturalHeight, bytes: m.bytes, mimeType: m.mimeType, durationMs: m.durationMs };
@@ -296,7 +329,10 @@ function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSour
         if (!plan) continue;
         const kind = String(plan.kind || ""), entityId = String(plan.entity_id || plan.id || plan.asset_id || "");
         const metadata = node.metadata || {};
-        const name = String(node.title || ""), description = String(metadata[`${kind}Description`] || "");
+        // 制作稿登记的是实体名称（人物/场景/道具名称），画布节点标题只是展示名。
+        // 两者可以不同：取名称字段，节点标题仅作兜底，避免把「角色名 · 资产类型」这类
+        // 卡片标题写进 character_registry.name 再被编译成 Subject 身份名。
+        const name = String(metadata[`${kind}Name`] || node.title || ""), description = String(metadata[`${kind}Description`] || "");
         let changed = false;
         if (kind === "character" || kind === "scene") {
             const registryName = kind === "character" ? "character_registry" : "scene_registry";

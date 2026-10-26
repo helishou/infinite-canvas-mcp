@@ -144,7 +144,7 @@ const directorProductionBaseSchema = z.object({
     artifacts: z.array(z.object({
         id, kind: z.enum(["image", "h3"]), targetId: id, prompt: z.string().min(1), sha256: hash, sourceHash: hash,
         status: z.enum(["draft", "ready", "stale"]),
-        references: z.array(z.object({ label: id, nodeId: id, storageKey: id, sha256: hash, role: id }).passthrough()),
+        references: z.array(z.object({ label: id, nodeId: id.optional(), bindingId: id.optional(), assetId: id.optional(), storageKey: id, sha256: hash, role: id }).passthrough()),
         receipt: z.object({ sourceHash: hash, promptHash: hash, engineRuntimeId: id, validator: id }).passthrough(),
     })),
     // Planning drafts may precede canvas node creation and asset approval.
@@ -713,8 +713,9 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("edit_director_continuity"), changes: z.array(z.object({ collection: z.enum(["facts", "timelines", "initial", "events", "requirements", "coverage"]), action: z.enum(["upsert", "delete"]), id, value: z.record(z.unknown()).optional() }).strict()).min(1) }).strict(),
-    z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()), keyframeBindings: z.array(z.object({ shotId: id, assetId: id, bindingId: id, nodeId: id.optional(), containerNodeId: id.optional(), storageKey: id.optional(), label: z.string().optional() }).strict()).optional(), removedStoryboardBindingIds: z.array(id).optional() }).strict(),
+    z.object({ type: z.literal("replace_director_clip_storyboard"), segmentId: id, segment: z.record(z.unknown()).optional(), patch: z.boolean().optional(), shots: z.array(z.record(z.unknown())).min(1), shotInputs: z.record(z.unknown()).optional(), keyframeBindings: z.array(z.object({ shotId: id, assetId: id, bindingId: id, nodeId: id.optional(), containerNodeId: id.optional(), clearNodeId: z.boolean().optional(), storageKey: id.optional(), label: z.string().optional() }).strict()).optional(), removedStoryboardBindingIds: z.array(id).optional() }).strict(),
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
+    z.object({ type: z.literal("request_director_shot_refresh"), shotIds: z.array(id).min(1).refine(values => new Set(values).size === values.length, "Shot ID 不能重复") }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
     z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(directorPatchSourceEntities), id: id.optional(), patch: directorPatchObjectSchema }).strict(),

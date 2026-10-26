@@ -275,7 +275,7 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
                 <span className="shrink-0" style={{ color: state.color }}>{toolIcon(kind, state.icon)}</span>
                 <span className="min-w-0 truncate font-medium">{title}</span>
                 <span className="shrink-0 text-[11px]" style={{ color: state.color }}>{state.label}</span>
-                {characters ? <span className="ml-auto shrink-0 text-[10px] tabular-nums" style={{ color: theme.node.muted }}>{[
+                {characters ? <span className="ml-auto shrink-0 text-[11px] tabular-nums" style={{ color: theme.node.muted }}>{[
                     typeof characters.input === "number" ? i18n.t("agent.chat.toolInputCharacters", { count: characters.input.toLocaleString() }) : "",
                     typeof characters.output === "number" ? i18n.t("agent.chat.toolOutputCharacters", { count: characters.output.toLocaleString() }) : "",
                 ].filter(Boolean).join(" · ")}</span> : null}
@@ -374,7 +374,7 @@ function AgentCommandEntry({ item, index, theme }: { item: AgentCommandItem; ind
     const color = state.failed ? "#dc2626" : state.running ? "#d97706" : "#16a34a";
     const content = (
         <>
-            <span className="w-4 shrink-0 text-center text-[10px] tabular-nums opacity-50" style={{ color: theme.node.muted }}>{index + 1}</span>
+            <span className="w-4 shrink-0 text-center text-[11px] tabular-nums opacity-50" style={{ color: theme.node.muted }}>{index + 1}</span>
             <code className="min-w-0 flex-1 truncate text-[11px] leading-5" style={{ color: theme.node.text }} title={item.text}>{item.text || t("agent.message.command")}</code>
             <span className="shrink-0" style={{ color }} title={status} aria-label={status}>
                 {state.running ? <LoaderCircle className="size-3.5 animate-spin" /> : state.failed ? <XCircle className="size-3.5" /> : <CheckCircle2 className="size-3.5" />}

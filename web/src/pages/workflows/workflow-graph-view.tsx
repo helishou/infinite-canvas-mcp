@@ -194,7 +194,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
     }, []);
 
     if (!layout || layout.nodes.length === 0) {
-        return <div className="flex h-64 items-center justify-center text-sm text-stone-400">无可视化节点</div>;
+        return <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">无可视化节点</div>;
     }
 
     return (
@@ -208,7 +208,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
 
             <div
                 ref={wrapRef}
-                className="graph-svg-wrap h-full w-full overflow-hidden rounded border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900"
+                className="graph-svg-wrap h-full w-full overflow-hidden rounded border border-border bg-muted dark:bg-muted"
                 onWheel={handleWheel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}

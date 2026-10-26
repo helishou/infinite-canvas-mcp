@@ -26,7 +26,7 @@ export const importRunningHubBrowserSession = (site?: RunningHubSite) => request
 /** 尾节点注入结果：added=接在输出槽上，added-video=视频输出，added-api=API 图接在输出节点的数据来源上，already=已存在，no-sink=没找到输出节点，not-ui=不是 UI 格式。 */
 export type RunningHubTailStatus = "added" | "added-video" | "added-api" | "already" | "no-sink" | "not-ui";
 /** 本地节点图上传到云端工作台并自动建档；cloudRead=false 表示平台还是草稿，OpenAPI 暂时读不回节点图。 */
-export const uploadRunningHubWorkflow = (input: { name: string; graph: Record<string, unknown>; uiWorkflow?: Record<string, unknown>; localFields?: Array<Record<string, unknown>>; site?: RunningHubSite }) => request<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite; format: "ui" | "api"; tail: RunningHubTailStatus; fieldMisses: number; fieldMissNames: string[] }>("POST", "/agent/runninghub/workflows/upload", input);
+export const uploadRunningHubWorkflow = (input: { name: string; graph: Record<string, unknown>; uiWorkflow?: Record<string, unknown>; localFields?: Array<Record<string, unknown>>; site?: RunningHubSite }) => request<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite; format: "ui" | "api"; tail: RunningHubTailStatus; fieldMisses: number; fieldMissNames: string[]; broadcastLinks: number; broadcastNodes: number }>("POST", "/agent/runninghub/workflows/upload", input);
 
 /** 把本地工作流的字段配置推给已有云端档案（历史上传的档案靠它补齐勾选状态）。 */
 export const applyRunningHubLocalFields = (profileId: string, localFields: Array<Record<string, unknown>>, uiWorkflow?: Record<string, unknown>) => request<{ workflow: RunningHubWorkflowProfile }>("POST", `/agent/runninghub/workflows/${encodeURIComponent(profileId)}/apply-local-fields`, { localFields, uiWorkflow });

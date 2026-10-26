@@ -713,6 +713,8 @@ export default function AssetsPage() {
                                 allowClear
                                 prefix={<Search className="mr-1 size-4 text-muted-foreground" />}
                                 aria-label={t("assets.search")}
+                                // antd 自带的搜索按钮不会继承 input 的 aria-label，屏幕阅读器只会念「按钮」。
+                                enterButton={<Button type="primary" aria-label={t("assets.search")} icon={<Search className="size-4" />} />}
                                 value={keyword}
                                 placeholder={t("assets.search")}
                                 onChange={(event) => {

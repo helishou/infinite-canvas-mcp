@@ -2,7 +2,10 @@ import { useTranslation } from "react-i18next";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { App, Alert, Button, Checkbox, Input, InputNumber, Radio, Segmented, Spin, Table, Tabs, message, Select, Tooltip } from "antd";
 import { Upload as UploadIcon, Cloud, Download, Play, RefreshCw, Trash2, Workflow, ExternalLink, UploadCloud } from "lucide-react";
-import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
+import { request, BackendApiError, fetchBackendGenerationLogs, deleteBackendGenerationLogs, fetchBackendTask, getBackendUrl, type BackendRuntimeTask } from "@/services/backend-api";
+import { fetchComfyStatus } from "@/services/api/canvas-agent";
+import { getBackendTokenShared } from "@/lib/backend-token";
+import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, syncWorkflowFromComfyUI, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
@@ -10,7 +13,7 @@ import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-librar
 import { RunTab } from "./run-panel";
 import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
-import { normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
+import { lastOutputNodeId, normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
 import { ComfyUIWorkflowImport } from "./comfyui-workflow-import";
 import { useRunningHubUpload } from "./runninghub-workflow-upload";
@@ -86,6 +89,28 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     const [section, setSection] = useState("workflows");
     // 本地库与 RunningHub 库共用同一页面壳，数据源与选中项各自独立。
     const [library, setLibrary] = useState<"local" | "runninghub">("local");
+    // 页签栏右侧的 ComfyUI 连接状态：只在挂载、进入「运行环境」和手动点击时查询，不额外轮询。
+    const [comfyStatus, setComfyStatus] = useState<{ state: "checking" | "connected" | "disconnected" | "unknown"; url?: string; error?: string }>({ state: "checking" });
+    const comfyStatusRequest = useRef(0);
+
+    const checkComfyStatus = useCallback(async () => {
+        const requestId = ++comfyStatusRequest.current;
+        setComfyStatus((prev) => ({ ...prev, state: "checking" }));
+        try {
+            const result = await fetchComfyStatus(getBackendUrl(), getBackendTokenShared());
+            if (requestId !== comfyStatusRequest.current) return;
+            setComfyStatus({ state: result.connected ? "connected" : "disconnected", url: result.url, error: result.error });
+        } catch (error) {
+            if (requestId !== comfyStatusRequest.current) return;
+            setComfyStatus({ state: "unknown", error: error instanceof Error ? error.message : String(error) });
+        }
+    }, []);
+
+    useEffect(() => { void checkComfyStatus(); }, [checkComfyStatus]);
+    useEffect(() => {
+        if (section === "runtime") void checkComfyStatus();
+    }, [section, checkComfyStatus]);
+
     const aiConfig = useConfigStore((state) => state.config);
     const [profiles, setProfiles] = useState<RunningHubWorkflowProfile[]>([]);
     const [profilesLoading, setProfilesLoading] = useState(false);
@@ -105,7 +130,13 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     // 指定输出节点属于当前工作流的配置，跟着 config 一起存；不选=不过滤。
     const outputNodes = selected?.config.outputNodes || [];
     const [rhOutputSelections, setRhOutputSelections] = useState<Record<string, string[]>>({});
-    const rhOutputNodes = selectedProfile ? rhOutputSelections[selectedProfile.id] || [] : [];
+    // 云端档案的输出节点只存在本次会话里；没动过时默认勾选链路末端那个（排除 Save Image To Local，它是收尾节点）。
+    const rhDefaultOutputNodes = (() => {
+        if (!selectedProfile) return [];
+        const last = lastOutputNodeId((selectedProfile.workflowJson || {}) as never, true);
+        return last ? [last] : [];
+    })();
+    const rhOutputNodes = selectedProfile ? rhOutputSelections[selectedProfile.id] ?? rhDefaultOutputNodes : [];
     const detailRequest = useRef(0);
     const historyRequest = useRef(0);
     const profileHistoryRequest = useRef(0);
@@ -453,7 +484,11 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         try {
             const detail = await request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
             if (version !== detailRequest.current) return;
-            const outputNodes = normalizeOutputNodeSelection(detail.config.outputNodes || [], detail.workflow);
+            // 没配置过就默认勾上链路末端的输出节点；用户显式清空过的（存了 []）保持空。
+            const lastOutput = lastOutputNodeId(detail.workflow);
+            const outputNodes = detail.config.outputNodes === undefined
+                ? (lastOutput ? [lastOutput] : [])
+                : normalizeOutputNodeSelection(detail.config.outputNodes, detail.workflow);
             setSelected({ ...detail, config: { ...detail.config, outputNodes } });
             setHistoryLogs([]);
             setActiveTab("graph");
@@ -747,9 +782,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
             {draftNotice && library === "runninghub" ? <Alert type="info" showIcon closable onClose={() => setDraftNotice(null)} message={t("runningHub.upload.draftHint")} description={<a className="underline" href={`${rhUploadSite === "ai" ? "https://www.runninghub.ai" : rhUploadSite === "cn" ? "https://www.runninghub.cn" : rhBaseUrl}/workflow/${draftNotice}`} target="_blank" rel="noreferrer">{draftNotice}</a>} /> : null}
             {libraryLoading && library === "local" ? <Spin size="small" /> : null}
             {library === "runninghub" ? (
-                <div className="flex shrink-0 items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs dark:border-stone-700 dark:bg-stone-900">
+                <div className="flex shrink-0 items-center gap-2 rounded-lg border border-border bg-white px-3 py-2 text-xs dark:bg-muted">
                     {profilesLoading ? <Spin size="small" /> : null}
-                    <span className="flex-1 text-stone-600 dark:text-stone-300">
+                    <span className="flex-1 text-muted-foreground">
                         {rhConfigured === null ? t("workflowRecovery.cloudStatusUnknown") : rhConfigured.hasApiKey
                             ? "云端工作流库：档案与平台节点图保持一致。"
                             : "未配置 RunningHub API Key，可浏览档案但无法运行。"}
@@ -757,14 +792,14 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                 </div>
             ) : null}
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
-                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-stone-200 px-3 py-2.5 dark:border-stone-700">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-white dark:bg-muted">
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2.5 ">
                     <h2 className="min-w-0 text-sm font-medium">{library === "local" ? "本地工作流列表" : "RunningHub 工作流列表"}</h2>
                     <div role="group" aria-label={t("workflowLibraryActions.libraryActions")} className="flex shrink-0 items-center gap-1">
                         {library === "local" ? <>
                             <ComfyUIWorkflowImport onImported={(name) => { void fetchWorkflows().then(() => handleLoadDetail(name)); }} />
                             <Tooltip title={t(loading ? "workflowLibraryActions.importingFile" : "workflowLibraryActions.importFile")}>
-                                <label className={`relative inline-flex size-6 items-center justify-center rounded text-stone-600 focus-within:ring-2 focus-within:ring-blue-500 dark:text-stone-300 ${loading ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-stone-100 dark:hover:bg-stone-800"}`}>
+                                <label className={`relative inline-flex size-6 items-center justify-center rounded text-muted-foreground focus-within:ring-2 focus-within:ring-blue-500 dark:text-muted-foreground ${loading ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:bg-muted dark:hover:bg-muted"}`}>
                                     {loading ? <Spin size="small" /> : <UploadIcon aria-hidden="true" className="size-3.5" />}
                                     <span className="sr-only">{t("workflowLibraryActions.importFile")}</span>
                                     <input
@@ -831,6 +866,16 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         </div>
     );
 
+    const comfyStatusLabel = t(`microTools.workflow.comfyStatus.${comfyStatus.state}`);
+    const comfyStatusHint = comfyStatus.state === "connected" || comfyStatus.state === "disconnected"
+        ? `${comfyStatusLabel} · ${comfyStatus.url || comfyStatus.error || t("microTools.workflow.comfyStatusRetry")}`
+        : t("microTools.workflow.comfyStatusRetry");
+    const comfyStatusDot = comfyStatus.state === "connected"
+        ? "bg-emerald-500"
+        : comfyStatus.state === "disconnected"
+            ? "bg-red-500"
+            : "bg-muted-foreground";
+
     return (
         <main className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-4 py-6 sm:px-6 lg:px-8">
             <PageHeader
@@ -848,9 +893,22 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                 activeKey={section}
                 onChange={setSection}
                 items={[
-                    { key: "workflows", label: "工作流库" },
-                    { key: "config", label: "模型与运行" },
+                    { key: "workflows", label: t("microTools.workflow.libraryTab") },
+                    { key: "models", label: t("microTools.workflow.localModels") },
+                    { key: "runtime", label: t("microTools.workflow.runtimeTab") },
                 ]}
+                tabBarExtraContent={
+                    <Tooltip title={comfyStatusHint}>
+                        <button
+                            type="button"
+                            onClick={() => void checkComfyStatus()}
+                            className="inline-flex h-7 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        >
+                            <span aria-hidden="true" className={cn("size-1.5 rounded-full", comfyStatusDot)} />
+                            {comfyStatusLabel}
+                        </button>
+                    </Tooltip>
+                }
             />
 
             <div className={`min-h-0 flex-1 ${section === "workflows" ? "overflow-y-auto lg:overflow-hidden" : "overflow-y-auto"}`}>
@@ -858,11 +916,11 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                 <div className="grid min-h-0 grid-cols-1 gap-4 lg:h-full lg:grid-cols-12">
                     <div className="flex h-[70vh] min-h-[480px] min-w-0 flex-col gap-3 lg:col-span-8 lg:h-auto lg:min-h-0">
                         {!selectedProfile ? (
-                            <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                            <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed border-border">
                                 <div className="text-center">
-                                    <Cloud className="mx-auto size-10 text-stone-300" />
-                                    <p className="mt-2 text-sm text-stone-500">{t("microTools.workflow.selectCloudProfile")}</p>
-                                    <p className="mt-1 text-xs text-stone-400">档案保存节点输入映射，运行由 RunningHub 云端执行并按平台计费</p>
+                                    <Cloud className="mx-auto size-10 text-muted-foreground" />
+                                    <p className="mt-2 text-sm text-muted-foreground">{t("microTools.workflow.selectCloudProfile")}</p>
+                                    <p className="mt-1 text-xs text-muted-foreground">档案保存节点输入映射，运行由 RunningHub 云端执行并按平台计费</p>
                                 </div>
                             </div>
                         ) : (
@@ -931,10 +989,10 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
             ) : section === "workflows" ? <div className="grid min-h-0 grid-cols-1 gap-4 lg:h-full lg:grid-cols-12">
                 <div className="h-[70vh] min-h-[480px] min-w-0 lg:col-span-8 lg:h-auto lg:min-h-0">
                     {!selected ? (
-                        <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                        <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border">
                             <div className="text-center">
-                                <Workflow className="mx-auto size-10 text-stone-300" />
-                                <p className="mt-2 text-sm text-stone-500">选择工作流查看详情</p>
+                                <Workflow className="mx-auto size-10 text-muted-foreground" />
+                                <p className="mt-2 text-sm text-muted-foreground">选择工作流查看详情</p>
                             </div>
                         </div>
                     ) : (
@@ -1070,9 +1128,9 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                                         { label: t("microTools.workflow.runTargetHybrid"), value: "hybrid" },
                                                     ]}
                                                 />
-                                                {boundProfile ? <span className="max-w-56 truncate text-xs text-stone-500">{boundProfile.name}</span> : null}
+                                                {boundProfile ? <span className="max-w-56 truncate text-xs text-muted-foreground">{boundProfile.name}</span> : null}
                                             </div>
-                                            <p className="text-xs text-stone-500">{t(`microTools.workflow.runTargetHint${runTarget === "cloud" ? "Cloud" : runTarget === "hybrid" ? "Hybrid" : "Local"}`)}</p>
+                                            <p className="text-xs text-muted-foreground">{t(`microTools.workflow.runTargetHint${runTarget === "cloud" ? "Cloud" : runTarget === "hybrid" ? "Hybrid" : "Local"}`)}</p>
                                             {runTarget !== "local" && !boundProfile ? <p className="text-xs text-amber-600">{t("microTools.workflow.runTargetNoBinding")}</p> : null}
                                         </div>
                                     }
@@ -1101,12 +1159,10 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                     )}
                     </div>
                     {libraryColumn}
-                </div> : (
-                    // 「模型与运行」把原来的本地模型、运行环境两个页签并成一块，保留直达但少一层切换。
-                    <div className="space-y-6">
-                        <ComfyChannelsPanel />
-                        <ComfyRuntimePanel />
-                    </div>
+                </div> : section === "models" ? (
+                    <ComfyChannelsPanel />
+                ) : (
+                    <ComfyRuntimePanel />
                 )}
             </div>
         </main>

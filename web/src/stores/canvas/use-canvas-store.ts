@@ -93,7 +93,7 @@ type CanvasStore = {
     renameFolder: (id: string, name: string) => void;
     updateFolder: (id: string, patch: Partial<Pick<CanvasFolder, "name" | "outline" | "description" | "coverStorageKey" | "tags">>) => void;
     deleteFolder: (id: string) => void;
-    deleteDramaProject: (id: string) => void;
+    deleteDramaProject: (id: string) => Promise<void>;
     moveProjectsToFolder: (ids: string[], folderId: string | null) => void;
     replaceFolders: (folders: CanvasFolder[]) => void;
     openProject: (id: string) => CanvasProject | null;
@@ -723,15 +723,15 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         scheduleCanvasFolderSync();
         scheduleCanvasSync();
     },
-    deleteDramaProject: (id) => {
-        for (const project of get().projects) if (project.folderId === id) captureCanvasAction(project, { ...project, folderId: null });
+    deleteDramaProject: async (id) => {
+        const freeCanvasIds = get().projects.filter((project) => project.folderId === id).map((project) => project.id);
+        await deleteBackendDramaProject(id, freeCanvasIds);
         set((state) => ({
             folders: state.folders.filter((folder) => folder.id !== id),
-            projects: state.projects.map((project) => project.folderId === id ? { ...project, folderId: null, updatedAt: new Date().toISOString() } : project),
+            projects: state.projects.filter((project) => project.folderId !== id),
         }));
         persistCurrentCanvasSnapshot();
         knownCanvasFolderIds.delete(id);
-        void deleteBackendDramaProject(id).catch((error) => console.error("短剧项目删除失败", error));
         scheduleCanvasFolderSync();
         scheduleCanvasSync();
     },

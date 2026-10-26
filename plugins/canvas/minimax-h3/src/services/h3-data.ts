@@ -3,10 +3,6 @@ import { sameRef } from "./h3-compatibility";
 import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
 import { applyReferenceOrder, orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
-export function quickStoryboardRuntimeKey(projectId: string, nodeId: string, segmentId: string) {
-    return `quick-storyboard-runtime:${projectId}:${nodeId}:${segmentId}`;
-}
-
 export function h3OutputName(node: { id?: string }, clipNumber: number, version?: number) {
     const source = String(node.id || "").trim().slice(-6);
     return `H3 Clip ${clipNumber}${source ? ` · ${source}` : ""}${version ? ` · v${version}` : ""}`;

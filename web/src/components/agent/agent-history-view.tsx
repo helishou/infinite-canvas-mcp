@@ -111,7 +111,7 @@ export function AgentHistoryView({
                                     <div className="min-w-0 flex-1">
                                         <div className="flex min-w-0 items-center gap-1.5">
                                             {active ? (
-                                                <span className="shrink-0 text-[10px] font-medium" style={{ color: theme.node.text }}>
+                                                <span className="shrink-0 text-[11px] font-medium" style={{ color: theme.node.text }}>
                                                     {t("agent.history.current")}
                                                 </span>
                                             ) : null}
@@ -119,7 +119,7 @@ export function AgentHistoryView({
                                         </div>
                                         <div className="truncate text-[11px] leading-4 opacity-65">{thread.preview || thread.id}</div>
                                     </div>
-                                    <span className="shrink-0 text-[10px] opacity-55">{formatThreadTime(thread.updatedAt || thread.createdAt, i18n.language)}</span>
+                                    <span className="shrink-0 text-[11px] opacity-55">{formatThreadTime(thread.updatedAt || thread.createdAt, i18n.language)}</span>
                                 </div>
                             </div>
                         );

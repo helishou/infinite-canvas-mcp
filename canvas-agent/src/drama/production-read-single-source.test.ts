@@ -14,6 +14,12 @@ test("v2 full reads drop legacy workbench mirrors and summaries count formal sou
     assert.deepEqual(summary.draft.counts, { scenes: 1, shots: 1, clipGroups: 1, keyframes: 0, keyframeReviews: 0 });
 });
 
+test("v2 Shot source reads include the current Segment mapping for only the returned targets", () => {
+    const result = projectProductionRead(production, { view: "source", sourceSection: "shots", targetIds: ["shot-1"], pageSize: 20 }) as any;
+    assert.deepEqual(result.targetClipMappings, [{ shotId: "shot-1", segmentIds: ["segment-1"] }]);
+    assert.deepEqual(result.source.items.map((shot: any) => shot.id), ["shot-1"]);
+});
+
 test("v2 source reads refuse legacy storyboard aliases", () => {
     assert.throws(() => projectProductionRead(production, { view: "source", sourceSection: "production_shots" }), /source\.shots/);
     assert.throws(() => projectProductionRead(production, { view: "source", sourceSection: "clip_groups" }), /source\.segments/);

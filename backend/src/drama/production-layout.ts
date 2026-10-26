@@ -213,7 +213,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const sceneGeometry = new Map<string, { position: Position; height: number; width: number; framesTopOffset: number; videoTopOffset: number; videoNodeHeights: number[] }>();
     for (const scene of scenes) {
         const sceneScripts = scriptByScene.get(scene.id) || [], frameShots = sceneFrameAssets.get(scene.id) || [];
-        const groupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(groupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
+        const legacyGroupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(legacyGroupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
         const groupPosition = groupNode?.position ? { x: Number(groupNode.position.x), y: Number(groupNode.position.y) } : priorGroup?.bounds.position || { x: 0, y: sceneY };
         const framesTopOffset = 70 + sceneScripts.length * 380 + (frameShots.length ? 40 : 0);
         const frameBottomOffset = frameShots.length ? framesTopOffset + Math.ceil(frameShots.length / 3) * 1000 + 780 : framesTopOffset;
@@ -226,10 +226,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => videoSize(nodeId).width + 80)));
         const requiredGroupSize = { width: Math.max(width, size(groupNode?.width, width)), height: Math.max(height, size(groupNode?.height, height)) };
         sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoNodeHeights: videoHeights });
+        // Keep a logical scene anchor in the plan for target lookup and stable
+        // scene bounds. Scene groups are no longer materialized onto the canvas.
         const sceneUnit = createUnit(`scene:${scene.id}`, "scene", [`scene:${scene.id}`], scene.id, groupPosition, requiredGroupSize,
-            [{ role: "scene", nodeId: groupId, nodeType: "group", position: groupPosition, size: requiredGroupSize }]);
+            [{ role: "scene", nodeId: productionLayoutStableId("production-scene-layout", owner.id, scene.id), nodeType: "layout-region", position: groupPosition, size: requiredGroupSize }]);
         sceneUnit.bounds.size = requiredGroupSize;
-        sceneUnit.members[0].size = sceneUnit.bounds.size;
         for (let index = 0; index < sceneScripts.length; index++) {
             const script = sceneScripts[index], node = nodeById.get(script.id), preferred = { x: groupPosition.x + 40, y: groupPosition.y + 70 + index * 380 };
             createUnit(`script:${script.scriptId}`, "script", [`script:${script.scriptId}`], scene.id, node?.position || preferred,

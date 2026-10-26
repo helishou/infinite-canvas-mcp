@@ -20,6 +20,10 @@ for (const mode of ["light", "dark"] as const) {
             }
         }
         assert.ok(contrast(token.colorTextLightSolid!, token.colorPrimary!) >= 4.5);
+        // 删除类危险操作是纯文字按钮，颜色来自 colorError，必须在所有容器底色上可读。
+        for (const background of [token.colorBgBase!, token.colorBgContainer!, token.colorBgElevated!]) {
+            assert.ok(contrast(token.colorError!, background) >= 4.5, `${token.colorError} on ${background}`);
+        }
     });
     test(`${mode} canvas node text remains readable on its shared surfaces`, () => {
         const theme = canvasThemes[mode];

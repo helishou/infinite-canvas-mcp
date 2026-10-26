@@ -43,30 +43,30 @@ export function RunHistoryList({
     return (
         <div>
             <div className="mb-3 flex items-center justify-between">
-                <p className="text-xs text-stone-500">{hint || "工作流运行历史"}</p>
+                <p className="text-xs text-muted-foreground">{hint || "工作流运行历史"}</p>
                 {onRefresh ? <Button size="small" onClick={onRefresh} disabled={loading}>刷新</Button> : null}
             </div>
             {error ? <Alert type="error" description={error} /> : null}
             {loading ? <Spin /> : error && entries.length === 0 ? null : entries.length === 0 ? <Empty description={emptyText || "暂无运行历史"} /> : (
                 <div className="space-y-2">
                     {entries.map((entry) => (
-                        <div key={entry.id} className="flex items-center gap-3 rounded border border-stone-200 bg-white p-3 text-sm dark:border-stone-700 dark:bg-stone-800">
+                        <div key={entry.id} className="flex items-center gap-3 rounded border border-border bg-white p-3 text-sm dark:bg-muted">
                             <div className="min-w-0 flex-1">
                                 <div className="mb-1 flex items-center gap-2">
                                     <Tag color={statusColor(entry.status)}>{entry.statusLabel || entry.status}</Tag>
                                     <span className="truncate font-medium">{entry.title}</span>
-                                    {entry.time ? <span className="shrink-0 text-xs text-stone-400">{entry.time}</span> : null}
+                                    {entry.time ? <span className="shrink-0 text-xs text-muted-foreground">{entry.time}</span> : null}
                                 </div>
-                                {entry.prompt ? <p className="truncate text-xs text-stone-500" title={entry.prompt}>{entry.prompt}</p> : null}
+                                {entry.prompt ? <p className="truncate text-xs text-muted-foreground" title={entry.prompt}>{entry.prompt}</p> : null}
                                 {entry.error ? <p className="whitespace-pre-wrap break-words text-xs text-red-500" title={entry.error}>{entry.error}</p> : null}
                                 {entry.texts?.length ? (
-                                    <div className="mt-1 space-y-1">{entry.texts.map((text, i) => <pre key={i} className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-stone-50 p-2 text-[11px] dark:bg-stone-900">{text}</pre>)}</div>
+                                    <div className="mt-1 space-y-1">{entry.texts.map((text, i) => <pre key={i} className="max-h-24 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-[11px] dark:bg-muted">{text}</pre>)}</div>
                                 ) : null}
                                 {entry.outputs.length > 0 && (
                                     <div className="mt-1 flex flex-wrap gap-1">
                                         {entry.outputs.slice(0, 4).map((item, i) => <OutputThumb key={i} item={item} />)}
                                         {entry.outputs.length > 4 && (
-                                            <span className="flex h-10 w-10 items-center justify-center rounded bg-stone-100 text-xs text-stone-500">+{entry.outputs.length - 4}</span>
+                                            <span className="flex h-10 w-10 items-center justify-center rounded bg-muted text-xs text-muted-foreground">+{entry.outputs.length - 4}</span>
                                         )}
                                     </div>
                                 )}

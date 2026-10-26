@@ -101,8 +101,8 @@ function stripRemovedPictureBindingIds(source: Record<string, any>, removed: Set
 
 export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
     const source = director.source as Record<string, any>;
-    const plan = { ...operation.assetPlan, created_by: "manual" } as Row;
-    const card = { ...operation.assetCard } as Row;
+    const plan = { ...structuredClone(operation.assetPlan), created_by: "manual" } as Row;
+    const card = structuredClone({ ...operation.assetCard }) as Row;
     const id = String(plan.id || "").trim();
     const kind = String(plan.kind || "");
     if (!id || !["character", "scene", "prop"].includes(kind) || plan.status !== "planned") throw new Error("MANUAL_ASSET_INVALID: assetPlan must be a planned character, scene or prop with a stable ID");
@@ -115,14 +115,19 @@ export function createManualDirectorAsset(director: DirectorProduction, operatio
 
     const registryKind = kind === "character" || kind === "scene" ? kind : undefined;
     const entityId = registryKind ? String(plan.entity_id || "") : id;
-    const registryEntity = operation.registryEntity as Row | undefined;
+    const registryEntity = operation.registryEntity ? structuredClone(operation.registryEntity) as Row : undefined;
     if (registryKind) {
         if (operation.registryKind !== registryKind || !registryEntity || String(registryEntity.id || "") !== entityId || !String(registryEntity.name || "").trim()) throw new Error(`MANUAL_ASSET_REGISTRY_MISMATCH: ${id}`);
         const registry = registryKind === "character" ? "character_registry" : "scene_registry";
         if (rows(source[registry]).some(row => String(row.id || "") === entityId)) throw new Error(`ASSET_ENTITY_ALREADY_EXISTS: ${entityId}`);
     } else if (operation.registryKind || operation.registryEntity) throw new Error(`MANUAL_ASSET_REGISTRY_UNEXPECTED: ${id}`);
 
-    const subject = operation.subject as Row | undefined;
+    // The registered rows must never alias the caller's operation objects: the same operation set
+    // is applied more than once per request (candidate pass, then the committed pass), and later
+    // steps such as ensureSharedSubjectPictureBinding mutate the registered Subject in place. An
+    // aliased op would come back with a picture binding and fail this operation's own contract
+    // ("SUBJECT_MISMATCH" on the second pass), so every row is deep-copied before it is stored.
+    const subject = operation.subject ? structuredClone(operation.subject) as Row : undefined;
     if (subject) {
         const expectedSubjectKind = registryKind || "asset";
         if (String(subject.entityRef?.ownerKind || "") !== owner.kind || String(subject.entityRef?.ownerId || "") !== owner.id) throw new Error(`MANUAL_ASSET_SUBJECT_OWNER_MISMATCH: ${id}`);

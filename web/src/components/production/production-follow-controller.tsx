@@ -48,7 +48,11 @@ export function ProductionFollowController() {
                 latest.setPendingPresentation(presentation);
                 return;
             }
-            const path = productionPresentationPath(presentation);
+            const canvas = document.querySelector<HTMLElement>('[data-canvas-project-id][data-canvas-active="true"]');
+            const path = productionPresentationPath(presentation, canvas ? {
+                id: canvas.dataset.canvasProjectId || "",
+                path: productionLocationKey(location.pathname, location.search),
+            } : undefined);
             if (path.startsWith("/director/")) markProductionEntry();
             if (path !== productionLocationKey(location.pathname, location.search)) {
                 latest.expectPath(path);

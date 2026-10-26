@@ -139,7 +139,7 @@ export function ImageSettingsPanel({
                                 { label: t("settingsPanels.image.runTargetHybrid"), value: "hybrid" },
                             ]}
                         />
-                        <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
+                        <div className={compact ? "text-[11px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
                             {t(runTarget === "hybrid" ? "settingsPanels.image.runTargetHintHybrid" : runTarget === "cloud" ? "settingsPanels.image.runTargetHintCloud" : "settingsPanels.image.runTargetHintLocal")}
                         </div>
                     </div>
@@ -147,13 +147,13 @@ export function ImageSettingsPanel({
                 {workflowParamsMissing ? (
                     <div className="space-y-1">
                         <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
-                    <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
+                    <div className={compact ? "text-[11px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
                             {t(workflowParamsBlockedByScenario ? "settingsPanels.image.workflowFieldsScenarioUnsupported" : "settingsPanels.image.workflowFieldsMissing")}
                         </div>
                     </div>
                 ) : null}
                 {debugScenario ? (
-                    <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.6 }}>
+                    <div className={compact ? "text-[11px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.6 }}>
                         {debugScenario}
                     </div>
                 ) : null}
@@ -221,7 +221,7 @@ export function ImageSettingsPanel({
                                 <div className="flex items-center justify-between gap-3">
                                     <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.size")}</SettingTitle>
                                     <div className="flex items-center gap-2">
-                                        <span className={`${compact ? "text-[10px]" : "text-xs"} font-medium`} style={{ color: theme.node.muted }}>
+                                        <span className={`${compact ? "text-[11px]" : "text-xs"} font-medium`} style={{ color: theme.node.muted }}>
                                             {t("settingsPanels.image.align16")} · {t("settingsPanels.groups.globalPreference")}
                                         </span>
                                         <span title={t("settingsPanels.image.align16Hint")} onMouseDown={(event) => event.stopPropagation()}>
@@ -261,7 +261,7 @@ export function ImageSettingsPanel({
                     <div className="flex items-center justify-between gap-3">
                         <div className="space-y-0.5">
                             <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.transparent")}</SettingTitle>
-                            <div className={compact ? "text-[10px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
+                            <div className={compact ? "text-[11px]" : "text-xs"} style={{ color: theme.node.muted, opacity: 0.75 }}>
                                 {t("settingsPanels.image.transparentHint")}
                             </div>
                         </div>
@@ -374,7 +374,7 @@ function AspectIcon({ type, width, height, color, compact = false }: { type: str
 
 export function SettingTitle({ children, color, compact = false }: { children: string; color: string; compact?: boolean }) {
     return (
-        <div className={`${compact ? "text-[10px]" : "text-xs"} font-medium`} style={{ color }}>
+        <div className={`${compact ? "text-[11px]" : "text-xs"} font-medium`} style={{ color }}>
             {children}
         </div>
     );
@@ -410,7 +410,7 @@ export function SettingsDisclosure({ title, summary, theme, children, compact = 
             <summary className={`cursor-pointer rounded-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring ${compact ? "text-[11px]" : "text-sm"}`}>
                 {title}
                 {summary ? (
-                    <span className={`${compact ? "mt-0.5 pl-3 text-[10px]" : "mt-1 pl-4 text-xs"} block break-words font-normal`} style={{ color: theme.node.muted }}>
+                    <span className={`${compact ? "mt-0.5 pl-3 text-[11px]" : "mt-1 pl-4 text-xs"} block break-words font-normal`} style={{ color: theme.node.muted }}>
                         {summary}
                     </span>
                 ) : null}

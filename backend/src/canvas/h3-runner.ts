@@ -37,7 +37,6 @@ type H3RunInput = {
     forceRegenerate?: boolean;
     expectedPlanHash?: string;
     params?: Record<string, unknown>;
-    h3RuntimeOverrides?: { quickStoryboard?: { storageKey: string; panelCount: number } };
     runPlan?: H3RunPlan;
 };
 
@@ -229,7 +228,6 @@ export class CanvasH3Runner {
         const planner = new CanvasH3Runner(stores, this.events, this.comfy, this.runningHub, this.videoDispatcher);
         const normalized = normalizeInput(input);
         const inspectedReferenceDigests = new Map<string, string>();
-        planner.validateRuntimeOverrides(snapshot, normalized);
         const checked = planner.preview(normalized, inspectedReferenceDigests);
         if (!checked.ready || checked.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH')) throw new Error(checked.diagnostics.map(issue => issue.message).join("；"));
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== checked.planHash) throw new Error("所选生成输入已变化，请刷新预览");
@@ -251,7 +249,6 @@ export class CanvasH3Runner {
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        this.validateRuntimeOverrides(project, normalized);
         const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
         if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
         const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
@@ -312,22 +309,6 @@ export class CanvasH3Runner {
             }
         }
         return blocked;
-    }
-
-    private validateRuntimeOverrides(project: Record<string, unknown>, input: H3RunInput) {
-        const quickStoryboard = input.h3RuntimeOverrides?.quickStoryboard;
-        if (!quickStoryboard) return;
-        if (!input.nodeId || !input.segmentId) throw new Error("快速分镜运行参数必须指定一个 Clip");
-        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
-        const node = nodes.find((item) => String(item.id || "") === input.nodeId);
-        const metadata = recordOf(node?.metadata);
-        const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
-        const segment = segments.find((item) => String(item.id || "") === input.segmentId);
-        if (!segment) throw new Error("快速分镜对应的 Clip 已不存在");
-        const taskMode = normalizeTaskMode(segment.mode || segment.taskMode || metadata.taskMode || metadata.mode);
-        if (taskMode !== "ref2va") throw new Error("快速分镜仅支持 Ref2VA，请先切换当前 Clip 模式");
-        const media = this.stores.media.meta(quickStoryboard.storageKey);
-        if (!media || !/^image\//iu.test(String(media.mimeType || "")) || !fs.existsSync(media.filePath)) throw new Error("快速分镜宫格媒体不存在或不是有效图片，请重新生成宫格");
     }
 
     /**
@@ -582,9 +563,7 @@ export class CanvasH3Runner {
         }
         const catalog = Array.isArray(project.referenceCatalog) ? project.referenceCatalog as Array<Record<string, unknown>> : [];
         for (const asset of catalog) if (assetIds.has(String(asset.id)) && asset.sourceNodeId) sourceNodeIds.add(String(asset.sourceNodeId));
-        const quickStoryboardKey = plans.some((plan) => plan.nodeId === input.nodeId && plan.segmentId === input.segmentId)
-            ? String(input.h3RuntimeOverrides?.quickStoryboard?.storageKey || "") : "";
-        const referenceKeys = [...new Set([...assetIds].map(id => String(catalog.find(asset => asset.id === id)?.storageKey || "")).concat(quickStoryboardKey).filter(Boolean))];
+        const referenceKeys = [...new Set([...assetIds].map(id => String(catalog.find(asset => asset.id === id)?.storageKey || "")).filter(Boolean))];
         const referenceDigests = Object.fromEntries(referenceKeys.flatMap(key => {
             const inspected = inspectedReferenceDigests?.get(key);
             if (inspected) return [[key, inspected]];
@@ -735,7 +714,7 @@ export class CanvasH3Runner {
                 }
                 const override = secondPass ? inFlight!.postpassParams : this.withPlannedSeed(input, plan, this.continuationOverride(input, plan, input.params || {}));
                 if (!secondPass && !input.runPlan) this.ensureCanonicalSegmentSubmission(input.projectId, plan, override);
-                const cache = this.clipCacheState(input, plan, override, effectiveFingerprints);
+                const cache = this.clipCacheState(input, plan, override, effectiveFingerprints, completedByKey);
                 effectiveFingerprints.set(key, cache.fingerprint);
                 // Cached MP4 files do not carry the latent context saved under this new run id.
                 if (!plan.continuation && !input.forceRegenerate && !secondPass && !confirmation.prepared && !confirmation.pending.length && cache.output) {
@@ -755,6 +734,13 @@ export class CanvasH3Runner {
                 let child = this.stores.tasks.get(childId);
                 if (!child) {
                     this.stores.tasks.addEvent(task.id, "child_intent", { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: childId, phase: secondPass ? "second_pass" : "first_pass" });
+                    // Routing and input preparation can fail before a child exists.
+                    // Own this exact Clip first so parent failure reaches its UI,
+                    // while previous output and later, unstarted Clips stay intact.
+                    this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, {
+                        status: "loading", parentTaskId: task.id, runtimeTaskId: task.id,
+                        progress: 0, errorDetails: "",
+                    });
                     child = await this.startChild(task, plan, override, childId, completedByKey);
                 } else if (["queued", "running"].includes(child.status)) {
                     const submitted = this.stores.tasks.events(child.id).some((event) => event.type === "submitted");
@@ -868,7 +854,13 @@ export class CanvasH3Runner {
         }
     }
 
-    private clipCacheState(input: H3RunInput, plan: H3Plan, override: Record<string, unknown>, fingerprints: Map<string, string>) {
+    private clipCacheState(
+        input: H3RunInput,
+        plan: H3Plan,
+        override: Record<string, unknown>,
+        fingerprints: Map<string, string>,
+        completedByKey: Map<string, Record<string, unknown>> = new Map(),
+    ) {
         override = this.withPlannedSeed(input, plan, override);
         const projectId = input.projectId;
         const project = this.projectFor(input);
@@ -882,11 +874,20 @@ export class CanvasH3Runner {
         // is only a default and can differ when one H3 node contains mixed modes.
         const taskMode = normalizeTaskMode(segment.taskMode || segment.mode || params.taskMode || params.mode);
         const { compilation } = compileH3Submission(project, segment, taskMode);
-        const quickStoryboard = quickStoryboardFor(input, plan, compilation.references);
         const scenePromptBase = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
-        const scenePrompt = quickStoryboard ? `${scenePromptBase}\n\n${quickStoryboard.promptAppend}` : scenePromptBase;
+        const scenePrompt = scenePromptBase;
         const previous = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
-        const previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
+        let previousFingerprint = previous ? fingerprints.get(`${plan.nodeId}:${String(previous.id || "")}`) || String(previous.cacheFingerprint || "") : "";
+        if (previous?.tailFrameContinuation === true) {
+            // The previous clip's prompt/settings fingerprint can stay the same
+            // when a fresh random generation replaces its video. Tail-frame
+            // consumers depend on that concrete media, so include its identity
+            // in the cache key (prefer this run's completed output over the
+            // frozen canvas snapshot).
+            const completedOutput = recordOf(completedByKey.get(`${plan.nodeId}:${String(previous.id || "")}`)?.output);
+            const previousMediaIdentity = String(completedOutput.storageKey || completedOutput.url || previous.resultStorageKey || previous.result || "");
+            previousFingerprint = stableH3Fingerprint({ fingerprint: previousFingerprint, tailFrameMedia: previousMediaIdentity });
+        }
         const confirming = override.confirmSecondPass === true;
         const firstPassReferences = confirming
             ? firstPassReferencesFromLog(this.stores.logs.list({ projectId, nodeId: plan.nodeId, segmentId: plan.segmentId, limit: 500 }), segment)
@@ -895,7 +896,7 @@ export class CanvasH3Runner {
             && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
         const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
         const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: scenePrompt, previousFingerprint };
-        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(quickStoryboard ? [...compilation.references, quickStoryboard.reference] : compilation.references) });
+        const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(compilation.references) });
         // v1 first-pass caches were fingerprinted from the raw params and complete
         // CompiledReference objects. Keep both exact historical inputs and the
         // log-backed reference snapshot so settings/timestamp normalization updates
@@ -1065,11 +1066,9 @@ export class CanvasH3Runner {
         const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
-        const quickStoryboard = quickStoryboardFor(input, plan, compilation.references);
-        if (quickStoryboard && taskMode !== "ref2va") throw new Error("快速分镜仅支持 Ref2VA，请先切换当前 Clip 模式");
-        const submittedCompilationReferences = quickStoryboard ? [...compilation.references, quickStoryboard.reference] : compilation.references;
+        const submittedCompilationReferences = compilation.references;
         const scenePromptBase = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
-        const scenePrompt = quickStoryboard ? `${scenePromptBase}\n\n${quickStoryboard.promptAppend}` : scenePromptBase;
+        const scenePrompt = scenePromptBase;
         const styleTemplates = defaults.styleTemplates;
         const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode, styleTemplates) : params.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId, styleTemplates)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
@@ -1125,10 +1124,13 @@ export class CanvasH3Runner {
         const audios = await Promise.all(audioRefs.map((ref) => this.resolveRef(ref)));
         const videos = await Promise.all(videoRefs.map((ref) => this.resolveRef(ref)));
         const previousSnapshot = plan.segmentIndex > 0 ? segments[plan.segmentIndex - 1] : undefined;
+        const previousCurrent = previousSnapshot?.tailFrameContinuation === true
+            ? await this.waitForTailFrameSource(parent.id, input.projectId, plan.nodeId, previousSnapshot)
+            : previousSnapshot;
         const previousOutput = previousSnapshot && recordOf(completedByKey.get(`${plan.nodeId}:${String(previousSnapshot.id || "")}`)?.output);
         const previous = previousSnapshot && previousOutput?.url
-            ? { ...previousSnapshot, result: String(previousOutput.url), resultStorageKey: String(previousOutput.storageKey || "") }
-            : previousSnapshot;
+            ? { ...previousCurrent, result: String(previousOutput.url), resultStorageKey: String(previousOutput.storageKey || "") }
+            : previousCurrent;
         // Previous output is read only for tail extraction or post-processing; AV latent carries Motion Context.
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
         const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
@@ -1189,7 +1191,7 @@ export class CanvasH3Runner {
             useWallet: metadata.minimaxRunningHubUseWallet,
         });
         const localOnlyReason = h3LocalOnlyReason(params);
-        const runningHubReady = !useSelectedVideoModel && this.runningHub.ready(params);
+        const runningHubReady = requestedEngine !== "local" && !useSelectedVideoModel && this.runningHub.ready(params);
         const localReady = useSelectedVideoModel || requestedEngine !== "auto" || localOnlyReason || !runningHubReady
             ? true
             : (await this.comfy.status()).connected;
@@ -1470,6 +1472,34 @@ export class CanvasH3Runner {
         return url;
     }
 
+    /** Do not let a separately started next Clip race its predecessor's canvas writeback. */
+    private async waitForTailFrameSource(parentId: string, projectId: string, nodeId: string, snapshot: H3Segment) {
+        const segmentId = String(snapshot.id || "");
+        const plan = { nodeId, segmentId, segmentIndex: 0 };
+        let current = this.segmentFor(projectId, plan);
+        const sourceParentId = String(current.parentTaskId || "");
+        if (sourceParentId && sourceParentId !== parentId && ["queued", "loading"].includes(String(current.status || ""))) {
+            while (true) {
+                this.assertActive(parentId);
+                const sourceTask = this.stores.tasks.get(sourceParentId);
+                if (!sourceTask) throw new Error(`Clip ${segmentId} 的上一段任务状态丢失，无法确认最新尾帧`);
+                if (["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(sourceTask.status)) {
+                    if (sourceTask.status !== "succeeded" && sourceTask.status !== "awaiting_confirmation") {
+                        throw new Error(`Clip ${segmentId} 的上一段尚未成功收片，无法截取最新尾帧`);
+                    }
+                    break;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            current = this.segmentFor(projectId, plan);
+        }
+        return {
+            ...snapshot,
+            result: String(current.result || ""),
+            resultStorageKey: String(current.resultStorageKey || ""),
+        };
+    }
+
     private captureTailFrame(videoPath: string, name: string) {
         return new Promise<ReturnType<Stores["media"]["store"]>>((resolve, reject) => {
             const chunks: Buffer[] = [];
@@ -1553,36 +1583,7 @@ function normalizeInput(input: H3RunInput): H3RunInput {
     // would give the whole batch one seed and override unrelated fixed seeds.
     return { projectId, nodeId: input.nodeId ? String(input.nodeId) : undefined, nodeIds: input.nodeIds?.map(String), segmentId: input.segmentId ? String(input.segmentId) : undefined,
         endSegmentId: input.endSegmentId, segmentIndex: input.segmentIndex, runFromCurrent: input.runFromCurrent === true, skipCompleted: input.skipCompleted === true, forceRegenerate: input.forceRegenerate === true,
-        ...(input.expectedPlanHash ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(input.h3RuntimeOverrides ? { h3RuntimeOverrides: normalizeH3RuntimeOverrides(input.h3RuntimeOverrides) } : {}), ...(input.runPlan ? { runPlan: input.runPlan } : {}), params: rawParams };
-}
-
-function normalizeH3RuntimeOverrides(value: unknown): NonNullable<H3RunInput["h3RuntimeOverrides"]> {
-    const quickStoryboard = recordOf(recordOf(value).quickStoryboard);
-    if (!Object.keys(quickStoryboard).length) return {};
-    const storageKey = String(quickStoryboard.storageKey || "");
-    const panelCount = Number(quickStoryboard.panelCount);
-    if (!storageKey || !Number.isInteger(panelCount) || panelCount < 1 || panelCount > 12) throw new Error("快速分镜运行参数无效");
-    return { quickStoryboard: { storageKey, panelCount } };
-}
-
-function quickStoryboardFor(input: H3RunInput, plan: H3Plan, references: Array<Record<string, unknown>>) {
-    const selected = input.h3RuntimeOverrides?.quickStoryboard;
-    if (!selected || (input.nodeId && plan.nodeId !== input.nodeId) || (input.segmentId && plan.segmentId !== input.segmentId)) return null;
-    const ordinal = references.filter((reference) => reference.mediaType === "image").length + 1;
-    const panelCount = selected.panelCount;
-    const arrangement = panelCount <= 3 ? "vertically from top to bottom" : "in reading order from top to bottom and left to right";
-    const shots = Array.from({ length: panelCount }, (_, index) => `Shot ${index + 1}`).join(", ");
-    const bindingId = `runtime-quick-storyboard-${plan.nodeId}-${plan.segmentId}`;
-    const reference = {
-        id: bindingId, bindingId, assetId: bindingId,
-        label: "快速分镜宫格", name: "快速分镜宫格", mediaType: "image", type: "image",
-        mimeType: "image/jpeg", role: "other", usage: "reference", enabled: true,
-        runtime: true, storageKey: selected.storageKey, ordinal, token: `<Picture ${ordinal}>`,
-    };
-    return {
-        reference,
-        promptAppend: `Quick storyboard order: It contains exactly ${panelCount} storyboard panels arranged ${arrangement}: ${shots}. Each panel guides only its corresponding shot's composition, camera angle, framing, character blocking and action. Use Picture ${ordinal} to guide the shot sequence. Do not reproduce the storyboard panels as a collage.`,
-    };
+        ...(input.expectedPlanHash ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(input.runPlan ? { runPlan: input.runPlan } : {}), params: rawParams };
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }

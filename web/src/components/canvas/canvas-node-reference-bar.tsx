@@ -177,11 +177,11 @@ function CharacterReferenceItem({ node, selection, sourceIsImageGeneration, sour
                         const url = urls[index] || previewUrlFor(image.storageKey);
                         return (
                             <span key={index} className="relative min-w-0 flex-1 overflow-hidden" style={{ background: theme.node.panel }}>
-                                {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[10px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
+                                {url ? <img src={url} alt={image.outfit || image.name || ""} className="absolute inset-0 size-full object-cover" draggable={false} /> : <span className="grid size-full place-items-center text-[11px]" style={{ color: theme.node.muted }}>{selectedImageCount} 图</span>}
                             </span>
                         );
                     })}
-                    {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[10px] font-medium">{name}</span></span> : null}
+                    {!selectedImages.length ? <span className="grid size-full place-items-center px-1 text-center leading-tight"><span className="min-w-0 truncate text-[11px] font-medium">{name}</span></span> : null}
                 </span>
                 <span className="pointer-events-none absolute bottom-0 left-0 max-w-full truncate rounded-tr-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{name}{voiceIncluded ? " · 声线" : ""}</span>
                 <span className="pointer-events-none absolute right-0 top-0 rounded-bl-md bg-black/55 px-1 py-px text-[9px] font-medium text-white">{selectedImageCount}图</span>

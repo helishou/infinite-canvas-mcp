@@ -1,6 +1,6 @@
 import { useCanvasHost, useCanvasRoute, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { useEffect, useRef, useState } from "react";
-import { ArchiveRestore, Clapperboard, MessagesSquare, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { ArchiveRestore, Clapperboard, MessagesSquare, Download, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
@@ -40,7 +40,6 @@ export function CanvasTopBar({
     onOpenPlugins,
     onUndo,
     onRedo,
-    onOpenGenerationLogs,
     collaborators,
 }: {
     projectId: string;
@@ -64,7 +63,6 @@ export function CanvasTopBar({
     onOpenPlugins: () => void;
     onUndo: () => void;
     onRedo: () => void;
-    onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
     const host = useCanvasHost();
@@ -167,8 +165,7 @@ export function CanvasTopBar({
                             <button type="button" className="flex h-8 items-center gap-2 rounded px-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setToolsOpen(false); setRecoveryDialog("drafts"); }}><ArchiveRestore className="size-3.5" />{t("canvasRecovery.localDrafts")}</button>
                         </div>
                         <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>}
-                    <Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
-                    <CanvasTaskCenterButton projectId={projectId} />
+                    <CanvasTaskCenterButton projectId={projectId} dramaId={productionDramaId} />
                 </div>
             </div>
             <CanvasTextSuggestionsDialog key={projectId} projectId={projectId} open={recoveryDialog === "suggestions"} onClose={() => setRecoveryDialog(null)} />

@@ -96,13 +96,13 @@ export function RunningHubPanel() {
         </div>
         <div className="mb-4 rounded-lg border border-border bg-background p-4">
             <div className="mb-1 text-xs font-semibold">{t("runningHub.session.title")}</div>
-            <p className="mb-2 text-xs text-stone-500">{t("runningHub.session.hint")}</p>
+            <p className="mb-2 text-xs text-muted-foreground">{t("runningHub.session.hint")}</p>
             <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="text-xs text-stone-500">{t("runningHub.upload.site")}</span>
+                <span className="text-xs text-muted-foreground">{t("runningHub.upload.site")}</span>
                 <Select size="small" aria-label={t("runningHub.upload.site")} className="min-w-56" value={uploadSite} onChange={(value) => void setUploadSite(value as RunningHubSite)} options={sites.map((value) => ({ value, label: t(`runningHub.upload.sites.${value}`) }))} />
-                <span className="text-xs text-stone-500">{uploadSite === "default" ? config.baseUrl : t(`runningHub.upload.sites.${uploadSite}`)}</span>
+                <span className="text-xs text-muted-foreground">{uploadSite === "default" ? config.baseUrl : t(`runningHub.upload.sites.${uploadSite}`)}</span>
             </div>
-            {session?.connected ? <p className="mb-2 text-xs text-stone-500">{t("runningHub.session.state")}：{session.source === "browser" ? t("runningHub.session.fromBrowser") : t("runningHub.session.manual")}{session.expired ? ` · ${t("runningHub.session.expired")}` : ""}</p> : null}
+            {session?.connected ? <p className="mb-2 text-xs text-muted-foreground">{t("runningHub.session.state")}：{session.source === "browser" ? t("runningHub.session.fromBrowser") : t("runningHub.session.manual")}{session.expired ? ` · ${t("runningHub.session.expired")}` : ""}</p> : null}
             <div className="flex flex-wrap items-center gap-2">
                 {effectiveSite !== "cn" ? <Button size="small" loading={sessionBusy} onClick={() => void connectSession(() => importRunningHubBrowserSession(uploadSite))}>{t("runningHub.session.readBrowser")}</Button> : null}
                 <Input.Password aria-label={t("runningHub.session.token")} size="small" className="max-w-64" autoComplete="off" placeholder={t("runningHub.session.tokenPlaceholder")} value={sessionToken} onChange={(event) => setSessionToken(event.target.value)} />
@@ -115,12 +115,12 @@ export function RunningHubPanel() {
                 {(["ai", "cn"] as const).map((site) => {
                     const key = config.siteApiKeys?.[site] || "";
                     return <div key={site}>
-                        <div className="mb-1 text-xs text-stone-500">{t("runningHub.upload.siteKeyHint", { site: t(`runningHub.upload.sites.${site}`) })}</div>
+                        <div className="mb-1 text-xs text-muted-foreground">{t("runningHub.upload.siteKeyHint", { site: t(`runningHub.upload.sites.${site}`) })}</div>
                         <Input.Password aria-label={`${t("runningHub.upload.siteKey")} · ${t(`runningHub.upload.sites.${site}`)}`} size="small" className="max-w-96" autoComplete="off" placeholder={key === runningHubSecretMask ? t("runningHub.secretStored") : t("runningHub.upload.siteKeyPlaceholder")} visibilityToggle={!!key && key !== runningHubSecretMask} value={key === runningHubSecretMask ? "" : key} onChange={(event) => patch({ siteApiKeys: { ...(config.siteApiKeys || {}), [site]: event.target.value } })} />
                     </div>;
                 })}
             </div>
-            <p className="mt-2 text-xs text-stone-500">{t("runningHub.session.snippetHint")}</p>
+            <p className="mt-2 text-xs text-muted-foreground">{t("runningHub.session.snippetHint")}</p>
             <Button size="small" className="mt-1" onClick={() => void copyTokenSnippet()}>{t("runningHub.session.copySnippet")}</Button>
         </div>
         {error && <Alert type="error" showIcon message={error} className="mb-4" />}

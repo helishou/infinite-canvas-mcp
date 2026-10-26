@@ -294,6 +294,24 @@ export function readCompilationReference(output: string, filename: string, verif
     throw new Error("Compiler reference path is not in the package or verified media snapshot");
 }
 
+function storyboardBindingIdForAsset(assetId: string) {
+    if (!assetId.startsWith("storyboard:")) return "";
+    try { return decodeURIComponent(assetId.slice("storyboard:".length)); }
+    catch { return ""; }
+}
+
+function isSelectedArchivedKeyframe(director: DirectorProduction, assetId: string, storageKey: string, digest: string) {
+    const asset = director.assets[assetId];
+    if (!asset || asset.nodeId || asset.storageKey !== storageKey || asset.sha256 !== digest || !storyboardBindingIdForAsset(assetId)) return false;
+    return (Array.isArray(director.source.shots) ? director.source.shots : []).some((shot: any) =>
+        (Array.isArray(shot.keyframes) ? shot.keyframes : []).some((frame: any) =>
+            String(frame.assetId || frame.id || "") === assetId
+            && frame.requiredForSubmission !== false && frame.anchor !== "composition"
+            && !frame.sourceNode
+            && frame.selection?.mode === "selected_result"
+            && String(frame.selection.resultId || "") === storageKey));
+}
+
 export function compileAchengDirector(input: DirectorProduction, directory: string, resolveReferenceFile?: (targetId: string, label: string) => string | undefined, selectedRuntimeId?: string) {
     const director = directorProductionSchema.parse(structuredClone(input));
     hydrateScopedApprovedInputs(director, resolveReferenceFile);
@@ -436,17 +454,25 @@ export function compileAchengDirector(input: DirectorProduction, directory: stri
                     ? { nodeId: canvasStyleAnchorId, storageKey: ref.canvas_storage_key, sha256: digest }
                     : undefined;
                 const audioBinding = authoredAudio ? { nodeId: authoredAudio.sourceNode.nodeId, storageKey: authoredAudio.storageKey } : undefined;
-                const binding = asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old || audioBinding;
-                if (!binding?.nodeId || !binding.storageKey || ref.sha256 !== digest) {
+                const assetId = String(ref.asset_id || "");
+                const directStoryboardBinding = assetId && asset?.storageKey && isSelectedArchivedKeyframe(director, assetId, String(asset.storageKey), digest)
+                    ? { assetId, bindingId: storyboardBindingIdForAsset(assetId), storageKey: String(asset.storageKey), sha256: digest }
+                    : undefined;
+                const binding: { nodeId?: string; bindingId?: string; assetId?: string; storageKey?: string; sha256?: string; version?: string; role?: string } | undefined =
+                    asset?.nodeId && asset.storageKey && asset.sha256 === digest ? asset : canvasStyleBinding || old || audioBinding || directStoryboardBinding;
+                if (!binding || !binding.storageKey || binding.sha256 !== digest || (!binding.nodeId && !binding.bindingId)) {
                     diagnostics.push({ code: "MISSING_REFERENCE_BINDING", path: `artifacts.${kind}-${targetId}.references`, targetId,
                         message: `No matching Canvas media binding for ${label}`, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
                     ready = false; continue;
                 }
-                const assetId = ref.asset_id || Object.keys(director.assets).find(id => director.assets[id].nodeId === binding.nodeId && director.assets[id].storageKey === binding.storageKey);
+                const resolvedAssetId = ref.asset_id || Object.keys(director.assets).find(id => director.assets[id].nodeId === binding.nodeId && director.assets[id].storageKey === binding.storageKey);
                 const card = (director.source.asset_cards as Array<Record<string, any>> || []).find(card => card.id === targetId);
                 const sourceRef = card?.references?.find((item: Record<string, any>) => item.image === ref.image);
-                references.push({ label, nodeId: binding.nodeId, storageKey: binding.storageKey, sha256: digest, role: ref.role || old?.role || "reference",
-                    ...(assetId ? { assetId, assetVersion: director.assets[assetId]?.version } : {}),
+                references.push({ label, ...(binding.nodeId ? { nodeId: binding.nodeId } : {}),
+                    ...(binding.bindingId ? { bindingId: binding.bindingId } : {}),
+                    ...(binding.assetId || resolvedAssetId ? { assetId: binding.assetId || resolvedAssetId } : {}),
+                    storageKey: binding.storageKey, sha256: digest, role: ref.role || old?.role || "reference",
+                    ...(resolvedAssetId ? { assetVersion: director.assets[resolvedAssetId]?.version } : {}),
                     ...(sourceRef?.preserve !== undefined ? { preserve: sourceRef.preserve } : {}), ...(sourceRef?.exclude !== undefined ? { exclude: sourceRef.exclude } : {}) });
             }
             director.artifacts.push({ id: `${kind}-${targetId}`, kind, targetId, prompt, sha256, sourceHash: director.sourceHash, status: ready ? "ready" : "draft", references,

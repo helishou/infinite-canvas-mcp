@@ -1617,13 +1617,14 @@ function registerBackendCanvasTools(
     "drama_delete_project",
     {
       description:
-        "删除短剧制作台中的剧目。只删除剧目归档，剧目下的场景画布会保留并回到待编排场景。",
-      inputSchema: z.object({ id: z.string().trim().min(1) }).shape,
+        "删除短剧制作台中的剧目及其分集、共享资产和场景画布；如剧目下还有自由画布，请将其 ID 一并传入。",
+      inputSchema: z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
-      const input = z.object({ id: z.string().trim().min(1) }).parse(rawInput);
+      const input = z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).parse(rawInput);
       const result = await backendApi.delete<{ ok: boolean; deleted?: number }>(
         `/drama/projects/${encodeURIComponent(input.id)}`,
+        { freeCanvasIds: input.freeCanvasIds || [] },
       );
       if (Number(result.deleted || 0) > 0 && state.activeDramaId === input.id) {
         state.activeDramaId = null;

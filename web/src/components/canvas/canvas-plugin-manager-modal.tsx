@@ -110,7 +110,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
     );
 
     const versionTag = (version: string) => (
-        <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px]" style={{ background: theme.toolbar.activeBg, color: theme.node.muted }}>
+        <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[11px]" style={{ background: theme.toolbar.activeBg, color: theme.node.muted }}>
             v{version}
         </span>
     );

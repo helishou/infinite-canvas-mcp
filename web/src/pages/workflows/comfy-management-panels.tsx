@@ -157,7 +157,7 @@ export function ComfyChannelsPanel() {
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                 <div>
                     <h2 className="text-base font-semibold">模型列表</h2>
-                    <p className="mt-1 text-sm text-stone-500">管理本地模型，最近一次生成产物会自动作为封面。</p>
+                    <p className="mt-1 text-sm text-muted-foreground">管理本地模型，最近一次生成产物会自动作为封面。</p>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                     <input
@@ -241,7 +241,7 @@ export function ComfyChannelsPanel() {
                     ))}
                 </section>
             ) : (
-                <div className="rounded-lg border border-dashed border-stone-300 py-12 dark:border-stone-700">
+                <div className="rounded-lg border border-dashed border-border py-12 ">
                     {models.length ? (
                         <div className="flex flex-col items-center gap-3">
                             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`没有${CAPABILITY_LABELS[capabilityFilter as Exclude<ModelCapability, "all">] || ""}类型的模型`} />
@@ -274,7 +274,7 @@ function ModelCard({ model, cover, selected, onSelectedChange, onConfigure, onDe
             className="group flex h-full flex-col overflow-hidden"
             styles={{ body: { display: "flex", flex: 1, flexDirection: "column", padding: 0 } }}
             cover={
-                <div className="relative aspect-[4/3] overflow-hidden bg-stone-100 dark:bg-stone-900">
+                <div className="relative aspect-[4/3] overflow-hidden bg-muted">
                     <button type="button" className="block size-full cursor-pointer text-left" onClick={onConfigure}>
                         {cover && !coverFailed ? (
                             cover.kind === "video" ? (
@@ -283,16 +283,16 @@ function ModelCard({ model, cover, selected, onSelectedChange, onConfigure, onDe
                                 <img src={cover.url} alt={model.name} className="size-full object-cover transition-transform duration-300 group-hover:scale-[1.03]" loading="lazy" decoding="async" onError={() => setCoverFailed(true)} />
                             )
                         ) : (
-                            <span className="grid size-full place-items-center text-stone-400 dark:text-stone-600"><PlaceholderIcon className="size-9" /></span>
+                            <span className="grid size-full place-items-center text-muted-foreground dark:text-muted-foreground"><PlaceholderIcon className="size-9" /></span>
                         )}
                         {cover && !coverFailed ? <span className="absolute bottom-2 left-2 rounded bg-black/60 px-2 py-1 text-[11px] text-white backdrop-blur-sm">最近产物</span> : null}
                     </button>
-                    <Checkbox className="absolute right-3 top-3 rounded bg-white/90 px-1.5 py-1 shadow-sm dark:bg-stone-950/85" checked={selected} aria-label={`选择 ${model.name}`} onChange={(event) => onSelectedChange(event.target.checked)} />
+                    <Checkbox className="absolute right-3 top-3 rounded bg-white/90 px-1.5 py-1 shadow-sm dark:bg-background/85" checked={selected} aria-label={`选择 ${model.name}`} onChange={(event) => onSelectedChange(event.target.checked)} />
                 </div>
             }
         >
             <button type="button" className="block w-full flex-1 cursor-pointer p-4 text-left" onClick={onConfigure}>
-                <h3 className="line-clamp-1 text-sm font-semibold text-stone-950 dark:text-stone-100" title={model.name}>{model.name}</h3>
+                <h3 className="line-clamp-1 text-sm font-semibold text-foreground " title={model.name}>{model.name}</h3>
                 <div className="mt-2"><Tag className="m-0">{CAPABILITY_LABELS[model.capability]}</Tag></div>
             </button>
             <div className="flex items-center gap-1 px-3 pb-3">
@@ -337,10 +337,10 @@ export function ComfyRuntimePanel() {
         <div className="mt-5 space-y-4">
             <RunningHubPanel />
             <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-4"><div><h3 className="text-sm font-semibold">{t("config.preferences.comfyDirectory")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("config.preferences.comfyDirectoryHint")}</p></div><Button onClick={() => openConfigDialog(false, "connection")}>{t("config.preferences.manageConnections")}</Button></section>
-            <section className="flex items-center justify-between gap-4 rounded-lg border border-stone-200 bg-white px-4 py-4 dark:border-stone-800 dark:bg-stone-900">
+            <section className="flex items-center justify-between gap-4 rounded-lg border border-border bg-white px-4 py-4 dark:bg-muted">
                 <div>
                     <div className="text-sm font-semibold">运行实例</div>
-                    <div className="mt-1 text-xs text-stone-500">管理用于模型调度的 ComfyUI 地址，例如本机或局域网实例。</div>
+                    <div className="mt-1 text-xs text-muted-foreground">管理用于模型调度的 ComfyUI 地址，例如本机或局域网实例。</div>
                 </div>
                 <Button icon={<Server className="size-4" />} onClick={() => setInstancesOpen(true)}>
                     管理实例

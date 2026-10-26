@@ -7,6 +7,8 @@ description: 使用当前激活的 Acheng Director 创作，在真实画布上�
 
 开始或恢复制作先读[适配核心](references/acheng-canvas-adapter.md)，解析当前激活的 Acheng Skill，并按本次缺项加载其专业模块。创作合同、完整提示词与 partial/commit 由 Acheng 维护；画布承担正式存储和授权执行。已有确认内容直接复用，七模块不是强制顺序阶段，也不默认启动多代理。
 
+调度纪律以[原生 MCP 操作预算](references/native-mcp-operation-budget.md)为唯一共享来源：标准批次、批量读、原子批量写、批量等待、单一写入负责人、生成前门禁梯和恢复顺序都在那里维护。本 Skill 与各制作 Skill 只引用，不各自复述一套；域专属参数（图片图序与 manifestHash、H3 planHash 范围与 Motion Context 连续组）仍留在对应参考。
+
 当本轮需要角色身份图时，先在“角色与素材”工作区生成或绑定必需图片，再开始依赖这些身份的镜头制作；只阻止实际消费缺失素材的目标。用户明确要求浏览器操作时，沿制作台页面操作，不切换到 MCP 或 Director Agent 执行同一生产任务。
 
 续做或生产 H3 分集前，按目标 Shots 的 `scene_id`/`source_scene_id` 汇总实际使用场景，并逐一核对场景图闭环：正式 `asset_plan` 与 `asset_cards`、真实成功归档的图片媒体、`director.assets` 的 storageKey/sha256、对应场景 Subject 的图片绑定、Shot 的 `subject_usages`。场景文字登记或 `type=scene` 实体节点都不算场景图；单独生成了图、但没有绑定到 Shot 的图也不会进入 H3。默认先复用有效的正式场景图；缺失时补建场景资产并在用户授权后生成，再重编并应用受影响的 Clip。只有用户明确选择纯文字环境描述时才跳过图像锚点。场景图提示词要保留正式场景登记中的空间关系与稳定固定陈设，排除人物和临时剧情道具。加入新图不会授权重生成已有视频。

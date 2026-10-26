@@ -61,7 +61,10 @@ function sound(source: Row) {
         const start = windows.get(utterance.start?.shotId), end = windows.get(utterance.end?.shotId);
         return { id: utterance.id, text: utterance.text, timeline: start?.timelineId, start: Number(start?.startFrame) + Number(utterance.start?.localFrame), duration: Number(end?.startFrame) + Number(utterance.end?.localFrame) - Number(start?.startFrame) - Number(utterance.start?.localFrame) };
     });
-    return order.sort((a, b) => String(a.timeline).localeCompare(String(b.timeline)) || a.start - b.start).map(({ start, ...value }) => value);
+    // Absolute start positions can move when a Shot is inserted before an utterance.
+    // Compare the stable utterance identities, timeline and duration; sorting by the
+    // shifted start and then discarding it can reorder otherwise unchanged entries.
+    return order.sort((a, b) => String(a.id).localeCompare(String(b.id))).map(({ start: _start, ...value }) => value);
 }
 function sliceUsages(shot: Row, start: number, end: number) {
     return rows(shot.subject_usages).flatMap(usage => {

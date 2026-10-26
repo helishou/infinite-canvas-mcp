@@ -56,6 +56,10 @@ export function getAntThemeConfig(dark: boolean): ThemeConfig {
             colorBorderSecondary: dark ? "#3c4436" : "#dddfd4",
             colorPrimary: color.primary,
             colorInfo: color.primary,
+            // antd 默认 error 色在深色底（#272b25）上只有 3.4:1，删除类文字按钮读不清。
+            // antd 6 没有独立的 colorErrorText，文字色由 colorError 派生（约压暗到四分之三亮度），
+            // 所以这里给的值要比目标色再亮一档；断言见 app-theme.test.ts。
+            colorError: dark ? "#ff8a87" : "#cf1322",
             colorLink: color.primary,
             colorLinkHover: color.primaryHover,
             colorLinkActive: color.primary,

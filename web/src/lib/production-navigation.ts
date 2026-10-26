@@ -6,8 +6,11 @@ export function productionTarget(owner: ProductionPresentation["owner"]): Produc
     return owner.id;
 }
 
-export function productionPresentationPath(presentation: ProductionPresentation) {
+export function productionPresentationPath(presentation: ProductionPresentation, mountedCanvas?: { id: string; path: string }) {
     const canvasId = presentation.canvasId || (presentation.owner.kind === "canvas" ? presentation.owner.id : "");
+    // An already mounted canvas receives a focus event; routing through /canvas
+    // would tear down its production workbench before the entry redirect returns.
+    if (canvasId && mountedCanvas?.id === canvasId) return mountedCanvas.path;
     const isCanvasProduction = Boolean(canvasId);
     if (isCanvasProduction) {
         const query = new URLSearchParams();

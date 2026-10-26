@@ -229,3 +229,50 @@ describe("runninghub-workflow-tail API 格式", () => {
         assert.equal(saveId, "800");
     });
 });
+
+describe("runninghub-workflow-tail API 多输出节点", () => {
+    /** 真实案例（终极资产图）：3 个输出节点，只有一个在链路末端。 */
+    function multiSink() {
+        return {
+            "718": { class_type: "VAEDecode", inputs: { samples: ["772", 0] } },
+            "772": { class_type: "KSampler", inputs: { seed: 1 } },
+            "380": { class_type: "PreviewImage", inputs: { images: ["718", 0] } },
+            "445": { class_type: "PreviewImage", inputs: { images: ["718", 0] } },
+            "684": { class_type: "ImageComposite", inputs: { a: ["718", 0] } },
+            "743": { class_type: "SaveImage", inputs: { images: ["684", 0] } },
+        } as Record<string, any>;
+    }
+
+    it("多个输出节点时接拓扑最深的那条，而不是先遇到的第一个", () => {
+        const result = appendRunningHubApiTail(multiSink());
+        const graph = result.graph as any;
+        const [playId] = result.nodeIds!;
+        assert.deepEqual(graph[playId].inputs.any_input, ["743", 0], "应该接 SaveImage 743，不是 PreviewImage 380");
+    });
+
+    it("深度比 id 更重要：更深的那条即使 id 更小也优先", () => {
+        const graph = {
+            "748": { class_type: "VAEDecode", inputs: { samples: ["772", 0] } },
+            "772": { class_type: "KSampler", inputs: { seed: 1 } },
+            "684": { class_type: "ImageComposite", inputs: { a: ["748", 0] } },
+            "380": { class_type: "PreviewImage", inputs: { images: ["684", 0] } },
+            "743": { class_type: "SaveImage", inputs: { images: ["748", 0] } },
+        } as Record<string, any>;
+        const result = appendRunningHubApiTail(graph);
+        const out = result.graph as any;
+        assert.deepEqual(out[result.nodeIds![0]].inputs.any_input, ["380", 0], "380 在链路末端，743 在它上游");
+    });
+
+    it("有视频输出时接视频那条（和 UI 版一致）", () => {
+        const graph = {
+            "748": { class_type: "VAEDecode", inputs: { samples: ["772", 0] } },
+            "772": { class_type: "KSampler", inputs: { seed: 1 } },
+            "743": { class_type: "SaveImage", inputs: { images: ["748", 0] } },
+            "900": { class_type: "SaveVideo", inputs: { video: ["748", 0] } },
+        } as Record<string, any>;
+        const result = appendRunningHubApiTail(graph);
+        const out = result.graph as any;
+        assert.deepEqual(out[result.nodeIds![0]].inputs.any_input, ["900", 0]);
+        assert.equal(result.kind, "video");
+    });
+});

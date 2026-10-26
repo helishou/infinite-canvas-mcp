@@ -40,6 +40,12 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
         sources.noiseSeedMode = legacySeedSource;
     }
     const params = normalizeH3Params({ ...values, ...override }, false);
+    // Provider routing belongs to the selected video model. Native H3 always
+    // uses local ComfyUI, including Clips with an old saved RH/auto preference.
+    if (params.selectedVideoModelEnabled !== true) {
+        params.minimaxEngine = 'local';
+        sources.minimaxEngine = 'builtIn';
+    }
     delete params.videoSteps;
     const requestedMode = override.mode ?? override.taskMode ?? params.mode ?? params.taskMode;
     params.mode = params.taskMode = canonicalH3TaskMode(requestedMode);

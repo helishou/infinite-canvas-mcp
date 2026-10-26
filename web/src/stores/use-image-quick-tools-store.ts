@@ -22,7 +22,7 @@ export const useImageQuickToolsStore = create<ImageQuickToolsStore>((set) => ({
     setConfig: (config) => {
         set({ ids: config.ids, showLabels: config.showLabels });
         if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => { saveTimer = null; void saveSettings({ imageQuickTools: { ...config, version: 2 } }); }, 500);
+        saveTimer = setTimeout(() => { saveTimer = null; void saveSettings({ imageQuickTools: { ...config, version: 3 } }); }, 500);
     },
 }));
 
@@ -32,10 +32,11 @@ async function hydrate() {
         const data = settings.imageQuickTools as Partial<ImageQuickToolsConfig> & { version?: number };
         const savedIds = Array.isArray(data.ids) ? normalizeImageQuickToolIds(data.ids) : defaultImageQuickToolIds;
         const version = Number(data.version) || 1;
-        const ids = version < 2 ? normalizeImageQuickToolIds([...savedIds, "autoLevels"]) : savedIds;
+        const migratedIds = version < 2 ? normalizeImageQuickToolIds([...savedIds, "autoLevels"]) : savedIds;
+        const ids = version < 3 ? normalizeImageQuickToolIds([...migratedIds, "stitch"]) : migratedIds;
         const showLabels = data.showLabels === true;
         useImageQuickToolsStore.setState({ ids, showLabels });
-        if (version < 2) void saveSettings({ imageQuickTools: { ids, showLabels, version: 2 } });
+        if (version < 3) void saveSettings({ imageQuickTools: { ids, showLabels, version: 3 } });
     }
 }
 

@@ -151,7 +151,7 @@ export type CanvasProductionContinuationBoundaries = { nodeId: string; boundarie
 export type CanvasProductionEditing = {
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
-    replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean }>;
+    replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean; segment?: Record<string, unknown> }>;
     setContinuationBoundary: (input: CanvasProductionContinuationBoundary) => Promise<{ sourceSaved: boolean }>;
     setContinuationBoundaries: (input: CanvasProductionContinuationBoundaries) => Promise<{ sourceSaved: boolean }>;
 };

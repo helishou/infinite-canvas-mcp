@@ -5,6 +5,16 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- For a production-bound H3 Clip, drag two archived Quick Storyboard images into its storyboard slots. Verify the production Shots save and preview those exact keyframes, the H3 track reflects the same order and bindings, and the switch between composite and individual submission leaves both slots intact. Compile the Clip and confirm each Shot description cites the matching Picture number in H3 submission order; archived images without image-node owners are accepted, while unarchived or missing media are rejected.
+
+- With the selected video model disabled, native H3 always runs on local ComfyUI and displays only the local execution location. Old RH/auto values in Clips or defaults must not make native runs read RH configuration. Verify local child tasks for current-and-following Clips, and that enabling a selected model restores local, RH, and hybrid choices.
+
+- When routing or input preparation fails before an H3 child task is created, the current Clip shows the specific failure while keeping its previous output. Unstarted Clips keep their existing status. Verify missing RH workflow settings, cancellation, concurrent Clips, and first-pass confirmation recovery.
+
+- H3 current-Clip and current-and-following runs keep the current workbench and canvas mounted, following targets within that canvas. Verify later Clips, task failures, and reconnection recovery without entry-route navigation or canvas remounts; manual follow pause and navigation to another canvas should still work.
+
+- The workflows page is back to three tabs (Workflow library / Local models / Runtime environment) with bilingual labels, and the tab bar shows a ComfyUI connection badge on the right. The status is checked when the page opens, when switching to Runtime environment, and when the badge is clicked — there is no polling. Verify the connected, offline and unknown states, that hovering shows the ComfyUI address or failure reason, the messaging when Backend or ComfyUI is offline, and light and dark themes.
+
 - RunningHub failed-task history now displays available platform diagnostics: node name/ID, exception type, node details, and remote task ID, with the full error wrapping onto multiple lines. Verify validation errors, missing-input errors, generic errors without node details, and readability in light and dark themes.
 
 - Storage: new large task inputs and canvas operation history use lossless compression, while small and legacy records remain readable. The Backend `compress-snapshot-json` maintenance command previews by default; `--apply` converts legacy records after backup and verifies the original JSON bytes, while `--backup` reuses a snapshot only if it contains every candidate's original text. Use `--vacuum` while idle to reclaim free database pages. Verify idempotent reruns, no writes on a backup mismatch, transaction rollback on failure, and task filtering, model usage, canvas synchronization, history recovery and operation replay after restart. Media and history retention remain unchanged.
@@ -1175,7 +1185,13 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - 对有多张图的角色节点调用 `canvas_image_input_manifest`，确认返回实际参考顺序与 storageKey，并提示未明确选择的角色图；提供 `characterImageKeys` 后再提交图片生成，输入清单应与生成快照一致。
 - 用 `canvas_replace_storyboard_slots` 一次替换有序分镜组的指定槽位及参考资产，确认只改指定槽位、画幅校验生效，旧图片与结果历史仍可读取。
-- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值，旧 storageKey 不匹配时拒绝写入。
+- 用 `canvas_get_storyboard_slots` 读取槽位：省略 `groupId` 时只列项目内分镜组摘要，给定 `groupId` 时返回逐槽位节点、画幅与已登记资产；打开一个 `groupSlots` 为空但成员归组或源视频镜头齐全的组，确认按成员归属/源视频分镜镜头重建槽位并返回 `STORYBOARD_SLOTS_REBUILT`，返回体不包含节点 metadata 大字段。
+- 省略 `expectedAspectRatio`、`expectedNodeId`、`assetIds` 各替换一次：确认画幅取组内首个有效槽位、CAS 用服务端当前槽位、资产自动复用或登记；再传 `dryRun` 预检，确认返回 `ready`、`blocked` 与 `applied: false` 且 revision 不变。连续两次只替换不换图的预检，确认第二次不重复登记资产。
+- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值；省略 `expectedStorageKey` 时按当前值替换，显式传入不匹配的旧 storageKey 时拒绝写入。
+- 用 `h3_get_clip_prompt`（`view: "storyboard"`）读取一个已有分镜的 Clip，确认返回逐镜 id、描述、切换方式与声景；对没有基线的老 Clip 确认返回 `established: false` 与全量写入模板。
+- 对已有基线的 Clip 只传 `shots: [{ id, description }]` 改一镜：确认其余镜头、开场描述、声景与配乐保持原值，回执 `changedShotIds` 只含该镜；再传不存在的 shot id，确认被拒绝并列出可用 id。
+- 对一个有镜头轨但没有结构化基线的老 Clip 只传一镜，确认返回 `STORYBOARD_BASELINE_PARTIAL` 而不是把其余镜头静默丢弃。
+- 对正式制作 Clip 用 `production_edit` 的 `replace_director_clip_storyboard` 传 `patch: true` 只改一镜的 `visual`，确认其余镜头正文、Shot 顺序、`shotInputs` 与 Clip 分镜轨保持原值；再传不存在的 shot id，确认返回 `CLIP_SHOT_UNKNOWN`；同时传 `segment` 时确认返回 `CLIP_PATCH_SEGMENT_CONFLICT`；不带 `patch` 又省略 `segment` 时确认返回 `CLIP_SEGMENT_REQUIRED`。
 
 ## 角色资产与画布节点同步
 

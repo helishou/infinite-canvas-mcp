@@ -313,6 +313,41 @@ test("one production edit can register precise refreshes for multiple changed Cl
     assert.deepEqual((scopedApply as any).referenceSync.map((item: any) => item.targetId), ["CLIP_A"], "applying one scoped compilation does not reproject unrelated Clips");
 });
 
+test("shot-scoped refresh resolves the post-edit Clip mapping and does not trust stale Segment IDs", async (t) => {
+    const { service } = fixture(t);
+    const camera = { framing: "MS", movement: "static", attention_subject_ids: ["SUB_P"] };
+    const usages = [{ subjectId: "SUB_P", presentation: "visible", referencePurpose: ["identity"] }];
+    const source: any = { version: 2, prompt_assembly: { version: 2 }, brief: "Shot 身份刷新测试", fps_num: 24, fps_den: 1,
+        subject_registry: [{ id: "SUB_P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }],
+        character_registry: [{ id: "P", name: "角色" }], scene_registry: [{ id: "SC1", name: "场景" }], script_scenes: [{ id: "SCENE1", scene_id: "SC1", text: "测试。" }],
+        shots: ["SH1", "SH2", "SH3"].map((id, index) => ({ id, scene_id: "SC1", timeline_id: "main", story_order: index, duration_frames: 96, visual: "初始画面。", camera, subject_usages: usages, keyframes: [], utterance_refs: [] })),
+        segments: [{ id: "OLD_A", shot_ids: ["SH1"], mode: "T2VA" }, { id: "OLD_B", shot_ids: ["SH2"], mode: "T2VA" }, { id: "CLIP_C", shot_ids: ["SH3"], mode: "T2VA" }],
+        utterances: [], asset_plan: [], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
+    const director = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" }, source,
+        sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: Object.fromEntries(["SH1", "SH2", "SH3"].map(id => [id, { keyframePolicy: "none", assetIds: [] }])), boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    const seeded = await service.edit("episode", { operationId: "seed-shot-refresh", expectedRevision: service.get("episode").revision, ops: [{ type: "set_director_production", director }] });
+
+    const edited = await service.edit("episode", { operationId: "regroup-and-refresh-by-shot", expectedRevision: seeded.revision, ops: [
+        { type: "repartition_director_clips", shotIds: ["SH1", "SH2"], segments: [{ id: "NEW_AB", shot_ids: ["SH1", "SH2"], mode: "T2VA" }] },
+        { type: "patch_director_source", entity: "shot", id: "SH1", patch: { visual: "重分组后更新的画面。" } },
+        { type: "request_director_shot_refresh", shotIds: ["SH1", "SH2"] },
+    ] });
+
+    assert.deepEqual(edited.draft.director!.source.segments.map((segment: any) => segment.id), ["NEW_AB", "CLIP_C"]);
+    assert.deepEqual((edited as any).clipRefreshes.map((job: any) => job.segmentId), ["NEW_AB"], "the Backend resolves the current target mapping and refreshes a regrouped Clip exactly once");
+    const current = service.get("episode");
+    await assert.rejects(() => service.edit("episode", { operationId: "unknown-shot-refresh", expectedRevision: current.revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "SH1", patch: { visual: "不得部分写入。" } },
+        { type: "request_director_shot_refresh", shotIds: ["NO_SUCH_SHOT"] },
+    ] }), error => {
+        assert.ok(error instanceof ProductionValidationError);
+        assert.ok(error.diagnostics.some(item => item.code === "SHOT_REFRESH_TARGET_UNKNOWN"));
+        return true;
+    });
+    assert.equal(service.get("episode").revision, current.revision, "an invalid stable Shot target rolls back the whole edit");
+    assert.equal((service.get("episode").draft.director!.source.shots as any[]).find(shot => shot.id === "SH1")!.visual, "重分组后更新的画面。");
+});
+
 test("Backend recovery resumes prepared translations by their persisted operation identity", (t) => {
     const { db, service } = fixture(t);
     const request = { kind: "episode", id: "episode", expectedRevision: 3, targetIds: ["SEG1", "SEG2"] };

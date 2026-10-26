@@ -193,20 +193,29 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
             });
             keyframeAssetId = match?.[0] || `storyboard:${encodeURIComponent(bindingId)}`;
             keyframeBindings.push({ shotId: String(slot.id), assetId: keyframeAssetId, bindingId,
-                ...(binding.sourceNodeId ? { nodeId: String(binding.sourceNodeId) } : {}),
-                containerNodeId: input.nodeId,
+                ...(binding.sourceNodeId ? { nodeId: String(binding.sourceNodeId) } : { clearNodeId: true }),
                 ...(binding.storageKey ? { storageKey: String(binding.storageKey) } : {}),
                 ...(binding.label ? { label: String(binding.label) } : {}) });
             if (v2) {
+                // A quick-storyboard reference may be stored directly on this H3 smart node rather than
+                // on a separate image node. In that case the H3 node is the authoritative source for
+                // the specific referenceBindingId/storageKey being promoted to a formal Shot keyframe.
+                // Quick Storyboard references have no image-node owner. Keep the
+                // archived result bound by storageKey instead of fabricating the
+                // H3 container as the image's source node.
                 const nodeId = String(binding.sourceNodeId || "");
                 const frameId = slotFrames[0]?.frame.id || `KF:${slot.id}:storyboard`;
                 const previousFrame = slotFrames[0]?.frame || {};
                 const keyframe = { ...previousFrame, id: String(frameId), assetId: keyframeAssetId,
                     ...(nodeId && projectId ? { sourceNode: { projectId, nodeId } } : { sourceNode: undefined }),
-                    selection: { mode: "node_selection" }, anchor: "opening",
+                    selection: nodeId ? { mode: "node_selection" } : { mode: "selected_result", resultId: String(binding.storageKey || bindingId) }, anchor: "opening",
                     subjectIds: Array.isArray(previousFrame.subjectIds) ? previousFrame.subjectIds : [],
                     retain: Array.isArray(previousFrame.retain) ? previousFrame.retain : ["分镜图的画面构图"],
-                    exclude: Array.isArray(previousFrame.exclude) ? previousFrame.exclude : [], requiredForSubmission: true };
+                    exclude: Array.isArray(previousFrame.exclude) ? previousFrame.exclude : [],
+                    // A quick-storyboard image is already an archived production input.
+                    // It remains valid without an image-node owner; compilation resolves
+                    // the selected storageKey directly instead of requiring a fake node.
+                    requiredForSubmission: Boolean(binding.storageKey) };
                 next.keyframes = [...rows(next.keyframes).filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id))), keyframe];
             }
         } else if (v2 && slotFrames.length) {
@@ -370,7 +379,17 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!clip || typeof projection?.targetId !== "string" || nextProjection.targetId && nextProjection.targetId !== projection.targetId) throw new Error("STORYBOARD_PROJECTION_MISMATCH");
         const editor = storyboardEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
-        return editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } }, clip);
+        const result = await editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } }, clip);
+        if (!result.sourceSaved) return result;
+        // The production edit reprojects its authoritative Shot data to the H3 canvas.
+        // Return that committed Clip so the caller can merge local-only Quick Storyboard
+        // fields without replaying an older H3 projection over the new track.
+        try {
+            const { project: latestProject } = await fetchBackendProject(projectId);
+            const latestNode = rows(latestProject.nodes).find(node => String(node.id || "") === input.nodeId);
+            const latestSegment = rows(latestNode?.metadata?.segments).find(segment => String(segment.id || "") === input.segmentId);
+            return latestSegment ? { ...result, segment: latestSegment } : result;
+        } catch { return result; }
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
         return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
     }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };

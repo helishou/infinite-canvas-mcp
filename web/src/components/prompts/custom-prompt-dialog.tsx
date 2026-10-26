@@ -199,13 +199,13 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
                     <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={handleCoverSelect} />
                     {coverUrl ? (
                         <div className="relative inline-block">
-                            <img src={coverUrl} alt="" className="h-24 w-24 rounded-md border border-stone-200 object-cover dark:border-stone-700" />
+                            <img src={coverUrl} alt="" className="h-24 w-24 rounded-md border border-border object-cover " />
                             <Button
                                 type="text"
                                 size="small"
                                 danger
                                 icon={<X className="size-3.5" />}
-                                className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-stone-200 !bg-white !p-0 dark:!border-stone-700 dark:!bg-stone-900"
+                                className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-border !bg-white !p-0 dark:!bg-muted"
                                 aria-label={t("prompts.workspace.removeCover")}
                                 onClick={() => setCoverUrl("")}
                             />
@@ -227,13 +227,13 @@ export function CustomPromptDialog({ open, mode, initial, canvasNodes, onClose, 
                     <div className="flex flex-wrap gap-2">
                         {referenceUrls.map((url, index) => (
                             <div key={`${index}-${url.slice(0, 24)}`} className="relative">
-                                <img src={url} alt="" className="h-20 w-20 rounded-md border border-stone-200 object-cover dark:border-stone-700" />
+                                <img src={url} alt="" className="h-20 w-20 rounded-md border border-border object-cover " />
                                 <Button
                                     type="text"
                                     size="small"
                                     danger
                                     icon={<X className="size-3.5" />}
-                                    className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-stone-200 !bg-white !p-0 dark:!border-stone-700 dark:!bg-stone-900"
+                                    className="!absolute !-right-2 !-top-2 !h-6 !w-6 !min-w-0 !rounded-full !border !border-border !bg-white !p-0 dark:!bg-muted"
                                     aria-label={t("prompts.workspace.removeReference", { index: index + 1 })}
                                     onClick={() => removeReference(index)}
                                 />

@@ -43,10 +43,12 @@ function enabledImageBindings(value: unknown) {
 }
 
 function referenceBindingMatch(left: Record<string, any>, right: Record<string, any>) {
-    const leftId = String(left.id || ""), rightId = String(right.id || "");
+    const leftId = String(left.id || left.bindingId || ""), rightId = String(right.id || right.bindingId || "");
     if (leftId && rightId && leftId === rightId) return true;
+    const leftAssetId = String(left.assetId || ""), rightAssetId = String(right.assetId || "");
     const leftNodeId = String(left.sourceNodeId || ""), rightNodeId = String(right.sourceNodeId || "");
     const leftMedia = String(left.storageKey || left.url || ""), rightMedia = String(right.storageKey || right.url || "");
+    if (leftAssetId && rightAssetId && leftAssetId === rightAssetId && leftMedia && leftMedia === rightMedia) return true;
     return Boolean(leftNodeId && leftNodeId === rightNodeId && leftMedia && leftMedia === rightMedia);
 }
 
@@ -305,7 +307,13 @@ function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionDat
     const nodeId = String(asset?.nodeId || frame.sourceNode?.nodeId || "");
     const referenceNodeId = String(reference.nodeId || reference.sourceNodeId || "");
     const storageKey = String(asset?.storageKey || "");
-    return Boolean(nodeId && referenceNodeId === nodeId && (!storageKey || String(reference.storageKey || "") === storageKey));
+    const referenceStorageKey = String(reference.storageKey || "");
+    // A Quick Storyboard frame is an archived clip reference, not an image node.
+    // Match that direct media binding by storageKey instead of inventing an H3
+    // node source that has no corresponding active image.
+    if (storageKey && referenceStorageKey === storageKey) return true;
+    if (!nodeId) return false;
+    return Boolean(referenceNodeId === nodeId && (!storageKey || referenceStorageKey === storageKey));
 }
 function reconcileSubjectImageReferences(segment: Record<string, any>, director: NonNullable<EpisodeProductionData["director"]>, group: EpisodeProductionData["clipGroups"][number], compiledBindings?: unknown) {
     if (!isSubjectPromptAssembly(director.source)) return;
@@ -404,11 +412,15 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         const pictureBinding = pictureBindingFor(ref, subjectId);
         const pictureBindingId = String(pictureBinding?.id || "") || undefined;
         const picturePurpose = Array.isArray(pictureBinding?.provides) ? pictureBinding.provides.map(String) : undefined;
+        const bindingId = String(ref.bindingId || stableId("binding", group.id, ref.label));
+        const assetId = !ref.nodeId && ref.bindingId
+            ? String(ref.bindingId)
+            : stableId("asset", String(ref.nodeId || ref.assetId || ref.bindingId || ""), ref.storageKey);
         return {
-            id: stableId("binding", group.id, ref.label), assetId: stableId("asset", ref.nodeId, ref.storageKey),
+            id: bindingId, assetId,
             label: ref.label, role: ref.role === "environment" ? "scene" : ref.role, tags: [], enabled: true, usage: "reference",
             mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
-            storageKey: ref.storageKey, sourceNodeId: ref.nodeId, order: index,
+            storageKey: ref.storageKey, ...(ref.nodeId ? { sourceNodeId: ref.nodeId } : {}), order: index,
             ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
             ...(pictureBindingId ? { pictureBindingId } : {}),
             ...(picturePurpose?.length ? { picturePurpose } : {}),
@@ -544,7 +556,7 @@ export function buildPublishedProductionClip(project: Record<string, any>, publi
 }
 
 /** Shot membership and timing remain projectable even while the prompt artifact is stale. */
-export function formalStoryboardTrack(data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], existing: Record<string, any>) {
+export function formalStoryboardTrack(data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], existing: Record<string, any>, referenceCatalog: unknown[] = []) {
     const director = data.director;
     if (!director) return undefined;
     const sourceShots = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object);
@@ -553,6 +565,27 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
     const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);
     if (!Number.isFinite(fps) || fps <= 0) return undefined;
     const refs = Array.isArray(existing.referenceBindings) ? existing.referenceBindings as Array<Record<string, any>> : [];
+    const catalogRefs = referenceCatalog.map(object).filter(reference => reference.role === "storyboard"
+        && (reference.mediaType === "image" || reference.type === "image") && reference.storageKey);
+    const projectedRefs = [...refs];
+    const bindingForArchivedKeyframe = (assetId: string, storageKey: string, sourceNodeId?: string) => {
+        const existingBinding = projectedRefs.find(reference => reference.role === "storyboard" && reference.mediaType === "image"
+            && (Boolean(assetId) && String(reference.assetId || "") === assetId || String(reference.storageKey || "") === storageKey
+                && (!sourceNodeId || !reference.sourceNodeId || String(reference.sourceNodeId) === sourceNodeId)));
+        if (existingBinding) return existingBinding;
+        const catalog = catalogRefs.find(reference => String(reference.storageKey || "") === storageKey
+            && (!sourceNodeId || !reference.sourceNodeId || String(reference.sourceNodeId) === sourceNodeId));
+        if (!catalog) return undefined;
+        const id = String(catalog.id || catalog.bindingId || "");
+        if (!id) return undefined;
+        const binding = {
+            ...catalog, id, assetId: String(catalog.assetId || id), label: String(catalog.label || catalog.name || id),
+            role: "storyboard", tags: Array.isArray(catalog.tags) ? catalog.tags : [], enabled: catalog.enabled !== false,
+            usage: String(catalog.usage || "reference"), mediaType: "image",
+        };
+        projectedRefs.push(binding);
+        return binding;
+    };
     const storyboardShots = (shots as Record<string, any>[]).map(shot => {
         const frames = Number(shot.duration_frames), start = Number(shot.start_frame), end = Number(shot.end_frame);
         const duration = Number.isFinite(frames) && frames > 0 ? frames / fps
@@ -562,13 +595,37 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
         const frame = subjectAssembly ? requiredSubjectStoryboardFrame(director, String(shot.id)) : undefined;
         const input = subjectAssembly ? undefined : director.shotInputs[shot.id];
         const asset = input?.keyframePolicy !== "none" && input?.keyframeAssetId ? director.assets[input.keyframeAssetId] : undefined;
-        const binding = subjectAssembly
-            ? frame && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
-            : asset && refs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && ref.storageKey === asset.storageKey
-                && (!asset.nodeId || !ref.sourceNodeId || ref.sourceNodeId === asset.nodeId));
+        const subjectFrameAsset = frame ? director.assets[String(frame.assetId || frame.id || "")] : undefined;
+        const priorTrackBindingId = String((Array.isArray(existing.storyboardShots) ? existing.storyboardShots : []).find(item => String(object(item).id || "") === String(shot.id))?.referenceBindingId
+            || subjectFrameAsset?.canvasReferenceBindingId || "");
+        const bindToExistingTrackSlot = () => {
+            if (!frame || !subjectFrameAsset?.storageKey || !priorTrackBindingId) return undefined;
+            const catalog = catalogRefs.find(ref => String(ref.storageKey || "") === String(subjectFrameAsset.storageKey));
+            const binding = {
+                ...(catalog || {}), id: priorTrackBindingId,
+                assetId: String(catalog?.assetId || frame.assetId || frame.id || priorTrackBindingId),
+                label: String(catalog?.label || catalog?.name || `Shot ${shot.id} storyboard`),
+                role: "storyboard", tags: Array.isArray(catalog?.tags) ? catalog.tags : [],
+                enabled: catalog?.enabled !== false, usage: String(catalog?.usage || "reference"), mediaType: "image",
+                storageKey: String(subjectFrameAsset.storageKey),
+                ...(frame.sourceNode?.nodeId ? { sourceNodeId: String(frame.sourceNode.nodeId) } : {}),
+            };
+            projectedRefs.push(binding);
+            return binding;
+        };
+        const frameBinding = frame
+            ? projectedRefs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
+                || (subjectFrameAsset?.storageKey ? bindingForArchivedKeyframe(String(frame.assetId || frame.id || ""), String(subjectFrameAsset.storageKey), subjectFrameAsset.nodeId) : undefined)
+                || bindToExistingTrackSlot()
+            : undefined;
+        const binding = subjectAssembly ? frameBinding
+            : asset?.storageKey ? bindingForArchivedKeyframe(String(input?.keyframeAssetId || ""), String(asset.storageKey), asset.nodeId) : undefined;
         return { id: String(shot.id), duration, ...(binding?.id ? { referenceBindingId: String(binding.id) } : {}) };
     });
-    return { storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0) };
+    return {
+        storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0),
+        ...(projectedRefs.length !== refs.length ? { referenceBindings: projectedRefs } : {}),
+    };
 }
 
 export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>, overwriteCompiledPrompt = false) {
@@ -846,8 +903,9 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         retainedProjectedSegments.set(nodeId, retained);
         if (existing) {
             if (!projected.segment) {
-                const storyboard = formalStoryboardTrack(data, group, existing);
+                const storyboard = formalStoryboardTrack(data, group, existing, Array.isArray(project.referenceCatalog) ? project.referenceCatalog : []);
                 if (storyboard && (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
+                    || canonicalProduction(existing.referenceBindings || []) !== canonicalProduction(storyboard.referenceBindings || existing.referenceBindings || [])
                     || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true)) {
                     operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: storyboard });
                 }
@@ -875,8 +933,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             if (!member || !unit) continue;
             const sceneId = unit.sceneId || layoutSceneForClip(data, group);
             const scene = sceneId && data.director ? productionSceneEntries(data.director.source).find(item => item.id === sceneId) : undefined;
-            const groupId = sceneId ? layout.units.find(item => item.id === `scene:${sceneId}`)?.members.find(item => item.role === "scene")?.nodeId : undefined;
-            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id } : {}), ...(groupId ? { groupId } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
+            const metadata = { ...createH3NodeMetadata(defaults, { segments: [segment] }), ...(sceneId ? { productionSceneId: sceneId, productionOwnerKind: layout.owner.kind, productionOwnerId: layout.owner.id } : {}), productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size };
             const operation = { type: "add_node", id: nodeId, nodeType: member.nodeType, title: `${scene?.title || sceneId || "场次"} · H3`, position: member.position, width: member.size.width, height: member.size.height, metadata } as Extract<CanvasOperation, { type: "add_node" }>;
             pendingNodes.set(nodeId, operation);
             operations.push(operation);

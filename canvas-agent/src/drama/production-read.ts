@@ -83,14 +83,19 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             production_shots: selected?.shots, clip_groups: selected?.clipGroups, keyframes: selected?.keyframes, keyframe_reviews: selected?.keyframeReviews, settings: selected?.settings };
         const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection && Object.hasOwn(rootSections, input.sourceSection) ? rootSections[input.sourceSection] : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
         const filtered = Array.isArray(section) && input.targetIds ? section.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id))) : section;
+        const page = Array.isArray(filtered) && input.pageSize ? paginate(filtered) : undefined;
+        const visibleShots = input.sourceSection === "shots" && subjectPromptV2(source)
+            ? (page?.items || (Array.isArray(filtered) ? filtered : [])) : [];
+        const targetClipMappings = visibleShots.map((shot: any) => ({ shotId: String(shot.id), segmentIds: (source?.segments || []).filter((segment: any) => Array.isArray(segment.shot_ids) && segment.shot_ids.map(String).includes(String(shot.id))).map((segment: any) => String(segment.id)) }));
+        const mappingReceipt = input.sourceSection === "shots" && subjectPromptV2(source) ? { targetClipMappings } : {};
         if (input.chunkBytes) {
             const value = Array.isArray(filtered) ? (filtered.length === 1 ? filtered[0] : undefined) : filtered;
             if (value === undefined) throw new Error("分块读取必须选定一个源稿对象");
-            return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, chunk: chunk(JSON.stringify(value)) };
+            return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...mappingReceipt, chunk: chunk(JSON.stringify(value)) };
         }
         return { ...header, snapshot: input.snapshot, engine: d?.engine, sourceHash: d?.sourceHash,
             ...(input.sourceSection === "context" ? { omittedSourceSections: ["script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
-            ...(Array.isArray(filtered) && input.pageSize ? { source: paginate(filtered) } : { source: filtered }) };
+            ...mappingReceipt, source: page || filtered };
     }
     if (input.view === "artifacts" || input.view === "artifact_index") {
         if (input.chunkBytes) {

@@ -56,11 +56,11 @@ export function WorkflowLibraryList({
     }
 
     return (
-        <div className="min-h-0 flex-1 divide-y divide-stone-200 overflow-y-auto dark:divide-stone-700">
+        <div className="min-h-0 flex-1 divide-y divide-border overflow-y-auto dark:divide-border">
             {items.map((item) => (
                 <div
                     key={item.id}
-                    className={`cursor-pointer px-3 py-2.5 transition hover:bg-stone-50 dark:hover:bg-stone-800 ${selectedId === item.id ? "bg-stone-100 dark:bg-stone-800" : ""}`}
+                    className={`cursor-pointer px-3 py-2.5 transition hover:bg-muted/60 dark:hover:bg-muted ${selectedId === item.id ? "bg-muted" : ""}`}
                     onClick={() => {
                         if (editingId !== item.id) onSelect(item);
                     }}
@@ -102,7 +102,7 @@ export function WorkflowLibraryList({
                                         {item.title}
                                     </p>
                                 )}
-                                {item.meta ? <p className="mt-0.5 truncate text-xs text-stone-500">{item.meta}</p> : null}
+                                {item.meta ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{item.meta}</p> : null}
                             </div>
                         </div>
                         {(actions?.(item) || []).map((action) => (
@@ -110,7 +110,7 @@ export function WorkflowLibraryList({
                                 <button
                                     type="button"
                                     aria-label={action.title}
-                                    className="flex size-6 shrink-0 items-center justify-center rounded text-stone-400 hover:bg-stone-100 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-stone-800"
+                                    className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-muted"
                                     disabled={action.busy}
                                     onClick={(event) => { event.stopPropagation(); action.onSelect(item); }}
                                 >

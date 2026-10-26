@@ -195,7 +195,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
         }
     };
 
-    const labelClass = "text-xs text-stone-500";
+    const labelClass = "text-xs text-muted-foreground";
     const imageUrlOf = (image: { url?: string; storageKey?: string }) => image.url || (image.storageKey ? backendMediaUrl(image.storageKey) : "");
 
     return <Modal open={open} onCancel={onCancel} footer={null} width={760} destroyOnHidden title={t("director.crud.editCanvasAsset")}>
@@ -212,7 +212,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                             value={voiceName || voiceUrl}
                             onChange={event => { setVoiceName(event.target.value); setVoiceAssetId(""); }}
                             placeholder={t("canvas.character.editVoicePlaceholder")}
-                            addonAfter={<button type="button" className="text-stone-500 hover:text-stone-700" onClick={() => voiceInputRef.current?.click()}><UploadIcon className="size-3.5" /></button>}
+                            addonAfter={<button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => voiceInputRef.current?.click()}><UploadIcon className="size-3.5" /></button>}
                         />
                         {voiceSource ? <Button icon={<X className="size-3.5" />} onClick={() => { setVoiceUrl(""); setVoiceName(""); setVoiceDescription(""); setVoiceStorageKey(""); setVoiceAssetId(""); }} /> : null}
                     </div>
@@ -245,7 +245,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                     </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {images.map((image, idx) => <div key={`${image.storageKey || image.url}:${idx}`} className="relative rounded-md border border-stone-200 p-2 dark:border-stone-700">
+                    {images.map((image, idx) => <div key={`${image.storageKey || image.url}:${idx}`} className="relative rounded-md border border-border p-2 ">
                         <MediaImage src={imageUrlOf(image)} alt={image.outfit || image.name} name={image.outfit || image.name} className="!h-24 !w-full !rounded !object-cover" />
                         <div className="mt-1 space-y-1">
                             <Input size="small" value={image.outfit} onChange={event => updateImage(idx, { outfit: event.target.value })} placeholder={t("assets.character.outfitPlaceholder")} />
@@ -267,7 +267,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                         </div>
                     </div>)}
                 </div>
-                {images.length === 0 && <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-400 dark:border-stone-700">{t("director.crud.noImages")}</div>}
+                {images.length === 0 && <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-border text-xs text-muted-foreground ">{t("director.crud.noImages")}</div>}
             </div>}
 
             {(nodeType === "scene" || nodeType === "prop") && <div className="space-y-2">
@@ -281,10 +281,10 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                 {imageProjectedFromSubjectBinding && <p className="text-xs text-muted-foreground">{t("director.crud.projectedEntityImageHint")}</p>}
                 {(() => {
                     const image = nodeType === "scene" ? sceneImage : propImage;
-                    if (!image) return <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-stone-300 text-xs text-stone-400 dark:border-stone-700">{t("director.crud.noImage")}</div>;
-                    return <div className="relative overflow-hidden rounded-lg border border-stone-200 dark:border-stone-700">
+                    if (!image) return <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-border text-xs text-muted-foreground ">{t("director.crud.noImage")}</div>;
+                    return <div className="relative overflow-hidden rounded-lg border border-border">
                         <MediaImage src={imageUrlOf(image)} alt={image.name} name={image.name} className="!h-36 !w-full !object-contain" />
-                        <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white">{image.name}</span>
+                        <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[11px] text-white">{image.name}</span>
                     </div>;
                 })()}
             </div>}

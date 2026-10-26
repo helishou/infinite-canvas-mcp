@@ -168,7 +168,7 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
         const status = readiness?.targets.find(item => item.id === `${kind === "shot" ? "frame" : kind}:${id}`)?.status;
         return <div key={`${kind}:${id}`} className="flex min-w-0 items-center gap-1 py-1" data-production-directory-target={`${kind}:${id}`}>
             <button type="button" className="min-w-0 flex-1 truncate rounded px-2 py-1 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10" aria-current={query.get("target") === `${kind}:${id}` ? "true" : undefined} onClick={() => select(workspace, kind, id)}>{title}</button>
-            {status && <span className="text-[10px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
+            {status && <span className="text-[11px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
             {prepareId && <Button size="small" type="text" disabled={busy} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
             {kind === "segment" && <Button size="small" type="text" danger disabled={busy || !canvasProject} onClick={() => confirmClipDelete(id, title)}>{t("productionCanvas.deleteClip")}</Button>}
             {!prepareId && kind !== "scene" && <Button size="small" type="text" icon={<Pencil className="size-3" />} aria-label={t("productionCanvas.editNamed", { name: title })} onClick={() => select(workspace, kind, id, true)} />}
@@ -191,7 +191,7 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
             <summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.archivedScenes")}</summary>
             {archives.filter(archive => !filter.trim() || `${archive.sceneId} ${archive.sceneTitle}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())).map(archive => <div key={archive.archiveId} className="flex min-w-0 items-center gap-1 py-1 text-xs">
                 <span className="min-w-0 flex-1 truncate px-2" title={archive.sceneId}>{archive.sceneTitle}</span>
-                <span className="text-[10px] opacity-60">{t("productionCanvas.archiveCounts", { shots: archive.shotCount, clips: archive.clipCount, expires: new Date(archive.expiresAt).toLocaleString() })}</span>
+                <span className="text-[11px] opacity-60">{t("productionCanvas.archiveCounts", { shots: archive.shotCount, clips: archive.clipCount, expires: new Date(archive.expiresAt).toLocaleString() })}</span>
                 <Button size="small" type="text" disabled={busy || !canvasProject} onClick={() => confirmRestore(archive)}>{t("productionCanvas.restoreScene")}</Button>
             </div>)}
         </details>}

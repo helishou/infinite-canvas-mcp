@@ -102,6 +102,50 @@ type AssetStore = {
     cleanupImages: (extra?: unknown) => void;
 };
 
+/**
+ * A library item is identified by its source node when it has one. Backend list
+ * reads project shared sources canonically, but realtime writes can arrive under
+ * a legacy asset ID for the same node. Keep one client-side row for that source
+ * so an update cannot resurrect a duplicate card until reload.
+ */
+function assetSourceIdentity(asset: Asset): string | null {
+    const shared = asset.metadata?.sharedAssetSource as { dramaId?: string; sourceProjectId?: string; sourceNodeId?: string } | undefined;
+    if (shared?.dramaId && shared.sourceProjectId && shared.sourceNodeId) {
+        return `shared\0${shared.dramaId}\0${shared.sourceProjectId}\0${shared.sourceNodeId}\0${asset.kind}`;
+    }
+    const projectId = asset.metadata?.projectId;
+    const nodeId = asset.metadata?.nodeId;
+    if (asset.dramaId && typeof projectId === "string" && projectId && typeof nodeId === "string" && nodeId) {
+        return `canvas\0${asset.dramaId}\0${projectId}\0${nodeId}\0${asset.kind}`;
+    }
+    return null;
+}
+
+export function dedupeAssetSources(assets: Asset[]): Asset[] {
+    const result: Asset[] = [];
+    const indexBySource = new Map<string, number>();
+    for (const asset of assets) {
+        const identity = assetSourceIdentity(asset);
+        if (!identity) {
+            result.push(asset);
+            continue;
+        }
+        const existingIndex = indexBySource.get(identity);
+        if (existingIndex === undefined) {
+            indexBySource.set(identity, result.length);
+            result.push(asset);
+            continue;
+        }
+        const existing = result[existingIndex];
+        const shared = asset.metadata?.sharedAssetSource as { assetId?: string } | undefined;
+        const existingShared = existing.metadata?.sharedAssetSource as { assetId?: string } | undefined;
+        const assetIsCanonical = Boolean(shared?.assetId && shared.assetId === asset.id);
+        const existingIsCanonical = Boolean(existingShared?.assetId && existingShared.assetId === existing.id);
+        if (assetIsCanonical !== existingIsCanonical ? assetIsCanonical : asset.updatedAt > existing.updatedAt) result[existingIndex] = asset;
+    }
+    return result;
+}
+
 /** 同步素材到总后台。 */
 let knownAssetIds = new Set<string>();
 let knownFolderIds = new Set<string>();
@@ -288,7 +332,7 @@ async function hydrateAssetsFromBackend() {
         const remoteAssets = Array.isArray(response.assets) ? response.assets as unknown as Asset[] : [];
         const remoteFolders = Array.isArray(response.folders) ? response.folders as unknown as AssetFolder[] : [];
         // 任何来自后端的 composite 资产都要先做迁移，确保前端 store 不会有 composite
-        const migrated = migrateAssetsInPlace(remoteAssets);
+        const migrated = dedupeAssetSources(migrateAssetsInPlace(remoteAssets));
         knownAssetIds = new Set(migrated.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource).map((asset) => asset.id));
         knownFolderIds = new Set(remoteFolders.map((folder) => folder.id));
         useAssetStore.setState({ assets: migrated, folders: remoteFolders, hydrateError: "" });
@@ -355,7 +399,7 @@ export const useAssetStore = create<AssetStore>()((set, get) => ({
             },
             replaceAssets: (assets) => {
                 // 写入前先迁移：调用方如果传了 composite（如来自导入包或回放），由 store 兜底转换为 character
-                const migrated = migrateAssetsInPlace(assets);
+                const migrated = dedupeAssetSources(migrateAssetsInPlace(assets));
                 for (const asset of migrated.filter(asset => asset.dramaId || asset.metadata?.sharedAssetSource)) void saveLibraryAsset(asset).catch(error => useAssetStore.setState({ hydrateError: String(error) }));
                 set({ assets: [...migrated.filter(asset => !asset.dramaId && !asset.metadata?.sharedAssetSource), ...get().assets.filter(asset => asset.dramaId || asset.metadata?.sharedAssetSource)] });
                 scheduleAssetSync();
@@ -420,7 +464,7 @@ export { syncAssetsToBackend, migrateAssetsInPlace, isLegacyComposite };
 export function acceptLibraryAsset(asset: Asset) {
     if (asset.dramaId || asset.metadata?.sharedAssetSource) knownAssetIds.delete(asset.id);
     else knownAssetIds.add(asset.id);
-    useAssetStore.setState(state => ({ assets: [asset, ...state.assets.filter(item => item.id !== asset.id)] }));
+    useAssetStore.setState(state => ({ assets: dedupeAssetSources([asset, ...state.assets.filter(item => item.id !== asset.id)]) }));
 }
 export function libraryErrorText(error: unknown) {
     return error instanceof BackendApiError ? String(error.details.error || error.message) : error instanceof Error ? error.message : String(error);

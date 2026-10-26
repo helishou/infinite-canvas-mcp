@@ -23,10 +23,11 @@ import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import * as Y from "yjs";
 import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
+import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, textOperation, textTargetSchema, type CanvasTextTarget } from "./canvas/collaborative-text.js";
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory, migrateCanvasReceipts } from "./canvas/history-maintenance.js";
-import { captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, purgeOrphanedSharedAssets, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import { canonicalSharedAssetIds, captureAssetEdits, deleteDramaAsset, migrateDramaAssets, normalizeAssetInsertion, projectAsset, propagateAssetChanges, purgeOrphanedSharedAssets, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -177,6 +178,8 @@ export type WorkflowConfigRow = {
     name: string; title: string; backend: string; description: string; operation: string;
     fieldsJson: string; mediaInputsJson: string; miniCardsJson: string; updatedAt: string;
     runningHubProfileId: string; runTarget: string;
+    /** 输出节点选择的原始 JSON；空串表示从未配置过（此时前端会默认勾选链路末端的输出节点）。 */
+    outputNodesJson: string;
 };
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -418,6 +421,7 @@ export class BackendDatabase {
                 mini_cards_json TEXT NOT NULL DEFAULT '{}',
                 runninghub_profile_id TEXT NOT NULL DEFAULT '',
                 run_target TEXT NOT NULL DEFAULT 'local',
+                output_nodes_json TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
         `);
@@ -425,6 +429,10 @@ export class BackendDatabase {
         const workflowColumns = this.db.prepare("PRAGMA table_info(workflow_configs)").all() as Array<{ name: string }>;
         if (!workflowColumns.some((column) => column.name === "runninghub_profile_id")) {
             this.db.exec("ALTER TABLE workflow_configs ADD COLUMN runninghub_profile_id TEXT NOT NULL DEFAULT ''");
+        }
+        // 输出节点选择：空串 = 从未配置，'[]' = 用户显式清空。两者行为不同，不能合并成默认值。
+        if (!workflowColumns.some((column) => column.name === "output_nodes_json")) {
+            this.db.exec("ALTER TABLE workflow_configs ADD COLUMN output_nodes_json TEXT NOT NULL DEFAULT ''");
         }
         if (!workflowColumns.some((column) => column.name === "run_target")) {
             this.db.exec("ALTER TABLE workflow_configs ADD COLUMN run_target TEXT NOT NULL DEFAULT 'local'");
@@ -2093,7 +2101,7 @@ export class BackendDatabase {
         if (Object.keys(settings).some((key) => key === "id" || H3_RUNTIME_SEGMENT_FIELDS.includes(key as typeof H3_RUNTIME_SEGMENT_FIELDS[number]))) throw new Error("历史参数包含后台运行字段");
         const url = `/media/${encodeURIComponent(storageKey)}`;
         return { type: "update_h3_segment", nodeId, segmentId, patch: {
-            ...settings,
+            ...withH3ParameterEdits(segment, settings),
             result: url, resultStorageKey: storageKey, results: [{ url, storageKey, mimeType: String(output?.mimeType || "video/mp4") }],
             status: "success", progress: 1, runtimeTaskId: "", cacheFingerprint: "",
             firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "",
@@ -2222,11 +2230,14 @@ export class BackendDatabase {
             values.push(options.keyword.trim(), options.keyword.trim());
         }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-        const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM assets ${where}`).get(...values) as { count: number }).count);
         const page = Math.max(1, Math.floor(options.page || 1));
         const pageSize = Math.max(1, Math.floor(options.pageSize || 20));
         const offset = (page - 1) * pageSize;
-        const rows = this.db.prepare(`SELECT id, kind, title, metadata_json, tags_json, folder_id, drama_id, updated_at, length(COALESCE(json_extract(data_json, '$.content'), json_extract(data_json, '$.data.content'), '')) AS content_chars, (cover_url <> '') AS has_cover, COALESCE(json_extract(data_json, '$.storageKey'), json_extract(data_json, '$.assetRef.storageKey'), json_extract(data_json, '$.data.storageKey')) AS storage_key, COALESCE(json_extract(data_json, '$.mimeType'), json_extract(data_json, '$.assetRef.mimeType'), json_extract(data_json, '$.data.mimeType')) AS mime_type FROM assets ${where} ORDER BY updated_at DESC, id ASC LIMIT ? OFFSET ?`).all(...values, pageSize, offset) as Array<Record<string, unknown>>;
+        const allRows = this.db.prepare(`SELECT id, kind, title, metadata_json, tags_json, folder_id, drama_id, updated_at, created_at, length(COALESCE(json_extract(data_json, '$.content'), json_extract(data_json, '$.data.content'), '')) AS content_chars, (cover_url <> '') AS has_cover, COALESCE(json_extract(data_json, '$.storageKey'), json_extract(data_json, '$.assetRef.storageKey'), json_extract(data_json, '$.data.storageKey')) AS storage_key, COALESCE(json_extract(data_json, '$.mimeType'), json_extract(data_json, '$.assetRef.mimeType'), json_extract(data_json, '$.data.mimeType')) AS mime_type FROM assets ${where} ORDER BY updated_at DESC, id ASC`).all(...values) as Array<Record<string, unknown>>;
+        const canonicalIds = canonicalSharedAssetIds(this, allRows.map(row => ({ id: String(row.id), createdAt: String(row.created_at || ""), metadata: JSON.parse(String(row.metadata_json || "{}")) })));
+        const visibleRows = allRows.filter(row => canonicalIds.has(String(row.id)));
+        const total = visibleRows.length;
+        const rows = visibleRows.slice(offset, offset + pageSize);
         return { total, page, pageSize, items: rows.map(row => {
             const bound = JSON.parse(String(row.metadata_json || "{}"))?.sharedAssetSource;
             const asset = bound ? this.getAsset(String(row.id)) : null;
@@ -3124,10 +3135,35 @@ export class BackendDatabase {
         return Boolean(this.db.prepare("SELECT 1 FROM drama_projects WHERE folder_id = ?").get(id));
     }
 
-    deleteDramaProject(id: string): number {
+    listDramaCanvasIds(id: string): string[] {
+        const rows = this.db.prepare(`
+            SELECT canvas_id AS id FROM drama_episodes WHERE drama_id=? AND canvas_id IS NOT NULL
+            UNION SELECT shared_asset_canvas_id AS id FROM drama_projects WHERE folder_id=? AND shared_asset_canvas_id IS NOT NULL
+            UNION SELECT c.canvas_id AS id FROM drama_scene_canvases c JOIN drama_scene_instances s ON s.id=c.scene_id WHERE s.drama_id=?
+        `).all(id, id, id) as Array<{ id: string }>;
+        return rows.map((row) => String(row.id));
+    }
+
+    deleteDramaProject(id: string, freeCanvasIds: string[] = []): number {
         this.db.exec("BEGIN IMMEDIATE");
         try {
+            if (!this.isDramaProject(id)) {
+                this.db.exec("COMMIT");
+                return 0;
+            }
+            const requestedCanvasIds = [...new Set(freeCanvasIds.filter((canvasId) => typeof canvasId === "string" && canvasId.length > 0))];
+            for (const canvasId of requestedCanvasIds) {
+                const belongsToOtherDrama = this.db.prepare(`
+                    SELECT 1 FROM drama_episodes WHERE canvas_id=? AND drama_id<>?
+                    UNION SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=? AND folder_id<>?
+                    UNION SELECT 1 FROM drama_scene_canvases c JOIN drama_scene_instances s ON s.id=c.scene_id WHERE c.canvas_id=? AND s.drama_id<>?
+                `).get(canvasId, id, canvasId, id, canvasId, id);
+                if (belongsToOtherDrama) throw new Error(`画布属于其他剧目，不能随当前剧目删除: ${canvasId}`);
+            }
+            const uniqueCanvasIds = [...new Set([...this.listDramaCanvasIds(id), ...requestedCanvasIds])];
             const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
+            const deleteCanvas = this.db.prepare("DELETE FROM canvas_projects WHERE id=?");
+            for (const canvasId of uniqueCanvasIds) deleteCanvas.run(canvasId);
             this.db.exec("COMMIT");
             return deleted;
         } catch (error) {
@@ -3233,6 +3269,7 @@ export class BackendDatabase {
                 miniCardsJson: String(row.mini_cards_json || '{}'),
                 runningHubProfileId: String(row.runninghub_profile_id || ''),
                 runTarget: String(row.run_target || 'local'),
+                outputNodesJson: String(row.output_nodes_json ?? ''),
                 updatedAt: String(row.updated_at),
             };
         } catch { return null; }
@@ -3271,19 +3308,20 @@ export class BackendDatabase {
     upsertWorkflowConfig(name: string, config: {
         title?: string; backend?: string; description?: string; operation?: string;
         fieldsJson?: string; mediaInputsJson?: string; miniCardsJson?: string;
-        runningHubProfileId?: string; runTarget?: string;
+        runningHubProfileId?: string; runTarget?: string; outputNodesJson?: string;
     }): void {
         const now = new Date().toISOString();
         const existing = this.getWorkflowConfig(name);
         this.db.prepare(`
-            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, output_nodes_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 title = excluded.title, backend = excluded.backend, description = excluded.description,
                 operation = excluded.operation, fields_json = excluded.fields_json,
                 media_inputs_json = excluded.media_inputs_json, mini_cards_json = excluded.mini_cards_json,
                 runninghub_profile_id = excluded.runninghub_profile_id,
                 run_target = excluded.run_target,
+                output_nodes_json = excluded.output_nodes_json,
                 updated_at = excluded.updated_at
         `).run(
             name,
@@ -3296,6 +3334,7 @@ export class BackendDatabase {
             config.miniCardsJson ?? existing?.miniCardsJson ?? '{}',
             config.runningHubProfileId ?? existing?.runningHubProfileId ?? '',
             config.runTarget ?? existing?.runTarget ?? 'local',
+            config.outputNodesJson ?? existing?.outputNodesJson ?? '',
             now,
         );
     }
@@ -3325,7 +3364,9 @@ export class BackendDatabase {
         if (options.dramaId) { clauses.push("drama_id = ?"); values.push(options.dramaId); }
         const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
         const rows = this.db.prepare(`SELECT * FROM assets ${where} ORDER BY updated_at DESC`).all(...values) as Array<Record<string, unknown>>;
-        return rows.map(row => projectAsset(this, assetFromRow(row)));
+        const assets = rows.map(row => projectAsset(this, assetFromRow(row)));
+        const canonicalIds = canonicalSharedAssetIds(this, assets);
+        return assets.filter(asset => canonicalIds.has(asset.id));
     }
 
     getAsset(id: string): Asset | null {

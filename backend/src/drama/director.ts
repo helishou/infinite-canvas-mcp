@@ -10,6 +10,7 @@ import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-a
 import { ref2vaPromptDiagnostics, ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { assertImageReferenceCoverage } from "./image-inputs.js";
 import { productionCanvasContext } from "./production-canvas.js";
+import { isArchivedStoryboardKeyframeBinding } from "./storyboard-media.js";
 
 export function assertDirectorEngine(_engine: DirectorProduction["engine"]) {
     return resolveAchengEngine();
@@ -206,18 +207,22 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         }
         for (const ref of artifact.references) {
             const node = nodes.find(n => n.id === ref.nodeId);
+            const archivedStoryboardBinding = !ref.nodeId && Boolean(ref.assetId)
+                && isArchivedStoryboardKeyframeBinding({ director: d, nodes, targetId: artifact.targetId, assetId: String(ref.assetId), bindingId: ref.bindingId, storageKey: ref.storageKey, sha256: ref.sha256 });
             const meta = obj(node?.metadata);
             const boundStoryboardMedia = Boolean(node && String(node.type || "").startsWith("minimax-h3:")
                 && list(meta.segments).some(segment => list(segment.referenceBindings).some(binding => binding.enabled !== false
                     && ["storyboard", "keyframe"].includes(String(binding.role || "")) && String(binding.storageKey || "") === ref.storageKey)));
             const keys = node ? [...(node.type === "character" ? resolveCanvasCharacterImageReferences(node) : resolveCanvasImageReferenceNode(node)).map(r => r.storageKey), node.storageKey, meta.storageKey, meta.resultStorageKey,
                 ...(boundStoryboardMedia ? [ref.storageKey] : [])] : [];
-            if (!node || !keys.includes(ref.storageKey)) throw new Error(`参考不属于目标画布节点：${ref.label}`);
+            if ((!node || !keys.includes(ref.storageKey)) && !archivedStoryboardBinding) throw new Error(`参考不属于目标画布节点或正式分镜轨：${ref.label}`);
             const media = db.getMediaFile(ref.storageKey);
             if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
             const selectedCanvasStyleAnchor = ref.role === "style" && ref.nodeId === styleAnchorNodeId;
-            const registeredAssetBinding = Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256);
-            if (!selectedCanvasStyleAnchor && !registeredAssetBinding) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
+            const registeredAssetBinding = ref.assetId
+                ? d.assets[ref.assetId]?.storageKey === ref.storageKey && d.assets[ref.assetId]?.sha256 === ref.sha256
+                : Object.values(d.assets).some(a => a.nodeId === ref.nodeId && a.storageKey === ref.storageKey && a.sha256 === ref.sha256);
+            if (!selectedCanvasStyleAnchor && !registeredAssetBinding && !archivedStoryboardBinding) throw new Error(`参考媒体未就绪或缺少可验证归属：${ref.label}`);
         }
     }
 }

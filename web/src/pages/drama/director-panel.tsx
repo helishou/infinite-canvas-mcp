@@ -294,7 +294,7 @@ function CanvasAssetInfoCard({ item, busy, shared = false, onSave, onRemove, can
       const imageSource = image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "";
       return <div key={`${image.storageKey || image.url}:${index}`} className={`relative min-h-0 overflow-hidden rounded bg-background/40 ${item.images.length === 1 ? "col-span-2 row-span-2" : ""}`} title={image.label} aria-label={`${item.name}: ${image.label}`}>
         <MediaImage className="h-full w-full object-contain" src={imageSource} alt={`${item.name} ${image.label}`} />
-        {image.primary && <span className="absolute bottom-0.5 left-0.5 rounded bg-background/80 px-1 text-[9px] leading-4 text-foreground">{t("director.workspace.currentImage")}</span>}
+        {image.primary && <span className="absolute bottom-0.5 left-0.5 rounded bg-background/80 px-1 text-[11px] leading-4 text-foreground">{t("director.workspace.currentImage")}</span>}
       </div>;
     }) : <div className="col-span-2 row-span-2 flex items-center justify-center"><ImageIcon className="size-7 text-muted-foreground/50" /></div>}</div>
     <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
@@ -1389,7 +1389,7 @@ export function DirectorPanel({
         const id = String(shot.id), frame = productionOverviewMedia(production, canvasNodes, id).frame?.storageKey, selected = id === String(overviewShot.id);
         return <button key={id} type="button" aria-pressed={selected} aria-label={t("director.studio.openShot", { number: index + 1 })} onClick={() => setOverviewShotId(id)} className={`w-36 shrink-0 rounded-md border p-1 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary sm:w-40 ${selected ? "border-primary bg-card" : "border-transparent hover:bg-muted"}`}>
           <span className="flex aspect-video items-center justify-center overflow-hidden rounded-sm bg-muted/50">{frame && !overviewMediaErrors[frame] ? <img src={backendMediaUrl(frame)} alt="" className="h-full w-full object-contain" loading="lazy" onError={() => setOverviewMediaErrors(current => ({ ...current, [frame]: true }))} /> : <Film className="size-5 text-muted-foreground" />}</span>
-          <span className="flex items-start gap-2 px-1 py-2"><span className="pt-0.5 text-[10px] tabular-nums text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><span className="line-clamp-2 text-xs leading-5">{shotTitle(id)}</span></span>
+          <span className="flex items-start gap-2 px-1 py-2"><span className="pt-0.5 text-[11px] tabular-nums text-muted-foreground">{String(index + 1).padStart(2, "0")}</span><span className="line-clamp-2 text-xs leading-5">{shotTitle(id)}</span></span>
         </button>;
       })}
     </nav>

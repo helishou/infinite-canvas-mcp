@@ -43,14 +43,14 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
 
     return (
         <div className="space-y-3">
-            <section className="rounded-lg border border-stone-200 p-4 dark:border-stone-800">
+            <section className="rounded-lg border border-border p-4 ">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                         <div className="flex items-center gap-2 text-sm font-semibold">
                             <FolderOpen className="size-4" />
                             {t("config.localStorage.dataDir")}
                         </div>
-                        <div className="mt-1 text-xs text-stone-500">{t("config.localStorage.dataDirDescription")}</div>
+                        <div className="mt-1 text-xs text-muted-foreground">{t("config.localStorage.dataDirDescription")}</div>
                     </div>
                 </div>
                 <div className="mt-3">
@@ -70,15 +70,15 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
                             />
                         }
                     />
-                    <div className="mt-1.5 flex flex-wrap items-center gap-x-1 text-[11px] text-stone-400">
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-1 text-[11px] text-muted-foreground">
                         <span>{t("config.localStorage.dataDirEffective")}</span>
-                        <span className="font-mono text-stone-500 dark:text-stone-300">{effectiveDataDir || "—"}</span>
+                        <span className="font-mono text-muted-foreground dark:text-muted-foreground">{effectiveDataDir || "—"}</span>
                         {dataDirFollowsDefault && <span>{t("config.localStorage.dataDirFollowsDefault")}</span>}
                     </div>
-                    <div className="mt-1.5 text-[11px] text-stone-400">{t("config.localStorage.dataDirHint")}</div>
+                    <div className="mt-1.5 text-[11px] text-muted-foreground">{t("config.localStorage.dataDirHint")}</div>
                 </div>
             </section>
-            <section className="rounded-lg border border-stone-200 p-4 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">
+            <section className="rounded-lg border border-border p-4 text-sm text-muted-foreground dark:text-muted-foreground">
                 {t("config.localStorage.backendStorageDescription")}
             </section>
         </div>

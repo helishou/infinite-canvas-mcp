@@ -295,6 +295,54 @@ function nextFreeApiId(graph: Json, start: number): number {
 }
 
 /**
+ * 每个节点到根的**最长**路径长度，等价于 UI 格式里的 `order`。
+ * API 图没有 order，一张图常有好几个输出节点（多个 PreviewImage + 一个 SaveImage），
+ * 只有拓扑最深的那条才是「最后一个节点」。带环保护。
+ */
+function apiDepths(graph: Json): Map<string, number> {
+    const depths = new Map<string, number>();
+    const visiting = new Set<string>();
+    const depthOf = (id: string): number => {
+        const cached = depths.get(id);
+        if (cached !== undefined) return cached;
+        if (visiting.has(id)) return 0;
+        visiting.add(id);
+        let best = 0;
+        for (const value of Object.values(obj(obj(graph[id]).inputs))) {
+            const link = asApiLink(value);
+            if (!link || !Object.hasOwn(graph, link[0])) continue;
+            best = Math.max(best, depthOf(link[0]) + 1);
+        }
+        visiting.delete(id);
+        depths.set(id, best);
+        return best;
+    };
+    for (const id of Object.keys(graph)) depthOf(id);
+    return depths;
+}
+
+/** 同深度时的次序：id 数值大的更靠后，非数字 id 按字符串比。 */
+function laterSink(a: { id: string }, b: { id: string }): number {
+    const left = Number(a.id);
+    const right = Number(b.id);
+    if (Number.isFinite(left) && Number.isFinite(right)) return right - left;
+    return b.id.localeCompare(a.id);
+}
+
+/**
+ * 选收尾挂哪个输出节点：有视频输出就接视频（和 UI 版一致，用户明确要求），
+ * 然后在候选里取**拓扑最深**的那条；只有深度并列时才比 id 大小。
+ */
+function pickLastSink<T extends { id: string; kind: "image" | "video" }>(candidates: T[], depths: Map<string, number>): T | undefined {
+    if (!candidates.length) return undefined;
+    const videos = candidates.filter((item) => item.kind === "video");
+    const pool = videos.length ? videos : candidates;
+    const deepest = Math.max(...pool.map((item) => depths.get(item.id) ?? 0));
+    const top = pool.filter((item) => (depths.get(item.id) ?? 0) === deepest);
+    return [...top].sort(laterSink)[0];
+}
+
+/**
  * 给 API 格式工作流补上云端收尾节点。
  *
  * API 图不保存输出槽信息，但输出节点本身是有输出的 —— ComfyUI 原生 `SaveImage` 就是
@@ -324,7 +372,7 @@ export function appendRunningHubApiTail(graph: Json, options: TailOptions = {}):
         if (!API_SINK_INPUT_KEYS.some((name) => asApiLink(inputs[name]))) continue;
         picked.push({ id, kind });
     }
-    const sink = picked.find((item) => item.kind === "video") || picked[0];
+    const sink = pickLastSink(picked, apiDepths(source));
     if (!sink) return { graph: source, added: false, reason: "no-sink" };
 
     const settings = { ...DEFAULTS, ...options };

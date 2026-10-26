@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Input, Modal, Radio, Tag } from "antd";
-import { ArrowUpRight, Clapperboard, Plus, Search } from "lucide-react";
+import { ArrowUpRight, Clapperboard, Plus, Search, Trash2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
@@ -166,6 +166,8 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
 }
 
 function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; episodes: DramaEpisode[] | undefined; onOpen: () => void; t: import("i18next").TFunction }) {
+    const deleteDramaProject = useCanvasStore((state) => state.deleteDramaProject);
+    const { modal, message } = App.useApp();
     const [coverUrl, setCoverUrl] = useState("");
     useEffect(() => {
         let disposed = false;
@@ -175,7 +177,7 @@ function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; epis
         return () => { disposed = true; };
     }, [folder.coverStorageKey]);
     const boundCanvases = episodes?.filter((episode) => episode.canvasId).length;
-    return <button type="button" className="group flex h-full flex-col overflow-hidden rounded-xl border border-border bg-card text-left transition-colors hover:border-primary/40 focus-visible:outline-primary" onClick={onOpen}>
+    return <div role="button" tabIndex={0} className="group flex h-full flex-col overflow-hidden rounded-xl border border-border bg-card text-left transition-colors hover:border-primary/40 focus-visible:outline-primary" onClick={onOpen}>
         {coverUrl ? (
             <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-border bg-muted/50">
                 <img src={coverUrl} alt={folder.name} className="h-full w-full object-cover" loading="lazy" />
@@ -199,8 +201,11 @@ function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; epis
             {(folder.tags || []).length ? <div className="mt-4 flex gap-1.5 overflow-hidden">{(folder.tags || []).slice(0, 3).map((tag) => <Tag key={tag} className="m-0 max-w-28 truncate border-border bg-transparent text-xs text-muted-foreground">{tag}</Tag>)}</div> : null}
             <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
                 <span>{episodes ? t("drama.boundCanvasCount", { count: boundCanvases }) : t("projects.episodesUnavailable")}</span>
-                <span>{t("drama.enterProject")}</span>
+                <span className="flex items-center gap-3">
+                    <button type="button" className="text-red-500 hover:text-red-600" onClick={(event) => { event.stopPropagation(); modal.confirm({ title: t("drama.deleteProject"), content: t("drama.deleteProjectDescription", { name: folder.name }), okText: t("drama.deleteProjectConfirm"), okType: "danger", cancelText: t("common.cancel"), onOk: async () => { try { await deleteDramaProject(folder.id); message.success(t("drama.deleted")); } catch (error) { message.error(String(error)); } } }); }}> <Trash2 className="inline size-3.5" /> {t("drama.deleteProject")}</button>
+                    <span>{t("drama.enterProject")}</span>
+                </span>
             </div>
         </div>
-    </button>;
+    </div>;
 }

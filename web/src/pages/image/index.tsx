@@ -712,7 +712,7 @@ export default function ImagePage() {
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative h-32 w-24 shrink-0 overflow-hidden rounded-md border border-border sm:h-28 sm:w-20">
                                             <img src={item.dataUrl} alt={item.name} className="h-20 w-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
+                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-white">{imageReferenceLabel(index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button
                                                 type="button"

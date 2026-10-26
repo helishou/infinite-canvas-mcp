@@ -103,14 +103,20 @@ test("script scene occurrences do not become reusable scene asset nodes without 
     assert.deepEqual(entities.filter(entity => entity.kind === "scene").map(entity => entity.entityId), ["SC_LUWU", "SHARED_SCENE"]);
 });
 
-test("visible Scene Subjects use an environment default while context usages require explicit pictures", () => {
+test("Scene environment defaults serve visible and state-context usages while other context usages require explicit pictures", () => {
     const subject = { id: "SUB_SCENE", kind: "scene", entityRef: { kind: "scene", id: "SCENE" }, pictureBindings: [
         { id: "SCENE_ENV", provides: ["environment"], defaultFor: ["environment"], applicableState: {} },
     ] };
     assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "visible", referencePurpose: ["environment"] }).bindingIds, ["SCENE_ENV"]);
     assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "visible", referencePurpose: ["identity"] }).bindingIds, []);
-    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"] }).bindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"] }).bindingIds, ["SCENE_ENV"]);
     assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"], pictureBindingIds: ["SCENE_ENV"] }).bindingIds, ["SCENE_ENV"]);
+    assert.deepEqual(resolveSubjectPictureBindingIds(subject, { subjectId: "SUB_SCENE", presentation: "state_context", referencePurpose: ["environment"], pictureBindingMode: "explicit" }).bindingIds, []);
+    const character = { id: "SUB_CHAR", kind: "character", entityRef: { kind: "character", id: "CHAR" }, pictureBindings: [
+        { id: "CHAR_IMG", provides: ["identity"], defaultFor: ["identity"], applicableState: {} },
+    ] };
+    assert.deepEqual(resolveSubjectPictureBindingIds(character, { subjectId: "SUB_CHAR", presentation: "state_context", referencePurpose: ["identity"] }).bindingIds, []);
+    assert.deepEqual(resolveSubjectPictureBindingIds(character, { subjectId: "SUB_CHAR", presentation: "visible", referencePurpose: ["identity"] }).bindingIds, ["CHAR_IMG"]);
 });
 
 test("environment and asset-card patches update compiler source without changing script or asset plans", () => {

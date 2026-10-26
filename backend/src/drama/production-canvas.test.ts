@@ -340,6 +340,33 @@ test("episode asset registration creates an identity-bound shared reference and 
     assert.ok(f.db.getAssetRecord("AST_SHARED_PERSON"), "removing a usage does not delete its shared source record");
 });
 
+test("shared asset registration keeps the entity name when it differs from the canvas node title", async t => {
+    const f = fixture(t), shared = ensureProductionCanvas(f.db, "shared-assets", "drama");
+    ensureProductionCanvas(f.db, "episode", "ep");
+    // 节点标题是卡片展示名（带「· 动画身份图」后缀），人物名称才是编译进 Subject 定义的身份名。
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "library-person", nodeType: "character", title: "慕璃 · 动画身份图", position: { x: 80, y: 90 }, width: 240, height: 320,
+        metadata: { characterName: "慕璃", characterDescription: "深蓝长发", characterImages: [{ storageKey: "image:muli", name: "慕璃身份图", width: 512, height: 768, bytes: 123, mimeType: "image/png" }], characterPrimaryIndex: 0 } }], { runtimeWrite: true });
+    // 共享画布上的角色节点已自动登记为资产，沿用该身份，不另造重复登记。
+    const library = f.db.listSharedAssetRecordsForProject(shared.project.id).find(asset => sourceOf(asset)?.sourceNodeId === "library-person")!;
+    save(f.episode, "ep", director());
+    const current = f.episode.get("ep");
+    const operation: any = { type: "create_manual_director_asset", assetPlan: { id: library.id, kind: "character", asset_name: "慕璃", entity_id: "CHAR_MULI", version: "v1", description: "深蓝长发", purpose: "剧目共享资产", depends_on: [], status: "planned", canvas_scope: "episode",
+        sharedSource: { dramaId: "drama", assetId: library.id, sourceProjectId: shared.project.id, sourceNodeId: "library-person" } },
+        assetCard: { id: library.id, asset_id: library.id, asset_kind: "character", asset_version: "v1", prompt: "", references: [] }, registryKind: "character",
+        registryEntity: { id: "CHAR_MULI", name: "慕璃", description: "深蓝长发", appearance: "深蓝长发" },
+        subject: { id: "SUBJECT_MULI", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "CHAR_MULI" }, pictureBindings: [] } };
+    await f.episode.edit("ep", { operationId: "include-muli", expectedRevision: current.revision, ops: [operation] });
+    const registered = f.db.getAsset(library.id)!;
+    assert.equal(registered.title, "慕璃 · 动画身份图", "the library keeps the card title for display");
+    assert.equal(registered.data.name, "慕璃", "the asset name is the entity name, not the node title");
+    assert.equal(f.episode.get("ep").draft.director!.source.character_registry.find((item: any) => item.id === "CHAR_MULI")!.name, "慕璃");
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "update_node", id: "library-person", metadata: { characterDescription: "深蓝长发，白袍" } }]);
+    const registry = f.episode.get("ep").draft.director!.source.character_registry.find((item: any) => item.id === "CHAR_MULI")! as any;
+    assert.equal(registry.name, "慕璃", "shared sync must not overwrite the entity name with the node title");
+    assert.equal(registry.appearance, "深蓝长发，白袍");
+    assert.equal(f.db.getAsset(library.id)!.data.name, "慕璃");
+});
+
 test("switching a Subject directly to an unregistered shared node includes it and binds its live reference atomically", async t => {
     const f = fixture(t), shared = ensureProductionCanvas(f.db, "shared-assets", "drama");
     ensureProductionCanvas(f.db, "episode", "ep");
@@ -424,6 +451,31 @@ test("Clip storyboard edits replace formal Shots and immediately reproject H3 tr
     assert.deepEqual(clip.storyboardShots.map((shot: any) => shot.id), ["s1", "s1b"]);
     assert.equal(clip.duration, 5);
     await assert.rejects(async () => await f.episode.edit("ep", { operationId: "clip-last-shot-delete", expectedRevision: saved.revision, ops: [{ type: "replace_director_clip_storyboard", segmentId: "seg1", segment: formalSegment, shots: [], shotInputs: {} }] }), /shots|至少|Too small/i);
+});
+
+test("Clip storyboard patch edits one existing Shot without resending the whole Clip", async t => {
+    const f = fixture(t), { project } = ensureProductionCanvas(f.db, "episode", "ep"), d = director();
+    (d.source.shots as any[])[0].source_scene_id = "morning";
+    (d.source.shots as any[])[1].source_scene_id = "night";
+    d.sourceHash = directorHash(d.source);
+    for (const artifact of d.artifacts) { artifact.sourceHash = d.sourceHash; artifact.receipt.sourceHash = d.sourceHash; }
+    const before = save(f.episode, "ep", d);
+    const saved = await f.episode.edit("ep", {
+        operationId: "clip-storyboard-patch", expectedRevision: before.revision,
+        ops: [{ type: "replace_director_clip_storyboard", segmentId: "seg1", patch: true, shots: [{ id: "s1", visual: "Enter with a lit lamp" }] }],
+    });
+    const shots = saved.draft.director!.source.shots as any[];
+    assert.equal(shots.find(shot => shot.id === "s1")!.visual, "Enter with a lit lamp");
+    assert.equal(shots.find(shot => shot.id === "s2")!.visual, "Return", "other Clip's Shot keeps its content");
+    assert.deepEqual((saved.draft.director!.source.segments as any[]).find(segment => segment.id === "seg1")!.shot_ids, ["s1"]);
+    // 未传的镜头输入沿用原值，不能被归一化清空。
+    assert.deepEqual(saved.draft.director!.shotInputs.s1.assetIds, ["ROLE"]);
+    assert.equal(saved.draft.director!.shotInputs.s1.keyframePolicy, "new");
+    const group = saved.draft.clipGroups.find(item => item.id === "seg1")!;
+    const canvas = f.db.getCanvasProject(project.id)!;
+    const node = (canvas.nodes as any[]).find(item => item.id === group.nodeId);
+    const clip = node.metadata.segments.find((item: any) => item.id === group.segmentId);
+    assert.equal(clip.storyboardModeEnabled, true, "patch still reprojects the H3 storyboard track");
 });
 
 test("large preparation, arrangement and synchronization recover lost responses without duplicate effects", async t => {
@@ -579,7 +631,7 @@ test("formal script edits update the same text node and document while preservin
     assert.equal(preservedOther.metadata.content, other.metadata.content);
     assert.deepEqual(preservedOther.position, other.position);
     assert.equal(preservedOther.width, other.width);
-    assert.equal(preservedOther.metadata.groupId, productionLayoutStableId("production-scene", "ep", String(other.metadata.productionScriptSceneId)));
+    assert.equal(preservedOther.metadata.groupId, undefined, "formal script nodes are no longer attached to auto-generated scene groups");
     assert.equal(f.db.getCanvasText(canvasId, target).text, "Changed scene");
     assert.equal((await f.episode.edit("ep", request)).replayed, true);
     assert.deepEqual(f.db.getCanvasProject(canvasId), project);
@@ -1095,7 +1147,7 @@ test("preparing an existing empty scene materializes its canonical H3 node", asy
     const expectedGroupId = productionLayoutStableId("production-scene", "ep", "dawn");
     const legacyProject = f.db.getCanvasProject(project.id)!;
     assert.ok((legacyProject.nodes as any[]).some(node => node.id === expectedNodeId), "the scene was created with its H3 node before it became a legacy repair target");
-    assert.ok((legacyProject.nodes as any[]).some(node => node.id === expectedGroupId), "the scene was created with its group before it became a legacy repair target");
+    assert.ok(!(legacyProject.nodes as any[]).some(node => node.id === expectedGroupId), "scene preparation no longer creates a wrapper group");
     f.db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(
         JSON.stringify({ ...legacyProject, nodes: (legacyProject.nodes as any[]).filter(node => node.id !== expectedNodeId && node.id !== expectedGroupId) }), project.id);
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
@@ -1104,8 +1156,7 @@ test("preparing an existing empty scene materializes its canonical H3 node", asy
 
     const nodes = f.db.getCanvasProject(project.id)!.nodes as any[];
     const sceneGroups = nodes.filter(node => node.type === "group" && node.metadata?.productionSceneId === "dawn");
-    assert.equal(sceneGroups.length, 1);
-    assert.equal(sceneGroups[0].id, expectedGroupId);
+    assert.equal(sceneGroups.length, 0, "empty scene preparation creates no group wrapper");
     const h3 = nodes.filter(node => node.type === "minimax-h3:video" && node.metadata?.productionSceneId === "dawn");
     assert.equal(h3.length, 1);
     assert.equal(h3[0].id, expectedNodeId);
@@ -1302,8 +1353,7 @@ test("target preparation is recoverable, preserves layout, reuses frame IDs, and
     const prepared = await runner.prepareTargets("ep", revision, ["frame:s1", "segment:seg1", "segment:seg2"], "prepare-1");
     const nodes = f.db.getCanvasProject(project.id)!.nodes as any[];
     assert.equal(nodes.filter(node => node.type === "minimax-h3:video").length, 2);
-    assert.equal(nodes.filter(node => node.type === "group" && node.metadata?.productionSceneId === "morning").length, 1);
-    assert.equal(nodes.filter(node => node.type === "group" && node.metadata?.productionSceneId === "night").length, 1);
+    assert.equal(nodes.filter(node => node.type === "group" && node.metadata?.productionSceneId).length, 0, "scene preparation creates no wrapper groups");
     assert.notEqual(prepared.draft.clipGroups[0].nodeId, prepared.draft.clipGroups[1].nodeId);
     const frame = nodes.find(node => node.id === prepared.draft.director!.assets.FRAME.nodeId);
     assert.equal(frame.metadata.model, "frame-model");
@@ -1560,11 +1610,8 @@ test("each formal scene owns one H3 node and keeps its clips and frames in the s
     for (const [index, sceneId] of ["morning", "night"].entries()) {
         const group = scenes.get(sceneId)!;
         const h3 = nodes.find(node => node.id === groups[index].nodeId);
-        assert.ok(group, `scene group ${sceneId} is materialized`);
-        assert.equal(h3.metadata.groupId, group.id);
-        assert.ok(h3.position.x >= group.position.x && h3.position.y >= group.position.y);
-        assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
-        assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
+        assert.equal(group, undefined, `scene ${sceneId} has no wrapper group`);
+        assert.equal(h3.metadata.groupId, undefined, "scene H3 node stays independent");
         assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
     }
     assert.equal(f.stores.tasks.list().length, 0, "scene H3 layout preparation must not generate media");
@@ -1587,11 +1634,8 @@ test("scene H3 preparation inherits saved layout and preserves materialized and 
         const h3 = nodes.find(node => node.id === groups[index].nodeId);
         assert.equal(h3.width, 3573);
         assert.equal(h3.height, 2145);
-        assert.ok(group, `scene group ${sceneId} is materialized`);
-        assert.equal(h3.metadata.groupId, group.id);
-        assert.ok(h3.position.x >= group.position.x && h3.position.y >= group.position.y);
-        assert.ok(h3.position.x + h3.width <= group.position.x + group.width);
-        assert.ok(h3.position.y + h3.height <= group.position.y + group.height);
+        assert.equal(group, undefined, `scene ${sceneId} has no wrapper group`);
+        assert.equal(h3.metadata.groupId, undefined, "scene H3 node stays independent");
         assert.match(h3.title, sceneId === "morning" ? /Morning/ : /Night/);
     }
     const recompiled = f.episode.ensureLayoutPlan("ep");
@@ -1615,9 +1659,9 @@ test("Clip synchronization also assigns unbound segments to their scene H3 nodes
     const nodes = f.db.getCanvasProject(projectId)!.nodes as any[];
     for (const group of synced) {
         const sceneId = group.id === "seg1" ? "morning" : "night";
-        const sceneGroup = nodes.find(item => item.metadata?.productionSceneId === sceneId);
+        const sceneGroup = nodes.find(item => item.type === "group" && item.metadata?.productionSceneId === sceneId);
         const node = nodes.find(item => item.id === group.nodeId);
-        assert.ok(sceneGroup);
+        assert.equal(sceneGroup, undefined, "Clip sync does not recreate scene wrapper groups");
         assert.equal(node.metadata.productionSceneId, sceneId);
         assert.equal(node.metadata.productionOwnerId, "ep");
     }
@@ -1706,15 +1750,16 @@ test("scene arrangement fits resized images and attached prompts and replays wit
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
     await runner.prepareTargets("ep", f.episode.get("ep").revision, ["frame:s1"], "layout-frame");
     const project = f.db.getCanvasProject(projectId)!, frame = (project.nodes as any[]).find(node => node.metadata?.productionShotId === "s1");
-    f.db.applyCanvasProjectOperations(projectId, undefined, [{ type: "update_node", id: frame.id, patch: { width: 900, height: 900 } }, { type: "add_node", id: "frame-prompt", nodeType: "config", width: 520, height: 300, metadata: { prompt: "keep this prompt", productionShotId: "s1", groupId: frame.metadata.groupId } }]);
+    f.db.applyCanvasProjectOperations(projectId, undefined, [{ type: "update_node", id: frame.id, patch: { width: 900, height: 900 } }, { type: "add_node", id: "frame-prompt", nodeType: "config", width: 520, height: 300, metadata: { prompt: "keep this prompt", productionShotId: "s1", productionSceneId: "morning" } }]);
     const otherScripts = (f.db.getCanvasProject(projectId)!.nodes as any[]).filter(node => node.metadata?.productionScriptId && node.metadata?.productionScriptSceneId !== "morning").map(node => [node.id, node.position]);
     const revision = f.episode.get("ep").revision;
     await runner.arrangeScene("ep", "morning", revision, "layout-arrange");
-    const after = f.db.getCanvasProject(projectId)!, nodes = after.nodes as any[], image = nodes.find(node => node.id === frame.id), prompt = nodes.find(node => node.id === "frame-prompt"), group = nodes.find(node => node.id === frame.metadata.groupId);
+    const after = f.db.getCanvasProject(projectId)!, nodes = after.nodes as any[], image = nodes.find(node => node.id === frame.id), prompt = nodes.find(node => node.id === "frame-prompt");
+    const sceneBounds = f.episode.ensureLayoutPlan("ep").units.find(unit => unit.id === "scene:morning")!.bounds;
     assert.equal(prompt.position.x, image.position.x);
     assert.ok(prompt.position.y >= image.position.y + image.height + 60);
-    assert.ok(prompt.position.y + prompt.height <= group.position.y + group.height);
-    assert.ok(image.position.x + image.width <= group.position.x + group.width);
+    assert.ok(prompt.position.y + prompt.height <= sceneBounds.position.y + sceneBounds.size.height);
+    assert.ok(image.position.x + image.width <= sceneBounds.position.x + sceneBounds.size.width);
     assert.equal(prompt.metadata.prompt, "keep this prompt");
     assert.deepEqual(nodes.filter(node => node.metadata?.productionScriptId && node.metadata?.productionScriptSceneId !== "morning").map(node => [node.id, node.position]), otherScripts);
     await runner.arrangeScene("ep", "morning", revision, "layout-arrange");

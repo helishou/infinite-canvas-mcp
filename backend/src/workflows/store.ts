@@ -13,6 +13,14 @@ const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
 const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
 const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
 const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "MiniMax_H3_T2I.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
+
+/** 解析持久化的输出节点选择。坏数据退化成空数组（= 不过滤，保留全部输出），不会误删产物。 */
+function parseOutputNodes(raw: string): string[] {
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch { return []; }
+}
 const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
     "IndexTTS-2.5.json": {
         title: "IndexTTS 2.5 配音",
@@ -328,6 +336,8 @@ export class WorkflowStore {
             miniCardsJson: JSON.stringify(config.miniCards ?? {}),
             runningHubProfileId: config.runningHubProfileId ?? "",
             runTarget: config.runTarget ?? "local",
+            // 没带这个字段就沿用旧值；显式传 [] 要存成 '[]'，与「从未配置」的空串区分开。
+            outputNodesJson: Array.isArray(config.outputNodes) ? JSON.stringify(config.outputNodes) : undefined,
         });
         return { config };
     }
@@ -361,6 +371,8 @@ export class WorkflowStore {
                 miniCards: JSON.parse(row.miniCardsJson),
                 ...(row.runningHubProfileId ? { runningHubProfileId: row.runningHubProfileId } : {}),
                 ...(row.runTarget && row.runTarget !== "local" ? { runTarget: row.runTarget as WorkflowConfig["runTarget"] } : {}),
+                // 空串 = 从未配置过（前端据此默认勾选链路末端的输出节点）；'[]' = 用户显式清空，要如实返回空数组。
+                ...(row.outputNodesJson ? { outputNodes: parseOutputNodes(row.outputNodesJson) } : {}),
             };
             if (name === "custom/视频修复FlashVSR1.1.json") {
                 config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);

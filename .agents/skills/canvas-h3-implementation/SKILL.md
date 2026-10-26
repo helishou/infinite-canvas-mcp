@@ -17,6 +17,7 @@ description: 修改或排查无限画布 H3 插件、Backend、MCP 与 ComfyUI �
 | H3 布局、控件、状态、输出恢复 | [UI 排障](references/h3-ui-state.md) | 用户动作和目标区域行为正确 |
 | 页面视觉、缩放与指针命中 | [页面验证](references/live-page-verification.md) | 独立测试页中的可观察结果 |
 | 通用工作流导入、配置、模型路由 | [工作流](references/workflow-import.md) | 配置往返和实际执行路由正确 |
+| 调度纪律、操作预算、批量读写与等待 | [原生 MCP 操作预算](../canvas-video-production-sop/references/native-mcp-operation-budget.md) | 调用轮次与批次数下降、回执可重放 |
 
 ## 工作方法
 

@@ -74,6 +74,7 @@ export function productionOperationContract(operationType?: string, includeDetai
                 : type === "restore_director_scene" ? ["Archive must belong to this production, remain within its 30-day retention window, and have no ID conflicts; both production and canvas revisions must match."]
                 : type === "split_director_scene" ? ["Requires an existing one-row script occurrence, a unique new occurrence ID, an existing scene registry environment and its registered environment picture binding. Selected Shots must form one contiguous run within the source occurrence and cannot split a Segment/Clip. Updates the original scene text/beat IDs, appends the new occurrence at the same narrative position, moves those Shots and their scene Subject usage atomically, invalidates compiled artifacts, and creates no media task."]
                 : type === "replace_director_scene_storyboard" ? ["Prompt v2 only. Registers or replaces one script scene's formal Shots and Clips in one revision-checked edit; a scene with no Shots uses the same operation to bootstrap its first storyboard. New Shots use positive integer duration_frames, one timeline and contiguous story_order, and must map to this scene through source_scene_id or a unique environment/beat. Clips reference only this scene's Shots, in story order, exactly once, and carry no frame or duration fields; shotInputs must cover exactly this scene's Shots. story_order shifts automatically for later same-timeline Shots, missing adjacent boundaries get authored defaults, and replacing an existing scene preserves its Clip ID set; change Clip partitions with repartition_director_clips."]
+                : type === "repartition_director_clips" ? ["Prompt v2 only. Rebuild the Clip partition over the selected contiguous Shot range. Keep a Clip ID only when its shot_ids exactly match the existing Clip; changed coverage receives a new ID automatically, even if the caller repeats an old ID. Execution settings are inherited from the overlapping old Clip when compatible; use executionProfileSourceId only when combining conflicting profiles."]
                 : type === "delete_director_clip" ? ["Requires explicit confirmation; deletes the Clip and its owned Shots as one source transaction. A single Shot cannot be deleted while leaving an empty Clip."]
                 : type === "set_archived" ? ["Episode only. Archived episodes are read-only: every other edit, publish, restore, generation run and shared-asset adoption is rejected, and shared-canvas updates stop syncing into the episode. The archive flag is record-level state, not part of the draft; send only this operation, without adoptions, and pass archived=false to unarchive."]
                 : type === "select_director_result" ? ["Successful archived output must belong to the original formal task and exact node/Clip; pass generationLogId or its exact taskId; both revisions must match; active generation and shared reference replacement are rejected. Images require review after selection. No media generation or prompt/timeline replacement occurs."]
@@ -134,8 +135,15 @@ const nonPromptTextFields = new Set([
     "segmentId", "shot_id", "shot_ids", "shotId", "start", "end", "story_order", "subject_id", "subjectId", "timeline_id",
 ]);
 type ModelTextEntry = { text: string; path: string; targetId?: string };
+/** Identifier collections (`camera.attention_subject_ids`, `subjectIds`, plain `ids` …) hold stable IDs,
+ *  not model-facing prose: a subject ID such as `SUBJECT_…_library-AST-SCENE-PALACE` legitimately contains
+ *  a registered asset ID, so scanning these arrays reported phantom INTERNAL_ID_IN_PROMPT errors and
+ *  blocked unrelated edits (for example rebinding a Subject on delete). */
+const isIdentifierCollection = (key: string) => key === "ids" || key.endsWith("_ids") || key.endsWith("Ids");
 function modelTextValues(value: unknown, path: Array<string | number> = [], identityPath: Array<string | number> = [], targetId?: string, output = new Map<string, ModelTextEntry>()) {
     if (typeof value === "string") {
+        const parentKey = typeof path.at(-2) === "string" ? String(path.at(-2)) : "";
+        if (isIdentifierCollection(parentKey)) return output;
         if (path.some(part => typeof part === "string" && modelTextFields.has(part))
             && !path.some(part => typeof part === "string" && nonPromptTextFields.has(part))) {
             output.set(identityPath.join("."), { text: value, path: path.join("."), targetId });

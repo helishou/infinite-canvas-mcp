@@ -108,7 +108,7 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
     };
 
     if (!workflow || Object.keys(workflow).length === 0) {
-        return <div className="flex h-64 items-center justify-center text-sm text-stone-400">无可视化节点</div>;
+        return <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">无可视化节点</div>;
     }
 
     return (
@@ -140,7 +140,7 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
                             <button
                                 key={f.id}
                                 onClick={() => onFieldsChange(fields.filter((x) => x.id !== f.id))}
-                                className="rounded bg-white/70 px-2 py-1 text-xs text-stone-700 shadow-sm hover:bg-white dark:bg-stone-700/70 dark:text-stone-200 dark:hover:bg-stone-700"
+                                className="rounded bg-card/70 px-2 py-1 text-xs text-foreground shadow-sm hover:bg-card"
                             >
                                 {f.name || f.id} ✕
                             </button>

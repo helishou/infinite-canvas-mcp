@@ -18,6 +18,12 @@ describe("ui-workflow-file.normalizeWorkflowStem", () => {
         assert.equal(normalizeWorkflowStem("扩图_1.json"), "扩图");
     });
 
+    it("去掉 -api 后缀：从 RunningHub 导入的本地副本靠它才能找到 UI 原件", () => {
+        // 真实形态：库名 custom/终极资产图 (1)-api.json，磁盘 UI 原件叫 终极资产图 (1).json
+        assert.equal(normalizeWorkflowStem("终极资产图 (1)-api.json"), normalizeWorkflowStem("终极资产图 (1).json"));
+        assert.equal(normalizeWorkflowStem("扩图_api.json"), normalizeWorkflowStem("扩图.json"));
+    });
+
     it("不把中间文字相同的不同流认成一个", () => {
         assert.notEqual(normalizeWorkflowStem("2.1 文生图.json"), normalizeWorkflowStem("2.1 文生图-加速开关.json"));
     });
@@ -67,6 +73,14 @@ describe("ui-workflow-file.findUiWorkflowFile", () => {
         await writeFile(path.join(dir, "坏文件 (1).json"), JSON.stringify(ui(7)), "utf8");
         const hit = await findUiWorkflowFile(dir, "坏文件.json") as { nodes: unknown[] } | null;
         assert.equal(hit!.nodes.length, 7);
+    });
+
+    it("库名带 -api 后缀时能找到同名的 UI 原件", async () => {
+        await writeFile(path.join(dir, "带api原件-api.json"), JSON.stringify({ "1": { class_type: "SaveImage" } }), "utf8");
+        await writeFile(path.join(dir, "带api原件.json"), JSON.stringify(ui(6)), "utf8");
+        const hit = await findUiWorkflowFile(dir, "custom/带api原件-api.json") as { nodes: unknown[] } | null;
+        assert.ok(hit, "-api 副本不该让上传退回 API 格式");
+        assert.equal(hit!.nodes.length, 6);
     });
 
     it("完全找不到时返回 null", async () => {

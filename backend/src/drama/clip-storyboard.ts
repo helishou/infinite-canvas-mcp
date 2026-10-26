@@ -15,7 +15,49 @@ export function clipShots(d: DirectorProduction, id: string) {
     if (!shots.length || shots.some((s: unknown) => !s)) reject("CLIP_SHOTS_MISSING", `segments.${id}.shot_ids`, "Clip 镜头不完整");
     return { segment, shots: shots as Record<string, any>[] };
 }
-export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segmentId: string; segment: Record<string, unknown>; shots: Record<string, any>[]; shotInputs: Record<string, unknown>; keyframeBindings?: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; storageKey?: string; label?: string }>; removedStoryboardBindingIds?: string[] }) {
+/**
+ * 局部修补 Clip 分镜：只传被改的镜头，其余镜头与输入沿用当前值。
+ *
+ * 增删镜头会改变 Shot 集合与时长覆盖，不属于修补范围——那类改动走 edit_director_shot /
+ * repartition_director_clips / 场次返修。归一化后仍交给完整替换执行既有全部校验。
+ */
+export function normalizeClipStoryboardPatch(d: DirectorProduction, op: Record<string, any>) {
+    if (op.patch !== true) {
+        if (!op.segment) reject("CLIP_SEGMENT_REQUIRED", "segment", `替换 Clip ${op.segmentId} 分镜需要完整 segment；只想改已有镜头的部分字段请传 patch: true`);
+        if (!op.shotInputs) reject("CLIP_SHOT_INPUTS_REQUIRED", "shotInputs", `替换 Clip ${op.segmentId} 分镜需要完整 shotInputs；只想改已有镜头的部分字段请传 patch: true`);
+        return op;
+    }
+    if (op.segment) reject("CLIP_PATCH_SEGMENT_CONFLICT", "segment", "patch: true 不能再传 segment：局部修补不改变镜头集合与时长范围，需要改写结构请用场次返修");
+    const { segment, shots: current } = clipShots(d, String(op.segmentId));
+    const rawShots = rows(op.shots);
+    if (!rawShots.length) reject("CLIP_PATCH_EMPTY", "shots", "patch: true 至少需要改动一镜");
+    const currentIds = new Set(current.map(shot => String(shot.id)));
+    const unknown = rawShots.map(shot => String(shot?.id || "")).filter(id => !currentIds.has(id));
+    if (unknown.length) reject("CLIP_SHOT_UNKNOWN", "shots", `镜头 ${unknown.join("、")} 不在 Clip ${op.segmentId} 内；增删镜头请用 edit_director_shot 或 repartition_director_clips`);
+    const patchById = new Map(rawShots.map(shot => [String(shot.id), shot]));
+    const merged = current.map(shot => {
+        const patch = patchById.get(String(shot.id));
+        if (!patch) return shot;
+        const next: Record<string, any> = { ...shot };
+        // 与 patch_director_source 一致：对象按嵌套字段合并，数组、null 与标量按提交值替换。
+        for (const [key, value] of Object.entries(patch)) {
+            const base = next[key];
+            next[key] = value && typeof value === "object" && !Array.isArray(value) && base && typeof base === "object" && !Array.isArray(base)
+                ? { ...base, ...value as Record<string, unknown> }
+                : value;
+        }
+        return next;
+    });
+    const shotInputs = {
+        ...Object.fromEntries(current.map(shot => [String(shot.id), d.shotInputs[String(shot.id)]])),
+        ...(op.shotInputs || {}),
+    };
+    return { ...op, patch: false, segment, shots: merged, shotInputs };
+}
+
+export function replaceDirectorClipStoryboard(d: DirectorProduction, rawOp: { segmentId: string; segment?: Record<string, unknown>; patch?: boolean; shots: Record<string, any>[]; shotInputs?: Record<string, unknown>; keyframeBindings?: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; clearNodeId?: boolean; storageKey?: string; label?: string }>; removedStoryboardBindingIds?: string[] }) {
+    // 局部修补（patch: true）在这里归一化成完整替换；函数体其余部分仍按全量语义校验。
+    const op = normalizeClipStoryboardPatch(d, rawOp) as { segmentId: string; segment: Record<string, unknown>; patch?: boolean; shots: Record<string, any>[]; shotInputs: Record<string, unknown>; keyframeBindings?: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; clearNodeId?: boolean; storageKey?: string; label?: string }>; removedStoryboardBindingIds?: string[] };
     const { segment, shots: old } = clipShots(d, op.segmentId), oldIds = new Set(old.map(s => s.id));
     const v2 = (d.source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
     if (op.segment.id !== segment.id || !v2 && (op.segment.start_frame !== segment.start_frame || op.segment.end_frame !== segment.end_frame))
@@ -72,13 +114,20 @@ export function replaceDirectorClipStoryboard(d: DirectorProduction, op: { segme
             assetPlans.push(plan);
         }
         const previous = next.assets[binding.assetId];
-        next.assets[binding.assetId] = {
+        const nextAsset = {
             ...previous,
             ...((binding.nodeId || binding.containerNodeId || previous?.nodeId) ? { nodeId: binding.nodeId || binding.containerNodeId || previous?.nodeId } : {}),
             ...(binding.storageKey ? { storageKey: binding.storageKey } : {}),
+            canvasReferenceBindingId: binding.bindingId,
             version: previous?.version || String(plan.version || "bound"),
             status: binding.storageKey ? "generated" : previous?.status || "planned",
-        };
+        } as DirectorProduction["assets"][string];
+        if (binding.clearNodeId) delete nextAsset.nodeId;
+        // H3 Clip references are already canonical archived media. They are not
+        // images owned by the H3 node itself, so a legacy containerNodeId must
+        // not survive as a fabricated source for Subject Prompt v2 keyframes.
+        if (String(binding.assetId).startsWith("storyboard:") && !binding.nodeId && !binding.containerNodeId) delete nextAsset.nodeId;
+        next.assets[binding.assetId] = nextAsset;
     }
     const subjectAssembly = d.source.version === 2
         && (d.source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2
@@ -126,9 +175,17 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
         if (!ids.length || ids.some((id, offset) => id !== op.shotIds[cursor + offset])) reject("CLIP_PARTITION_ORDER", `segments.${index}.shot_ids`, "新分组必须按源 Shot 顺序连续排列");
         cursor += ids.length;
         const matchingOld = oldGroups.find(segment => canonicalProduction(segment.shot_ids || []) === canonicalProduction(ids));
-        const id = String(raw.id || matchingOld?.id || `SEG_${crypto.createHash("sha256").update(ids.join("\0")).digest("hex").slice(0, 20)}`);
+        const generatedId = `SEG_${crypto.createHash("sha256").update(ids.join("\0")).digest("hex").slice(0, 20)}`;
+        let id = String(raw.id || matchingOld?.id || generatedId);
+        // Callers may carry forward the old Clip ID when a group changes. Keep
+        // the operation usable by minting a deterministic identity for the new
+        // coverage instead of rejecting an otherwise valid repartition.
+        if (oldIds.has(id) && !matchingOld) {
+            id = generatedId;
+            let suffix = 1;
+            while (oldIds.has(id) || allSegments.some(segment => segment.id === id && !oldIds.has(id))) id = `${generatedId}_${suffix++}`;
+        }
         if (createdIds.has(id) || allSegments.some(segment => segment.id === id && !oldIds.has(id))) reject("CLIP_ID_CONFLICT", `segments.${index}.id`, `新 Clip ID 已被使用：${id}`);
-        if (oldIds.has(id) && !matchingOld) reject("CLIP_ID_REUSE", `segments.${index}.id`, "覆盖范围改变时不能沿用旧 Clip ID");
         createdIds.add(id);
         const profileSources = oldGroups.filter(segment => (segment.shot_ids || []).some((shotId: string) => ids.includes(shotId)));
         const priorProfiles = profileSources.map(segment => ({ mode: segment.mode, mode_lock: segment.mode_lock, styleTemplateId: segment.styleTemplateId }));

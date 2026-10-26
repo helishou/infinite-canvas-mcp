@@ -9,6 +9,7 @@ import { useBackendStore } from "@/stores/use-backend-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { groupRecentTasks } from "./task-groups";
 import { taskDestination } from "@/pages/home/workbench-data";
+import { taskProgress } from "@/lib/canvas/task-progress";
 
 /** Opens in place so checking tasks never discards the current editor or input. */
 export function GlobalTaskButton({ className }: { className?: string }) {
@@ -39,13 +40,14 @@ function GlobalTaskDialog({ onClose }: { onClose: () => void }) {
         <div className="max-h-[65vh] overflow-y-auto">
             {!connected ? null : tasks.isError ? isBackendAvailabilityError(tasks.error) ? null : <Alert type="error" showIcon message={tasks.error instanceof Error ? tasks.error.message : String(tasks.error)} /> : tasks.isPending ? <div className="grid min-h-32 place-items-center"><Spin /></div> : tasks.data.length ? groupRecentTasks(tasks.data).map(group => <section key={group.key} aria-label={t(`microTools.tasks.${group.key}`)}><h3 className="sticky top-0 bg-background py-2 text-sm font-medium">{t(`microTools.tasks.${group.key}`)} · {group.tasks.length}</h3>{group.tasks.map(task => {
                 const destination = taskDestination(task, projectIds);
+                const children = tasks.data.filter(child => child.parentTaskId === task.id);
                 return <div key={task.id} className="border-b border-border py-4 last:border-0">
                     <div className="flex flex-wrap items-start gap-2">
                         <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{projects.find(project => project.id === task.projectId)?.title || task.model || task.kind || t("home.workbench.task")}</p><p className="mt-1 text-xs text-muted-foreground">{task.model} · {date(task.updatedAt || task.createdAt || "")}</p></div>
                         <Tag color={task.status === "failed" ? "error" : task.status === "running" ? "processing" : task.status === "succeeded" ? "success" : "default"}>{t(`home.workbench.status_${task.status}`)}</Tag>
                         {destination && <Button size="small" onClick={() => { onClose(); navigate(destination); }}>{t("home.workbench.openSource")}</Button>}
                     </div>
-                    {task.status === "running" && <Progress className="!mt-2" percent={Math.min(100, Math.max(0, Math.round((Number(task.progress) || 0) * 100)))} size="small" />}
+                    {task.status === "running" && <Progress className="!mt-2" percent={Math.min(100, Math.max(0, Math.round(taskProgress(task, children) * 100)))} size="small" />}
                     {task.error && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-destructive">{task.error}</p>}
                 </div>;
             })}</section>) : <Empty description={t("home.workbench.noTasks")} />}

@@ -11,8 +11,8 @@ function previewValue(rawValue: unknown) {
     }
     if (typeof rawValue === "number") return <span className="font-mono font-bold text-blue-700">{rawValue}</span>;
     if (typeof rawValue === "boolean") return <span className={`font-bold ${rawValue ? "text-green-700" : "text-amber-700"}`}>{rawValue ? "✓ true" : "✗ false"}</span>;
-    if (rawValue && typeof rawValue === "object") return <span className="font-mono text-stone-500">{JSON.stringify(rawValue)}</span>;
-    return <span className="text-stone-400">{String(rawValue)}</span>;
+    if (rawValue && typeof rawValue === "object") return <span className="font-mono text-muted-foreground">{JSON.stringify(rawValue)}</span>;
+    return <span className="text-muted-foreground">{String(rawValue)}</span>;
 }
 
 export type NodeFieldRowState = {
@@ -46,37 +46,37 @@ export function NodeFieldPopupShell({
                 role="dialog"
                 aria-modal="true"
                 aria-label={`${classType || "Unknown"} #${nodeId}`}
-                className="flex max-h-[min(70vh,calc(100dvh-2rem))] w-[420px] max-w-full flex-col overflow-hidden rounded-lg border border-stone-200 bg-white p-4 shadow-xl dark:border-stone-700 dark:bg-stone-800"
+                className="flex max-h-[min(70vh,calc(100dvh-2rem))] w-[420px] max-w-full flex-col overflow-hidden rounded-lg border border-border bg-white p-4 shadow-xl dark:bg-muted"
                 onClick={(event) => event.stopPropagation()}
             >
-                <div className="mb-3 flex shrink-0 items-center justify-between border-b border-stone-100 pb-2">
+                <div className="mb-3 flex shrink-0 items-center justify-between border-b border-border pb-2">
                     <div>
                         <div className="font-medium">{classType || "Unknown"}</div>
-                        <div className="text-xs text-stone-500">#{nodeId}</div>
+                        <div className="text-xs text-muted-foreground">#{nodeId}</div>
                     </div>
-                    <button onClick={onClose} className="text-xl leading-none text-stone-400 hover:text-stone-600">×</button>
+                    <button onClick={onClose} className="text-xl leading-none text-muted-foreground hover:text-muted-foreground">×</button>
                 </div>
 
                 {rows.length === 0 ? (
-                    <div className="min-h-0 overflow-y-auto py-4 text-center text-xs text-stone-400">{emptyText}</div>
+                    <div className="min-h-0 overflow-y-auto py-4 text-center text-xs text-muted-foreground">{emptyText}</div>
                 ) : (
                     <div className="min-h-0 space-y-2 overflow-y-auto">
                         {rows.map(({ key, rawValue, active, editor }) => (
-                            <div key={key} className={`rounded border p-2 text-xs ${active ? "border-blue-300 bg-blue-50/50 dark:border-blue-700 dark:bg-blue-900/20" : "border-stone-200 dark:border-stone-700"}`}>
+                            <div key={key} className={`rounded border p-2 text-xs ${active ? "border-blue-300 bg-blue-50/50 dark:border-blue-700 dark:bg-blue-900/20" : "border-border"}`}>
                                 <div className="flex items-center gap-2">
                                     <button
                                         onClick={() => onToggle(key)}
                                         aria-label={`启用 ${key}`}
-                                        className={`flex size-4 shrink-0 items-center justify-center rounded border transition ${active ? "border-blue-500 bg-blue-500 text-white" : "border-stone-300 dark:border-stone-600"}`}
+                                        className={`flex size-4 shrink-0 items-center justify-center rounded border transition ${active ? "border-blue-500 bg-blue-500 text-white" : "border-border "}`}
                                     >
-                                        {active && <span className="text-[10px] leading-none">✓</span>}
+                                        {active && <span className="text-[11px] leading-none">✓</span>}
                                     </button>
                                     <div className="min-w-0 flex-1">
                                         <div className="truncate font-medium">{key}</div>
-                                        <div className="truncate text-[10px] text-stone-400">默认: {previewValue(rawValue)}</div>
+                                        <div className="truncate text-[11px] text-muted-foreground">默认: {previewValue(rawValue)}</div>
                                     </div>
                                 </div>
-                                {active && editor ? <div className="mt-2 space-y-2 border-t border-stone-200/50 pt-2">{editor}</div> : null}
+                                {active && editor ? <div className="mt-2 space-y-2 border-t border-border/50 pt-2">{editor}</div> : null}
                             </div>
                         ))}
                     </div>

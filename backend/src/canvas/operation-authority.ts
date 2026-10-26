@@ -111,9 +111,8 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     if (!isH3CanvasNode(node)) return;
     const metadata = recordOf(node!.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Record<string, unknown>[] : [];
-    if (operation.type === "delete_h3_segment") {
-        const previous = segments.find(segment => segment.id === operation.segmentId);
-        if (previous && recordOf(previous.productionClipProjection).targetId) throw collaborationError("PRODUCTION_CLIP_OWNED", "制作 Clip 由制作台维护；不能从画布单独删除");
+    if (["add_h3_segment", "delete_h3_segment", "move_h3_segment"].includes(operation.type) && isProductionBoundNode(node!)) {
+        throw collaborationError("PRODUCTION_CLIP_MEMBERSHIP_OWNED", "制作绑定的 Clip 列表由制作台维护，不能从画布独立新增、删除或重排");
     }
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
         if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", "制作投影摘要由 Backend 管理");

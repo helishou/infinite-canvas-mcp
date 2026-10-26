@@ -14,7 +14,7 @@
 
 图片和关键帧选择使用完整 projectId/nodeId，不用节点名称或局部 ID 猜测来源。可选择当前画布智能图片节点及已正式采用的共享来源；未采用的其他项目图片不直接绑定。共享选择保留采用资产 ID，节点引用策略沿既有历史选择规则处理。创建或绑定节点不表示已生成图片，编译不自动提交媒体请求。
 
-旧稿未启用新合同时，沿现有 `patch_director_source`、`patch_director_continuity` 和替换入口兼容；需要单段自动刷新时在同批 ops 显式登记 `request_director_clip_refresh`。只有首次创建或用户明确整稿替换才回传完整导演稿。Backend 保留其他源稿并重算哈希，不能为局部编辑整稿回写。
+旧稿未启用新合同时，沿现有 `patch_director_source`、`patch_director_continuity` 和替换入口兼容；需要单段自动刷新时在同批 ops 显式登记 `request_director_clip_refresh({segmentId})`。新合同需要返修一个或多个稳定 Shot 时，优先在同一 `production_edit` 中提交源稿修改与 `request_director_shot_refresh({shotIds})`；Backend 在源稿写入事务内解析本次提交后的 Shot→Segment 映射，并按输入哈希只登记实际变化的当前 Clip。若同批还重分组，不传旧 Segment ID；Backend 会对比编辑前后映射并覆盖仍存在的受影响 Clip。未知 Shot、无唯一当前 Clip 或与显式 Segment 目标重叠时整笔编辑回滚。该操作只排队编译/同步，不提交媒体。只有首次创建或用户明确整稿替换才回传完整导演稿。Backend 保留其他源稿并重算哈希，不能为局部编辑整稿回写。
 
 `patch_director_source` 的 `scene` 修改剧本场次 `script_scenes`，`environment` 修改编译引用的 `scene_registry`，`asset` 修改 `asset_plan`，`asset_card` 修改 `asset_cards` 的提示词与七步正文。环境文字返修须定向检查登记与资产卡中实际被消费的文字，不能把修改资产计划当作已更新环境正文。
 
@@ -40,7 +40,7 @@ Agent 负责编译前的创作和结构化源稿。自动刷新已登记时消�
 
 编译输入是已保存的结构化制作源稿、Shot/Segment、资产资料和实际参考绑定。只有资产时运行 `compile_assets.py`；包含视频片段时运行 `compile_h3.py`。脚本按对应 Skill 规则产出独立、完整的图像或 H3 提示词文件、索引、逐目标诊断、参考映射和哈希回执；缺少依赖的目标保留为 draft，不伪造 ready。Backend 再核对当前制作 revision、媒体归属和执行条件。
 
-场景图只有在 Shot 的 `subject_usages` 明确声明对应 Scene Subject 与 `referencePurpose: ["environment"]` 时才参与该 Shot 所属 Clip；对 `state_context` 用途显式填写该 Subject 的 `pictureBindingIds`。不能只按 `scene_id` 或场次包自动推断场景图。应用编译后逐段核对 H3 `referenceBindings` 的源节点、`storageKey`、用途与顺序，并检查 `referenceSync`；画布连线或提示词中的场景文字不证明图片已进入模型输入。输入更新只使旧媒体对应旧输入，不自动重生成。
+场景图只有在 Shot 的 `subject_usages` 明确声明对应 Scene Subject 与 `referencePurpose: ["environment"]` 时才参与该 Shot 所属 Clip；`state_context` 用途未显式给出 `pictureBindingIds` 时按该 Scene Subject 的 `environment` 默认绑定解析，需要无图时写 `pictureBindingMode: "explicit"` 和空数组。不能只按 `scene_id` 或场次包自动推断场景图。应用编译后逐段核对 H3 `referenceBindings` 的源节点、`storageKey`、用途与顺序，并检查 `referenceSync`；画布连线或提示词中的场景文字不证明图片已进入模型输入。输入更新只使旧媒体对应旧输入，不自动重生成。
 
 离线批次可在一次调用中重复指定多个 `--asset <id>` 或 `--segment <id>`，减少重复读取与审计；省略选项仍编译原有全量范围。`interactive_segment` 保持每次一个完整 Segment。批次索引记录选中目标，未选择目标不导出；缺失/未知 ID 明确失败。离线批量与正式在线编译是不同入口，不要对同一目标和输入连续执行两遍。
 

@@ -131,7 +131,7 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
             confirmLoading={importing}
             destroyOnClose
         >
-            <p className="mb-3 text-sm text-stone-500">{t("runningHub.import.description")}</p>
+            <p className="mb-3 text-sm text-muted-foreground">{t("runningHub.import.description")}</p>
             <Select
                 className="mb-3 w-full"
                 aria-label={t("runningHub.import.savedProfileLabel")}

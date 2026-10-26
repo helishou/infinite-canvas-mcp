@@ -371,7 +371,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
           <div className="shot-editor-span-all space-y-3"><h3 className="text-sm font-medium">{t("director.crud.temporalKeyframes")}</h3><p className="text-xs text-muted-foreground">{t("director.crud.temporalKeyframesHint")}</p></div>
           <div className="shot-editor-span-all flex gap-2"><SmartImageNodePicker canvasId={canvasId} canvasNodes={canvasNodes} assets={assets} assetPlan={records(source.asset_plan)} value={keyframeNode} disabled={disabled} placeholder={t("director.workspace.chooseKeyframeNode")} exclude={value.keyframes.map(frame => frame.sourceNode || {})} onUnavailable={() => setKeyframeNode(undefined)} onChange={setKeyframeNode} /><Button disabled={disabled || !keyframeChoiceValid} onClick={addKeyframe}>{t("director.crud.bindFrame")}</Button></div><p className="shot-editor-span-all text-xs text-muted-foreground">{t("director.crud.saveBindingHint")}</p>
           {value.keyframes.map((frame, index) => {
-            const resolved = records(workbench?.keyframes).find(item => item.id === frame.id)?.resolved;
+            const resolved = records(workbench?.context?.keyframeMedia ?? workbench?.keyframes).find(item => item.id === frame.id)?.resolved;
             const frameSubjectIds: string[] = (frame.subjectIds || []).map(String);
             const outfitOptions = subjects.map(subject => {
                 const subjectId = String(subject.id);

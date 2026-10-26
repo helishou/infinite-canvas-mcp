@@ -20,7 +20,7 @@ export function validateNodeUpdate(operation: Record<string, any>, previous?: Re
     }
     return patch;
 }
-const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "quickStoryboardEnabled", "quickStoryboardDrafts", "quickStoryboardArrangement", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags"]);
+const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags"]);
 export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) {
     if (patch.h3ParameterOverrides !== undefined && (!Array.isArray(patch.h3ParameterOverrides) || patch.h3ParameterOverrides.some((key: unknown) => typeof key !== "string" || !(H3_PARAM_KEYS as readonly string[]).includes(key)))) throw new Error("H3 人工参数标记无效");
     for (const [key, value] of Object.entries(patch)) {
@@ -34,19 +34,6 @@ export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) 
         if (key === "referenceOrder" && (value.some((id: unknown) => typeof id !== "string" || !id) || new Set(value).size !== value.length)) throw new Error("INVALID_CLIP_FIELD: patch.referenceOrder 必须是无重复的 binding ID 数组");
         if (["h3CharacterGroups", "storyboardDurations", "storyboardPromptCache"].includes(key) && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 object`);
         if (["storyboardModeEnabled", "storyboardCompositeEnabled"].includes(key) && typeof value !== "boolean") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 boolean`);
-        if (key === "quickStoryboardEnabled" && typeof value !== "boolean") throw new Error("INVALID_CLIP_FIELD: patch.quickStoryboardEnabled 必须为 boolean");
-        if (["quickStoryboardDrafts", "quickStoryboardArrangement"].includes(key)) {
-            if (!Array.isArray(value)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 array`);
-            const ids = new Set<string>();
-            for (const item of value) {
-                if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 项必须为 object`);
-                const row = item as Record<string, unknown>;
-                if (typeof row.bindingId !== "string" || !row.bindingId.trim() || ids.has(row.bindingId)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 的 bindingId 必须非空且唯一`);
-                if (typeof row.name !== "string" || typeof row.sourceTime !== "number" || !Number.isFinite(row.sourceTime) || row.sourceTime < 0) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 的 name/sourceTime 无效`);
-                if (row.fingerprint !== undefined && (typeof row.fingerprint !== "string" || !/^[a-f0-9]{64}$/i.test(row.fingerprint))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 的 fingerprint 必须是 SHA-256`);
-                ids.add(row.bindingId);
-            }
-        }
         if (key === "duration" && (typeof value !== "number" && typeof value !== "string" || !Number.isFinite(Number(value)) || Number(value) <= 0)) throw new Error("INVALID_CLIP_FIELD: patch.duration 必须为正数");
         if (key === "taskMode" && !["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(String(value))) throw new Error("INVALID_CLIP_FIELD: patch.taskMode 无效");
     }

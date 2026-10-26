@@ -1657,13 +1657,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return productionSegments(current).filter(segment => ids.has(String(segment.id)) && clipRefreshTarget(segment)).slice(0, 1)
       .map(segment => ({ type: "request_director_clip_refresh" as const, segmentId: String(segment.id) }));
   };
-  const shotClipRefreshOps = (shotIds: readonly string[]): ProductionOperation[] => {
-    const current = production;
-    if (!current?.draft.director || !isSubjectPromptAssembly(current.draft.director.source)) return [];
-    const ids = new Set(shotIds.map(String));
-    return productionSegments(current).filter(segment => segmentShotIds(segment).some(id => ids.has(id)) && clipRefreshTarget(segment)).slice(0, 1)
-      .map(segment => ({ type: "request_director_clip_refresh" as const, segmentId: String(segment.id) }));
-  };
   const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => {
     const ops: ProductionOperation[] = [];
     if (Object.hasOwn(patch, "performance") && patch.performance !== null) {
@@ -1678,7 +1671,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId, keyframes });
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     if (!ops.length) return true;
-    ops.push(...shotClipRefreshOps([shotId]));
     return edit(ops);
   };
   const patchSource = async (entity: "style" | "spec" | "story" | "scene" | "environment" | "character" | "asset" | "asset_card" | "shot" | "segment", id: string | undefined, patch: Record<string, unknown>) => {

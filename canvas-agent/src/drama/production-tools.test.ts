@@ -10,6 +10,11 @@ test("unified run routing preserves canvas defaults and explicit published input
     const edit = productionToolRequest("production_edit", { kind: "canvas", id: "canvas", operationId: "adopt", expectedRevision: 2,
         ops: [{ type: "patch_director_source", entity: "brief", patch: { value: "accepted" } }], adoptions: [{ taskId: "task", artifactHash: "a".repeat(64) }] });
     assert.deepEqual((edit as { body: any }).body.adoptions, [{ taskId: "task", artifactHash: "a".repeat(64) }]);
+    const shotRefresh = productionToolRequest("production_edit", { kind: "episode", id: "episode", operationId: "shot-refresh", expectedRevision: 5,
+        ops: [{ type: "request_director_shot_refresh", shotIds: ["SHOT_A", "SHOT_B"] }] });
+    assert.deepEqual((shotRefresh as { body: any }).body.ops, [{ type: "request_director_shot_refresh", shotIds: ["SHOT_A", "SHOT_B"] }]);
+    assert.equal(productionToolSchemas.production_edit.safeParse({ kind: "episode", id: "episode", operationId: "duplicate-shot-refresh", expectedRevision: 5,
+        ops: [{ type: "request_director_shot_refresh", shotIds: ["SHOT_A", "SHOT_A"] }] }).success, false);
 });
 import assert from "node:assert/strict";
 import { productionToolNames, productionToolRequest, productionToolSchemas, executeProductionTool, isProductionTool } from "./production-tools.js";

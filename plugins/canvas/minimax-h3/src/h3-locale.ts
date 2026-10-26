@@ -23,7 +23,7 @@ const labels = {
     prompt: ["提示词", "Prompt"],
     settings: ["参数设置", "Settings"],
     selectedVideoModel: ["自选视频模型", "Choose video model"],
-    selectedVideoModelHint: ["开启后使用下方所选视频模型及其已配置的渠道/工作流；H3 参数按该模型的工作流映射传递。关闭时使用 H3 默认执行流。", "Use the selected video model and its configured channel/workflow. H3 parameters follow that workflow's field mappings. Turn off to use the default H3 execution path."],
+    selectedVideoModelHint: ["开启后使用下方所选视频模型及其已配置的渠道/工作流；H3 参数按该模型的工作流映射传递。关闭时固定使用本地 ComfyUI 的原生 H3 执行流。", "Use the selected video model and its configured channel/workflow. H3 parameters follow that workflow's field mappings. Turn off to always use native H3 on local ComfyUI."],
     selectedVideoModelClipOnly: ["仅切换当前 Clip。", "Affects the current Clip only."],
     selectedVideoModelUnset: ["未选择模型", "No model selected"],
     nativeH3: ["原生 H3", "Native H3"],

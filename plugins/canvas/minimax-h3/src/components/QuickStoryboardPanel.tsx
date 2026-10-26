@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sd
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { Button, Modal, Switch, message } from "antd";
 import type { H3Ref, H3Segment } from "../types";
-import { quickStoryboardRuntimeKey, refsForSegment, withSegmentRefs } from "../services/h3-data";
-import { alignStoryboardReferenceOrder, storyboardTrackItems } from "../services/h3-storyboard-track";
+import { refsForSegment, withSegmentRefs } from "../services/h3-data";
+import { addStoryboardShot, alignStoryboardReferenceOrder, insertStoryboardShotAfter, storyboardTrackItems } from "../services/h3-storyboard-track";
 import { h3ThemeVars } from "../h3-theme";
 
 type Frame = { id: string; url: string; storageKey?: string; name: string; sourceTime: number; fingerprint?: string };
@@ -119,14 +119,9 @@ async function composeStoryboardPreview(frames: Array<Frame | null>) {
   return canvas.toDataURL("image/jpeg", 0.88);
 }
 
-async function blobFromDataUrl(dataUrl: string) {
-  const response = await fetch(dataUrl);
-  return response.blob();
-}
-
 export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: CanvasNodeContext; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void }) {
   const [open, setOpen] = useState(false);
-  const [enabled, setEnabled] = useState(false);
+  const [compositeEnabled, setCompositeEnabled] = useState(false);
   const [drafts, setDrafts] = useState<Frame[]>([]);
   const [arranged, setArranged] = useState<Frame[]>([]);
   const [slots, setSlots] = useState<Array<Frame | null>>([]);
@@ -147,6 +142,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
   slotsRef.current = slots;
   const inFlightFingerprintsRef = useRef(new Set<string>());
   const composeRevisionRef = useRef(0);
+  const writingTrackRef = useRef(false);
   const quickStoryboardMode = String(selected?.mode || selected?.taskMode || "ref2va").toLowerCase();
   const requireRef2va = () => {
     if (quickStoryboardMode === "ref2va") return true;
@@ -160,37 +156,30 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
   };
 
   useEffect(() => {
-    const resolveFrames = (items: H3Segment["quickStoryboardDrafts"]) => (items || []).flatMap((item) => {
-      const ref = allKnownRefs.find((entry) => entry.bindingId === item.bindingId);
-      return ref ? [{ id: item.bindingId, url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, storageKey: ref.storageKey, name: item.name, sourceTime: Number(item.sourceTime || 0), fingerprint: item.fingerprint || ref.tags?.find((tag) => tag.startsWith("sha256:"))?.slice(7) }] : [];
-    });
-    setDrafts(resolveFrames(selected?.quickStoryboardDrafts));
-    const arrangedFrames = resolveFrames(selected?.quickStoryboardArrangement);
-    setArranged(arrangedFrames);
     const trackItems = selected ? storyboardTrackItems(selected) : [];
     const formalTrackFrames = trackItems.flatMap((item) => item.ref?.bindingId ? [{
       id: item.ref.bindingId, url: item.ref.storageKey ? ctx.mediaUrl(item.ref.storageKey) : item.ref.url,
       storageKey: item.ref.storageKey, name: item.ref.name || `Shot ${trackItems.indexOf(item) + 1}`, sourceTime: 0,
     }] : []);
-    const byId = new Map([...resolveFrames(selected?.quickStoryboardDrafts), ...arrangedFrames, ...formalTrackFrames].map((frame) => [frame.id, frame]));
-    const savedSlots = selected?.quickStoryboardSlotBindings;
-    const nextSlots = trackItems.map((_, index) => {
-      const bindingId = savedSlots?.[index] ?? arrangedFrames[index]?.id ?? trackItems[index]?.ref?.bindingId;
-      return bindingId ? byId.get(bindingId) || null : null;
-    });
+    const usedBindingIds = new Set(formalTrackFrames.map((frame) => frame.id));
+    const scopeTag = selected?.id ? `quick-storyboard:${ctx.node.id}:${selected.id}` : "";
+    const dismissedTag = selected?.id ? `quick-storyboard-dismissed:${ctx.node.id}:${selected.id}` : "";
+    const catalogDrafts = catalogRefs.filter((ref) => scopeTag && ref.tags?.includes(scopeTag) && !ref.tags?.includes(dismissedTag) && ref.bindingId && !usedBindingIds.has(ref.bindingId)).map((ref) => ({
+      id: ref.bindingId!, url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, storageKey: ref.storageKey,
+      name: ref.name || `分镜帧 ${ref.bindingId}`, sourceTime: 0, fingerprint: ref.tags?.find((tag) => tag.startsWith("sha256:"))?.slice(7),
+    }));
+    const framesById = new Map([...catalogDrafts, ...formalTrackFrames].map((frame) => [frame.id, frame]));
+    setDrafts(catalogDrafts);
+    setArranged(formalTrackFrames);
+    const nextSlots = trackItems.map(item => item.ref?.bindingId ? framesById.get(item.ref.bindingId) || null : null);
     slotsRef.current = nextSlots;
     setSlots(nextSlots);
-    let active = true;
     setCollagePreview("");
-    if (selected?.id) void ctx.storage.get<{ storageKey?: string }>(quickStoryboardRuntimeKey(ctx.projectId, ctx.node.id, selected.id)).then((runtime) => {
-      if (active && runtime?.storageKey) setCollagePreview(ctx.mediaUrl(runtime.storageKey));
-    }).catch(() => undefined);
-    return () => { active = false; };
   }, [selected, allKnownRefs]);
 
   useEffect(() => {
-    setEnabled(selected?.quickStoryboardEnabled === true);
-  }, [selected?.id, selected?.quickStoryboardEnabled]);
+    setCompositeEnabled(selected?.storyboardCompositeEnabled === true);
+  }, [selected?.id, selected?.storyboardCompositeEnabled]);
 
   useEffect(() => {
     let active = true;
@@ -211,15 +200,14 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       if (!selected?.id || request?.nodeId !== ctx.node.id) return;
       if (!requireRef2va()) return;
       setOpen(true);
-      setEnabled(true);
-      patchSelected({ quickStoryboardEnabled: true });
       setBusy(true);
       setError("");
       const scopeId = `${ctx.node.id}:${selected.id}`;
+      const dismissedTag = `quick-storyboard-dismissed:${scopeId}`;
       const fingerprints = new Set([...draftsRef.current, ...arrangedRef.current, ...slotsRef.current.filter((frame): frame is Frame => Boolean(frame))].map((frame) => frame.fingerprint).filter((value): value is string => Boolean(value)));
       const existingAssets = new Map<string, H3Ref>();
       for (const ref of catalogRefs) {
-        if (!ref.tags?.includes(`quick-storyboard:${scopeId}`)) continue;
+        if (!ref.tags?.includes(`quick-storyboard:${scopeId}`) || ref.tags.includes(dismissedTag)) continue;
         const fingerprint = ref.tags.find((tag) => tag.startsWith("sha256:"))?.slice(7);
         if (!fingerprint) continue;
         existingAssets.set(fingerprint, ref);
@@ -233,7 +221,6 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
           url: asset.url || (asset.storageKey ? ctx.mediaUrl(asset.storageKey) : ""), storageKey: asset.storageKey, type: "image" as const, name: asset.label,
           mimeType: asset.mimeType, role: "storyboard" as const, bindingId: asset.id, assetId: asset.id, tags: asset.tags,
         })).filter((ref) => ref.url))).catch(() => undefined);
-        patchSelected({ quickStoryboardDrafts: next.map(({ id, name, sourceTime, fingerprint }) => ({ bindingId: id, name, sourceTime, fingerprint })) });
       }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setBusy(false));
     };
     const addSingleFrame = (event: Event) => {
@@ -241,8 +228,6 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       if (!selected?.id || request?.nodeId !== ctx.node.id) return;
       if (!requireRef2va()) return;
       setOpen(true);
-      setEnabled(true);
-      patchSelected({ quickStoryboardEnabled: true });
       setBusy(true);
       setError("");
       void (async () => {
@@ -258,6 +243,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
         }
         const scopeId = `${ctx.node.id}:${selected.id}`;
         const catalogMatch = catalogRefs.find((ref) => ref.tags?.includes(`quick-storyboard:${scopeId}`)
+          && !ref.tags.includes(`quick-storyboard-dismissed:${scopeId}`)
           && ref.tags.some((tag) => tag === `sha256:${fingerprint}`));
         const sourceTime = Math.max(0, Number(request.sourceTime || 0));
         const frameLabel = request.position === "first" ? "首帧" : request.position === "last" ? "尾帧" : "当前帧";
@@ -277,7 +263,6 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
         const next = [...draftsRef.current, frame];
         draftsRef.current = next;
         setDrafts(next);
-        patchSelected({ quickStoryboardDrafts: next.map(({ id, name, sourceTime, fingerprint }) => ({ bindingId: id, name, sourceTime, fingerprint })) });
         void ctx.references.list().then((assets) => setCatalogRefs(assets.filter((asset) => asset.tags?.includes("quick-storyboard") && asset.mediaType === "image").map((asset) => ({
           url: asset.url || (asset.storageKey ? ctx.mediaUrl(asset.storageKey) : ""), storageKey: asset.storageKey, type: "image" as const, name: asset.label,
           mimeType: asset.mimeType, role: "storyboard" as const, bindingId: asset.id, assetId: asset.id, tags: asset.tags,
@@ -292,19 +277,13 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
     };
   }, [ctx.node.id, ctx.projectId, ctx.references, selected?.id, selected?.mode, selected?.taskMode, selected?.storyboardShots?.length, catalogRefs]);
 
-  const updateArrangement = (nextSlots: Array<Frame | null>) => {
+  const updateArrangement = async (nextSlots: Array<Frame | null>, baseSegment = selected, extraPatch: Partial<H3Segment> = {}, nextDrafts = draftsRef.current) => {
     const next = nextSlots.filter((frame): frame is Frame => Boolean(frame));
-    setSlots(nextSlots);
-    slotsRef.current = nextSlots;
-    setArranged(next);
-    arrangedRef.current = next;
-    if (!selected) return;
-    void ctx.storage.remove(quickStoryboardRuntimeKey(ctx.projectId, ctx.node.id, selected.id)).catch(() => undefined);
-    const allDrafts = draftsRef.current;
-    const trackItems = storyboardTrackItems(selected);
+    if (!baseSegment || busy || writingTrackRef.current) return false;
+    const trackItems = storyboardTrackItems(baseSegment);
     const assignedIds = new Set(nextSlots.flatMap((frame) => frame ? [frame.id] : []));
     const previousStoryboardIds = new Set(trackItems.flatMap((item) => item.ref?.bindingId ? [item.ref.bindingId] : []));
-    const refs = refsForSegment(selected).map((ref) => previousStoryboardIds.has(ref.bindingId || "") && !assignedIds.has(ref.bindingId || "")
+    const refs = refsForSegment(baseSegment).map((ref) => previousStoryboardIds.has(ref.bindingId || "") && !assignedIds.has(ref.bindingId || "")
       ? { ...ref, role: "other" as const } : ref);
     const nextRefs = [...refs];
     const storyboardShots = trackItems.map((item, index) => {
@@ -319,50 +298,76 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       else nextRefs.push(ref);
       return { id: item.id, duration: item.duration, referenceBindingId: frame.id };
     });
-    const updated = alignStoryboardReferenceOrder(withSegmentRefs({ ...selected, storyboardModeEnabled: true, storyboardShots }, nextRefs));
-    patchSelected({
+    const updated = alignStoryboardReferenceOrder(withSegmentRefs({
+      ...baseSegment,
+      storyboardModeEnabled: true,
+      storyboardShots,
+    }, nextRefs));
+    const updatedSegment = {
       ...updated,
-      quickStoryboardDrafts: allDrafts.map(({ id, name, sourceTime, fingerprint }) => ({ bindingId: id, name, sourceTime, fingerprint })),
-      quickStoryboardArrangement: next.map(({ id, name, sourceTime, fingerprint }) => ({ bindingId: id, name, sourceTime, fingerprint })),
-      quickStoryboardSlotBindings: nextSlots.map((frame) => frame?.id || null),
-    });
+      ...extraPatch,
+    };
+    const isFormalClip = Boolean(updatedSegment.productionClipProjection?.targetId);
+    writingTrackRef.current = true;
+    setBusy(true);
+    try {
+      if (isFormalClip) {
+        if (!ctx.production?.replaceStoryboardTrack) throw new Error("当前制作台未接收分镜修改；轨道与关键帧均未写入。");
+        const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: baseSegment.id, segment: updatedSegment as Record<string, unknown> });
+        if (!result.sourceSaved) throw new Error("制作台未保存分镜 Shot 和关键帧；轨道未更新。");
+      } else patchSelected(updatedSegment);
+      draftsRef.current = nextDrafts;
+      setDrafts(nextDrafts);
+      setSlots(nextSlots);
+      slotsRef.current = nextSlots;
+      setArranged(next);
+      arrangedRef.current = next;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally { writingTrackRef.current = false; setBusy(false); }
     setError("");
     const revision = ++composeRevisionRef.current;
-    if (!next.length) { setCollagePreview(""); return; }
+    if (!next.length) { setCollagePreview(""); return true; }
     void composeStoryboardPreview(nextSlots).then((preview) => {
-      if (revision === composeRevisionRef.current) setCollagePreview(preview);
+      if (revision !== composeRevisionRef.current) return;
+      setCollagePreview(preview);
     }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+    return true;
   };
 
   const removeDraftFrame = (frameId: string) => {
     if (busy) return;
     const nextDrafts = draftsRef.current.filter((frame) => frame.id !== frameId);
-    const nextArrangement = slotsRef.current.map((frame) => frame?.id === frameId ? null : frame);
-    draftsRef.current = nextDrafts;
-    setDrafts(nextDrafts);
-    updateArrangement(nextArrangement);
+    const scopeTag = selected ? `quick-storyboard-dismissed:${ctx.node.id}:${selected.id}` : "";
+    const asset = catalogRefs.find(ref => ref.bindingId === frameId);
+    if (asset && scopeTag) void ctx.references.upsert({
+      id: frameId, label: asset.name, mediaType: "image", role: "storyboard", url: asset.url,
+      storageKey: asset.storageKey, mimeType: asset.mimeType, tags: [...(asset.tags || []), scopeTag],
+    }).then(() => ctx.references.list()).then(assets => setCatalogRefs(assets.filter(item => item.tags?.includes("quick-storyboard") && item.mediaType === "image").map(item => ({
+      url: item.url || (item.storageKey ? ctx.mediaUrl(item.storageKey) : ""), storageKey: item.storageKey, type: "image" as const, name: item.label,
+      mimeType: item.mimeType, role: "storyboard" as const, bindingId: item.id, assetId: item.id, tags: item.tags,
+    })).filter(ref => ref.url))).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
   };
 
-  const submitArranged = async () => {
-    if (busy || !selected || !arrangedRef.current.length) return;
-    if (!requireRef2va()) return;
-    setBusy(true);
+  const toggleComposite = (value: boolean) => {
+    if (!selected || busy) return;
+    if (value && slotsRef.current.filter(Boolean).length < 2) {
+      setError("至少需要两张已放入分镜轨的图片才能合并宫格。");
+      return;
+    }
+    if (value && !requireRef2va()) return;
+    setCompositeEnabled(value);
     setError("");
-    try {
-      const currentArrangement = slotsRef.current;
-      const collageDataUrl = await composeStoryboardPreview(currentArrangement);
-      setCollagePreview(collageDataUrl);
-      const uploadedCollage = await ctx.uploadImage(await blobFromDataUrl(collageDataUrl));
-      if (!uploadedCollage.storageKey) throw new Error("宫格图片尚未归档到媒体库，无法在运行时作为参考图提交。");
-      await ctx.storage.set(quickStoryboardRuntimeKey(ctx.projectId, ctx.node.id, selected.id), {
-        storageKey: uploadedCollage.storageKey,
-        panelCount: currentArrangement.length,
-      });
-      setCollagePreview(ctx.mediaUrl(uploadedCollage.storageKey));
-      message.success("宫格已准备好；启用快速分镜后，点击运行时才会临时加入参考图和提示词。");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally { setBusy(false); }
+    // Use H3's canonical composite setting; the montage is compiled from this same track.
+    const recoveredSlots = slotsRef.current.map((frame, index) => frame || arrangedRef.current[index] || null);
+    if (value && recoveredSlots.filter(Boolean).length >= 2) {
+      // Older saves can retain the selected arrangement while their track binding was
+      // cleared by a production projection. Re-apply those exact images to the Shots.
+      updateArrangement(recoveredSlots, selected, { storyboardCompositeEnabled: value });
+    } else {
+      patchSelected({ storyboardCompositeEnabled: value });
+    }
   };
 
   const drop = (event: React.DragEvent<HTMLDivElement>, target: "draft" | "arranged", targetIndex?: number) => {
@@ -378,31 +383,44 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
     if (!from || !frameId) return;
     const frame = (from === "draft" ? draftsRef.current : slotsRef.current.filter((item): item is Frame => Boolean(item))).find((item) => item.id === frameId);
     if (!frame) return;
-    const nextSlots = [...slotsRef.current];
+    let nextSlots = [...slotsRef.current];
+    let nextDrafts = draftsRef.current;
     if (target === "arranged") {
-      if (targetIndex === undefined || targetIndex < 0 || targetIndex >= nextSlots.length) return;
+      let destinationIndex = targetIndex;
+      let arrangementSegment = selected;
+      if (destinationIndex === undefined) {
+        if (!selected) return;
+        const items = storyboardTrackItems(selected);
+        arrangementSegment = items.length
+          ? insertStoryboardShotAfter(selected, items[items.length - 1].id)
+          : addStoryboardShot(selected);
+        const nextItems = storyboardTrackItems(arrangementSegment);
+        if (nextItems.length <= items.length) {
+          setError("最后一个 Shot 时长不足，无法再拆出分镜格。");
+          return;
+        }
+        nextSlots = [...nextSlots, null];
+        destinationIndex = nextSlots.length - 1;
+      }
+      if (destinationIndex < 0 || destinationIndex >= nextSlots.length) return;
       const occupiedAt = nextSlots.findIndex((item) => item?.id === frame.id);
-      if (from === "draft" && occupiedAt >= 0 && occupiedAt !== targetIndex) return;
-      const destination = nextSlots[targetIndex];
+      if (from === "draft" && occupiedAt >= 0 && occupiedAt !== destinationIndex) return;
+      const destination = nextSlots[destinationIndex];
       if (from === "arranged") {
-        if (occupiedAt < 0 || occupiedAt === targetIndex) return;
+        if (occupiedAt < 0 || occupiedAt === destinationIndex) return;
         nextSlots[occupiedAt] = destination || null;
       } else {
-        const nextDrafts = draftsRef.current.filter((item) => item.id !== frame.id);
+        nextDrafts = draftsRef.current.filter((item) => item.id !== frame.id);
         if (destination && !nextDrafts.some((item) => item.id === destination.id)) nextDrafts.push(destination);
-        draftsRef.current = nextDrafts;
-        setDrafts(nextDrafts);
       }
-      nextSlots[targetIndex] = frame;
-      updateArrangement(nextSlots);
+      nextSlots[destinationIndex] = frame;
+      void updateArrangement(nextSlots, arrangementSegment, {}, nextDrafts);
     } else if (from === "arranged") {
       const occupiedAt = nextSlots.findIndex((item) => item?.id === frame.id);
       if (occupiedAt >= 0) {
         nextSlots[occupiedAt] = null;
-        const nextDrafts = draftsRef.current.some((item) => item.id === frame.id) ? draftsRef.current : [...draftsRef.current, frame];
-        draftsRef.current = nextDrafts;
-        setDrafts(nextDrafts);
-        updateArrangement(nextSlots);
+        nextDrafts = draftsRef.current.some((item) => item.id === frame.id) ? draftsRef.current : [...draftsRef.current, frame];
+        void updateArrangement(nextSlots, selected, {}, nextDrafts);
       }
     }
     draggingRef.current = null;
@@ -410,7 +428,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
   };
 
   return <>
-    <Button size="small" className="minimax-quick-storyboard-trigger" aria-pressed={enabled} onClick={openQuickStoryboard}>快速分镜</Button>
+    <Button size="small" className="minimax-quick-storyboard-trigger" aria-pressed={compositeEnabled} onClick={openQuickStoryboard}>快速分镜</Button>
     <Modal
       title="快速分镜"
       open={open}
@@ -420,15 +438,15 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       destroyOnHidden={false}
     >
       <div data-canvas-no-zoom style={h3ThemeVars(ctx.theme)}><section className="minimax-quick-storyboard">
-        <div className="minimax-quick-storyboard-head"><div><b>快速分镜工作区</b><small>从视频提取帧，拖入排列区并调整顺序；宫格和提示词只在点击运行时临时加入。</small></div><label><span>启用</span><Switch checked={enabled} onChange={(value) => { setEnabled(value); patchSelected({ quickStoryboardEnabled: value }); }} /></label></div>
-        {enabled ? <>
+        <div className="minimax-quick-storyboard-head"><div><b>快速分镜工作区</b><small>分镜图始终保留在 H3 分镜轨并同步制作台；关闭宫格时按单张图提交。</small></div><label><span>合并提交分镜图</span><Switch checked={compositeEnabled} disabled={busy || slots.filter(Boolean).length < 2 && !compositeEnabled} onChange={toggleComposite} /></label></div>
+        <>
           <div className="minimax-quick-storyboard-columns">
             <div className={`minimax-quick-storyboard-zone${dropZone === "draft" ? " is-drop-target" : ""}`} onDragEnter={() => setDropZone("draft")} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropZone("draft"); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropZone(null); }} onDrop={(event) => drop(event, "draft")}>
               <div className="minimax-quick-storyboard-zone-head"><b>草稿区</b><span>{drafts.length} 帧</span></div>
               <div className="minimax-quick-storyboard-items">{drafts.map((frame, index) => <div key={frame.id} className={dragging?.frame.id === frame.id ? "is-dragging" : ""} draggable={!busy} onDragStart={(event) => { const value = { frame, from: "draft" as const }; draggingRef.current = value; setDragging(value); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-quick-storyboard", JSON.stringify({ from: "draft", id: frame.id })); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDragEnd={() => { draggingRef.current = null; setDragging(null); }} title={`${frame.name} · ${frame.sourceTime.toFixed(1)} 秒`}><span className="minimax-quick-storyboard-shot">帧 {index + 1}</span><img draggable={false} src={frame.url} alt={frame.name} /><span className="minimax-quick-storyboard-caption">{frame.name}</span><button type="button" disabled={busy} className="minimax-quick-storyboard-remove" aria-label={`删除${frame.name}`} title="从草稿区删除" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.preventDefault(); event.stopPropagation(); removeDraftFrame(frame.id); }}>×</button></div>)}</div>
               {!drafts.length ? <div className="minimax-quick-storyboard-empty">在视频预览或 Output 上右键，提取分镜帧</div> : null}
             </div>
-            <div className={`minimax-quick-storyboard-zone is-arranged${dropZone === "arranged" ? " is-drop-target" : ""}`} onDragEnter={() => setDropZone("arranged")} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropZone("arranged"); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropZone(null); }}>
+            <div className={`minimax-quick-storyboard-zone is-arranged${dropZone === "arranged" ? " is-drop-target" : ""}`} onDragEnter={() => setDropZone("arranged")} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropZone("arranged"); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropZone(null); }} onDrop={(event) => drop(event, "arranged")}>
               <div className="minimax-quick-storyboard-zone-head"><b>排列区 · 分镜轨</b><span>{slots.length} 格</span></div>
               <div className="minimax-quick-storyboard-items">{slots.map((frame, index) => <div key={storyboardTrackItems(selected!)[index]?.id || index} className={`${dragging?.frame.id === frame?.id ? "is-dragging" : ""}${frame ? "" : " is-empty"}`} draggable={Boolean(frame) && !busy} onDragStart={(event) => { if (!frame) return; const value = { frame, from: "arranged" as const }; draggingRef.current = value; setDragging(value); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-h3-quick-storyboard", JSON.stringify({ from: "arranged", id: frame.id })); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }} onDrop={(event) => drop(event, "arranged", index)} onDragEnd={() => { draggingRef.current = null; setDragging(null); }} title={frame ? `${frame.name} · ${frame.sourceTime.toFixed(1)} 秒` : `Shot ${index + 1} · 拖入分镜帧`}>
                 <span className="minimax-quick-storyboard-shot">Shot {index + 1}</span>{frame ? <><img draggable={false} src={frame.url} alt={frame.name} /><span className="minimax-quick-storyboard-caption">{frame.name}</span></> : <span className="minimax-quick-storyboard-slot-empty">拖入帧</span>}
@@ -436,9 +454,9 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
               {!slots.length ? <div className="minimax-quick-storyboard-empty">当前 Clip 尚无分镜，请先在分镜轨添加分镜</div> : null}
             </div>
           </div>
-          {slots.some(Boolean) ? <div className="minimax-quick-storyboard-preview"><div><b>宫格预览</b><span>{slots.length} 格 · 与分镜轨 Shot 一一对应</span></div>{collagePreview ? <img src={collagePreview} alt="当前排列生成的分镜宫格" /> : <div className="minimax-quick-storyboard-preview-empty">拖动分镜帧后自动生成预览</div>}</div> : null}
-          <div className="minimax-quick-storyboard-footer"><small>{busy ? "正在生成宫格…" : error ? " " : "每一格对应分镜轨中的 Shot；更改会同步到制作台"}{error ? <span role="alert">{error}</span> : null}</small>{arranged.length ? <Button type="primary" size="middle" loading={busy} disabled={busy || arranged.length < 1} onClick={() => void submitArranged()}>生成宫格供运行时使用</Button> : null}</div>
-        </> : null}
+          {slots.some(Boolean) ? <div className="minimax-quick-storyboard-preview"><div><b>宫格预览</b><span>{slots.length} 格 · {compositeEnabled ? "合并提交" : "预览，生成时仍按轨道单图提交"}</span></div>{collagePreview ? <img src={collagePreview} alt="当前排列生成的分镜宫格" /> : <div className="minimax-quick-storyboard-preview-empty">拖动分镜帧后生成预览</div>}</div> : null}
+          <div className="minimax-quick-storyboard-footer"><small>{busy ? "正在更新宫格…" : error ? " " : "拖放和顺序调整会同步至 H3 分镜轨及制作台"}{error ? <span role="alert">{error}</span> : null}</small></div>
+        </>
       </section></div>
     </Modal>
   </>;

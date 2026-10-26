@@ -61,6 +61,42 @@ test("Clip storyboard replacement supports Prompt v2 frame durations, reordering
     assert.deepEqual(source.shots.map((shot: any) => [shot.id, shot.duration_frames, shot.story_order]), [["S2", 24, 0], ["S5", 72, 1], ["S3", 48, 2], ["S4", 48, 3]]);
 });
 
+test("patch 模式只改传入镜头，其余镜头与输入保持原值", () => {
+    const value = director([
+        { id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA", mode_lock: "Ref2VA", styleTemplateId: null },
+        { id: "C2", shot_ids: ["S3", "S4"], mode: "Ref2VA", mode_lock: "Ref2VA", styleTemplateId: null },
+    ]);
+    (value as any).shotInputs = { S1: { keyframePolicy: "none", assetIds: [] }, S2: { keyframePolicy: "none", assetIds: [] } };
+    const before = structuredClone((value.source as Record<string, any>).shots);
+    replaceDirectorClipStoryboard(value, { segmentId: "C1", patch: true, shots: [{ id: "S2", visual: "红绡反手扣住灯盏" }] });
+    const source = value.source as Record<string, any>;
+    assert.deepEqual(source.segments[0].shot_ids, ["S1", "S2"]);
+    assert.equal(source.shots[0].visual, before[0].visual);
+    assert.equal(source.shots[1].visual, "红绡反手扣住灯盏");
+    assert.deepEqual(source.shots.map((shot: any) => shot.duration_frames), before.map((shot: any) => shot.duration_frames));
+    assert.equal(Object.hasOwn((value as any).shotInputs, "S1"), true);
+    assert.equal(Object.hasOwn((value as any).shotInputs, "S2"), true);
+});
+
+test("patch 模式的错误指出可用镜头与结构改动的替代入口", () => {
+    const value = director([
+        { id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA", styleTemplateId: null },
+        { id: "C2", shot_ids: ["S3", "S4"], mode: "Ref2VA", styleTemplateId: null },
+    ]);
+    assert.throws(
+        () => replaceDirectorClipStoryboard(value, { segmentId: "C1", patch: true, shots: [{ id: "S9", visual: "x" }] }),
+        error => (error as any).diagnostics?.some((item: any) => item.code === "CLIP_SHOT_UNKNOWN" && /S9/.test(item.message)),
+    );
+    assert.throws(
+        () => replaceDirectorClipStoryboard(value, { segmentId: "C1", patch: true, segment: { id: "C1", shot_ids: ["S1"] }, shots: [{ id: "S1", visual: "x" }] }),
+        error => (error as any).diagnostics?.some((item: any) => item.code === "CLIP_PATCH_SEGMENT_CONFLICT"),
+    );
+    assert.throws(
+        () => replaceDirectorClipStoryboard(value, { segmentId: "C1", shots: [{ id: "S1", visual: "x" }] }),
+        error => (error as any).diagnostics?.some((item: any) => item.code === "CLIP_SEGMENT_REQUIRED"),
+    );
+});
+
 test("repartition rejects gaps and requires an explicit existing profile when old Clip settings differ", () => {
     const gapped = director([{ id: "C1", shot_ids: ["S1", "S2", "S3", "S4"], mode: "Ref2VA" }]);
     assert.throws(() => repartitionDirectorClips(gapped, { shotIds: ["S1", "S2", "S3", "S4"], segments: [{ shot_ids: ["S1", "S3"] }, { shot_ids: ["S2", "S4"] }] }), error => (error as any).diagnostics?.some((item: any) => item.code === "CLIP_PARTITION_ORDER"));

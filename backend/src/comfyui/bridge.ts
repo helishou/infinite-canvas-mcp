@@ -21,7 +21,6 @@ import { H3_CONTINUATION_NODE_ID, h3ContinuationFolder, stageH3ContinuationSeed,
 import { listLocalLoras } from "./local-lora-catalog.js";
 import { createLogger } from "../logger.js";
 import { watchSlowOperation } from "../slow-operation.js";
-import { freeLlmBeforeGenerate, restoreLlmAfterGenerate } from "./llm-handoff.js";
 
 const slowOperationLogger = createLogger("comfyui");
 
@@ -414,9 +413,6 @@ export class ComfyUiBackend {
         let executionCompleted = false;
         const keepModelCache = task.params.keepModelCache !== false;
         try {
-            // GPU 显存交接：卸掉本地 LLM 引擎（:18080），让出整卡给 ComfyUI。
-            // 条件式+幂等——交接脚本不存在或本地没启动 LLM 时就是 no-op，不影响生成。
-            await freeLlmBeforeGenerate();
             const completedTask = this.deps.tasks.get(task.id);
             if (controller.signal.aborted || !completedTask || !["queued", "running"].includes(completedTask.status)) return;
             this.updateTask(task.id, { status: "running", progress: 0.05 });
@@ -435,10 +431,6 @@ export class ComfyUiBackend {
             this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
         } finally {
-            // 结束本次生成：递减引用计数；若本批已结束且 Free 确实卸过引擎，
-            // 就安排一次（防抖的）引擎恢复。这里「不 await」——槽位要等本函数
-            // 返回才释放，等 170s 的重启会把下一段 clip 卡住。
-            restoreLlmAfterGenerate();
             if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
                 try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
             }

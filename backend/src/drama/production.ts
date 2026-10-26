@@ -4,6 +4,7 @@ import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecut
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { editDirectorShot } from "./shot-edit.js";
 import { createManualDirectorAsset, deleteDirectorAsset } from "./director-asset-delete.js";
+import { sourceOf } from "../canvas/drama-asset-library.js";
 import { replaceDirectorClipStoryboard, repartitionDirectorClips, assertClipEdit, clipShots, rows as clipRows } from "./clip-storyboard.js";
 import { ClipRefreshStore, clipRefreshReceipt, clipRefreshScope } from "./clip-refresh.js";
 import { reverseSyncPromptEdit, type PromptSourceMap } from "./prompt-reverse-sync.js";
@@ -52,7 +53,8 @@ import {
     type ProductionOperation,
 } from "@basketikun/canvas-agent/drama/production-contract";
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { H3_DEFAULTS_KEY } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { H3_DEFAULTS_KEY, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { generationSettingsSnapshot } from "../canvas/generation-settings.js";
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
@@ -79,6 +81,7 @@ import { buildPublishedProductionClip, clipInputHash, clipInputOperations, forma
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
+import { isArchivedStoryboardKeyframeBinding } from "./storyboard-media.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import { decodeReceipt, encodeReceipt, type StoredReceipt } from "./receipt-storage.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -500,7 +503,19 @@ export class EpisodeProductionService {
             const planSharedSource = plan?.sharedSource && typeof plan.sharedSource === "object" ? plan.sharedSource as Record<string, any> : undefined;
             const sharedSource = planSharedSource;
             const isSharedAsset = Boolean(sharedSource || String(plan?.canvas_scope || "episode") === "shared");
-            const directStoredMedia = !projectId && !nodeId && Boolean(old?.storageKey) && !isSharedAsset;
+            const archivedQuickStoryboardReference = Boolean(old?.storageKey && projectId === productionCanvasId
+                && node && isH3NodeType(String(node.type || ""))
+                && [
+                    ...clipRows(metadata.segments).flatMap(segment => clipRows(segment.referenceBindings)),
+                    ...clipRows(project?.referenceCatalog),
+                ].some(reference => reference.role === "storyboard"
+                    && (reference.mediaType === "image" || reference.type === "image")
+                    && String(reference.storageKey || "") === String(old.storageKey)));
+            // Quick Storyboard frames are already archived H3 reference assets. They
+            // have no image-node owner; verify the exact H3 Clip binding, then resolve
+            // their bytes by storageKey instead of dereferencing a fabricated node.
+            const directStoredMedia = !isSharedAsset && Boolean(old?.storageKey)
+                && (!projectId && !nodeId || archivedQuickStoryboardReference);
             const sharedBindingError = (stage: NonNullable<ProductionDiagnostic["details"]>["stage"], reason: string, message: string): never => {
                 throw new ProductionValidationError([{
                     code: "SHARED_ASSET_BINDING_INVALID", path: `${bindingPath}.sourceNode`, targetId: bindingId, message, severity: "error",
@@ -1239,8 +1254,9 @@ export class EpisodeProductionService {
         // Older compiled H3 artifact snapshots can retain the previous audio media key;
         // treating those as image bindings makes a valid audio node fail image-node checks.
         const currentArtifactReferences = director.artifacts.filter(artifact => artifact.status === "ready" && currentCompilationArtifact(director, artifact));
-        const bindings = [...Object.values(director.assets), ...currentArtifactReferences.flatMap(a => a.references.filter(binding => !isAudioReference(binding)))];
-        const currentArtifactBindings = currentArtifactReferences.flatMap(artifact => artifact.references.filter(binding => !isAudioReference(binding)));
+        const bindings: Array<Record<string, any>> = [...Object.entries(director.assets).map(([assetId, asset]) => ({ ...asset, assetId })),
+            ...currentArtifactReferences.flatMap(artifact => artifact.references.filter(binding => !isAudioReference(binding)).map(binding => ({ ...binding, targetId: artifact.targetId })))];
+        const currentArtifactBindings = currentArtifactReferences.flatMap(artifact => artifact.references.filter(binding => !isAudioReference(binding)).map(binding => ({ ...binding, targetId: artifact.targetId })));
         // 画布风格锚点可以位于剧目共享资产画布，只有它能跨画布解析；其余引用仍须落在本集制作画布上。
         const styleAnchorNodeId = String(director.source.style_anchor_node_id || "");
         const sharedCanvasId = productionCanvasContext(this.db, canvasId!).sharedAssetCanvasId;
@@ -1254,9 +1270,17 @@ export class EpisodeProductionService {
         for (const binding of bindings) {
             if (!binding.storageKey) continue;
             const node = nodesById.get(String(binding.nodeId || ""));
+            const storyboardTargetIds = binding.targetId ? [String(binding.targetId)] : clipRows(director.source.segments)
+                .filter(segment => clipRows(segment.shot_ids).some(shotId => clipRows(director.source.shots)
+                    .some(shot => String(shot.id || "") === String(shotId)
+                        && clipRows(shot.keyframes).some(frame => String(frame.assetId || frame.id || "") === String(binding.assetId || "")))))
+                .map(segment => String(segment.id || ""));
+            const archivedStoryboardBinding = !binding.nodeId && Boolean(binding.assetId)
+                && storyboardTargetIds.some(targetId => isArchivedStoryboardKeyframeBinding({ director, nodes, targetId,
+                    assetId: String(binding.assetId), bindingId: binding.bindingId, storageKey: String(binding.storageKey), sha256: String(binding.sha256 || "") }));
             const meta = node?.metadata as Record<string, unknown> | undefined;
             const keys = node ? [...resolveCanvasCharacterImageReferences(node).map(r => r.storageKey), (node as any).storageKey, meta?.storageKey, meta?.resultStorageKey] : [];
-            if (!node || !keys.includes(binding.storageKey)) {
+            if ((!node || !keys.includes(binding.storageKey)) && !archivedStoryboardBinding) {
                 const currentReference = currentArtifactBindings.some(reference => String(reference.nodeId || "") === String(binding.nodeId || "")
                     && reference.storageKey === binding.storageKey);
                 // `director.assets` may retain a previous local projection after a Subject picture
@@ -2129,7 +2153,7 @@ export class EpisodeProductionService {
             if (director.sourceHash !== publishedDirector.sourceHash || fingerprint(director.engine) !== fingerprint(publishedDirector.engine)) publicationWide = true;
             const signature = (artifact: NonNullable<DirectorProduction["artifacts"][number]> | undefined) => artifact ? {
                 prompt: artifact.sha256, status: artifact.status, sourceHash: artifact.sourceHash, receipt: artifact.receipt,
-                references: artifact.references.map(ref => [ref.label, ref.nodeId, ref.storageKey, ref.sha256, ref.role]),
+                references: artifact.references.map(ref => [ref.label, ref.nodeId || "", ref.bindingId || "", ref.assetId || "", ref.storageKey, ref.sha256, ref.role]),
             } : null;
             const artifactKeys = [...new Set([...director.artifacts, ...publishedDirector.artifacts].map(item => `${item.kind}:${item.targetId}`))];
             for (const key of artifactKeys) {
@@ -3338,15 +3362,17 @@ export class EpisodeProductionService {
             for (const operation of input.ops) {
                 if (operation.type === "patch_director_source" && operation.entity === "shot" && operation.id) ids.add(operation.id);
                 else if (operation.type === "set_director_shot_keyframes" || operation.type === "set_director_shot_utterances") ids.add(operation.shotId);
+                else if (operation.type === "request_director_shot_refresh") for (const shotId of operation.shotIds) ids.add(shotId);
                 else if (operation.type === "request_director_clip_refresh") continue;
                 else if (operation.type === "upsert_director_subject") hasSubjectBindingEdit = true;
                 else return undefined;
             }
             return ids.size || hasSubjectBindingEdit ? ids : undefined;
         })();
-        const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh");
-        const refreshTargetIds = refreshes.map(op => op.type === "request_director_clip_refresh" ? op.segmentId : "");
-        if (new Set(refreshTargetIds).size !== refreshTargetIds.length) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "同一批返修不能重复登记同一个 Clip", severity: "error" }]);
+        const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh" || op.type === "request_director_shot_refresh");
+        const refreshTargetIds = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
+        const refreshShotIds = refreshes.flatMap(op => op.type === "request_director_shot_refresh" ? op.shotIds : []);
+        if (new Set(refreshTargetIds).size !== refreshTargetIds.length || new Set(refreshShotIds).size !== refreshShotIds.length) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "同一批返修不能重复登记同一个 Clip 或 Shot", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         // 归档状态是记录级开关：必须单独提交，不能与其他编辑或采纳混批，也不触发重编译或画布重投影。
         const archiveOp = input.ops.length === 1 && input.ops[0].type === "set_archived" ? input.ops[0] : undefined;
@@ -3401,8 +3427,29 @@ export class EpisodeProductionService {
             }
             if (refreshes.length && record.draft.director && draft.director && isSubjectPromptAssembly(draft.director.source)) {
                 const before = record.draft.director, after = draft.director;
-                const explicitTargets = refreshes.filter(op => op.type === "request_director_clip_refresh").map(op => op.segmentId);
-                const changedTargets = measure("clip_refresh_input_hash_comparison", () => explicitTargets.filter(segmentId => {
+                const explicitTargets = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
+                const shotTargets = refreshShotIds;
+                const shotResolvedTargets = new Set<string>();
+                if (shotTargets.length) {
+                    const beforeSegments = clipRows(before.source.segments);
+                    const afterSegments = clipRows(after.source.segments);
+                    const afterShotIds = new Set(clipRows(after.source.shots).map(shot => String(shot.id || "")));
+                    const segmentContainsShot = (segment: Record<string, any>, shotId: string) => Array.isArray(segment.shot_ids) && segment.shot_ids.map(String).includes(shotId);
+                    for (const shotId of shotTargets) {
+                        if (!afterShotIds.has(shotId)) throw new ProductionValidationError([{ code: "SHOT_REFRESH_TARGET_UNKNOWN", path: `request.ops.shotIds.${shotId}`, targetId: shotId, message: `返修 Shot ${shotId} 不存在于本次提交后的当前源稿`, severity: "error" }]);
+                        const currentSegments = afterSegments.filter(segment => segmentContainsShot(segment, shotId));
+                        if (currentSegments.length !== 1) throw new ProductionValidationError([{ code: "SHOT_REFRESH_MAPPING_INVALID", path: `request.ops.shotIds.${shotId}`, targetId: shotId, message: `返修 Shot ${shotId} 必须且只能映射到一个当前 Clip`, severity: "error" }]);
+                        // Resolve within the same source transaction: include a surviving prior
+                        // Clip as well as the current Clip if this edit repartitioned the Shot.
+                        const priorIds = beforeSegments.filter(segment => segmentContainsShot(segment, shotId)).map(segment => String(segment.id));
+                        for (const segmentId of [...priorIds, ...currentSegments.map(segment => String(segment.id))]) {
+                            if (afterSegments.some(segment => String(segment.id) === segmentId)) shotResolvedTargets.add(segmentId);
+                        }
+                    }
+                }
+                if (explicitTargets.some(segmentId => shotResolvedTargets.has(segmentId))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "Segment 目标与 Shot 目标解析后重叠，不能重复登记同一 Clip", severity: "error" }]);
+                const targetIds = [...new Set([...explicitTargets, ...shotResolvedTargets])];
+                const changedTargets = measure("clip_refresh_input_hash_comparison", () => targetIds.filter(segmentId => {
                     try {
                         const nextHash = compilationScopeInput(after, clipRefreshScope(segmentId)).inputHash;
                         const priorHash = compilationScopeInput(before, clipRefreshScope(segmentId)).inputHash;
@@ -3418,6 +3465,7 @@ export class EpisodeProductionService {
                     }
                 });
             } else if (refreshes.length) {
+                if (refreshes.some(op => op.type === "request_director_shot_refresh")) throw new Error("SHOT_REFRESH_REQUIRES_V2: 按稳定 Shot 身份返修仅支持 Prompt Assembly v2");
                 const refresh = refreshes[0];
                 if (refresh?.type !== "request_director_clip_refresh" || !record.draft.director || !draft.director) throw new Error("CLIP_REFRESH_SOURCE_MISSING");
                 assertClipEdit(record.draft.director, draft.director, input, refresh.segmentId);
@@ -3884,11 +3932,15 @@ export class EpisodeProductionService {
                     const scopedShotProjection = Boolean(previousLayout && shotTargets?.size);
                     const layout = scopedShotProjection ? previousLayout! : measure("layout_compile", () => compileProductionLayout({ h3Defaults, canvasId: canvas.id, owner, production: next.draft, project: canvas, previous: previousLayout }));
                     if (!scopedShotProjection) this.db.saveProductionLayoutPlan(canvas.id, layout);
+                    const deferShotClipProjection = Boolean(options.shotDependencyFreeEdit
+                        && !options.overwriteCompiledPromptTargets?.size && !options.forceBoundaryTargets?.size);
                     const { sceneOperations, clips } = measure("clip_and_scene_projection", () => ({
                         sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
-                        clips: clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets),
+                        clips: deferShotClipProjection
+                            ? { operations: [], referenceSync: [] }
+                            : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets),
                     }));
-                    next.referenceSync = clips.referenceSync;
+                    next.referenceSync = deferShotClipProjection ? undefined : clips.referenceSync;
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
                     const forcedBoundarySegments = new Set(next.draft.clipGroups.filter(group => options.forceBoundaryTargets?.has(group.id)).map(group => String(group.segmentId || "")));
                     const clipOperations = clips.operations.filter(op => {
@@ -4160,10 +4212,23 @@ export class EpisodeProductionService {
             if (!clip || ["queued", "loading", "awaiting_confirmation"].includes(String(clip.status))) throw new Error("Clip 正在生成，不能替换活动结果");
             if (!String(media.mimeType).startsWith("video/")) throw new Error("Clip 历史结果必须是视频");
             const alreadyActive = String(clip.resultStorageKey || "") === op.storageKey && clip.status === "success";
+            const logParams = record(log.params);
+            const submission = record(logParams.submission);
+            const taskParams = record(task.params);
+            const expectedRuntime = record(record(taskParams.h3ExecutionContract).expectedRuntime);
+            const settingsSource = Object.keys(expectedRuntime).length ? expectedRuntime : Object.keys(taskParams).length ? taskParams : logParams;
+            const safeSettingsSource = generationSettingsSnapshot(settingsSource, {});
+            const settings = Object.fromEntries(H3_PARAM_KEYS
+                .filter(key => Object.prototype.hasOwnProperty.call(safeSettingsSource, key))
+                .map(key => [key, safeSettingsSource[key]]));
+            const historicalPrompt = typeof submission.authoredPrompt === "string" ? submission.authoredPrompt
+                : typeof logParams.prompt === "string" ? logParams.prompt
+                    : typeof taskParams.prompt === "string" ? taskParams.prompt : "";
+            if (historicalPrompt.trim()) settings.prompt = historicalPrompt;
             operations = alreadyActive
                 ? clip.inputOutdated === staleInput ? [] : [{ type: "update_h3_segment", nodeId: op.nodeId, segmentId: group.segmentId,
                     expectedFields: { resultStorageKey: clip.resultStorageKey, status: clip.status }, patch: { inputOutdated: staleInput } }]
-                : [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: group.segmentId, generationLogId: log.id, storageKey: op.storageKey, settings: {} }];
+                : [{ type: "restore_h3_output", nodeId: op.nodeId, segmentId: group.segmentId, generationLogId: log.id, storageKey: op.storageKey, settings }];
             Object.assign(group, { selectedResult, inputOutdated: staleInput });
         } else {
             if (binding.target_id !== op.targetId || !String(media.mimeType).startsWith("image/")) throw new Error("历史图片不属于这个正式资产或关键帧");
@@ -4567,6 +4632,11 @@ export class EpisodeProductionService {
                     const current = this.db.getAssetRecord(source.assetId)!;
                     if (canonicalProduction(current.metadata.sharedAssetSource) !== canonicalProduction(source)) throw new Error("共享资产 ID 已被其他来源占用");
                 } else {
+                    const existingSource = this.db.listSharedAssetRecordsForProject(source.sourceProjectId).find(asset => {
+                        const registered = sourceOf(asset);
+                        return registered?.dramaId === source.dramaId && registered.sourceProjectId === source.sourceProjectId && registered.sourceNodeId === source.sourceNodeId;
+                    });
+                    if (existingSource) throw Object.assign(new Error(`该共享节点已登记为资产 ${existingSource.id}，请复用已有资产身份`), { code: "SHARED_ASSET_ID_CONFLICT" });
                     const now = new Date().toISOString();
                     this.db.upsertAssetRecord({ id: source.assetId, kind: op.assetPlan.kind, title: sourceNode.title || op.assetPlan.asset_name, coverUrl: "", tags: [],
                         folderId: null, dramaId: episode.dramaId, data: {}, note: null, source: "production-shared",
@@ -4929,10 +4999,14 @@ export class EpisodeProductionService {
             const removedStoryboardBindingIds = new Set(op.removedStoryboardBindingIds || []);
             const referenceBindings = (Array.isArray(existing.referenceBindings) ? existing.referenceBindings : []).filter((ref: Record<string, unknown>) =>
                 !(removedStoryboardBindingIds.has(String(ref.id || "")) && ref.mediaType === "image" && ref.role === "storyboard"));
-            const storyboard = formalStoryboardTrack(draft, group, removedStoryboardBindingIds.size ? { ...existing, referenceBindings } : existing);
+            const storyboard = formalStoryboardTrack(draft, group, removedStoryboardBindingIds.size ? { ...existing, referenceBindings } : existing,
+                Array.isArray(project.referenceCatalog) ? project.referenceCatalog : []);
             if (!storyboard) throw new Error("CLIP_STORYBOARD_SOURCE_INVALID: 无法从正式 Shot 生成 H3 分镜轨");
-            const storyboardPatch = { ...storyboard, ...(referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0) ? { referenceBindings } : {}) };
+            const storyboardPatch = { ...storyboard,
+                ...(storyboard.referenceBindings ? { referenceBindings: storyboard.referenceBindings } : {}),
+                ...(referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0) ? { referenceBindings } : {}) };
             if (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
+                || canonicalProduction(existing.referenceBindings || []) !== canonicalProduction(storyboardPatch.referenceBindings || existing.referenceBindings || [])
                 || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true
                 || referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0)) {
                 this.db.applyCanvasProjectOperations(projectId, Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, patch: storyboardPatch }], {
@@ -5522,7 +5596,7 @@ export class EpisodeProductionService {
         const shotAfter = keyed(after.source.shots, item => String(item.id || ""));
         const signature = (director: NonNullable<EpisodeProductionData["director"]> | undefined, kind: "image" | "h3", id: string) => {
             const artifact = director?.artifacts.find(item => item.kind === kind && item.targetId === id);
-            return artifact ? { prompt: artifact.sha256, references: artifact.references.map(ref => [ref.label, ref.nodeId, ref.storageKey, ref.sha256, ref.role]) } : null;
+            return artifact ? { prompt: artifact.sha256, references: artifact.references.map(ref => [ref.label, ref.nodeId || "", ref.bindingId || "", ref.assetId || "", ref.storageKey, ref.sha256, ref.role]) } : null;
         };
         const changedAssets = [...new Set([...assetBefore.keys(), ...assetAfter.keys(), ...Object.keys(before?.assets || {}), ...Object.keys(after.assets)])]
             .filter(id => fingerprint(assetInputSignature(assetBefore.get(id))) !== fingerprint(assetInputSignature(assetAfter.get(id)))

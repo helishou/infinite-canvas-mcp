@@ -27,6 +27,22 @@ test("canvas production presentations open the Production workspace at the exact
     assert.equal(url.searchParams.get("workId"), "work-1");
 });
 
+test("native H3 follow retains the mounted canvas route across Clip and task changes", () => {
+    const presentation = {
+        key: "work:segment:clip-1", workId: "work-1",
+        owner: { kind: "episode" as const, id: "episode-1" },
+        canvasId: "canvas-1", workspace: "production" as const,
+        action: "produce" as const, targetKind: "segment" as const, targetId: "segment-1",
+        nodeId: "node-1", segmentId: "clip-1", status: "ready" as const,
+    };
+    for (const path of ["/production?dramaId=drama&episodeId=episode-1", "/canvas/canvas-1?nodeId=node-1"]) {
+        const mounted = { id: "canvas-1", path };
+        assert.equal(productionPresentationPath(presentation, mounted), path);
+        assert.equal(productionPresentationPath({ ...presentation, segmentId: "clip-2", taskId: "task-2", status: "blocked" }, mounted), path);
+    }
+    assert.match(productionPresentationPath(presentation, { id: "other-canvas", path: "/production" }), /^\/canvas\/canvas-1\?/);
+});
+
 test("standalone production routes remain on their existing page", () => {
     const path = productionPresentationPath({
         key: "work:shot:shot-1",

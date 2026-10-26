@@ -4,7 +4,6 @@ import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/product
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import { projectDirector, withoutDirectorProjection } from "./director.js";
-import { productionLayoutStableId } from "./production-layout-geometry.js";
 
 type Owner = { kind: "canvas" | "episode" | "scene"; id: string };
 const nodes = (project: Record<string, any>) => (project.nodes || []) as Record<string, any>[];
@@ -31,13 +30,14 @@ export function scriptNodeOperations(project: Record<string, any>, data: Episode
         if (node.type !== "text" || node.metadata?.productionScriptId !== script.scriptId) throw new Error("剧本文本节点身份冲突，未覆盖原节点");
         const content = String(node.metadata?.content || "");
         const metadata: Record<string, unknown> = {};
-        const groupId = productionLayoutStableId("production-scene", owner.id, script.sceneId);
-        if (node.metadata?.groupId !== groupId) metadata.groupId = groupId;
+        const metadataDelete = Object.hasOwn(node.metadata || {}, "groupId") ? ["groupId"] : [];
         if (content !== script.content) {
             if (!prior.has(script.id) || prior.get(script.id)!.content !== content) throw new Error("剧本文本已被修改，请回读后再保存制作稿");
             metadata.content = script.content;
         }
-        return Object.keys(metadata).length ? [{ type: "update_node", id: node.id, metadata }] : [];
+        return Object.keys(metadata).length || metadataDelete.length
+            ? [{ type: "update_node", id: node.id, metadata, ...(metadataDelete.length ? { metadataDelete } : {}) }]
+            : [];
     });
 }
 

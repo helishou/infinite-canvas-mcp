@@ -11,6 +11,7 @@ import type { BackendEventBus } from "../events.js";
 import { randomUUID } from "node:crypto";
 import { H3ExecutionQueue, h3CanResumeQueued } from "./h3-queue.js";
 import { collectBrowserSessions, jwtExpiry, probeSession, readSession, clearSession, sessionStatus, writeSession, type RunningHubBrowserSession, type RunningHubSession, type RunningHubSessionStatus } from "./runninghub-session.js";
+import { flattenUseEverywhere, type FlattenResult } from "./runninghub-use-everywhere.js";
 import { appendRunningHubApiTail, appendRunningHubOutputTail, type ApiTailResult, type TailResult } from "./runninghub-workflow-tail.js";
 import { convertComfyWorkflowToApi } from "../workflows/comfyui-workflow-conversion.js";
 import { applyLocalFieldsToDiscovered, type LocalWorkflowField } from "./runninghub-field-sync.js";
@@ -28,6 +29,18 @@ const SITE_URLS = { ai: "https://www.runninghub.ai", cn: "https://www.runninghub
 const SITE_LABEL = { ai: "runninghub.ai（国际站）", cn: "runninghub.cn（国内站）" } as const;
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 const WS_FILE_RETRY_DELAYS_MS = [0, 350, 800, 1600, 3200, 6400];
+
+/**
+ * 上传前对 UI 图做两步预处理：
+ * 1. 展开 `Anything Everywhere` 广播（RunningHub 没有 cg-use-everywhere，广播不会发生，下游输入会空缺）；
+ * 2. 在输出节点后面追加收尾链。
+ * 两步都在内存副本上做，不改本地工作流文件。
+ */
+function prepareRunningHubUi(ui: Json): { workflow: Json; flattened: FlattenResult; tail: TailResult } {
+    const flattened = flattenUseEverywhere(ui);
+    const tail = appendRunningHubOutputTail(flattened.workflow);
+    return { workflow: tail.workflow, flattened, tail };
+}
 
 /** 收尾节点（Play Sound KJ → Save Image To Local）的注入结果，给前端决定提示文案。 */
 export type TailStatus = "added" | "added-video" | "added-api" | "already" | "no-sink" | "not-ui";
@@ -245,7 +258,7 @@ export class RunningHubBackend {
      * 优先用**原始 UI 格式**（nodes/links）：RunningHub 编辑器只认它；API 格式（class_type）虽能上传，
      * 但编辑器解析不出节点，工作流等于不能用。没有 UI 原件时才退回 API 格式并标记 format=api。
      */
-    async pushWorkflowGraph(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; name: string; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus; fallbackGraph: Json }> {
+    async pushWorkflowGraph(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite }): Promise<{ workflowId: string; name: string; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus; fallbackGraph: Json; broadcastLinks: number; broadcastNodes: number }> {
         const graph = record(input.graph);
         const ui = input.uiWorkflow && typeof input.uiWorkflow === "object" && !Array.isArray(input.uiWorkflow) ? record(input.uiWorkflow) : undefined;
         const usingUi = Boolean(ui && Array.isArray((ui as { nodes?: unknown }).nodes) && ((ui as { nodes: unknown[] }).nodes).length > 0);
@@ -254,18 +267,20 @@ export class RunningHubBackend {
         const site = normalizeSite(input.site);
         const session = this.requireSession(site);
         const config = this.siteConfig(site);
-        // 云端收尾：输出节点后面补 Play Sound KJ → Save Image To Local（幂等，已有就跳过）。
-        // UI 格式接输出槽；API 格式没有输出槽信息，改接输出节点的数据来源（见 appendRunningHubApiTail）。
-        const tailed = usingUi ? appendRunningHubOutputTail(ui!) : undefined;
+        // 云端收尾：先把 Anything Everywhere 广播展开成真实连线（RunningHub 没装 cg-use-everywhere），
+        // 再在输出节点后面补 Play Sound KJ → Save Image To Local（幂等，已有就跳过）。
+        // UI 格式接输出槽；API 格式没有类型信息、也没有输出槽，只能接输出节点的第一个输出。
+        const prepared = usingUi ? prepareRunningHubUi(ui!) : undefined;
+        const tailed = prepared?.tail;
         const apiTailed = usingUi ? undefined : appendRunningHubApiTail(graph);
         // 本地档案在云端图尚不可读时会作为 RH 执行底图。它必须与上传的图同源，
-        // 否则上传里追加的两个收尾节点会在 fallback 快照和 RH 任务里消失。
+        // 否则上传里展开的广播连线、追加的收尾节点会在 fallback 快照和 RH 任务里消失。
         const fallbackGraph = usingUi
-            ? stripModelFoldersFromApiGraph(convertComfyWorkflowToApi(record(tailed ? tailed.workflow : ui!)))
+            ? stripModelFoldersFromApiGraph(convertComfyWorkflowToApi(record(prepared?.workflow ?? ui!)))
             : stripModelFoldersFromApiGraph(record(apiTailed ? apiTailed.graph : graph));
         // 模型文件名去掉本地目录前缀：云端的模型是平铺的，带 `Minimax\` 之类的前缀在平台上选不中。
         const payload = usingUi
-            ? stripModelFoldersFromUiWorkflow(record(tailed ? tailed.workflow : ui!))
+            ? stripModelFoldersFromUiWorkflow(record(prepared?.workflow ?? ui!))
             : stripModelFoldersFromApiGraph(record(apiTailed ? apiTailed.graph : graph));
         const form = new FormData();
         form.set("workflowFile", new Blob([JSON.stringify(payload)], { type: "application/json" }), `${safeFileName(name)}.json`);
@@ -276,13 +291,13 @@ export class RunningHubBackend {
         checkResponse(response, raw, config);
         const workflowId = String(record(raw.data).id || "");
         if (!workflowId) throw new Error("RunningHub 已接收工作流但没有返回工作流 ID");
-        return { workflowId, name, site, format: usingUi ? "ui" : "api", tail: usingUi ? tailStatusOf(tailed) : apiTailStatusOf(apiTailed), fallbackGraph };
+        return { workflowId, name, site, format: usingUi ? "ui" : "api", tail: usingUi ? tailStatusOf(tailed) : apiTailStatusOf(apiTailed), fallbackGraph, broadcastLinks: prepared?.flattened.links ?? 0, broadcastNodes: prepared?.flattened.removedNodes.length ?? 0 };
     }
     /**
      * 上传本地工作流并在本地建档：上传 → 拿 workflowId → 自动导入。
      * 平台侧新建的工作流是草稿，对 OpenAPI 暂不可读，所以读不到平台图时直接用刚上传的这份图建档。
      */
-    async publishLocalWorkflow(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite; localFields?: LocalWorkflowField[] }): Promise<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus; fieldMisses: number; fieldMissNames: string[] }> {
+    async publishLocalWorkflow(input: { name?: string; graph?: unknown; uiWorkflow?: unknown; site?: RunningHubSite; localFields?: LocalWorkflowField[] }): Promise<{ workflowId: string; profile: RunningHubWorkflowProfile; cloudRead: boolean; site: RunningHubSite; format: "ui" | "api"; tail: TailStatus; fieldMisses: number; fieldMissNames: string[]; broadcastLinks: number; broadcastNodes: number }> {
         const uploaded = await this.pushWorkflowGraph(input);
         let cloudRead = true;
         // 归档的节点图也用清洗后的模型名：运行提交会把它作为底图，带本地目录前缀在云端会找不到模型。
@@ -295,15 +310,16 @@ export class RunningHubBackend {
         } catch { cloudRead = false; }
         // 本地字段可能指向连线输入（如 `265::prompt` 走 GetNode/SetNode），先顺链解析到真正可覆写的位置。
         // GetNode/SetNode 的变量名只存在于 UI 原件里，所以这里按上传时那份 UI 重新算一份（纯函数，代价很小）。
+        // 必须和 pushWorkflowGraph 走同一套预处理（展开广播 + 收尾链），否则解析用的图和上传的图不是一张。
         const uiSource = input.uiWorkflow && typeof input.uiWorkflow === "object" && !Array.isArray(input.uiWorkflow) ? record(input.uiWorkflow) : undefined;
         const usingUi = Boolean(uiSource && Array.isArray(uiSource.nodes) && (uiSource.nodes as unknown[]).length);
-        const uiPayload = usingUi ? stripModelFoldersFromUiWorkflow(record(appendRunningHubOutputTail(uiSource!).workflow)) : undefined;
+        const uiPayload = usingUi ? stripModelFoldersFromUiWorkflow(prepareRunningHubUi(uiSource!).workflow) : undefined;
         const resolution = resolveLocalFieldTargets(workflowJson, uiPayload, input.localFields || []);
         const remappedLocal = resolution.targets.map((target) => ({ ...target.local, node: target.nodeId, input: target.fieldName }));
         // 平台自动发现的字段默认全禁用；把本地已配置的那批启用起来，云端档案页与运行表单才和本地一致。
         fields = applyLocalFieldsToDiscovered(fields, remappedLocal);
         const profile = this.saveWorkflowProfile({ id: randomUUID(), name: uploaded.name, workflowId: uploaded.workflowId, fields, workflowJson, site: uploaded.site === "default" ? undefined : uploaded.site });
-        return { workflowId: uploaded.workflowId, profile, cloudRead, site: uploaded.site, format: uploaded.format, tail: uploaded.tail, fieldMisses: resolution.unresolved.length, fieldMissNames: resolution.unresolved.map((item) => item.name || `${item.node}::${item.input}`) };
+        return { workflowId: uploaded.workflowId, profile, cloudRead, site: uploaded.site, format: uploaded.format, tail: uploaded.tail, fieldMisses: resolution.unresolved.length, fieldMissNames: resolution.unresolved.map((item) => item.name || `${item.node}::${item.input}`), broadcastLinks: uploaded.broadcastLinks, broadcastNodes: uploaded.broadcastNodes };
     }
     listWorkflowProfiles() {
         const stored = this.settings.get("runninghub.workflows");
@@ -547,7 +563,6 @@ export class RunningHubBackend {
         const uploaded = new Map<string, Promise<string>>();
         const values: Array<{ nodeId: string; fieldName: string; fieldValue: unknown }> = [];
         const omittedInputs: Array<{ nodeId: string; fieldName: string; kind: "image" | "video" | "audio" }> = [];
-        let hasPrompt = false;
         const fields = config.fields || [];
         validateFields(fields);
         for (const field of fields.filter((item) => item.enabled !== false)) {
@@ -558,7 +573,6 @@ export class RunningHubBackend {
             // 否则正向与负面提示词共用一个槽位会互相覆盖。
             if (source === "prompt") {
                 value = Object.hasOwn(configured, key) ? String(configured[key] ?? "") : String(task.input.prompt ?? "");
-                hasPrompt = true;
             } else if (source === "image" || source === "video" || source === "audio") {
                 const index = field.index === undefined ? cursors[source]++ : field.index - 1;
                 cursors[source] = Math.max(cursors[source], index + 1);
@@ -589,7 +603,6 @@ export class RunningHubBackend {
             if (field.required && (value === "" || value === undefined || value === null)) throw new Error(`RunningHub 参数「${field.label || field.fieldName}」不能为空`);
             values.push({ nodeId: String(field.nodeId), fieldName: field.fieldName, fieldValue: value });
         }
-        if (task.input.prompt && !hasPrompt) throw new Error("RunningHub 工作流没有启用 H3 提示词映射");
         for (const kind of ["image", "video", "audio"] as const) {
             const supplied = media[kind].filter(Boolean).length;
             if (used[kind].size !== supplied) throw new Error(`RunningHub ${kind}输入映射未覆盖本轮全部 ${supplied} 个参考素材`);

@@ -245,8 +245,8 @@ export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
-export function deleteBackendDramaProject(id: string) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`);
+export function deleteBackendDramaProject(id: string, freeCanvasIds: string[] = []) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`, { freeCanvasIds });
 }
 
 export type DramaEpisode = {

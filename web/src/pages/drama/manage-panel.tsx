@@ -376,11 +376,13 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             okText: t("drama.deleteProjectConfirm"),
             okType: "danger",
             cancelText: t("common.cancel"),
-            onOk: () => {
-                deleteDramaProject(folder.id);
-                setDraft(null);
-                navigate("/production");
-                message.success(t("drama.deleted"));
+            onOk: async () => {
+                try {
+                    await deleteDramaProject(folder.id);
+                    setDraft(null);
+                    navigate("/production");
+                    message.success(t("drama.deleted"));
+                } catch (error) { message.error(String(error)); }
             },
         });
     };
@@ -436,8 +438,8 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                 {draft ? <Tabs activeKey={planningTab} onChange={key => setPlanningTab(key as "info" | "settings")} items={[
                     { key: "info", label: t("productionCanvas.planningOverviewTab"), children: <div className="space-y-5 pt-1">
                 <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
-                    <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-stone-300 bg-stone-100 text-left dark:border-stone-700 dark:bg-stone-900" onClick={() => coverInputRef.current?.click()}>
-                        {draft.coverUrl ? <img src={draft.coverUrl} alt={draft.name} className="h-full min-h-40 w-full object-cover" /> : <div className="grid min-h-40 place-items-center text-center text-xs text-stone-400"><span><ImagePlus className="mx-auto mb-2 size-6" />{t("drama.uploadCover")}</span></div>}
+                    <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-border bg-muted text-left dark:bg-muted" onClick={() => coverInputRef.current?.click()}>
+                        {draft.coverUrl ? <img src={draft.coverUrl} alt={draft.name} className="h-full min-h-40 w-full object-cover" /> : <div className="grid min-h-40 place-items-center text-center text-xs text-muted-foreground"><span><ImagePlus className="mx-auto mb-2 size-6" />{t("drama.uploadCover")}</span></div>}
                         <span className="absolute inset-x-0 bottom-0 bg-black/55 px-3 py-2 text-center text-xs text-white opacity-0 transition group-hover:opacity-100">{t("drama.changeCover")}</span>
                     </button>
                     <div className="space-y-4">
@@ -470,14 +472,14 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             {(!view || view === "shared") && <section data-drama-shared-canvas className="mb-5 space-y-4">
                 <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.sharedCanvas")} summary={t(folder.sharedAssetCanvasId ? "productionCanvas.sharedCanvasReady" : "productionCanvas.sharedCanvasEmpty")} help={<p>{t("productionCanvas.sharedCanvasDescription")}</p>} actions={<Button loading={openingSharedCanvas} onClick={() => void openSharedCanvas()}>{t("productionCanvas.openSharedCanvas")}<ArrowUpRight className="ml-1 size-4" /></Button>} />
                 {folder.sharedAssetCanvasId ? (
-                    <div className="overflow-hidden rounded-2xl border border-stone-200 bg-background dark:border-stone-800">
+                    <div className="overflow-hidden rounded-2xl border border-border bg-background ">
                         <div className="flex flex-col gap-5 p-5 sm:flex-row sm:items-center">
                             <div className="min-w-0 flex-1 space-y-3">
                                 <div className="flex items-center gap-3">
                                     <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Images className="size-5" /></span>
                                     <div className="min-w-0">
                                         <p className="truncate text-sm font-semibold" title={sharedCanvasProject?.title}>{sharedCanvasProject?.title || t("productionCanvas.sharedCanvas")}</p>
-                                        <p className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedCanvasDescription")}</p>
+                                        <p className="mt-0.5 text-xs text-muted-foreground">{t("productionCanvas.sharedCanvasDescription")}</p>
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap gap-2">
@@ -488,37 +490,37 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                             </div>
                             {sharedThumbs.length > 0 && <div className="flex shrink-0 items-center">
                                 {sharedThumbs.map((asset, index) => <MediaImage key={asset.id} src={sharedAssetImageSource(asset)} alt={asset.title} name={asset.title} className={`size-16 rounded-xl border-2 border-background object-cover shadow-sm ${index ? "-ml-4" : ""}`} preview={false} />)}
-                                {orderedSharedAssets.length > sharedThumbs.length && <span className="-ml-4 grid size-16 shrink-0 place-items-center rounded-xl border-2 border-background bg-stone-100 text-xs font-medium text-stone-500 dark:bg-stone-900 dark:text-stone-400">+{orderedSharedAssets.length - sharedThumbs.length}</span>}
+                                {orderedSharedAssets.length > sharedThumbs.length && <span className="-ml-4 grid size-16 shrink-0 place-items-center rounded-xl border-2 border-background bg-muted text-xs font-medium text-muted-foreground dark:text-muted-foreground">+{orderedSharedAssets.length - sharedThumbs.length}</span>}
                             </div>}
                         </div>
                     </div>
                 ) : (
-                    <div className="flex items-center gap-4 rounded-2xl border border-dashed border-stone-300 bg-stone-50 p-5 dark:border-stone-700 dark:bg-stone-900/40">
+                    <div className="flex items-center gap-4 rounded-2xl border border-dashed border-border bg-muted p-5 dark:bg-muted/40">
                         <span className="grid size-10 shrink-0 place-items-center rounded-full bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Images className="size-5" /></span>
                         <div className="min-w-0">
                             <p className="text-sm font-medium">{t("productionCanvas.sharedCanvasDescription")}</p>
-                            <p className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedCanvasEmpty")}</p>
+                            <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("productionCanvas.sharedCanvasEmpty")}</p>
                         </div>
                     </div>
                 )}
                 {folder.sharedAssetCanvasId && <div>
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                         <h3 className="text-sm font-semibold">{t("productionCanvas.sharedAssetGalleryTitle")}</h3>
-                        {orderedSharedAssets.length > 0 && <span className="text-xs text-stone-400">{t("productionCanvas.sharedAssetGalleryCount", { count: orderedSharedAssets.length })}</span>}
+                        {orderedSharedAssets.length > 0 && <span className="text-xs text-muted-foreground">{t("productionCanvas.sharedAssetGalleryCount", { count: orderedSharedAssets.length })}</span>}
                     </div>
                     {sharedAssetsError ? (
-                        <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-stone-300 px-4 py-4 text-sm text-stone-400 dark:border-stone-700">
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-4 text-sm text-muted-foreground ">
                             <span>{t("productionCanvas.sharedAssetGalleryLoadFailed")}</span>
                             <Button size="small" onClick={() => setSharedAssetsReload((nonce) => nonce + 1)}>{t("productionCanvas.sharedAssetGalleryRetry")}</Button>
                         </div>
                     ) : orderedSharedAssets.length ? (
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                             {orderedSharedAssets.map((asset) => (
-                                <button key={asset.id} type="button" onClick={() => void openSharedCanvas()} className="group min-w-0 overflow-hidden rounded-xl border border-stone-200 bg-background text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900">
-                                    <MediaImage src={sharedAssetImageSource(asset)} alt={asset.title} name={asset.title} className="aspect-[4/3] w-full bg-stone-100 object-cover dark:bg-stone-900" preview={false} />
+                                <button key={asset.id} type="button" onClick={() => void openSharedCanvas()} className="group min-w-0 overflow-hidden rounded-xl border border-border bg-background text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900">
+                                    <MediaImage src={sharedAssetImageSource(asset)} alt={asset.title} name={asset.title} className="aspect-[4/3] w-full bg-muted object-cover dark:bg-muted" preview={false} />
                                     <div className="space-y-1.5 p-3">
                                         <p className="truncate text-sm font-medium" title={asset.title}>{asset.title || t("productionCanvas.sharedAssetUntitled")}</p>
-                                        <div className="flex items-center gap-2 text-xs text-stone-400">
+                                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
                                             <span className="truncate">{t(`assets.kinds.${asset.kind}`)}</span>
                                             <span className="ml-auto shrink-0">{new Date(asset.updatedAt).toLocaleDateString()}</span>
                                         </div>
@@ -527,13 +529,13 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                             ))}
                         </div>
                     ) : (
-                        <div className="rounded-xl border border-dashed border-stone-300 px-4 py-6 text-center text-sm text-stone-400 dark:border-stone-700">{t("productionCanvas.sharedAssetGalleryEmpty")}</div>
+                        <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground ">{t("productionCanvas.sharedAssetGalleryEmpty")}</div>
                     )}
                 </div>}
-                {folder.sharedAssetCanvasId && sharedProduction?.draft.director && <div className="rounded-2xl border border-stone-200 bg-background p-5 dark:border-stone-800" data-shared-style-anchor>
+                {folder.sharedAssetCanvasId && sharedProduction?.draft.director && <div className="rounded-2xl border border-border bg-background p-5 " data-shared-style-anchor>
                     <div className="mb-3">
                         <h3 className="text-sm font-semibold">{t("productionCanvas.sharedStyleAnchorTitle")}</h3>
-                        <p className="mt-1 text-xs leading-5 text-stone-500 dark:text-stone-400">{t("productionCanvas.sharedStyleAnchorHint")}</p>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">{t("productionCanvas.sharedStyleAnchorHint")}</p>
                     </div>
                     <div className="grid gap-4 md:grid-cols-2">
                         <label className="grid gap-1.5 text-sm">
@@ -565,21 +567,21 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                         {episodes.map((episode) => <EpisodeCard key={episode.id} episode={episode} project={episode.canvasId ? projects.find((item) => item.id === episode.canvasId) : undefined} onProduce={() => produceEpisode(episode)} onEdit={() => openEpisodeEditor(episode)} onDelete={() => removeEpisode(episode)} t={t} />)}
                     </div>
                 ) : (
-                    <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-stone-300 px-6 text-center dark:border-stone-700">
+                    <div className="flex min-h-60 flex-col items-center justify-center rounded-2xl border border-dashed border-border px-6 text-center ">
                         <div className="grid size-12 place-items-center rounded-full bg-orange-100 text-orange-600 dark:bg-orange-950/40 dark:text-orange-300"><Clapperboard className="size-5" /></div>
                         <h3 className="mt-5 text-lg font-medium">{t("drama.emptyFolderTitle")}</h3>
-                        <p className="mt-2 max-w-md text-sm leading-6 text-stone-500 dark:text-stone-400">{t("drama.emptyFolderDescription")}</p>
+                        <p className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">{t("drama.emptyFolderDescription")}</p>
                         <Button type="primary" className="mt-5" icon={<Plus className="size-4" />} onClick={() => openEpisodeEditor()}>{t("drama.newEpisode")}</Button>
                     </div>
                 )}
             </section>}
 
-            {(!view || view === "shared" || view === "planning") && <section className="mt-10 rounded-2xl border border-stone-200 bg-background p-5 dark:border-stone-800">
+            {(!view || view === "shared" || view === "planning") && <section className="mt-10 rounded-2xl border border-border bg-background p-5 ">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                         <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.customAssets.eyebrow")}</p>
                         <h3 className="mt-1 text-lg font-semibold">{t("drama.customAssets.title")}</h3>
-                        <p className="mt-1 text-xs text-stone-500">{t("drama.customAssets.description")}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">{t("drama.customAssets.description")}</p>
                     </div>
                     <Button icon={<Upload className="size-4" />} loading={uploadingAssets} onClick={() => assetInputRef.current?.click()}>{t("drama.customAssets.upload")}</Button>
                     <input ref={assetInputRef} type="file" multiple className="hidden" onChange={(event) => void handleAssetUpload(event)} />
@@ -587,15 +589,15 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                 {assets.length ? (
                     <div className="mt-4 grid gap-2 sm:grid-cols-2">
                         {assets.map((asset) => (
-                            <div key={asset.id} className="flex min-w-0 items-center gap-3 rounded-xl border border-stone-200 px-3 py-3 dark:border-stone-800">
-                                <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-stone-100 text-stone-500 dark:bg-stone-900"><FileArchive className="size-5" /></div>
-                                <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium" title={asset.data.fileName}>{asset.data.fileName || asset.title}</div><div className="mt-1 text-xs text-stone-400">{formatBytes(asset.data.bytes)} · {(asset.metadata?.extension || "file").replace(/^\./, "").toUpperCase()}</div></div>
-                                <a href={backendMediaUrl(asset.data.storageKey)} download={asset.data.fileName} className="grid size-8 shrink-0 place-items-center rounded-md text-stone-400 transition hover:bg-stone-100 hover:text-stone-900 dark:hover:bg-stone-900 dark:hover:text-stone-100" aria-label={t("drama.customAssets.download")}><Download className="size-4" /></a>
+                            <div key={asset.id} className="flex min-w-0 items-center gap-3 rounded-xl border border-border px-3 py-3 ">
+                                <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground dark:bg-muted"><FileArchive className="size-5" /></div>
+                                <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium" title={asset.data.fileName}>{asset.data.fileName || asset.title}</div><div className="mt-1 text-xs text-muted-foreground">{formatBytes(asset.data.bytes)} · {(asset.metadata?.extension || "file").replace(/^\./, "").toUpperCase()}</div></div>
+                                <a href={backendMediaUrl(asset.data.storageKey)} download={asset.data.fileName} className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground dark:hover:bg-muted dark:hover:text-foreground" aria-label={t("drama.customAssets.download")}><Download className="size-4" /></a>
                                 <Button type="text" size="small" danger className="!px-1.5" onClick={() => removeDramaAsset(asset)} aria-label={t("drama.customAssets.delete")}><Trash2 className="size-4" /></Button>
                             </div>
                         ))}
                     </div>
-                ) : <div className="mt-4 rounded-xl border border-dashed border-stone-300 px-4 py-6 text-center text-sm text-stone-400 dark:border-stone-700">{t("drama.customAssets.empty")}</div>}
+                ) : <div className="mt-4 rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground ">{t("drama.customAssets.empty")}</div>}
             </section>}
 
             <Modal width={720} title={episodeDraft?.id ? t("drama.editEpisode") : t("drama.newEpisode")} open={episodeEditorOpen} onCancel={() => { if (!episodeSaving) { setEpisodeEditorOpen(false); setEpisodeDraft(null); } }} onOk={() => void saveEpisode()} okText={t("drama.saveEpisode")} cancelText={t("common.cancel")} confirmLoading={episodeSaving}>
@@ -606,8 +608,8 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                     </div>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeSynopsis")}</span><Input.TextArea rows={4} value={episodeDraft.synopsis} onChange={(event) => setEpisodeDraft({ ...episodeDraft, synopsis: event.target.value })} placeholder={t("drama.episodeSynopsisPlaceholder")} /></label>
                     <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.episodeFullPlot")}</span><Input.TextArea autoSize={{ minRows: 8, maxRows: 18 }} value={episodeDraft.fullPlot} onChange={(event) => setEpisodeDraft({ ...episodeDraft, fullPlot: event.target.value })} placeholder={t("drama.episodeFullPlotPlaceholder")} /></label>
-                    {!episodeDraft.id && <div className="flex items-center justify-between rounded-lg border border-stone-200 px-3 py-3 dark:border-stone-800"><span className="text-sm text-stone-500 dark:text-stone-400">{t("drama.withCanvas")}</span><Switch checked={Boolean(episodeDraft.withCanvas)} onChange={(value) => setEpisodeDraft({ ...episodeDraft, withCanvas: value })} /></div>}
-                    <div className="rounded-lg border border-stone-200 px-3 py-3 text-sm text-stone-500 dark:border-stone-800 dark:text-stone-400">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
+                    {!episodeDraft.id && <div className="flex items-center justify-between rounded-lg border border-border px-3 py-3 "><span className="text-sm text-muted-foreground">{t("drama.withCanvas")}</span><Switch checked={Boolean(episodeDraft.withCanvas)} onChange={(value) => setEpisodeDraft({ ...episodeDraft, withCanvas: value })} /></div>}
+                    <div className="rounded-lg border border-border px-3 py-3 text-sm text-muted-foreground dark:text-muted-foreground">{episodeDraft.canvasId ? t("drama.legacyEpisodeCanvasBound", { name: projects.find(project => project.id === episodeDraft.canvasId)?.title || episodeDraft.canvasId }) : t("drama.sceneCanvasWorkflowHint")}</div>
                 </div> : null}
             </Modal>
             
@@ -617,21 +619,21 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
 }
 
 function EpisodeCard({ episode, project, onProduce, onEdit, onDelete, t }: { episode: DramaEpisode; project?: CanvasProject; onProduce: () => void; onEdit: () => void; onDelete: () => void; t: TFunction }) {
-    return <article className="group relative flex min-h-48 min-w-0 flex-col justify-between overflow-hidden rounded-2xl border border-stone-200 bg-background p-5 text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:border-stone-800 dark:hover:border-orange-900">
+    return <article className="group relative flex min-h-48 min-w-0 flex-col justify-between overflow-hidden rounded-2xl border border-border bg-background p-5 text-left transition hover:-translate-y-0.5 hover:border-orange-300 hover:shadow-lg hover:shadow-orange-950/5 dark:hover:border-orange-900">
         <div className="absolute right-0 top-0 h-24 w-24 translate-x-8 -translate-y-8 rounded-full border border-orange-200/70 transition group-hover:scale-125 dark:border-orange-950/60" />
         <div className="relative flex flex-wrap items-start justify-between gap-3">
             <button type="button" className="text-left text-xs font-medium text-orange-600 dark:text-orange-400" onClick={onProduce}>{t("drama.episodeLabel", { number: episode.episodeNumber })}</button>
             <div className="flex flex-wrap items-center gap-1">
                 <Button size="small" onClick={onProduce}>{t("drama.editEpisodeDirector")}</Button>
-                <Button type="text" size="small" className="!px-1.5 !text-stone-400 hover:!text-stone-900 dark:hover:!text-stone-100" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
+                <Button type="text" size="small" className="!px-1.5 !text-muted-foreground hover:!text-foreground" onClick={onEdit} aria-label={t("drama.editEpisode")}><PencilLine className="size-4" /></Button>
                 <Button type="text" size="small" danger className="!px-1.5" onClick={onDelete} aria-label={t("drama.deleteEpisodeTitle")}><Trash2 className="size-4" /></Button>
             </div>
         </div>
         <button type="button" className="relative mt-6 min-w-0 text-left" onClick={onProduce}>
             <h3 className="truncate text-lg font-semibold" title={episode.title}>{episode.title || t("drama.episodeLabel", { number: episode.episodeNumber })}</h3>
-            <p className="mt-2 line-clamp-3 whitespace-pre-line break-words text-sm leading-6 text-stone-500 dark:text-stone-400">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
+            <p className="mt-2 line-clamp-3 whitespace-pre-line break-words text-sm leading-6 text-muted-foreground">{episode.synopsis || t("drama.noEpisodeSynopsis")}</p>
         </button>
-        <div className="relative mt-5 flex items-center justify-between gap-3 text-xs text-stone-400">
+        <div className="relative mt-5 flex items-center justify-between gap-3 text-xs text-muted-foreground">
             <span className="truncate">{project?.title || t("drama.sceneCanvasPerEpisode")}</span>
             <span className="shrink-0">{project ? `${project.summary?.nodeCount ?? project.nodes.length} ${t("drama.nodes")}` : ""}</span>
         </div>

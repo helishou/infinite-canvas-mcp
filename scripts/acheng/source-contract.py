@@ -232,8 +232,15 @@ def validate_subject_prompt_v2(source, stage="edit", validation_scope=None):
                             issue("shots." + shot_id + ".subject_usages.pictureBindingIds", "Missing or ambiguous default binding for " + str(purpose), shot_id,
                                   severity="warning" if stage == "compile" else None)
         for frame in shot.get("keyframes", []) if isinstance(shot.get("keyframes"), list) else []:
-            if frame.get("anchor") != "composition" and frame.get("requiredForSubmission", True) and str(frame.get("id")) not in binding_owner and not frame.get("sourceNode"):
-                issue("shots." + shot_id + ".keyframes", "Required keyframe lacks a smart node binding", shot_id)
+            if frame.get("anchor") != "composition" and frame.get("requiredForSubmission", True):
+                selection = frame.get("selection") if isinstance(frame.get("selection"), dict) else {}
+                selected_archived_result = (
+                    selection.get("mode") == "selected_result"
+                    and bool(selection.get("resultId"))
+                    and bool(frame.get("assetId"))
+                )
+                if str(frame.get("id")) not in binding_owner and not frame.get("sourceNode") and not selected_archived_result:
+                    issue("shots." + shot_id + ".keyframes", "Required keyframe lacks a smart node binding or selected archived result", shot_id)
         for reference in shot.get("reference_requirements", []) if isinstance(shot.get("reference_requirements"), list) else []:
             if reference.get("requiredForSubmission", True) and (not reference.get("id") or not reference.get("asset_id") or not reference.get("asset_version") or not reference.get("purpose") or not reference.get("sourceNode")):
                 issue("shots." + shot_id + ".reference_requirements", "Required composition reference lacks a stable source, version or purpose", shot_id)

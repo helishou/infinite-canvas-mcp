@@ -120,6 +120,7 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
             // This host boundary catches every H3 subpanel that edits a formal
             // storyboard, even if it doesn't call the workbench's explicit handler.
             const routedIds = new Set(routed.map(item => String(item.before.id || "")));
+            const committedSegments = new Map<string, Record<string, any>>();
             const ordinaryPatch = { ...shared };
             if (nextSegments) {
                 const ordinarySegments = nextSegments.map(segment => {
@@ -143,6 +144,25 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
                 for (const { segment } of routed) {
                     const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: String(segment.id), segment: segment as Record<string, unknown> });
                     if (!result.sourceSaved) throw new Error("制作台未保存分镜与主体引用更改。");
+                    if (result.segment) committedSegments.set(String(segment.id), result.segment as Record<string, any>);
+                }
+                if (nextSegments && ordinaryPatch.segments) {
+                    // The production edit reprojects the authoritative Shot list back to this H3 Clip.
+                    // Merge unrelated Quick Storyboard fields onto that latest projection; never replay
+                    // the pre-edit storyboard fields captured before the async production write.
+                    const latestNode = ctx.getNode(ctx.node.id) || ctx.node;
+                    const latestSegments = Array.isArray(latestNode.metadata?.segments) ? latestNode.metadata!.segments as Array<Record<string, any>> : [];
+                    const latestById = new Map(latestSegments.map(segment => [String(segment.id || ""), segment]));
+                    ordinaryPatch.segments = nextSegments.map(segment => {
+                        const id = String(segment.id || "");
+                        if (!routedIds.has(id)) return segment;
+                        const latest = committedSegments.get(id) || latestById.get(id) || beforeById.get(id) || {};
+                        const merged = { ...segment };
+                        for (const field of productionStoryboardFields) {
+                            if (Object.hasOwn(latest, field)) merged[field] = latest[field]; else delete merged[field];
+                        }
+                        return merged;
+                    });
                 }
                 if (Object.keys(ordinaryPatch).length) ctx.updateMetadata(ordinaryPatch);
             })().catch(error => {
