@@ -300,7 +300,7 @@ export class CanvasH3Runner {
             for (const plan of this.planNode(node, input)) {
                 const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
                 if (!segment) continue;
-                const taskMode = normalizeTaskMode(input.params?.mode || input.params?.taskMode || segment.mode || segment.taskMode);
+                const taskMode = normalizeTaskMode(input.params?.taskMode || input.params?.mode || segment.taskMode || segment.mode);
                 try {
                     assertReferenceCompilation(compileH3Submission(project, segment, taskMode).compilation);
                 } catch (error) {
@@ -1063,7 +1063,7 @@ export class CanvasH3Runner {
         if (params.latentConfirmationPhase) {
             params.latentCheckpointId = createHash("sha256").update(JSON.stringify([parent.id, plan.nodeId, plan.segmentId])).digest("hex");
         }
-        const taskMode = normalizeTaskMode(params.mode || params.taskMode || segment.mode || segment.taskMode);
+        const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const submittedCompilationReferences = compilation.references;

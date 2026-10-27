@@ -38,7 +38,7 @@ test("standalone, setup, and embedded production share the real global settings 
     const topNav = read("../../components/layout/app-top-nav.tsx");
     const agent = read("../../components/agent/agent-panel.tsx");
     const production = read("./production.tsx");
-    assert.match(router, /<UserLayout>[\s\S]*<Outlet \/>[\s\S]*children: \[/);
+    assert.match(router, /<UserLayout>[\s\S]*<Outlet \/>[\s\S]*children: appRoutes/);
     assert.match(router, /path: "\/director\/:projectId", element: lazyPage\(EpisodeProductionPage\)/);
     assert.match(layout, /<AppTopNav \/>/);
     assert.match(layout, /<AgentPanel \/>/);

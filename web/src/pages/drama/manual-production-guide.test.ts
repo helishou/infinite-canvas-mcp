@@ -24,7 +24,7 @@ test("model, media and timing problems route to existing manual controls", () =>
     assert.equal(modelRecovery.seriesTab, "settings");
     assert.equal(manualTargetRecovery({ ...target, kind: "asset", targetId: "character", blockers: ["缺少图片模型"] }, source).seriesTab, "settings");
     assert.equal(manualTargetRecovery({ ...target, blockers: ["参考图片尚未归档"] }, source).messageKey, "referenceMissing");
-    assert.equal(manualTargetRecovery({ ...target, blockers: ["帧窗与秒数须一致"] }, source).id, "shot");
+    assert.equal(manualTargetRecovery({ ...target, blockers: ["帧窗与秒数须一致"] }, source).id, "clip");
 });
 test("typed material nodes can be bound manually while wrong types, missing nodes and duplicate sources stay unavailable", () => {
     const nodes = ["character", "scene", "prop", "image"].map(type => ({ id: type, type }));

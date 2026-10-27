@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
 import { normalizeEntityPrimaryMedia } from "@basketikun/canvas-agent/shared-asset-reference";
+import { canvasNodeDefaultSize } from "@basketikun/canvas-agent/canvas/node-sizes";
+import { canonicalH3TaskMode } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -100,13 +102,14 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                     : Boolean(metadata[entityType === "scene" ? "sceneImage" : "propImage"]);
                 operation.metadata = normalizeEntityPrimaryMedia(entityType, metadata, hasCanonicalImage ? entityType === "character" ? "gallery" : "nested" : "legacy");
             }
-            const width = Number(operation.width || 320);
-            const height = Number(operation.height || 240);
+            const defaultSize = canvasNodeDefaultSize(entityType);
+            const width = Number(operation.width || defaultSize.width);
+            const height = Number(operation.height || defaultSize.height);
             const hasExplicitPosition = operation.position !== undefined || operation.x !== undefined || operation.y !== undefined;
             const position = hasExplicitPosition
                 ? operation.position || { x: Number(operation.x || 0), y: Number(operation.y || 0) }
                 : nextUntakenNodePosition(nodes);
-            nodes.push({
+            const created: Record<string, unknown> = {
                 id,
                 type: String(operation.nodeType || "text"),
                 title: String(operation.title || ""),
@@ -114,7 +117,11 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 width,
                 height,
                 metadata: operation.metadata || {},
-            });
+            };
+            // 节点数组顺序就是渲染层级（后者在上）。组需要垫在成员下面，所以允许显式插入位置。
+            const requestedIndex = Number(operation.index);
+            if (Number.isInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < nodes.length) nodes.splice(requestedIndex, 0, created);
+            else nodes.push(created);
             syncOrderedGroupMembership(nodes, id);
             const createdNode = nodes.find((node) => String(node.id) === id);
             if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) {
@@ -234,7 +241,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
         } else if (operation.type === "update_h3_segment") {
             const nodeId = String(operation.nodeId || "");
             const segmentId = String(operation.segmentId || "");
-            const patch = recordOf(operation.patch);
+            const patch = { ...recordOf(operation.patch) };
             if (!nodeId) throw new Error("update_h3_segment 缺少 nodeId");
             if (!segmentId) throw new Error("update_h3_segment 缺少 segmentId");
             const node = nodes.find((item) => String(item.id) === nodeId);
@@ -243,6 +250,15 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const segments = segmentsOf(node);
             const index = findSegmentIndex(segments, segmentId);
             if (index < 0) throw new Error(`节点 ${nodeId} 上找不到 segment ${segmentId}`);
+            if (Object.hasOwn(patch, "taskMode") || Object.hasOwn(patch, "mode")) {
+                const mode = canonicalH3TaskMode(Object.hasOwn(patch, "taskMode") ? patch.taskMode : patch.mode);
+                if (!["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(mode)) throw new Error(`H3 Clip 模式无效：${mode}`);
+                // taskMode is the execution contract. Keep the legacy alias in lockstep
+                // so older readers cannot resurrect a different prompt format.
+                patch.taskMode = mode;
+                patch.mode = mode;
+                operation.patch = patch;
+            }
             // CAS：expectedFields 中的每一个字段都必须与当前值匹配，否则抛错（用于任务回写防止被新任务接管后被覆盖）。
             if (operation.expectedFields && typeof operation.expectedFields === "object") {
                 for (const [field, expected] of Object.entries(operation.expectedFields as Record<string, unknown>)) {
@@ -744,7 +760,7 @@ function nextUntakenNodePosition(nodes: Array<Record<string, unknown>>) {
     if (!validNodes.length) return { x: 0, y: 0 };
     const right = Math.max(...validNodes.map((node) => {
         const position = recordOf(node.position);
-        return Number(position.x || 0) + Number(node.width || 320);
+        return Number(position.x || 0) + Number(node.width || canvasNodeDefaultSize(node.type).width);
     }));
     return { x: right + gap, y: 0 };
 }

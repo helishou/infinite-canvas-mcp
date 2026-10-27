@@ -229,7 +229,17 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
 
 export function directorArtifact(data: EpisodeProductionData, kind: "image" | "h3", targetId: string) {
     const d = data.director;
-    const a = d?.artifacts.find(a => a.kind === kind && a.targetId === targetId && a.status === "ready");
-    if (!d || !a || !compilationArtifactFreshness(d, a).current || promptHash(a.prompt) !== a.sha256) throw new Error(`${targetId} 缺少当前版本完整 ${kind} 产物；请由 Acheng 编译，不从镜头摘要生成`);
+    const artifacts = d?.artifacts.filter(a => a.kind === kind && a.targetId === targetId) || [];
+    const a = artifacts.find(a => a.status === "ready") || artifacts[0];
+    const label = kind === "h3" ? "H3 提示词" : "图片提示词";
+    if (!d || !a) throw Object.assign(new Error(`${targetId} 尚未编译${label}；请编译此目标后同步画布`), { code: "COMPILATION_ARTIFACT_MISSING", targetId });
+    const freshness = compilationArtifactFreshness(d, a);
+    if (a.status !== "ready" || !freshness.current) {
+        const staleReason = freshness.current ? "marked_stale" : freshness.staleReason;
+        const reason = staleReason === "compiler_changed" ? "编译器已更新"
+            : ["source_changed", "scope_input_changed"].includes(staleReason) ? "该目标的编译输入已变化"
+            : staleReason === "prompt_hash_mismatch" ? "提示词与编译回执不一致" : "编译回执已失效";
+        throw Object.assign(new Error(`${targetId} 的${label}需要重新编译：${reason}`), { code: "COMPILATION_ARTIFACT_STALE", targetId, staleReason });
+    }
     return a;
 }

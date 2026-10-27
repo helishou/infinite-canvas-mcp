@@ -143,7 +143,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
   const inFlightFingerprintsRef = useRef(new Set<string>());
   const composeRevisionRef = useRef(0);
   const writingTrackRef = useRef(false);
-  const quickStoryboardMode = String(selected?.mode || selected?.taskMode || "ref2va").toLowerCase();
+  const quickStoryboardMode = String(selected?.taskMode || selected?.mode || "ref2va").toLowerCase();
   const requireRef2va = () => {
     if (quickStoryboardMode === "ref2va") return true;
     message.error("快速分镜只支持 Ref2VA，请先将当前 Clip 切换为 Ref2VA。");

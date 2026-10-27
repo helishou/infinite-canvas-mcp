@@ -53,10 +53,10 @@ function isLive(node: Json): boolean {
     return node.mode !== 2 && node.mode !== 4;
 }
 
-/** 找一条 link 的来源：`[link_id, origin_id, origin_slot, ...]` 或对象形式。 */
-function linkRow(link: unknown): { id: number; originId: number; originSlot: number } | null {
-    if (Array.isArray(link) && link.length >= 3) return { id: num(link[0]), originId: num(link[1]), originSlot: num(link[2]) };
-    if (isObj(link)) return { id: num(link.id), originId: num(link.origin_id), originSlot: num(link.origin_slot) };
+/** 解析一条 link：`[link_id, origin_id, origin_slot, target_id, target_slot, type]` 或对象形式。 */
+function linkRow(link: unknown): { id: number; originId: number; originSlot: number; targetId: number } | null {
+    if (Array.isArray(link) && link.length >= 4) return { id: num(link[0]), originId: num(link[1]), originSlot: num(link[2]), targetId: num(link[3]) };
+    if (isObj(link)) return { id: num(link.id), originId: num(link.origin_id), originSlot: num(link.origin_slot), targetId: num(link.target_id) };
     return null;
 }
 
@@ -127,17 +127,20 @@ export function flattenUseEverywhere(workflow: Json): FlattenResult {
         created += 1;
     }
 
-    // 4) 移除广播节点及其连线（它们没有输出，只需处理别的节点指向自己的那些 link）。
+    // 4) 移除广播节点及其连线。
+    //    广播节点没有输出，所以指向它的那条 link 的 **target** 才是它 —— 只按 origin 过滤会漏掉，
+    //    残留下来就会在 UI→API 转换时报「连线引用了不存在的节点：736 → 738」。两边都要过滤。
     const keptLinks = links.filter((row) => {
         const info = linkRow(row);
-        return info ? !broadcastIds.has(info.originId) : false;
+        if (!info) return false;
+        return !broadcastIds.has(info.originId) && !broadcastIds.has(info.targetId);
     });
     for (const node of nodes) {
         if (broadcastIds.has(num(node.id))) continue;
         for (const input of arr(node.inputs).filter(isObj)) {
-            const target = links.find((row) => linkRow(row)?.id === num(input.link));
-            const info = linkRow(target);
-            if (info && broadcastIds.has(info.originId)) input.link = null;
+            if (input.link === null || input.link === undefined) continue;
+            // 输入端只可能指向广播节点（广播节点没有输出，不可能作为来源）。
+            if (!keptLinks.some((row) => linkRow(row)?.id === num(input.link))) input.link = null;
         }
         for (const output of arr(node.outputs).filter(isObj)) {
             output.links = arr(output.links).filter((id) => keptLinks.some((row) => linkRow(row)?.id === num(id)));

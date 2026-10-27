@@ -75,7 +75,7 @@ function storyboardCompositePlan(enabled: boolean, shots: StoryboardShotInput[],
     return { ...layout, panels: bindingIds.map((bindingId, index) => ({ bindingId, index: index + 1, row: Math.floor(index / layout.columns) + 1, column: index % layout.columns + 1, shotNumbers: [...new Set(uses.get(bindingId) || [])] })) };
 }
 function promptModeOf(segment: RecordValue) {
-    const mode = string(segment.mode || segment.taskMode || "ref2va");
+    const mode = string(segment.taskMode || segment.mode || "ref2va");
     return ["ref2va", "t2v", "i2v", "fl2v"].includes(mode) ? mode : "ref2va";
 }
 

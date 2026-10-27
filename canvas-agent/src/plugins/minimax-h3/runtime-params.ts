@@ -47,7 +47,10 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
         sources.minimaxEngine = 'builtIn';
     }
     delete params.videoSteps;
-    const requestedMode = override.mode ?? override.taskMode ?? params.mode ?? params.taskMode;
+    // taskMode is the canonical H3 Clip mode. `mode` remains a legacy alias and
+    // must not override it when an older projection left the aliases divergent.
+    const modeLayer = layers.find(([, layer]) => layer.taskMode !== undefined || layer.mode !== undefined)?.[1];
+    const requestedMode = modeLayer?.taskMode ?? modeLayer?.mode;
     params.mode = params.taskMode = canonicalH3TaskMode(requestedMode);
     if (sources.loraSlots === 'builtIn' && String(values.loraName || '').trim()) sources.loraSlots = sources.loraName;
     return { params, sources, parameterIssues, policy: useDefaults ? 'defaults' as const : 'overrides' as const };

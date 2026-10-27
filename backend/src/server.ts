@@ -200,7 +200,7 @@ export function startServer(
   // 否则一条挂着的长连接会长期占满统计，把真实慢请求挤出去。
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.method === "OPTIONS") return next();
-    const watch = watchHttpOperation(logger, `${req.method} ${safeOperationPath(req.path)}`);
+    const watch = watchHttpOperation(logger, `${req.method} ${safeOperationPath(req.path)}`, {}, () => String(res.getHeader("content-type") ?? ""));
     const originalWriteHead = res.writeHead;
     res.writeHead = function writeHead(this: Response, ...args: unknown[]) {
       const result = (originalWriteHead as (...rest: unknown[]) => Response).apply(this, args);

@@ -82,6 +82,7 @@ import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
 import { isArchivedStoryboardKeyframeBinding } from "./storyboard-media.js";
+import { productionModeFromH3TaskMode, synchronizeDirectorModesFromH3 } from "./h3-mode-sync.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
 import { decodeReceipt, encodeReceipt, type StoredReceipt } from "./receipt-storage.js";
 import type { NativeProductionTarget } from "./native-generation.js";
@@ -396,49 +397,69 @@ export class EpisodeProductionService {
         if (!productionCanvasId) throw new Error("SUBJECT_IMAGE_PRODUCTION_CANVAS_MISSING: 制作对象尚未绑定画布");
         const assetPlans = clipRows(director.source.asset_plan), subjects = clipRows(director.source.subject_registry);
         const shotsById = new Map(clipRows(director.source.shots).map(shot => [String(shot.id), shot]));
-        let sourceModeChanged = false;
-        if (forCompilation) {
-            for (const segment of clipRows(director.source.segments)) {
-                const segmentId = String(segment.id || "");
-                if (!segmentId || targetIds && !targetIds.includes(segmentId)) continue;
-                // A recorded mode lock is a deliberate source choice. Without one, derive
-                // the mode from visible Subjects, selected scene-environment references,
-                // and required-keyframe references; stale Ref2VA defaults on voiceover/object
-                // shots otherwise create a DRAFT with no media bindings. Scene environment
-                // Subjects often use state_context and still need Ref2VA to carry their image.
-                if (segment.mode_lock) continue;
-                const shotIds = clipRows(segment.shot_ids).map(String);
-                const selectedShots = shotIds.map(shotId => shotsById.get(shotId)).filter(Boolean) as Array<Record<string, any>>;
-                const frames = selectedShots.flatMap(shot => clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor !== "composition"));
-                const compositionReferences = selectedShots.flatMap(shot => [
-                    ...clipRows(shot.reference_requirements).filter(reference => reference.requiredForSubmission),
-                    ...clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor === "composition"),
-                ]);
-                const hasVisibleSubject = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage => usage.presentation === "visible"));
-                const hasSceneEnvironmentReference = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage => {
-                    const subject = subjects.find(item => String(item.id || "") === String(usage.subjectId || ""));
-                    return subject?.entityRef?.kind === "scene"
-                        && Array.isArray(usage.referencePurpose) && usage.referencePurpose.map(String).includes("environment")
-                        && resolveSubjectPictureBindingIds(subject, usage).bindingIds.length > 0;
-                }));
-                const openingFrames = frames.filter(frame => frame.anchor === "opening").length;
-                const closingFrames = frames.filter(frame => frame.anchor === "closing").length;
-                // Base modes have fixed image slots: I2VA=one opening, L2VA=one
-                // closing, FL2VA=one of each. Additional or in-shot frames need
-                // Ref2VA so every required storyboard frame keeps a real mapping.
-                const baseMode = frames.length === 1 && openingFrames === 1 ? "I2VA"
-                    : frames.length === 1 && closingFrames === 1 ? "L2VA"
-                        : frames.length === 2 && openingFrames === 1 && closingFrames === 1 ? "FL2VA" : undefined;
-                const sourceMode = compositionReferences.length || hasSceneEnvironmentReference ? "Ref2VA"
-                    : baseMode || (hasVisibleSubject || frames.length ? "Ref2VA" : "T2VA");
-                if (!sourceMode || segment.mode === sourceMode) continue;
-                segment.mode = sourceMode;
-                delete segment.mode_lock;
-                delete segment.mode_selection_reason;
-                sourceModeChanged = true;
+        const canvas = this.db.getCanvasProject(productionCanvasId);
+        const h3ModesByTarget = new Map<string, string>();
+        for (const node of clipRows(canvas?.nodes)) {
+            if (!isH3NodeType(String(node.type || ""))) continue;
+            const metadata = record(node.metadata);
+            if (metadata.productionArchiveLabel) continue;
+            if (metadata.productionOwnerId && String(metadata.productionOwnerId) !== id) continue;
+            if (metadata.productionOwnerKind && String(metadata.productionOwnerKind) !== this.ownerKind) continue;
+            for (const clip of clipRows(metadata.segments)) {
+                const targetId = String(record(clip.productionClipProjection).targetId || "");
+                const mode = productionModeFromH3TaskMode(clip.taskMode ?? clip.mode);
+                if (targetId && mode) h3ModesByTarget.set(targetId, mode);
             }
-            if (sourceModeChanged) director.sourceHash = directorHash(director.source);
         }
+        let sourceModeChanged = false;
+        for (const segment of clipRows(director.source.segments)) {
+            const segmentId = String(segment.id || "");
+            if (!segmentId || targetIds && !targetIds.includes(segmentId)) continue;
+            const h3Mode = h3ModesByTarget.get(segmentId);
+            if (h3Mode) {
+                const reason = "Synchronized from the authoritative H3 Clip taskMode.";
+                if (segment.mode !== h3Mode || segment.mode_lock !== h3Mode || segment.mode_selection_reason !== reason) {
+                    segment.mode = h3Mode;
+                    segment.mode_lock = h3Mode;
+                    segment.mode_selection_reason = reason;
+                    sourceModeChanged = true;
+                }
+                continue;
+            }
+            if (!forCompilation || segment.mode_lock) continue;
+            // Only segments without a bound H3 Clip can use source-side inference.
+            // Once a Clip exists, its taskMode is the authoritative generation mode.
+            const shotIds = clipRows(segment.shot_ids).map(String);
+            const selectedShots = shotIds.map(shotId => shotsById.get(shotId)).filter(Boolean) as Array<Record<string, any>>;
+            const frames = selectedShots.flatMap(shot => clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor !== "composition"));
+            const compositionReferences = selectedShots.flatMap(shot => [
+                ...clipRows(shot.reference_requirements).filter(reference => reference.requiredForSubmission),
+                ...clipRows(shot.keyframes).filter(frame => frame.requiredForSubmission && frame.anchor === "composition"),
+            ]);
+            const hasVisibleSubject = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage => usage.presentation === "visible"));
+            const hasSceneEnvironmentReference = selectedShots.some(shot => clipRows(shot.subject_usages).some(usage => {
+                const subject = subjects.find(item => String(item.id || "") === String(usage.subjectId || ""));
+                return subject?.entityRef?.kind === "scene"
+                    && Array.isArray(usage.referencePurpose) && usage.referencePurpose.map(String).includes("environment")
+                    && resolveSubjectPictureBindingIds(subject, usage).bindingIds.length > 0;
+            }));
+            const openingFrames = frames.filter(frame => frame.anchor === "opening").length;
+            const closingFrames = frames.filter(frame => frame.anchor === "closing").length;
+            // Base modes have fixed image slots: I2VA=one opening, L2VA=one
+            // closing, FL2VA=one of each. Additional or in-shot frames need
+            // Ref2VA so every required storyboard frame keeps a real mapping.
+            const baseMode = frames.length === 1 && openingFrames === 1 ? "I2VA"
+                : frames.length === 1 && closingFrames === 1 ? "L2VA"
+                    : frames.length === 2 && openingFrames === 1 && closingFrames === 1 ? "FL2VA" : undefined;
+            const sourceMode = compositionReferences.length || hasSceneEnvironmentReference ? "Ref2VA"
+                : baseMode || (hasVisibleSubject || frames.length ? "Ref2VA" : "T2VA");
+            if (!sourceMode || segment.mode === sourceMode) continue;
+            segment.mode = sourceMode;
+            delete segment.mode_lock;
+            delete segment.mode_selection_reason;
+            sourceModeChanged = true;
+        }
+        if (sourceModeChanged) director.sourceHash = directorHash(director.source);
         const bindings: Array<{ subjectId: string; binding: Record<string, any>; sourcePath?: string }> = subjects.flatMap(subject => clipRows(subject.pictureBindings).map(binding => ({ subjectId: String(subject.id), binding })));
         const subjectById = new Map(subjects.map(subject => [String(subject.id), subject]));
         const previewSubjects = new Set(previewSubjectIds || []);
@@ -2035,6 +2056,18 @@ export class EpisodeProductionService {
                 shotIds.add(operation.shotId);
                 continue;
             }
+            // 新增/复制镜头不改变既有镜头的对白与边界归属：对白同 Clip、边界重建与
+            // 4–15s 时长门都在 shot-edit 事务里权威拦截，只需校验新镜头与锚点邻镜
+            // （编译端按对白/连续性自动扩邻），避免每次加 Clip 对整源全量校验（3.7MB 源实测 3.2s）。
+            // split/merge/delete/move/repartition 会改变对白归属，保持全量校验。
+            if (operation.type === "edit_director_shot" && (operation.action === "insert" || operation.action === "duplicate")) {
+                for (const id of operation.action === "insert"
+                    ? [operation.shot?.id, operation.shotId, operation.anchorShotId]
+                    : [operation.shotId, operation.newShotId]) {
+                    if (id !== undefined && id !== null) shotIds.add(String(id));
+                }
+                continue;
+            }
             return undefined;
         }
         return shotIds.size ? { shotIds: [...shotIds] } : undefined;
@@ -3385,6 +3418,9 @@ export class EpisodeProductionService {
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh" || op.type === "request_director_shot_refresh");
         const refreshTargetIds = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
         const refreshShotIds = refreshes.flatMap(op => op.type === "request_director_shot_refresh" ? op.shotIds : []);
+        // The same edit transaction owns both the saved source and its refresh intent.
+        // A queued refresh has no new compiled input to project yet.
+        const clipSync = { targets: undefined as Set<string> | undefined, pending: new Set<string>() };
         if (new Set(refreshTargetIds).size !== refreshTargetIds.length || new Set(refreshShotIds).size !== refreshShotIds.length) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "同一批返修不能重复登记同一个 Clip 或 Shot", severity: "error" }]);
         if (input.ops.some(operation => operation.type === "restore_archived_scene_results") && input.ops.length !== 1) throw new Error("归档视频恢复必须单独提交，不能与其他制作编辑混批");
         // 归档状态是记录级开关：必须单独提交，不能与其他编辑或采纳混批，也不触发重编译或画布重投影。
@@ -3438,8 +3474,9 @@ export class EpisodeProductionService {
                     if (!saved || saved.delivery !== utterance.delivery) throw new ProductionValidationError([{ code: "WRITE_VERIFICATION_FAILED", path: `utterances.${utterance.utteranceId}.delivery`, targetId: utterance.utteranceId, message: "对白指导未能按请求写入；本次制作编辑已回滚", severity: "error" }]);
                 }
             }
-            if (refreshes.length && record.draft.director && draft.director && isSubjectPromptAssembly(draft.director.source)) {
+            if (record.draft.director && draft.director && isSubjectPromptAssembly(draft.director.source)) {
                 const before = record.draft.director, after = draft.director;
+                if (!sceneRuntime || refreshes.length || overwriteCompiledPromptTargets?.size) clipSync.targets = new Set<string>();
                 const explicitTargets = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
                 const shotTargets = refreshShotIds;
                 const shotResolvedTargets = new Set<string>();
@@ -3461,20 +3498,28 @@ export class EpisodeProductionService {
                     }
                 }
                 if (explicitTargets.some(segmentId => shotResolvedTargets.has(segmentId))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "Segment 目标与 Shot 目标解析后重叠，不能重复登记同一 Clip", severity: "error" }]);
-                const targetIds = [...new Set([...explicitTargets, ...shotResolvedTargets])];
+                const requestedTargets = new Set([...explicitTargets, ...shotResolvedTargets]);
+                const automaticTargets = overwriteCompiledPromptTargets?.size || sceneRuntime ? []
+                    : clipRows(after.source.segments).filter(segment => !shotProjectionIds?.size
+                        || (segment.shot_ids || []).some((id: string) => shotProjectionIds.has(id))).map(segment => String(segment.id));
+                const targetIds = [...new Set([...requestedTargets, ...automaticTargets])];
                 const changedTargets = measure("clip_refresh_input_hash_comparison", () => targetIds.filter(segmentId => {
                     try {
                         const nextHash = compilationScopeInput(after, clipRefreshScope(segmentId)).inputHash;
                         const priorHash = compilationScopeInput(before, clipRefreshScope(segmentId)).inputHash;
-                        return nextHash !== priorHash;
+                        return nextHash !== priorHash || requestedTargets.has(segmentId)
+                            && !after.artifacts.some(artifact => artifact.kind === "h3" && artifact.targetId === segmentId
+                                && artifact.status === "ready" && currentCompilationArtifact(after, artifact));
                     } catch { return true; }
                 }));
+                for (const targetId of [...changedTargets, ...requestedTargets, ...(overwriteCompiledPromptTargets || []), ...forceBoundaryTargets]) clipSync.targets?.add(targetId);
                 const store = this.clipRefreshStore(episodeId);
                 measure("clip_refresh_binding_resolution", () => {
-                    for (const segmentId of changedTargets) {
+                    for (const segmentId of changedTargets.filter(id => !overwriteCompiledPromptTargets?.has(id))) {
                         let resolvedAfter = after;
                         try { resolvedAfter = this.resolveSubjectPictureInputs(episodeId, after, [segmentId], true); } catch { /* Saving the draft is allowed; the refresh job will report the unresolved source. */ }
                         store.register(input.operationId, record.revision + 1, before, resolvedAfter, segmentId);
+                        clipSync.pending.add(segmentId);
                     }
                 });
             } else if (refreshes.length) {
@@ -3508,6 +3553,7 @@ export class EpisodeProductionService {
                 beforeCommit?.(record);
             },
             onStage,
+            clipSync,
             shotProjectionIds: input.ops.some(op => op.type === "upsert_director_subject") && shotProjectionIds
                 ? (current, next) => {
                     const currentSource = current.draft.director?.source as Record<string, any> | undefined;
@@ -3547,26 +3593,29 @@ export class EpisodeProductionService {
             overwriteCompiledPromptTargets, forceBoundaryTargets, allowArchived: Boolean(archiveOp), skipCanvasProjection: Boolean(archiveOp),
         };
         const commitPrepared = () => {
+            const commitStartedAt = performance.now();
             const result = this.commit(episodeId, input.operationId, input.expectedRevision, requestHash, mutate, commitOptions);
             canvasCommits.forEach(commit => this.db.notifyCanvasCommit(commit));
-            if (refreshes.length) {
-                const editRefreshes = this.clipRefreshStore(episodeId).byEditAll(input.operationId);
-                if (editRefreshes.length) {
-                    (result as any).clipRefreshes = editRefreshes.map(clipRefreshReceipt);
-                    if (editRefreshes.length === 1) (result as any).clipRefresh = clipRefreshReceipt(editRefreshes[0]);
-                }
+            const editRefreshes = this.clipRefreshStore(episodeId).byEditAll(input.operationId);
+            if (editRefreshes.length) {
+                (result as any).clipRefreshes = editRefreshes.map(clipRefreshReceipt);
+                if (editRefreshes.length === 1) (result as any).clipRefresh = clipRefreshReceipt(editRefreshes[0]);
             }
+            onStage?.("commit_prepared", Math.round(performance.now() - commitStartedAt));
             return result;
         };
         if (!shouldValidateSource) return commitPrepared();
         if (this.replayOperationReceipt(episodeId, input.operationId, requestHash)) return commitPrepared();
         const simulate = () => this.simulateEditedCandidate(episodeId, input, sceneRuntime, overwriteCompiledPromptTargets);
         let simulated: ReturnType<typeof simulate>;
+        const simulateStartedAt = performance.now();
         try { simulated = simulate(); }
         catch (error) {
+            onStage?.("candidate_simulate", Math.round(performance.now() - simulateStartedAt));
             if (this.replayOperationReceipt(episodeId, input.operationId, requestHash)) return commitPrepared();
             throw error;
         }
+        onStage?.("candidate_simulate", Math.round(performance.now() - simulateStartedAt));
         validatedDirectorFingerprint = simulated.draft.director ? fingerprint(simulated.draft.director) : null;
         const validationStarted = performance.now();
         const validation = simulated.draft.director
@@ -3844,6 +3893,7 @@ export class EpisodeProductionService {
         onStage?: (name: string, durationMs: number) => void;
         shotProjectionIds?: ReadonlySet<string> | ((current: ProductionRecord, next: ProductionRecord) => ReadonlySet<string> | undefined);
         shotDependencyFreeEdit?: boolean;
+        clipSync?: { targets?: ReadonlySet<string>; pending: ReadonlySet<string> };
         maintenanceLegacyRead?: boolean;
         overwriteCompiledPromptTargets?: ReadonlySet<string>;
         forceBoundaryTargets?: ReadonlySet<string>;
@@ -3893,13 +3943,14 @@ export class EpisodeProductionService {
             // committed revision from the row read under this transaction, never from a
             // caller cursor or a mutation's captured revision.
             next.revision = current.revision + 1;
-            this.recordSourceLifecycleChanges(episodeId, current.draft.director?.source, next.draft.director?.source, next.revision, operationId);
             const projectionOperationId = `production:${this.ownerKind}:${episodeId}:${operationId}:projection`;
             let canvasId = options.skipCanvasProjection ? null : this.episode(episodeId).canvasId;
             if (!canvasId && !options.skipCanvasProjection && this.ownerKind === "episode" && next.draft.director && productionEntities(next.draft.director.source, { kind: this.ownerKind, id: episodeId }).length) {
                 canvasId = ensureProductionCanvas(this.db, "episode", episodeId, undefined, true).project.id;
             }
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
+            if (canvas && next.draft.director && synchronizeDirectorModesFromH3(next.draft.director, canvas, undefined, { kind: this.ownerKind, id: episodeId })) projectDirector(next.draft);
+            this.recordSourceLifecycleChanges(episodeId, current.draft.director?.source, next.draft.director?.source, next.revision, operationId);
             if (canvas) {
                 if (next.draft.director) {
                     if (this.ownerKind === "episode" && current.draft.director) syncSharedEntityEdits(this.db, current.draft, next.draft, episodeId, canvas.id, operationId, scriptCommits);
@@ -3951,9 +4002,9 @@ export class EpisodeProductionService {
                         sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
                         clips: deferShotClipProjection
                             ? { operations: [], referenceSync: [] }
-                            : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets),
+                            : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets, options.clipSync?.pending),
                     }));
-                    next.referenceSync = deferShotClipProjection ? undefined : clips.referenceSync;
+                    next.referenceSync = deferShotClipProjection ? undefined : clips.referenceSync.filter(item => !options.clipSync?.targets || options.clipSync.targets.has(item.targetId));
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
                     const forcedBoundarySegments = new Set(next.draft.clipGroups.filter(group => options.forceBoundaryTargets?.has(group.id)).map(group => String(group.segmentId || "")));
                     const clipOperations = clips.operations.filter(op => {
@@ -3967,6 +4018,10 @@ export class EpisodeProductionService {
                     const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);
                     if (operations.length) measure("canvas_operation_apply", () => this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } }));
                 }
+            }
+            if (options.clipSync?.pending.size) {
+                const refreshes = this.clipRefreshStore(episodeId).byEditAll(operationId).map(clipRefreshReceipt);
+                Object.assign(next, { clipRefreshes: refreshes, ...(refreshes.length === 1 ? { clipRefresh: refreshes[0] } : {}) });
             }
             measure("dependency_and_receipt_persist", () => {
                 if (!options.shotDependencyFreeEdit) this.syncSubjectClipDependencies(episodeId, next.draft.director);
@@ -4620,11 +4675,15 @@ export class EpisodeProductionService {
         if (op.type === "create_manual_director_asset") {
             if (!draft.director) throw new Error("DIRECTOR_NOT_INITIALIZED: 没有正式制作稿");
             const sharedSource = op.assetPlan.sharedSource;
+            let assetOperation = op;
             if (sharedSource) {
                 if (this.ownerKind !== "episode") throw new Error("共享节点只能登记到分集制作稿");
                 const existingPlan = clipRows(draft.director.source.asset_plan).find(item => item.sharedSource?.sourceProjectId === sharedSource.sourceProjectId && item.sharedSource?.sourceNodeId === sharedSource.sourceNodeId);
                 if (existingPlan) {
-                    if (String(existingPlan.id || existingPlan.asset_id || "") !== op.assetPlan.id || canonicalProduction(existingPlan.sharedSource) !== canonicalProduction(sharedSource)) throw new Error("共享节点已以其他资产身份纳入本集");
+                    const existingSource = existingPlan.sharedSource as Record<string, unknown>;
+                    if (String(existingPlan.sharedSource?.dramaId || "") !== String(sharedSource.dramaId || "")
+                        || String(existingSource?.sourceProjectId || "") !== String(sharedSource.sourceProjectId || "")
+                        || String(existingSource?.sourceNodeId || "") !== String(sharedSource.sourceNodeId || "")) throw new Error("共享节点已以其他资产身份纳入本集");
                     const episode = this.db.getDramaEpisode(episodeId);
                     const drama = episode?.dramaId ? this.db.listCanvasFolders().find(folder => folder.id === episode.dramaId && folder.isDrama) : undefined;
                     const shared = this.db.getCanvasProject(sharedSource.sourceProjectId);
@@ -4636,31 +4695,43 @@ export class EpisodeProductionService {
                 }
                 const episode = this.db.getDramaEpisode(episodeId);
                 const drama = episode?.dramaId ? this.db.listCanvasFolders().find(folder => folder.id === episode.dramaId && folder.isDrama) : undefined;
-                if (!episode?.canvasId || !drama || drama.sharedAssetCanvasId !== sharedSource.sourceProjectId || sharedSource.assetId !== op.assetPlan.id) throw new Error("共享节点来源与当前剧目不匹配");
+                if (!episode?.canvasId || !drama || drama.sharedAssetCanvasId !== sharedSource.sourceProjectId) throw new Error("共享节点来源与当前剧目不匹配");
                 const shared = this.db.getCanvasProject(sharedSource.sourceProjectId);
                 const sourceNode = (shared?.nodes as Array<Record<string, any>> || []).find(node => node.id === sharedSource.sourceNodeId);
                 if (!sourceNode || sourceNode.type !== op.assetPlan.kind || !["character", "scene", "prop"].includes(String(sourceNode.type || ""))) throw new Error("共享节点已变化或不属于当前共享资产画布");
-                const source = { dramaId: episode.dramaId, assetId: op.assetPlan.id, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId };
-                if (this.db.getAssetRecord(source.assetId)) {
-                    const current = this.db.getAssetRecord(source.assetId)!;
+                const existingSource = this.db.listSharedAssetRecordsForProject(sharedSource.sourceProjectId).find(asset => {
+                    const registered = sourceOf(asset);
+                    return registered?.dramaId === episode.dramaId && registered.sourceProjectId === sharedSource.sourceProjectId && registered.sourceNodeId === sharedSource.sourceNodeId;
+                });
+                if (existingSource && existingSource.kind !== op.assetPlan.kind) throw new Error("共享节点的既有资产类型与来源节点不一致");
+                const stableAssetId = existingSource?.id || op.assetPlan.id;
+                if (!existingSource && sharedSource.assetId !== op.assetPlan.id) throw new Error("共享节点来源与当前剧目不匹配");
+                const source = { dramaId: episode.dramaId, assetId: stableAssetId, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId };
+                if (existingSource && (stableAssetId !== op.assetPlan.id || sharedSource.assetId !== stableAssetId)) {
+                    // Shared canvas nodes are registered by the asset library before an episode
+                    // adopts them. Reuse that canonical identity instead of treating the UI's
+                    // provisional ID as a second asset for the same source node.
+                    const subject = op.subject && op.assetPlan.kind === "prop" && op.subject.entityRef.kind === "asset"
+                        ? { ...op.subject, entityRef: { ...op.subject.entityRef, id: stableAssetId } }
+                        : op.subject;
+                    assetOperation = { ...op, assetPlan: { ...op.assetPlan, id: stableAssetId, sharedSource: source },
+                        assetCard: { ...op.assetCard, id: stableAssetId, asset_id: stableAssetId }, ...(subject ? { subject } : {}) };
+                }
+                if (this.db.getAssetRecord(stableAssetId)) {
+                    const current = this.db.getAssetRecord(stableAssetId)!;
                     if (canonicalProduction(current.metadata.sharedAssetSource) !== canonicalProduction(source)) throw new Error("共享资产 ID 已被其他来源占用");
                 } else {
-                    const existingSource = this.db.listSharedAssetRecordsForProject(source.sourceProjectId).find(asset => {
-                        const registered = sourceOf(asset);
-                        return registered?.dramaId === source.dramaId && registered.sourceProjectId === source.sourceProjectId && registered.sourceNodeId === source.sourceNodeId;
-                    });
-                    if (existingSource) throw Object.assign(new Error(`该共享节点已登记为资产 ${existingSource.id}，请复用已有资产身份`), { code: "SHARED_ASSET_ID_CONFLICT" });
                     const now = new Date().toISOString();
                     this.db.upsertAssetRecord({ id: source.assetId, kind: op.assetPlan.kind, title: sourceNode.title || op.assetPlan.asset_name, coverUrl: "", tags: [],
                         folderId: null, dramaId: episode.dramaId, data: {}, note: null, source: "production-shared",
                         metadata: { projectId: source.sourceProjectId, nodeId: source.sourceNodeId, sharedAssetSource: source }, createdAt: now, updatedAt: now });
                 }
             }
-            createManualDirectorAsset(draft.director, op, { kind: this.ownerKind, id: episodeId });
+            createManualDirectorAsset(draft.director, assetOperation, { kind: this.ownerKind, id: episodeId });
             if (sharedSource) {
-                draft.director.assets[op.assetPlan.id] = { version: op.assetPlan.version, status: "planned" };
+                draft.director.assets[assetOperation.assetPlan.id] = { version: assetOperation.assetPlan.version, status: "planned" };
                 const episodeCanvasId = this.db.getDramaEpisode(episodeId)?.canvasId;
-                if (episodeCanvasId) ensureSharedSubjectPictureBinding(draft.director, episodeId, episodeCanvasId, op.assetPlan as Record<string, any>, String(op.subject?.id || ""));
+                if (episodeCanvasId) ensureSharedSubjectPictureBinding(draft.director, episodeId, episodeCanvasId, assetOperation.assetPlan as Record<string, any>, String(op.subject?.id || ""));
             }
             projectDirector(draft);
             return;

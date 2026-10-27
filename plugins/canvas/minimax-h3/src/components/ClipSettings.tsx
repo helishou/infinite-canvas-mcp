@@ -116,7 +116,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         return () => { active = false; };
     }, [ctx.storage, segment?.id]);
     if (!segment) return null;
-    const mode = (segment.mode || segment.taskMode || "ref2va") as keyof typeof modeLabels;
+    const mode = (segment.taskMode || segment.mode || "ref2va") as keyof typeof modeLabels;
     const styleTemplateId = segment.styleTemplateId === undefined
         ? styleTemplateFromPrompt(String(segment.prompt || ""), mode, defaults.styleTemplates)
         : segment.styleTemplateId;
@@ -180,7 +180,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const defaultSelectedModelFieldValue = (item: CanvasVideoModelField) => {
         if (Object.prototype.hasOwnProperty.call(selectedModelValues, item.id)) return selectedModelValues[item.id];
         if (["duration", "seconds"].includes(item.id)) return segment.duration ?? selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
-        if (["mode", "taskMode"].includes(item.id)) return segment.mode || segment.taskMode || item.default;
+        if (["mode", "taskMode"].includes(item.id)) return segment.taskMode || segment.mode || item.default;
         return selectedVideoModelSchema?.defaultValues?.[item.id] ?? item.default;
     };
     const patchSelectedModelField = (item: CanvasVideoModelField, value: unknown) => {
@@ -390,7 +390,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
 }
 
 function selectedVideoWorkflowReferenceCount(segment?: H3Segment) {
-    const mode = String(segment?.mode || segment?.taskMode || "ref2va").toLowerCase();
+    const mode = String(segment?.taskMode || segment?.mode || "ref2va").toLowerCase();
     if (mode === "t2v" || mode === "t2va") return 0;
     if (mode === "i2v" || mode === "i2va") return 1;
     if (mode === "fl2v" || mode === "fl2va") return 2;

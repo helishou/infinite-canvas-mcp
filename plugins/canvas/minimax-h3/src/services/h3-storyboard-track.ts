@@ -11,7 +11,7 @@ import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
 
 export function supportsStoryboardTrack(segment: H3Segment) {
-    const mode = String(segment.mode || segment.taskMode || "ref2va");
+    const mode = String(segment.taskMode || segment.mode || "ref2va");
     return mode !== "t2v" && mode !== "i2v" && mode !== "fl2v";
 }
 
@@ -486,7 +486,7 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
             ? remapPictureTags(snapshot.text, refsForSegment(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
             : snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const section = (mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description") as H3PromptSection;
         const sectionText = readH3PromptSection(prompt, section);
         const refs = currentRefs;

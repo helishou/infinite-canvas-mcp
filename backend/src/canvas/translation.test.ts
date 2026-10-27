@@ -3,8 +3,9 @@ import test from "node:test";
 import { H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, neutralizeQuotedDialogueReferences, parseH3TranslationBatchResponse, protectH3TranslationMarkers, runH3TranslationBatches } from "./translation.js";
 
 test("H3 English translation preserves only actual dialogue", () => {
-  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Translate all Chinese text into English except the actual spoken dialogue payload/);
-  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /This includes lyrics and explicitly quoted on-screen text/);
+  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Translate all Chinese descriptive and instructional prose into English except actual spoken dialogue and text that is visibly rendered inside the video frame/);
+  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /Preserve every visible text string exactly in its original language and wording, including doorplates, signs, plaques, labels, props with writing, subtitles, phone\/computer\/system UI/);
+  assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /This applies whether or not the visible text is quoted/);
   assert.match(H3_PROMPT_TRANSLATION_SYSTEM_PROMPT, /preserve dialogue wrapped in tags such as <d>\[Chinese\]spoken words<\/d> exactly in its original language/);
 });
 
@@ -28,6 +29,16 @@ test("H3 translation protects structure and dialogue from model rewriting", () =
   assert.doesNotThrow(() => protectedPrompt.restore(`${translated} ZXQH3LOCKUNKNOWNQXZ`));
   const duplicated = translated.replace(/ZXQH3LOCK[A-Z]+QXZ/, token => `${token} ${token}`);
   assert.equal(protectedPrompt.restore(duplicated).split("Camera:").length - 1, 1);
+});
+
+test("H3 translation locks quoted doorplate and system display text while translating directions", () => {
+  const source = "镜头掠过门牌“龙宫寝殿”，墙上系统提示“权限不足”闪烁。 The screen displays \"ACCESS DENIED\".";
+  const protectedPrompt = protectH3TranslationMarkers(source);
+  assert.doesNotMatch(protectedPrompt.text, /龙宫寝殿|权限不足|ACCESS DENIED/);
+  assert.match(protectedPrompt.text, /镜头掠过门牌/);
+  assert.match(protectedPrompt.text, /系统提示/);
+  assert.match(protectedPrompt.text, /The screen displays/);
+  assert.equal(protectedPrompt.restore(protectedPrompt.text), source);
 });
 
 test("quoted dialogue neutralization retains protected numbers before final validation", () => {

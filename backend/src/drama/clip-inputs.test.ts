@@ -116,6 +116,31 @@ test("a Shot-local projection neither adds outside its targets nor sweeps other 
     assert.deepEqual(deletes(clipInputOperations(intact, twoSceneProduction, layout, {}, new Set(), new Set(["CLIP_B"])).operations), [], "untouched scene must not lose its Clips");
 });
 
+test("pending Clip compilation preserves existing inputs and does not report a missing artifact", () => {
+    const existing = { ...projectedClip("clip-a", "CLIP_A"), resultStorageKey: "video:previous", prompt: "previous compiled prompt" };
+    const current = project(h3Node("H3-A", "SC-A", [existing]));
+    const result = clipInputOperations(current, onlyClipA, layout, {}, new Set(), new Set(["CLIP_A"]), undefined, undefined, new Set(["CLIP_A"]));
+    assert.deepEqual(result.referenceSync, []);
+    assert.deepEqual(result.operations, []);
+    assert.equal(existing.prompt, "previous compiled prompt");
+    assert.equal(existing.resultStorageKey, "video:previous");
+});
+
+test("Clip diagnostics distinguish a missing artifact from a changed compiler", () => {
+    const current = project(h3Node("H3-A", "SC-A", [projectedClip("clip-a", "CLIP_A")]));
+    const production = { ...onlyClipA, shots: [{ id: "SH-A", duration: 4 }] };
+    const missing = clipInputOperations(current, production, layout).referenceSync[0];
+    assert.equal(missing.diagnostics[0].code, "COMPILATION_ARTIFACT_MISSING");
+    const data = structuredClone(production);
+    data.director.engine = { compilerHashes: { h3: "current" } };
+    data.director.artifacts = [{ kind: "h3", targetId: "CLIP_A", status: "ready", prompt: "old prompt", sha256: "old",
+        receipt: { engine: { compilerHashes: { h3: "old" } } } }];
+    const stale = clipInputOperations(current, data, layout).referenceSync[0];
+    assert.equal(stale.diagnostics[0].code, "COMPILATION_ARTIFACT_STALE");
+    assert.equal(stale.diagnostics[0].staleReason, "compiler_changed");
+    assert.match(stale.diagnostics[0].message, /编译器已更新/);
+});
+
 const characterGroup = (outfitId: string) => ({
     "character-group-asset-1": {
         id: "character-group-asset-1", characterName: "红绡", characterNodeId: "character-1", subjectId: "character-1",

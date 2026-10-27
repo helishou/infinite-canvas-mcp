@@ -165,5 +165,16 @@ test("generation flow handles legacy nodes without dimensions", () => {
     const state = { nodes: [{ id: "legacy", type: "image", position: { x: 100, y: 0 } }] };
     const ops = opsOf("canvas_generate_image", { prompt: "legacy canvas" }, state as any);
     const config = ops.find((op) => op.type === "add_node" && op.nodeType === "config");
-    assert.equal((config as { position: { x: number; y: number } }).position.x, 500);
+    // 缺宽高的历史节点按它自己的类型（image 340）估宽，避免统一当成 320 把新节点压上去。
+    assert.equal((config as { position: { x: number; y: number } }).position.x, 520);
+});
+
+test("工具层自带的默认尺寸与共享规格一致，不再让 Backend 兜底成 320×240", () => {
+    const config = opsOf("canvas_create_config_node", { prompt: "尺寸" }).find((op) => op.type === "add_node")!;
+    assert.deepEqual([config.width, config.height], [420, 540]);
+    const video = opsOf("canvas_create_node", { nodeType: "video" }).find((op) => op.type === "add_node")!;
+    assert.deepEqual([video.width, video.height], [420, 236]);
+    // 插件节点由浏览器注册尺寸，工具层按兜底尺寸落，与界面创建未知类型一致。
+    const plugin = opsOf("canvas_create_node", { nodeType: "demo:panel" }).find((op) => op.type === "add_node")!;
+    assert.deepEqual([plugin.width, plugin.height], [340, 240]);
 });

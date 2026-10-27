@@ -350,6 +350,7 @@ export type CanvasProductionEditing = {
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean; segment?: Record<string, unknown> }>;
     addClipAtBoundary?: (input: { nodeId: string; segmentId: string; position: "before" | "after" }) => Promise<{ sourceSaved: boolean; targetId?: string }>;
+    deleteClip?: (input: { nodeId: string; segmentId: string }) => Promise<{ sourceSaved: boolean; targetId?: string }>;
     setContinuationBoundary: (input: CanvasProductionContinuationBoundary) => Promise<{ sourceSaved: boolean }>;
     setContinuationBoundaries: (input: CanvasProductionContinuationBoundaries) => Promise<{ sourceSaved: boolean }>;
 };

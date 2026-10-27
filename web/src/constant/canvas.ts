@@ -1,3 +1,5 @@
+import { canvasNodeDefaultSize } from "@basketikun/canvas-agent/canvas/node-sizes";
+
 import i18n from "@/i18n";
 import { CanvasNodeType } from "@/types/canvas";
 import type { CanvasNodeMetadata } from "@/types/canvas";
@@ -10,60 +12,41 @@ type CanvasNodeSpec = {
     metadata?: CanvasNodeMetadata;
 };
 
+// 尺寸只有共享规格一个来源：浏览器、Backend 与 MCP 创建同类型节点必须得到同一个大小。
+// 本文件只补本地化标题与初始 metadata。
 export const NODE_DEFAULT_SIZE = {
-    [CanvasNodeType.Image]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.image"); } },
-    [CanvasNodeType.Text]: { width: 340, height: 240, get title() { return i18n.t("canvas.nodeTypes.text"); } },
-    [CanvasNodeType.Config]: { width: 420, height: 540, get title() { return i18n.t("canvas.nodeTypes.config"); } },
-    [CanvasNodeType.Video]: { width: 420, height: 236, get title() { return i18n.t("canvas.nodeTypes.video"); } },
-    [CanvasNodeType.Audio]: { width: 340, height: 120, get title() { return i18n.t("canvas.nodeTypes.audio"); } },
-    [CanvasNodeType.Loop]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.loop"); } },
-    [CanvasNodeType.Group]: { width: 760, height: 480, get title() { return i18n.t("canvas.nodeTypes.group"); } },
-    [CanvasNodeType.Character]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.character"); } },
-    [CanvasNodeType.Scene]: { width: 380, height: 320, get title() { return i18n.t("canvas.nodeTypes.scene"); } },
-    [CanvasNodeType.Prop]: { width: 360, height: 300, get title() { return i18n.t("canvas.nodeTypes.prop"); } },
+    [CanvasNodeType.Image]: { ...canvasNodeDefaultSize(CanvasNodeType.Image), get title() { return i18n.t("canvas.nodeTypes.image"); } },
+    [CanvasNodeType.Text]: { ...canvasNodeDefaultSize(CanvasNodeType.Text), get title() { return i18n.t("canvas.nodeTypes.text"); } },
+    [CanvasNodeType.Config]: { ...canvasNodeDefaultSize(CanvasNodeType.Config), get title() { return i18n.t("canvas.nodeTypes.config"); } },
+    [CanvasNodeType.Video]: { ...canvasNodeDefaultSize(CanvasNodeType.Video), get title() { return i18n.t("canvas.nodeTypes.video"); } },
+    [CanvasNodeType.Audio]: { ...canvasNodeDefaultSize(CanvasNodeType.Audio), get title() { return i18n.t("canvas.nodeTypes.audio"); } },
+    [CanvasNodeType.Loop]: { ...canvasNodeDefaultSize(CanvasNodeType.Loop), get title() { return i18n.t("canvas.nodeTypes.loop"); } },
+    [CanvasNodeType.Group]: { ...canvasNodeDefaultSize(CanvasNodeType.Group), get title() { return i18n.t("canvas.nodeTypes.group"); } },
+    [CanvasNodeType.Character]: { ...canvasNodeDefaultSize(CanvasNodeType.Character), get title() { return i18n.t("canvas.nodeTypes.character"); } },
+    [CanvasNodeType.Scene]: { ...canvasNodeDefaultSize(CanvasNodeType.Scene), get title() { return i18n.t("canvas.nodeTypes.scene"); } },
+    [CanvasNodeType.Prop]: { ...canvasNodeDefaultSize(CanvasNodeType.Prop), get title() { return i18n.t("canvas.nodeTypes.prop"); } },
 } satisfies Record<CanvasNodeType, { width: number; height: number; title: string }>;
 
+function nodeSpec(type: CanvasNodeType, metadata: CanvasNodeMetadata): CanvasNodeSpec {
+    return {
+        width: NODE_DEFAULT_SIZE[type].width,
+        height: NODE_DEFAULT_SIZE[type].height,
+        get title() { return NODE_DEFAULT_SIZE[type].title; },
+        metadata,
+    };
+}
+
 export const NODE_SPECS = {
-    [CanvasNodeType.Image]: {
-        width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Image].title; },
-        metadata: { content: "", status: "idle" },
-    },
-    [CanvasNodeType.Text]: {
-        width: 340, height: 240, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Text].title; },
-        metadata: { content: "", status: "idle", fontSize: 14 },
-    },
-    [CanvasNodeType.Config]: {
-        width: 420, height: 540, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Config].title; },
-        metadata: { content: "", status: "idle", generationMode: "image", smart: true },
-    },
-    [CanvasNodeType.Video]: {
-        width: 420, height: 236, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Video].title; },
-        metadata: { content: "", status: "idle" },
-    },
-    [CanvasNodeType.Audio]: {
-        width: 340, height: 120, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Audio].title; },
-        metadata: { content: "", status: "idle" },
-    },
-    [CanvasNodeType.Loop]: {
-        width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Loop].title; },
-        metadata: { status: "idle", generationMode: "image", loopMode: "serial", loopMediaMode: "auto", loopPromptEnabled: false, loopImageEnabled: false, loopVideoEnabled: false, loopStart: 1, loopImageBatchSize: 1, loopVideoBatchSize: 1, loopAudioBatchSize: 1, loopPrompt: "" },
-    },
-    [CanvasNodeType.Group]: {
-        width: 760, height: 480, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Group].title; },
-        metadata: { status: "idle" },
-    },
-    [CanvasNodeType.Character]: {
-        width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Character].title; },
-        metadata: { status: "idle", characterImages: [], characterPrimaryIndex: 0 },
-    },
-    [CanvasNodeType.Scene]: {
-        width: 380, height: 320, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Scene].title; },
-        metadata: { status: "idle" },
-    },
-    [CanvasNodeType.Prop]: {
-        width: 360, height: 300, get title() { return NODE_DEFAULT_SIZE[CanvasNodeType.Prop].title; },
-        metadata: { status: "idle" },
-    },
+    [CanvasNodeType.Image]: nodeSpec(CanvasNodeType.Image, { content: "", status: "idle" }),
+    [CanvasNodeType.Text]: nodeSpec(CanvasNodeType.Text, { content: "", status: "idle", fontSize: 14 }),
+    [CanvasNodeType.Config]: nodeSpec(CanvasNodeType.Config, { content: "", status: "idle", generationMode: "image", smart: true }),
+    [CanvasNodeType.Video]: nodeSpec(CanvasNodeType.Video, { content: "", status: "idle" }),
+    [CanvasNodeType.Audio]: nodeSpec(CanvasNodeType.Audio, { content: "", status: "idle" }),
+    [CanvasNodeType.Loop]: nodeSpec(CanvasNodeType.Loop, { status: "idle", generationMode: "image", loopMode: "serial", loopMediaMode: "auto", loopPromptEnabled: false, loopImageEnabled: false, loopVideoEnabled: false, loopStart: 1, loopImageBatchSize: 1, loopVideoBatchSize: 1, loopAudioBatchSize: 1, loopPrompt: "" }),
+    [CanvasNodeType.Group]: nodeSpec(CanvasNodeType.Group, { status: "idle" }),
+    [CanvasNodeType.Character]: nodeSpec(CanvasNodeType.Character, { status: "idle", characterImages: [], characterPrimaryIndex: 0 }),
+    [CanvasNodeType.Scene]: nodeSpec(CanvasNodeType.Scene, { status: "idle" }),
+    [CanvasNodeType.Prop]: nodeSpec(CanvasNodeType.Prop, { status: "idle" }),
 } satisfies Record<CanvasNodeType, CanvasNodeSpec>;
 
 // Return built-in specs directly and resolve plugin types from the registry.

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
+import { canvasNodeDefaultSize } from "./node-sizes.js";
 import { nextCanvasFlowAnchor, nextCanvasX } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
@@ -19,7 +20,9 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_apply_ops") return { name, input: normalizeCanvasApplyOps(input) };
     if (name === "canvas_create_node") {
         const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
-        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width, height: data.height, metadata: data.metadata }]);
+        // 显式尺寸优先；省略时按该类型的默认规格落地，不再让 Backend 兜底成 320×240。
+        const size = canvasNodeDefaultSize(data.nodeType);
+        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width ?? size.width, height: data.height ?? size.height, metadata: data.metadata }]);
     }
     if (name === "canvas_create_config_node") {
         const x = Number(input.x ?? nextCanvasX(state));
@@ -149,14 +152,15 @@ function normalizeCanvasApplyOps(input: Record<string, unknown>) {
 function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: number) {
     const mode = generationMode(input.mode);
     const prompt = String(input.prompt || "");
+    const size = canvasNodeDefaultSize("config");
     return {
         type: "add_node",
         id,
         nodeType: "config",
         title: String(input.title || generationTitle(mode)),
         position: { x, y },
-        width: typeof input.width === "number" ? input.width : undefined,
-        height: typeof input.height === "number" ? input.height : undefined,
+        width: typeof input.width === "number" ? input.width : size.width,
+        height: typeof input.height === "number" ? input.height : size.height,
         metadata: cleanRecord({
             smart: true,
             generationMode: mode,

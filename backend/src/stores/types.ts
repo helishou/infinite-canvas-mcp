@@ -13,7 +13,7 @@ import type { CanvasCommandContext } from "../canvas/collaboration.js";
 export type AssetFilter = { kind?: string; folderId?: string; dramaId?: string };
 export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
-export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
+export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string };
 export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;
 export type MediaStats = { width?: number | null; height?: number | null; durationMs?: number | null };
 export type MediaCategory = "input" | "output" | "library";

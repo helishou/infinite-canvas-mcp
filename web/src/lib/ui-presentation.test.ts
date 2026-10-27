@@ -53,8 +53,14 @@ test("canvas authored prompts retain their previous face in inline and expanded 
 test("safe browser fixture uses exact production result and reference components", () => {
     const source = readFileSync(new URL("../pages/image/index.tsx", import.meta.url), "utf8");
     const fixture = readFileSync(new URL("../../tests/visual-polish-cards.tsx", import.meta.url), "utf8");
-    for (const [start, end] of [["function ResultImageCard(", "function PendingImageCard("], ["function ReferenceOrderButtons(", "function buildLog("]]) {
-        assert.ok(fixture.includes(source.slice(source.indexOf(start), source.indexOf(end))), start);
+    const slice = (text: string, name: string) => {
+        const start = text.indexOf(name);
+        assert.notEqual(start, -1, name);
+        const next = text.indexOf("\nfunction ", start + 1);
+        return text.slice(start, next < 0 ? text.length : next);
+    };
+    for (const name of ["function ResultImageCard(", "function ReferenceOrderButtons("]) {
+        assert.ok(fixture.includes(slice(source, name)), name);
     }
 });
 

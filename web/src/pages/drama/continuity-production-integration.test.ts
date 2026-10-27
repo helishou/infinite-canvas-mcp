@@ -70,6 +70,19 @@ function harness() {
         fetchProductionContinuity: async (_target: unknown, options: object) => ({ continuity: { status: "stale", ...options } }),
         fetchProductionReadiness: async () => ({ readiness: {} }),
         setContinuityReport: (value: unknown) => { context.continuityReport = value; }, setReadiness: () => undefined,
+        receiptRecoveryInFlight: { current: false }, setReceiptRecovering: () => undefined,
+        setEpisode: () => undefined, setProductionContext: () => undefined, setTitle: () => undefined,
+        setCanvasId: () => undefined, setCanvasRead: () => undefined, setSharedCanvasNodes: () => undefined,
+        setVersions: () => undefined, setBatches: () => undefined, setBatchesLoadedFor: () => undefined,
+        setRuntimeTasks: () => undefined, setBriefDraft: () => undefined, setLoadError: () => undefined,
+        productionOwner: { kind: "episode", id: "fixture" }, backendReadFailed: { current: false }, supplementalReads: { current: new Map() }, remoteSequence: { current: 0 }, observedProductionRevision: { current: null }, refreshInFlight: { current: null },
+        // 旧 Backend 没有回执读端点：recoverPending 应走 404 分支的精确幂等重放。
+        fetchProductionOperationReceipt: async () => { throw new TestBackendApiError("Receipt endpoint unavailable", 404); },
+        watchSlowBrowserOperation: () => () => undefined,
+        setCompileError: () => undefined, setCompileNotice: () => undefined,
+        productionSegments: (production: any) => Array.isArray(production?.draft?.director?.source?.segments) ? production.draft.director.source.segments : [],
+        productionSegmentRuntimeMatches: () => [],
+        seriesOnly: false,
     };
     for (const name of ["beginContinuityRead", "finishContinuityRead", "pending", "sendCommand", "edit", "saveContinuity", "recoverPending", "checkContinuity", "changeContinuitySnapshot"]) context[name] = handler(name, context);
     return { context, ledger, calls, writes, failures, checks };
@@ -323,7 +336,7 @@ test("shared report guard rejects delayed load/refresh responses and invalidated
     assert.equal(unmounting.isCurrent(), false);
 });
 
-test("initial load and refresh both use the shared report guard", () => {
+test("initial load, refresh and the continuity effect route through the shared report guard", () => {
     for (const name of ["load", "refreshRemote"]) {
         let declaration = "";
         const visit = (node: ts.Node) => {
@@ -331,10 +344,13 @@ test("initial load and refresh both use the shared report guard", () => {
             ts.forEachChild(node, visit);
         };
         visit(ast);
-        assert.match(declaration, /const continuityRead = beginContinuityRead\(\)/);
-        assert.match(declaration, /fetchProductionContinuity\(target, \{ snapshot: continuityRead.snapshot \}\)/);
-        assert.match(declaration, /finishContinuityRead\(continuityRead, continuity.continuity\)/);
+        assert.match(declaration, /const continuityRead = [^\n]*beginContinuityRead\(\)/);
+        assert.match(declaration, /finishContinuityRead\(continuityRead/);
     }
+    // 连续性报告由专用 effect 获取：beginContinuityRead 捕获当前快照，迟到响应不能覆盖更新的选择。
+    assert.match(source, /const read = beginContinuityRead\(continuitySnapshot\)/);
+    assert.match(source, /fetchProductionContinuity\(target, \{ snapshot: continuitySnapshot \}\)/);
+    assert.match(source, /finishContinuityRead\(read, value\.continuity\)/);
 });
 
 test("a background refresh cannot suppress the result of a check still on the same snapshot", async () => {
@@ -533,6 +549,6 @@ test("blocked workspace navigation preserves the mounted continuity form; approv
     }; visit(ast); assert.ok(effect);
     blocked = false; navigate("shots"); assert.equal(workspace, "continuity"); assert.equal(routeWorkspace, "shots");
     const js = ts.transpileModule(`const sync = ${effect};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
-    const sync = new Function("context", `with(context) { ${js}; return sync; }`)({ ...context, routeWorkspace, workspace, productionWorkspaces: ["continuity", "shots"], series: undefined });
+    const sync = new Function("context", `with(context) { ${js}; return sync; }`)({ ...context, routeWorkspace, workspace, productionWorkspaces: ["continuity", "shots"], series: undefined, seriesOnly: false });
     sync(); assert.equal(workspace, "shots"); assert.deepEqual(updates, ["shots"]);
 });

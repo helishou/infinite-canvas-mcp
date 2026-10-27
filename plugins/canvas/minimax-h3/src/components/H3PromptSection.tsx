@@ -659,7 +659,7 @@ export function H3PromptSection({
   const promptSubjectSection = readPromptSection(prompt, "subject_definitions");
   const literalSubjects = useMemo(() => literalPromptSubjects(`subject_definitions:\n${promptSubjectSection}`), [promptSubjectSection]);
   const TextEditor = ctx.TextEditor;
-  const mode = String(selected?.mode || selected?.taskMode || "ref2va");
+  const mode = String(selected?.taskMode || selected?.mode || "ref2va");
   const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
   const structuredPromptV2 = productionProjection?.promptAssemblyVersion === 2;
   const [promptDiffersFromCompiled, setPromptDiffersFromCompiled] = useState(false);
@@ -1376,7 +1376,7 @@ export function H3PromptSection({
           ctx.ai.defaultModel("text") ||
           "",
       );
-      const targetMode = String(target.mode || target.taskMode || "ref2va");
+      const targetMode = String(target.taskMode || target.mode || "ref2va");
       const normalizedMode = targetMode === "t2v" ? "t2va" : targetMode === "i2v" ? "i2va" : targetMode === "fl2v" ? "fl2va" : "ref2va";
        const references = refsForSubmission(target);
       const missingAddress = references.filter((ref) => !ref.url && !ref.storageKey);

@@ -26,15 +26,38 @@ test("Add preserves all original builtin callbacks and current extension registr
     assert.equal(items.find(item => item.key === "group").label, "canvas.controls.group");
 });
 test("multi-selection actions preserve focus, rename, arrange, group and destructive target callbacks", () => {
+    let block: ts.JsxElement | undefined;
+    const visit = (node: ts.Node) => {
+        if (ts.isJsxElement(node) && node.openingElement.attributes.properties.some(a => ts.isJsxAttribute(a) && a.name.getText(tree) === "className" && a.initializer?.getText(tree) === '"canvas-selection-actions"')) block ||= node;
+        ts.forEachChild(node, visit);
+    };
+    visit(tree); assert.ok(block);
     const invoked: string[] = [];
     const handlers = Object.fromEntries(["FocusSelection", "BatchRename", "Arrange", "AddGroup", "Delete"].map(name => [`on${name}`, () => invoked.push(name)]));
     const icons = Object.fromEntries(["Focus", "PencilLine", "Grid2x2", "Group", "Trash2"].map(name => [name, () => null]));
-    const scope = {React, t, ...handlers, ...icons, selectedCount:2, groupSelection:true};
-    const items = evaluate("selectionItems", scope).filter(item => item.onClick);
-    items.forEach(item => item.onClick());
-    assert.deepEqual(invoked, ["FocusSelection", "BatchRename", "Arrange", "AddGroup", "Delete"]);
-    assert.equal(items.at(-1).danger, true);
-    assert.equal(evaluate("selectionItems", {...scope, selectedCount:1, groupSelection:false}).filter(item => ["rename","group"].includes(item.key)).length, 0);
+    const Button = () => null;
+    const scope: Record<string, unknown> = { React, t, Button, Tooltip: ({ children }: { children: unknown }) => children, ...handlers, ...icons, selectedCount: 2, groupSelection: true, deleteDisabled: false, theme: { toolbar: { panel: "", border: "", item: "" } } };
+    const code = ts.transpileModule(`return (${block.getText(tree)});`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const renderButtons = (extra: Record<string, unknown> = {}) => {
+        const input = { ...scope, ...extra };
+        const root = new Function(...Object.keys(input), code)(...Object.values(input));
+        const buttons: Array<any> = [];
+        const walk = (n: unknown) => {
+            if (!n || typeof n !== "object") return;
+            if (Array.isArray(n)) { n.forEach(walk); return; }
+            const el = n as { type?: unknown; props?: { children?: unknown; onClick?: () => void; danger?: boolean } };
+            if (el.type === Button) buttons.push(el.props);
+            if (el.props?.children) walk(el.props.children);
+        };
+        walk((root as { props: { children?: unknown } }).props.children);
+        return buttons;
+    };
+    const buttons = renderButtons();
+    assert.deepEqual(buttons.map(button => button.onClick), [handlers.onFocusSelection, handlers.onBatchRename, handlers.onAddGroup, handlers.onArrange, handlers.onDelete]);
+    buttons.forEach(button => button.onClick!());
+    assert.deepEqual(invoked, ["FocusSelection", "BatchRename", "AddGroup", "Arrange", "Delete"]);
+    assert.equal(buttons.at(-1)?.danger, true);
+    assert.deepEqual(renderButtons({ selectedCount: 1, groupSelection: false }).map(button => button.onClick), [handlers.onFocusSelection, handlers.onArrange, handlers.onDelete]);
 });
 
 test("panning out of cull bounds keeps the single builtin editor owner mounted without pinning unrelated plugins", () => {
@@ -45,7 +68,7 @@ test("panning out of cull bounds keeps the single builtin editor owner mounted w
     visit(projectTree); assert.ok(callback);
     const code = ts.transpileModule(`return (${callback.getText(projectTree)})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
     const image = { id:"image", type:"image" }, plugin = { id:"plugin", type:"custom" }, visible = [{id:"nearby"}];
-    const scope = {queryCanvasSpatialIndex: () => visible, graphIndex:{nodeSpatialIndex:{}}, visibleWorldBounds:{}, dialogNodeId:"image", nodeById:new Map([["image",image],["plugin",plugin]]), getNodeDefinition:(type:string) => type === "custom" ? {Panel:()=>null} : undefined};
+    const scope = {queryCanvasSpatialIndex: () => visible, graphIndex:{nodeSpatialIndex:{}}, visibleWorldBounds:{}, dialogNodeId:"image", nodeById:new Map([["image",image],["plugin",plugin]]), getNodeDefinition:(type:string) => type === "custom" ? {Panel:()=>null} : undefined, refPickActive:false, refPickTargetNodeId:null};
     const run = (extra = {}) => { const input = {...scope,...extra}; return new Function(...Object.keys(input),code)(...Object.values(input)); };
     assert.deepEqual(run(),[...visible,image]);
     assert.equal(run({dialogNodeId:null}),visible);

@@ -46,6 +46,9 @@ test("stopping a running request aborts all matching controllers and returns aff
     assert.equal(first.signal.aborted, true);
     assert.equal(second.signal.aborted, true);
     assert.equal(unrelated.signal.aborted, false);
+    assert.deepEqual([...requests.keys()].sort(), ["target-a", "target-b", "target-c"]);
+    finishCanvasGenerationRequest(requests, "target-a", first);
+    finishCanvasGenerationRequest(requests, "target-b", second);
     assert.deepEqual([...requests.keys()], ["target-c"]);
 });
 

@@ -16,7 +16,7 @@ const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
 const boundaryEditors = new Map<string, { token: symbol; handler: ContinuationBoundaryHandler }>();
 const membershipEditors = new Map<string, { token: symbol; handler: ClipMembershipHandler }>();
-type ClipMembershipHandler = (input: { nodeId: string; segmentId: string; position: "before" | "after" }) => Promise<{ sourceSaved: boolean; targetId?: string }>;
+type ClipMembershipHandler = (input: { nodeId: string; segmentId: string; position: "before" | "after" } | { nodeId: string; segmentId: string; action: "delete" }) => Promise<{ sourceSaved: boolean; targetId?: string }>;
 const pendingPromptCompiles = new Map<string, PendingPromptCompile>();
 type PendingPromptCompile = { expectedRevision: number; operationId: string; staleRetries?: number; waitedMs?: number };
 // 已发送未确认的编译先用原 operationId 取回执：刷新页面或重新打开浮层后仍能接回同一次编译。
@@ -201,6 +201,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
             keyframeAssetId = match?.[0] || `storyboard:${encodeURIComponent(bindingId)}`;
             keyframeBindings.push({ shotId: String(slot.id), assetId: keyframeAssetId, bindingId,
                 ...(binding.sourceNodeId ? { nodeId: String(binding.sourceNodeId) } : { clearNodeId: true }),
+                ...((binding.containerNodeId || input.nodeId) ? { containerNodeId: String(binding.containerNodeId || input.nodeId) } : {}),
                 ...(binding.storageKey ? { storageKey: String(binding.storageKey) } : {}),
                 ...(binding.label ? { label: String(binding.label) } : {}) });
             if (v2) {
@@ -213,7 +214,12 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                 const nodeId = String(binding.sourceNodeId || "");
                 const frameId = slotFrames[0]?.frame.id || `KF:${slot.id}:storyboard`;
                 const previousFrame = slotFrames[0]?.frame || {};
-                const keyframe = { ...previousFrame, id: String(frameId), assetId: keyframeAssetId,
+                // slotFrames 来自重建前的原镜头；时长已变时必须继承克隆帧上已缩放好的
+                // localFrame，否则回写的关键帧停在旧时点（例如 96→72 帧后仍指 48）。
+                const rescaledFrame = rows(next.keyframes).find(frame => String(frame.id || "") === String(frameId));
+                const keyframe = { ...previousFrame,
+                    ...(rescaledFrame && rescaledFrame.localFrame !== undefined ? { localFrame: rescaledFrame.localFrame } : {}),
+                    id: String(frameId), assetId: keyframeAssetId,
                     ...(nodeId && projectId ? { sourceNode: { projectId, nodeId } } : { sourceNode: undefined }),
                     selection: nodeId ? { mode: "node_selection" } : { mode: "selected_result", resultId: String(binding.storageKey || bindingId) }, anchor: "opening",
                     subjectIds: Array.isArray(previousFrame.subjectIds) ? previousFrame.subjectIds : [],
@@ -223,7 +229,10 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                     // It remains valid without an image-node owner; compilation resolves
                     // the selected storageKey directly instead of requiring a fake node.
                     requiredForSubmission: Boolean(binding.storageKey) };
-                next.keyframes = [...rows(next.keyframes).filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id))), keyframe];
+                const keptFrames = rows(next.keyframes);
+                next.keyframes = keptFrames.some(frame => String(frame.id || "") === String(frameId))
+                    ? keptFrames.map(frame => String(frame.id || "") === String(frameId) ? keyframe : frame)
+                    : [...keptFrames.filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id))), keyframe];
             }
         } else if (v2 && slotFrames.length) {
             for (const { ownerShot, frame } of slotFrames) {
@@ -406,6 +415,15 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         const editor = membershipEditors.get(projectId);
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY: 制作台未连接，无法在 H3 端新增 Clip");
         return editor.handler({ nodeId: input.nodeId, segmentId: input.segmentId, position: input.position });
+    }, deleteClip: async (input: { nodeId: string; segmentId: string }) => {
+        await flush();
+        const node = getNode(input.nodeId), segments = node?.metadata?.segments;
+        const clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
+        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        if (!clip || typeof projection?.targetId !== "string") throw new Error("CLIP_MEMBERSHIP_NOT_FORMAL: 当前 Clip 不是正式制作 Clip，请直接删除 H3 轨内片段");
+        const editor = membershipEditors.get(projectId);
+        if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY: 制作台未连接，无法在 H3 端删除 Clip");
+        return editor.handler({ nodeId: input.nodeId, segmentId: input.segmentId, action: "delete" });
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
         return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
     }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };

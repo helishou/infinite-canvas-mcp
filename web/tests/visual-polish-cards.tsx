@@ -27,9 +27,9 @@ function ResultImageCard({
 }) {
     const { t } = useTranslation();
     return (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain" />
-            <div className="space-y-2 border-t border-border px-3 py-3">
+        <div className="overflow-hidden rounded-lg border border-border bg-card lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain lg:aspect-auto lg:h-full lg:min-h-0 lg:flex-1" />
+            <div className="space-y-2 border-t border-border px-3 py-3 lg:shrink-0">
                 <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted-foreground">
                     <span>
                         {image.width}x{image.height}
@@ -83,7 +83,6 @@ function ReferenceOrderButtons({ index, total, onMove }: { index: number; total:
         </div>
     );
 }
-
 
 function Fixture(){const [dark,setDark]=useState(false);const [receipt,setReceipt]=useState("No action");const [width,setWidth]=useState(220);const [index,setIndex]=useState(0);
 const image={id:"mock-result",dataUrl:'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="%23687959"/><circle cx="128" cy="128" r="70" fill="%23c1cfa3"/></svg>',width:1024,height:1024,bytes:122880,durationMs:7200};

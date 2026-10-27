@@ -41,7 +41,7 @@ test("asset registration shares the search toolbar and keeps style controls and 
 test("warnings and draft recovery stay outside optional header guidance", () => {
     const continuity = read("./continuity-panel.tsx");
     const heading = continuity.split('\n').find(line => line.includes('<ProductionPageHeading')) || "";
-    for (const key of ["sourceConflict", "invalidDraft", "publishedReadOnly", "legacyReadOnly"]) {
+    for (const key of ["sourceConflict", "invalidDraft", "publishedReadOnly"]) {
         assert.match(continuity, new RegExp(key));
         assert.doesNotMatch(heading, new RegExp(key));
     }

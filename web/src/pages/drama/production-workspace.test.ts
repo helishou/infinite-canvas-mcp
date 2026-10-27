@@ -68,7 +68,7 @@ test("production and canvas selectors share targets while preserving the switche
     assert.match(source, /if \(!routeWorkspace && workspace === "series"\) setWorkspace\("overview"\)/);
     const canvasToolbar = readFileSync(new URL("../../components/production/canvas-production-workspace.tsx", import.meta.url), "utf8");
     assert.doesNotMatch(canvasToolbar, /key: "history", label: t\("productionCanvas\.advanced"\)/);
-    assert.match(canvasToolbar, /overlayHost\?\.switchProductionCanvas\(\{ projectId: canvasId, dramaId: context\.dramaId!, episodeId: id, keepCanvasOpen: true \}\)/);
+    assert.match(canvasToolbar, /overlayHost\.switchProductionCanvas\(\{ projectId: canvasId, dramaId: context\.dramaId!, episodeId: id, keepCanvasOpen: true \}\)/);
     const canvasHost = readFileSync(new URL("../../lib/canvas/canvas-host.tsx", import.meta.url), "utf8");
     assert.match(canvasHost, /switchProductionCanvas: \(target: ProductionCanvasTarget\) => void/);
     const overlay = readFileSync(new URL("./workbench-canvas.tsx", import.meta.url), "utf8");

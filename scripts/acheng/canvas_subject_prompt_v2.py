@@ -889,7 +889,15 @@ def adapt_production(production, *, draft=False):
                 description_text = ("; appearance: " + selected_description) if selected_description else ""
                 definition = label + " is " + name + description_text + "; " + ", ".join(picture_roles) + "."
             else:
-                _core_def = description or name
+                # Keep the canonical entity name even when a non-character
+                # (scene/prop) has a longer authored description. Choosing the
+                # description alone made named props such as 万妖画卷 collapse
+                # to generic text like “a projection visible only to the lead”.
+                core_name = name if name and name != entity_id else ""
+                if core_name and description and description != core_name:
+                    _core_def = core_name + "; " + description
+                else:
+                    _core_def = description or core_name or name
                 definition = label + " is " + _core_def + ", represented by " + ", ".join(labels) + "."
             if visually_present:
                 retention_level = "fully_preserved" if entity_kind == "character" and has_identity_reference else "partially_preserved"

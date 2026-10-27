@@ -6,10 +6,10 @@ type NodeAction = { id: string; danger?: boolean };
 
 const actionGroups: Record<string, CanvasNodeActionGroup> = {
     info: "inspect", view: "inspect", download: "inspect", copyPrompt: "inspect", compareVideo: "inspect",
-    replace: "edit", resize: "edit", maskEdit: "edit", crop: "edit", split: "edit", upscale: "edit", superResolve: "edit", autoLevels: "edit", angle: "edit",
+    replace: "edit", resize: "edit", maskEdit: "edit", crop: "edit", split: "edit", stitch: "edit", upscale: "edit", superResolve: "edit", autoLevels: "edit", angle: "edit",
     trimVideo: "edit", extractAudio: "edit", edit: "edit", config: "edit", decreaseFont: "edit", increaseFont: "edit", uploadImage: "edit", uploadVideo: "edit", uploadAudio: "edit",
     retry: "generate", generateImage: "generate", reversePrompt: "generate", convertToCharacter: "generate", convertToScene: "generate", convertToProp: "generate",
-    saveAsset: "organize", saveCharacterToAsset: "organize", saveSceneToAsset: "organize", arrangeGroup: "organize", toggleOrderedGroup: "organize", groupLock: "organize",
+    saveAsset: "organize", saveCharacterToAsset: "organize", saveSceneToAsset: "organize", arrangeGroup: "organize", createOrderedGroupCollage: "organize", toggleOrderedGroup: "organize", groupLock: "organize",
     delete: "danger", discardShared: "danger",
 };
 

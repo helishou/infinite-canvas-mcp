@@ -4,7 +4,7 @@ import { continuityReadProjection, continuityEventPositionIssues, continuityBloc
 import { continuityEventAnchor, continuityEventFrame, continuityEventPositionPatch } from "./continuity-event-anchor";
 import { appendContinuityChange } from "./continuity-event-draft";
 
-const fixture = () => ({ prompt_assembly: { version: 2 }, subject_registry: [{ id: "SUB", entityRef: { kind: "asset", id: "KEY" } }],
+const fixture = () => ({ version: 2, prompt_assembly: { version: 2 }, subject_registry: [{ id: "SUB", entityRef: { kind: "asset", id: "KEY" } }],
     shots: [{ id: "S2", timeline_id: "main", story_order: 2, duration_frames: 72, source_scene_id: "return", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible", localStartFrame: 12, localEndFrame: 60 }] },
         { id: "S1", timeline_id: "main", story_order: 1, duration_frames: 72, source_scene_id: "first", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible" }] },
         { id: "S3", timeline_id: "main", story_order: 3, duration_frames: 96, source_scene_id: "return", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible" }] },

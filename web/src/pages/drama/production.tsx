@@ -45,7 +45,7 @@ import { DirectorPanel, type DirectorWorkspace } from "./director-panel";
 import { type CanvasAssetEditPayload } from "./canvas-asset-edit-modal";
 import { DramaManagePanel } from "./manage-panel";
 import "./production.css";
-import { registerProductionPromptEditor, registerProductionStoryboardEditor, registerProductionBoundaryEditor, sourceSegmentForCanvasClip, buildDirectorClipStoryboardOperation } from "@/lib/canvas/production-editing";
+import { registerProductionPromptEditor, registerProductionStoryboardEditor, registerProductionBoundaryEditor, registerProductionClipMembershipEditor, sourceSegmentForCanvasClip, buildDirectorClipStoryboardOperation } from "@/lib/canvas/production-editing";
 import { dramaWorkbenchEpisode, dramaWorkbenchPath } from "./workbench-entry";
 import { commandNeedsRecovery, commandFailureRecord, normalizeCommandRecovery, commandErrorSummary } from "./production-command-recovery";
 import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQuery, productionWorkspaces, seriesPlanningOption, seriesWorkspaceView, type SeriesWorkspaceView, type ProductionWorkspaceScope } from "./production-workspace";
@@ -424,18 +424,38 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (seriesOnly || workspace !== "assets" || !productionContext || !canvasId
       || productionContext.owner?.kind !== productionOwner.kind || productionContext.owner?.id !== productionOwner.id) return;
     const sharedCanvasId = String(productionContext.sharedAssetCanvasId || "");
-    if (!sharedCanvasId || sharedCanvasId === canvasId || sharedCanvasNodes?.id === sharedCanvasId) return;
-    const key = `${productionOwner.kind}:${productionOwner.id}:shared-canvas:${sharedCanvasId}`;
-    if (supplementalReads.current.has(key)) return;
+    if (!sharedCanvasId || sharedCanvasId === canvasId) return;
     let active = true;
-    const pendingRead = fetchBackendProject(sharedCanvasId).then(({ project }) => {
-      if (active && currentOwnerKey.current === continuityOwnerKey && Array.isArray(project.nodes)) setSharedCanvasNodes({ id: sharedCanvasId, revision: Number(project.revision || 0), nodes: project.nodes as ProductionCanvasSnapshot["nodes"] });
-    }).catch(error => {
-      if (active && currentOwnerKey.current === continuityOwnerKey) setLoadError(String(error));
-    }).finally(() => supplementalReads.current.delete(key));
-    supplementalReads.current.set(key, pendingRead.then(() => undefined));
-    return () => { active = false; };
-  }, [seriesOnly, workspace, productionContext, canvasId, sharedCanvasNodes?.id, productionOwner.kind, productionOwner.id, continuityOwnerKey]);
+    let refreshPending = false;
+    let pendingRead = false;
+    const refreshSharedCanvas = () => {
+      if (!active) return;
+      if (pendingRead) { refreshPending = true; return; }
+      pendingRead = true;
+      void fetchBackendProject(sharedCanvasId).then(({ project }) => {
+        if (active && currentOwnerKey.current === continuityOwnerKey && Array.isArray(project.nodes)) setSharedCanvasNodes({ id: sharedCanvasId, revision: Number(project.revision || 0), nodes: project.nodes as ProductionCanvasSnapshot["nodes"] });
+      }).catch(error => {
+        if (active && currentOwnerKey.current === continuityOwnerKey) setLoadError(String(error));
+      }).finally(() => {
+        pendingRead = false;
+        if (refreshPending && active) { refreshPending = false; refreshSharedCanvas(); }
+      });
+    };
+    const onBackendEvent = (event: Event) => {
+      const value = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+      if (value?.type === "canvas.updated" && value.entityId === sharedCanvasId) refreshSharedCanvas();
+    };
+    refreshSharedCanvas();
+    window.addEventListener("backend-event", onBackendEvent);
+    window.addEventListener("backend-events-reset", refreshSharedCanvas);
+    window.addEventListener("backend-connected", refreshSharedCanvas);
+    return () => {
+      active = false;
+      window.removeEventListener("backend-event", onBackendEvent);
+      window.removeEventListener("backend-events-reset", refreshSharedCanvas);
+      window.removeEventListener("backend-connected", refreshSharedCanvas);
+    };
+  }, [seriesOnly, workspace, productionContext, canvasId, productionOwner.kind, productionOwner.id, continuityOwnerKey]);
 
   useEffect(() => {
     if (embedded && production) useProductionWorkspaceStore.getState().setSnapshot(productionOwner.id, production, readiness);
@@ -1597,7 +1617,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [embedded, owner?.kind, owner?.id, production, canvasId, busy, draftKey, briefDraft, dirtySourceDraftKeys, sourceDrafts, remoteRevision, pendingRunStart, batches, navigate, t]);
   const regroupSegment = async (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => edit([{ type: "set_director_segment_group", segmentId, shotIds, removeSegmentIds }]);
   const repartitionV2 = async (shotIds: string[], segments: Array<Record<string, unknown>>) => edit([{ type: "repartition_director_clips", shotIds, segments }]);
-  const editV2Shot = async (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => {
+  const editV2Shot = async (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>, extraOps: ProductionOperation[] = []) => {
     const director = production?.draft.director;
     if (!director) return false;
     if (!isSubjectPromptAssembly(director.source)) {
@@ -1605,7 +1625,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       return false;
     }
     const captured: Record<string, string> = {}, ops: ProductionOperation[] = [];
-    for (const id of [...new Set([operation.shotId, operation.targetShotId].filter((id): id is string => Boolean(id)))]) {
+    for (const id of [...new Set([operation.shotId, operation.targetShotId, operation.anchorShotId].filter((id): id is string => Boolean(id)))]) {
       const key = `v2shot:${id}`, raw = sourceDrafts[key];
       if (!raw) continue;
       const shot = (director.source.shots as Array<Record<string, any>>).find(shot => shot.id === id);
@@ -1618,7 +1638,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (changes.utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId: id, utterances: changes.utterances as Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"] });
       captured[key] = raw;
     }
-    const saved = await edit([...ops, operation]);
+    const saved = await edit([...ops, operation, ...extraOps]);
     if (saved) setSourceDrafts(current => Object.fromEntries(Object.entries(current).filter(([key, value]) => captured[key] !== value)));
     return saved;
   };
@@ -1918,6 +1938,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const { project } = await fetchBackendProject(canvasId);
     return edit([{ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
   };
+  const deleteClip = async (clipId: string) => {
+    if (!production || busy || !clipId || !canvasId) return false;
+    const { project } = await fetchBackendProject(canvasId);
+    return edit([{ type: "delete_director_clip", segmentId: clipId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
+  };
   const deleteAsset = async (assetId: string) => {
     if (!production || busy || !assetId) return false;
     return edit([{ type: "delete_director_asset", id: assetId, confirmed: true }]);
@@ -2108,6 +2133,52 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       return { sourceSaved: await edit(ops) };
     });
   }, [production, canvasId, setH3Boundary, edit]);
+
+  // H3 工作台与制作台共用的 Clip 成员操作：在锚点 Clip 边界插入新 Clip 及其首镜，走同一命令日志。
+  useEffect(() => {
+    if (!production?.draft.director || !canvasId) return;
+    return registerProductionClipMembershipEditor(canvasId, async input => {
+      const director = production.draft.director!;
+      const source = director.source as Record<string, any>;
+      const groupId = sourceSegmentForCanvasClip(canvasNodes as any, source, input.nodeId, input.segmentId);
+      const clipSegments = (Array.isArray(source.segments) ? source.segments : []) as Array<Record<string, any>>;
+      const index = clipSegments.findIndex(segment => String(segment.id || "") === String(groupId));
+      if (index < 0) throw new Error(`正式制作 Clip 不存在：${groupId}`);
+      if ("action" in input) {
+        const confirmed = await new Promise<boolean>(resolve => modal.confirm({
+          title: t("productionCanvas.deleteClipConfirm", { clip: `Clip ${index + 1}` }),
+          okText: t("productionCanvas.deleteClip"), okType: "danger", cancelText: t("common.cancel"),
+          onOk: () => resolve(true), onCancel: () => resolve(false),
+        }));
+        if (!confirmed) return { sourceSaved: false };
+        const saved = await deleteClip(String(groupId));
+        return { sourceSaved: saved, ...(saved ? { targetId: String(groupId) } : {}) };
+      }
+      const position = input.position;
+      const anchorGroup = position === "after" ? clipSegments[index] : clipSegments[index - 1];
+      if (!anchorGroup) throw new Error("该边界没有可插入新 Clip 的锚点，请在制作台调整 Clip 分组");
+      const anchorShotIds = new Set((Array.isArray(anchorGroup.shot_ids) ? anchorGroup.shot_ids : []).map(String));
+      const anchorShot = (Array.isArray(source.shots) ? source.shots : [])
+        .filter((shot: Record<string, any>) => anchorShotIds.has(String(shot.id))).slice(-1)[0];
+      if (!anchorShot) throw new Error("锚点 Clip 没有镜头，无法插入新 Clip");
+      const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
+      const clipId = `CLIP_${nanoid()}`;
+      const segment: Record<string, unknown> = {
+        ...(anchorGroup.mode_lock !== undefined ? { mode_lock: anchorGroup.mode_lock } : {}),
+        ...(anchorGroup.styleTemplateId !== undefined ? { styleTemplateId: anchorGroup.styleTemplateId } : {}),
+        mode: anchorGroup.mode || "Ref2VA", id: clipId,
+      };
+      const anchorCamera = anchorShot.camera && typeof anchorShot.camera === "object" ? anchorShot.camera as Record<string, any> : {};
+      const camera = { ...anchorCamera, framing: anchorCamera.framing || "MS",
+        editorial_reason: `由场次 H3 工作台在${position === "after" ? "该 Clip 之后" : "该 Clip 之前"}新增 Clip` };
+      const saved = await editV2Shot({ type: "edit_director_shot", action: "insert", segment, anchorShotId: String(anchorShot.id),
+        shot: { id: `SHOT_${nanoid()}`, title: `新 Clip 镜头 ${clipSegments.length + 1}`,
+          visual: anchorShot.visual ? `${String(anchorShot.visual).slice(0, 40)}（新 Clip 待制作台细化）` : "新 Clip 镜头待制作台细化",
+          camera, scene_id: anchorShot.scene_id, timeline_id: anchorShot.timeline_id,
+          duration_frames: Math.round(4 * fps), keyframes: [], utterance_refs: [], audio: {} } });
+      return { sourceSaved: saved, ...(saved ? { targetId: clipId } : {}) };
+    });
+  }, [production, canvasId, canvasNodes, editV2Shot]);
 
   useEffect(() => {
     if (agentTaskResult?.status === "failed") setAgentError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
@@ -2326,7 +2397,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               }}
               onAnswerDecision={answerDecision}
               onExport={exportBundle} exporting={exporting}
-              onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)} onRetire={retireRun}
+              onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onDeleteClip={deleteClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)} onRetire={retireRun}
               runStartPending={Boolean(pendingRunStart)} activeTargetIds={activeTargetIds}
               onRestore={restoreVersion} onSceneCommand={sendSceneCommand} sceneCommandPending={Boolean(pendingCommand || pendingRunStart)} onRefresh={() => void load(() => true, true).catch(fail)}
             />

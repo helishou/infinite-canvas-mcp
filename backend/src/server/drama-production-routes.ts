@@ -43,7 +43,11 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     };
     compilations.onSettled = id => { queueMicrotask(() => { scenes.wake(id); refreshes.wake(id); }); };
     events?.subscribe(event => {
-        if (event.type === "drama-production.updated" && service.sceneWorkOwners().includes(event.entityId || "")) queueMicrotask(() => scenes.wake(event.entityId!));
+        if (event.type !== "drama-production.updated" || !event.entityId) return;
+        queueMicrotask(() => {
+            refreshes.wake(event.entityId!);
+            if (service.sceneWorkOwners().includes(event.entityId!)) scenes.wake(event.entityId!);
+        });
     });
     for (const id of service.sceneWorkOwners()) {
         try { scenes.recover(id); }
@@ -344,7 +348,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const production = await service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
             serviceMs = Math.round(performance.now() - serviceStartedAt);
             res.json({ ok: true, production: publicProductionRecord(production) });
-            queueMicrotask(() => refreshes.wake(req.params.episodeId));
+            if (!events) queueMicrotask(() => refreshes.wake(req.params.episodeId));
         } catch (error) {
             serviceMs = Math.round(performance.now() - startedAt);
             handle(res, error);

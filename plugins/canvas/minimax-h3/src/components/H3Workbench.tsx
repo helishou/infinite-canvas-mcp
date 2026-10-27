@@ -456,7 +456,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const requestCanvasRefPick = (segmentId: string, slotIndex: number) => {
         const segment = segments.find((item) => item.id === segmentId);
         if (!segment) { console.warn("[H3] 点空槽加引用：找不到对应 Clip", segmentId); return; }
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         if (mode === "t2v") { console.warn("[H3] 点空槽加引用：该 Clip 为 t2v（不接收参考）", segmentId); return; }
         setPickingRef({ segmentId, slotIndex, types: mode === "ref2va" ? ["image", "video", "audio"] : ["image"] });
         window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id } }));
@@ -471,7 +471,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const beginCanvasRefReplace = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
         if (!segment) return;
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const allowedTypes: H3Ref["type"][] = mode === "ref2va" ? ["image", "video", "audio"] : ["image"];
         if (!allowedTypes.includes(ref.type)) return;
         const refs = refsForSegment(segment);
@@ -615,7 +615,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 }
             } catch { /* 普通 URL 交给后续解析 */ }
         }
-        const mode = String(selected.mode || selected.taskMode || "ref2va");
+        const mode = String(selected.taskMode || selected.mode || "ref2va");
         // 角色资产 / 角色节点：建/复用角色组，outfit 拆为 image refs、voice 拆为 audio ref（占 audio 槽，受 3 上限约束）
         let characterGroupInput: ReturnType<typeof readCharacterGroupFromDrop>;
         try {
@@ -660,7 +660,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         target = target || selected;
         if (!target) return;
-        const targetMode = String(target.mode || target.taskMode || "ref2va");
+        const targetMode = String(target.taskMode || target.mode || "ref2va");
         if (targetMode === "t2v") return;
         // 角色节点派发：建/复用角色组
         const kind = String(detail.type || detail.kind || "").toLowerCase();

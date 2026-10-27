@@ -256,7 +256,7 @@ export function findCharacterGroupBySource(segment: H3Segment, source: { charact
 }
 
 function characterGroupCapacity(segment: H3Segment, groupId?: string) {
-    const rawMode = String(segment.mode || segment.taskMode || "ref2va");
+    const rawMode = String(segment.taskMode || segment.mode || "ref2va");
     const mode = rawMode === "t2v" || rawMode === "i2v" || rawMode === "fl2v" ? rawMode : "ref2va";
     // ref2va 的参考图槽位不限数量（与画布 ref 槽位一致）：角色 outfit 不再按 9 张裁剪；
     // i2v / fl2v 的图片是固定语义（首帧 / 首尾帧）才需要限制。

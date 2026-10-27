@@ -43,7 +43,7 @@ export function h3ClipCacheFingerprint(input: {
     const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
     // 同一模板 ID 的正文修订也会改变生成输入，不能复用旧风格的成片。
     const styleTemplateId = segment.styleTemplateId === undefined
-        ? styleTemplateFromPrompt(compiledPrompt, String(params.mode || params.taskMode || "ref2va"), styleTemplates)
+        ? styleTemplateFromPrompt(compiledPrompt, String(params.taskMode || params.mode || "ref2va"), styleTemplates)
         : segment.styleTemplateId;
     const styleTemplate = styleTemplateText(styleTemplateId as string | null, styleTemplates) || undefined;
     // Older tail-frame runs replaced opening keyframes/storyboards. The appended

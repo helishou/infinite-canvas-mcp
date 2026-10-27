@@ -14,6 +14,10 @@
 
 已有画布持久编辑统一走 ops。外部入口 `/canvas/projects/:id/ops` 携带稳定 operationId、expectedRevision 与 source.clientId/kind/label；Backend 内部复用 `stores.projects.applyOperations`，不必回环 HTTP。SQLite 事务完成幂等与 revision 后，广播同一份 delta。不得直接写库、整图覆盖或独立补造记录来绕过该链。
 
+内置节点默认尺寸由 `@basketikun/canvas-agent` 的共享节点规格给出：浏览器、Backend 与 MCP 创建同类型节点得到同一大小，不各自写死兜底值。插件节点类型只在浏览器注册尺寸，其他入口按共享兜底尺寸处理；发给 Backend 的 `add_node` 带显式尺寸与坐标，不依赖 Backend 猜测。
+
+节点数组顺序就是渲染层级。`add_node` 在数组中段插入（撤销删除、粘贴到中间、插入时垫在成员下面）时必须带 `index`；同一批 op 中的删除晚于新增执行，位置按回放数组中已存在的锚点计算，不能直接拿目标数组下标，否则节点会落到最上层。
+
 打开中的画布收到 Backend revision 后采用 Zustand 已合并的内存快照；不能另绕异步 Promise 使有效更新被 UI version 防护丢弃。
 
 ## 制作稿、草稿与派生版本
@@ -76,6 +80,8 @@
   显式启用场次并行的制作，可在 Backend 核验当前草稿和发布目标的输入作用域均与原任务版本一致、实际活动结果仍属于本轮任务后，将结果投影到当前等价目标；保留原 taskId、源版本及历史快照，不将它宣称为新输入生成的媒体。目标输入变化或用户已选择其他结果时，只保存原版本历史。
 
 ## H3 字段与引用
+
+- H3 Clip `taskMode` 是制作模式唯一权威值；Acheng Segment `mode`/`mode_lock` 是同一值的源稿投影。编辑 H3 模式时，Backend 在同一 Canvas ops 事务同步 Segment 并使旧编译产物失效；编译与制作台读取按已绑定 H3 Clip 的 `taskMode` 投影模式，不得再按关键帧/参考数量覆盖为 I2VA/FL2VA/Ref2VA。没有绑定 H3 Clip 的新目标才可使用源稿模式推断；正式制作投影更新 H3 节点时必须保留该节点当前 `taskMode`。
 
 - 自选视频模型关闭时，原生 H3 固定走本地 ComfyUI，保存稿、请求或默认参数残留的 RH／自动分流选择不参与原生路由，也不读取 RH 配置。自选模型开启后才使用其模型渠道、工作流及本地／RH／混合选择；界面、参数预检和后台执行共享这一语义。
 

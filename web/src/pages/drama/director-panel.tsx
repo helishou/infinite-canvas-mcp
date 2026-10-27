@@ -652,7 +652,7 @@ export function DirectorPanel({
   onPrepareEntities, onUpsertSubject, onSwitchToSharedNode, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
   onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRetire, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
-  onCompile, onGenerateClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onSplitScene,
+  onCompile, onGenerateClip, onDeleteClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onSplitScene,
   onApplyTranslatedPrompts, autoTranslateCompilation, readOnly = false, onArchive,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
@@ -726,6 +726,7 @@ export function DirectorPanel({
   onCompile?: (sceneId?: string, targetId?: string, targetIds?: string[]) => void;
   /** 编译就绪的 Clip 直接提交生成，复用生成页同一条 startRun。 */
   onGenerateClip?: (clipId: string) => void;
+  onDeleteClip?: (clipId: string) => Promise<boolean | void>;
   onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
   autoTranslateCompilation?: { id: string; targetIds: string[] } | null;
   /** Archived episodes are read-only: refuse to submit any edit and free the archive toggle to un-archive. */
@@ -2084,7 +2085,7 @@ export function DirectorPanel({
       autoTranslateCompilation={autoTranslateCompilation}
       onClip={id => onNavigate("production", { kind: "segment", id })}
       busy={busy} lockReadOnly={readOnly} compileBusy={compileBusy} compilePending={compilePending} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets} onCompile={onCompile}
-      onGenerateClip={subjectAssembly ? onGenerateClip : undefined} runStartPending={runStartPending}
+      onGenerateClip={subjectAssembly ? onGenerateClip : undefined} onDeleteClip={subjectAssembly ? onDeleteClip : undefined} runStartPending={runStartPending}
         onDiscuss={(targetId, instruction, discussionWorkspace, clipContext) => onAskDirector({ workspace: discussionWorkspace || "overview", targetId, instruction, clipContext })} onNavigate={onNavigate} />;
     return <div className="space-y-3"><Alert type="info" message={t("director.workspace.noShots")} /><Button type="text" disabled={busy} icon={<WandSparkles className="size-3.5" />} onClick={() => onAskDirector({ workspace: "shots" })}>{t("director.studio.collaborate")}</Button></div>;
   };

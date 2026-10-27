@@ -8,7 +8,7 @@ import { directorModules, directorProductionSchema, productionWriteReceipt, proj
 import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
-import { directorHash } from "./director.js";
+import { directorHash, promptHash } from "./director.js";
 import { ClipRefreshCoordinator } from "./clip-refresh.js";
 import { productionLayoutStableId } from "./production-layout-geometry.js";
 
@@ -110,6 +110,105 @@ test("saving visible Shot text is allowed while its required identity image is s
     assert.equal(saved.draft.director?.sourceHash, directorHash(director.source));
     assert.deepEqual((saved.draft.director?.source.shots as any[])[0].subject_usages[0].pictureBindingIds, []);
     assert.equal(saved.revision, current.revision + 1);
+});
+
+test("ordinary Shot saves queue one Clip refresh and replay the saved intent without unrelated blockers", t => {
+    const service = fixture(t, true), director = directorV2();
+    (director.source.shots as any[]).push({ ...(director.source.shots as any[])[0], id: "S2", story_order: 1,
+        subject_usages: [], visual: "An unrelated empty doorway." });
+    (director.source.segments as any[]).push({ id: "C2", shot_ids: ["S2"], mode: "T2VA" });
+    director.shotInputs.S2 = { keyframePolicy: "none", assetIds: [] };
+    director.sourceHash = directorHash(director.source);
+    const initial = service.edit("ep", { operationId: "auto-initial", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }] });
+    const input = { operationId: "auto-shot-save", expectedRevision: initial.revision,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "S1", patch: { visual: "The character turns toward a sound." } }] };
+    const saved = service.edit("ep", input) as any;
+    const jobs = service.clipRefreshStore("ep").byEditAll(input.operationId);
+    assert.deepEqual(jobs.map(job => [job.segmentId, job.status]), [["C1", "queued"]]);
+    assert.equal(saved.clipRefresh.sourceSaved, true);
+    assert.equal(saved.clipRefresh.mediaSubmitted, false);
+    assert.deepEqual(saved.referenceSync || [], [], "queued compilation must not report a missing-artifact failure");
+    const restored = service.operationReceipt("ep", input.operationId) as any;
+    assert.equal(restored.clipRefresh.operationId, jobs[0].operationId, "lost-response recovery keeps the original refresh identity");
+    assert.deepEqual(restored.referenceSync || [], []);
+    const replayed = service.edit("ep", input) as any;
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.revision, saved.revision);
+    assert.equal(service.clipRefreshStore("ep").byEditAll(input.operationId).length, 1);
+    const receipt = productionWriteReceipt({ ok: true, production: saved }, { tool: "production_edit", input });
+    assert.equal((receipt as any).clipRefreshSummary.running, 1);
+    assert.equal((receipt as any).clipRefreshSummary.blocked, 0);
+});
+
+test("an explicit refresh repairs an unchanged Clip with no current artifact", t => {
+    const service = fixture(t, true), director = directorV2();
+    const initial = service.edit("ep", { operationId: "refresh-initial", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }] });
+    const saved = service.edit("ep", { operationId: "refresh-missing", expectedRevision: initial.revision,
+        ops: [{ type: "request_director_clip_refresh", segmentId: "C1" }] }) as any;
+    assert.equal(saved.clipRefresh.status, "queued");
+    assert.deepEqual(saved.referenceSync || [], []);
+    assert.equal(service.clipRefreshStore("ep").byEditAll("refresh-missing").length, 1);
+});
+
+test("saving unchanged Shot content neither recompiles nor reports existing missing artifacts", t => {
+    const service = fixture(t, true), director = directorV2();
+    const initial = service.edit("ep", { operationId: "no-op-initial", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }] });
+    const saved = service.edit("ep", { operationId: "no-op-save", expectedRevision: initial.revision,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "S1", patch: { visual: (director.source.shots as any[])[0].visual } }] }) as any;
+    assert.equal(service.clipRefreshStore("ep").byEditAll("no-op-save").length, 0);
+    assert.deepEqual(saved.referenceSync || [], []);
+});
+
+test("an automatically registered refresh applies compiled input once and reaches translation without submitting media", async t => {
+    let database!: BackendDatabase;
+    const service = fixture(t, true, db => { database = db; }), director = directorV2();
+    director.source.subject_registry = [];
+    director.source.character_registry = [];
+    director.source.asset_plan = [];
+    director.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] };
+    (director.source.shots as any[])[0].subject_usages = [];
+    (director.source.shots as any[])[0].camera.attention_subject_ids = [];
+    (director.source.segments as any[])[0].mode = "T2VA";
+    director.assets = {};
+    director.sourceHash = directorHash(director.source);
+    const initial = service.edit("ep", { operationId: "pipeline-initial", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }] });
+    const saved = service.edit("ep", { operationId: "pipeline-edit", expectedRevision: initial.revision,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "S1", patch: { visual: "The door opens slowly." } }] }) as any;
+    let enqueues = 0, applications = 0, translations = 0;
+    const prompt = "integrated_multimodal_description:\n[Shot 1] The door opens slowly.\n\noverall_soundscape:\nRoom tone.\n\nnon_diegetic_music:\nNone.\n";
+    const compilations = {
+        enqueue: () => { enqueues++; return { status: "succeeded", preparedId: "pipeline-prepared" }; },
+        getCompilation: (_id: string, _owner: string, _key: string, view?: string) => view === "targets"
+            ? { items: [{ targetId: "C1", status: "ready" }], total: 1 } : { status: "succeeded" },
+        apply: () => {
+            applications++;
+            const current = service.get("ep"), compiled = structuredClone(current.draft.director!);
+            const sha256 = promptHash(prompt);
+            compiled.artifacts = [{ id: "h3-C1", targetId: "C1", kind: "h3", status: "ready", prompt, sha256,
+                sourceHash: compiled.sourceHash, references: [], receipt: { sourceHash: compiled.sourceHash,
+                    promptHash: sha256, engineRuntimeId: compiled.engine.runtimeId, validator: "fixture" } }];
+            return service.edit("ep", { operationId: "pipeline-apply", expectedRevision: current.revision,
+                ops: [{ type: "set_director_production", director: compiled }] }, undefined, false, undefined, undefined, new Set(["C1"]));
+        },
+    };
+    Object.assign(service, { translateCompiledPrompts: async () => { translations++; return {}; } });
+    const coordinator = new ClipRefreshCoordinator(service, compilations as any, "fixture");
+    coordinator.wake("ep");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const job = service.clipRefreshStore("ep").get(saved.clipRefresh.operationId)!;
+    assert.equal(job.status, "succeeded");
+    assert.deepEqual([enqueues, applications, translations], [1, 1, 1]);
+    assert.deepEqual(job.application.referenceSync.map((item: any) => [item.targetId, item.status]), [["C1", "ready"]]);
+    const node = (database.getCanvasProject("CANVAS_EP")!.nodes as any[]).find(node => node.type === "minimax-h3:video");
+    assert.equal(node.metadata.segments[0].prompt, prompt);
+    assert.equal(service.clipRefreshStore("ep").byEditAll("pipeline-apply").length, 0, "applying compiled input must not queue another compile");
+    coordinator.wake("ep");
+    assert.deepEqual([enqueues, applications, translations], [1, 1, 1]);
+    assert.equal((productionWriteReceipt({ ok: true, production: saved }, { tool: "production_edit", input: { operationId: "pipeline-edit" } }) as any).mediaSubmitted, false);
 });
 
 test("a visible Subject image dependency keeps its Segment blocked until the archived asset is available", t => {

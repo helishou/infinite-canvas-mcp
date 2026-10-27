@@ -40,18 +40,20 @@ test('initial composite identity has no delimiter collision and rejects duplicat
  assert.deepEqual(apply(source, ledger, 'initial', ledger.initial[0]).initial, [ledger.initial[1]]);
  ledger.initial.push({ ...ledger.initial[0] }); assert.equal(analyze(source, ledger, 'initial', ledger.initial[0]).code, 'ambiguous');
 });
-test('fact/timeline references include ledger and source without cascading edits', () => {
- const ledger = change(); assert.equal(analyze(source, ledger, 'facts', 'F').code, 'referenced');
+test('fact deletion drops ledger-owned assertions while timeline references block deletion', () => {
+ const ledger = change(); const factAnalysis = analyze(source, ledger, 'facts', 'F');
+ assert.equal(factAnalysis.code, 'allowed'); assert.deepEqual(factAnalysis.affectedShotIds, ['S']);
  const analysis = analyze(source, ledger, 'timelines', 'T'); assert.equal(analysis.code, 'referenced'); assert.ok(analysis.references.some(row => row.collection === 'shots' && row.shotId === 'S'));
- assert.throws(() => apply(source, ledger, 'facts', 'F'), /referenced/);
+ assert.deepEqual(apply(source, ledger, 'facts', 'F').facts, []);
+ assert.throws(() => apply(source, ledger, 'timelines', 'T'), /referenced/);
 });
-test('all source fact consumers prevent deleting an otherwise unused fact', () => {
+test('source fact consumers are reported as affected shots instead of blocking deletion', () => {
  const ledger = { ...fixture(), initial: [] };
  for (const shot of [{ ...shots[0], continuity_facts: ['F'] }, { ...shots[0], subject_usages: [{ subjectId: 'P', continuityFactIds: ['F'] }] }, { ...shots[0], subject_usages: [{ subjectId: 'P', stateRequirements: [{ factId: 'F', value: 'a' }] }] }]) {
-  const analysis = analyze({ shots: [shot] }, ledger, 'facts', 'F'); assert.equal(analysis.code, 'referenced'); assert.deepEqual(analysis.affectedShotIds, ['S']);
+  const analysis = analyze({ shots: [shot] }, ledger, 'facts', 'F'); assert.equal(analysis.code, 'allowed'); assert.deepEqual(analysis.affectedShotIds, ['S']);
  }
- assert.equal(analyze({ subject_registry: [{ id: 'P', pictureBindings: [{ id: 'PB', applicableState: { F: 'a' } }] }] }, ledger, 'facts', 'F').code, 'referenced');
- assert.equal(analyze(undefined, ledger, 'facts', 'F').code, 'referenced');
+ assert.equal(analyze({ subject_registry: [{ id: 'P', pictureBindings: [{ id: 'PB', applicableState: { F: 'a' } }] }] }, ledger, 'facts', 'F').code, 'allowed');
+ assert.equal(analyze(undefined, ledger, 'facts', 'F').code, 'allowed');
  assert.deepEqual(apply({}, ledger, 'facts', 'F').facts, []); assert.deepEqual(apply({}, { ...fixture(), initial: [] }, 'timelines', 'T').timelines, []);
 });
 test('sole supporting hold is protected while redundant holds remain editable', () => {

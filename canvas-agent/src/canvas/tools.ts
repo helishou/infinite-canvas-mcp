@@ -1,3 +1,4 @@
+import { canvasNodeDefaultSize } from "./node-sizes.js";
 import { toolInputSchemas, toolNames, type ToolName } from "./schemas.js";
 import type { CanvasNode, CanvasSnapshot } from "./types.js";
 
@@ -30,10 +31,10 @@ export function compactNode(node: CanvasNode) {
 export function nextCanvasX(state: CanvasSnapshot | null, anchorId?: string) {
     if (anchorId) {
         const anchor = (state?.nodes || []).find((node) => node.id === anchorId);
-        if (anchor) return safePosition(anchor).x + safeDimension(anchor.width, 320) + 96;
+        if (anchor) return safePosition(anchor).x + nodeWidth(anchor) + 96;
     }
     const nodes = state?.nodes || [];
-    return nodes.length ? Math.max(...nodes.map((node) => safePosition(node).x + safeDimension(node.width, 320))) + 80 : 0;
+    return nodes.length ? Math.max(...nodes.map((node) => safePosition(node).x + nodeWidth(node))) + 80 : 0;
 }
 
 /** 计算新节点的默认起点（x + y）。传 anchorId 时新节点贴在 anchor 同行右侧、y 与 anchor 对齐，
@@ -43,7 +44,7 @@ export function nextCanvasAnchor(state: CanvasSnapshot | null, anchorId?: string
         const anchor = (state?.nodes || []).find((node) => node.id === anchorId);
         if (anchor) {
             const position = safePosition(anchor);
-            return { x: position.x + safeDimension(anchor.width, 320) + 96, y: position.y };
+            return { x: position.x + nodeWidth(anchor) + 96, y: position.y };
         }
     }
     return { x: nextCanvasX(state), y: 0 };
@@ -57,11 +58,13 @@ export function nextCanvasFlowAnchor(
 ): { x: number; y: number } {
     const base = nextCanvasAnchor(state, anchorId);
     const includePrompt = options.includePrompt !== false;
-    const promptWidth = safeDimension(options.promptWidth, 320);
-    const promptHeight = safeDimension(options.promptHeight, 240);
+    const promptSize = canvasNodeDefaultSize("text");
+    const configSize = canvasNodeDefaultSize("config");
+    const promptWidth = safeDimension(options.promptWidth, promptSize.width);
+    const promptHeight = safeDimension(options.promptHeight, promptSize.height);
     const configOffset = safeDimension(options.configOffset, 420);
-    const configWidth = safeDimension(options.configWidth, 320);
-    const configHeight = safeDimension(options.configHeight, 240);
+    const configWidth = safeDimension(options.configWidth, configSize.width);
+    const configHeight = safeDimension(options.configHeight, configSize.height);
     const nodes = state?.nodes || [];
     let x = base.x;
     for (let attempt = 0; attempt < 128; attempt++) {
@@ -71,17 +74,26 @@ export function nextCanvasFlowAnchor(
         ];
         const collided = nodes.filter((node) => {
             const position = safePosition(node);
-            const width = safeDimension(node.width, 320);
-            const height = safeDimension(node.height, 240);
+            const width = nodeWidth(node);
+            const height = nodeHeight(node);
             return rectangles.some((rect) => rect.x < position.x + width + 8
                 && rect.x + rect.width + 8 > position.x
                 && rect.y < position.y + height + 8
                 && rect.y + rect.height + 8 > position.y);
         });
         if (!collided.length) return { x, y: base.y };
-        x = Math.max(...collided.map((node) => safePosition(node).x + safeDimension(node.width, 320))) + 96;
+        x = Math.max(...collided.map((node) => safePosition(node).x + nodeWidth(node))) + 96;
     }
     return { x, y: base.y };
+}
+
+/** 节点缺省宽高时按它自己的类型取默认尺寸，而不是统一当成 320×240。 */
+function nodeWidth(node: Pick<CanvasNode, "type" | "width">) {
+    return safeDimension(node.width, canvasNodeDefaultSize(node.type).width);
+}
+
+function nodeHeight(node: Pick<CanvasNode, "type" | "height">) {
+    return safeDimension(node.height, canvasNodeDefaultSize(node.type).height);
 }
 
 function safePosition(node: Pick<CanvasNode, "position">) {

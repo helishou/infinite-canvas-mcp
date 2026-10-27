@@ -374,3 +374,27 @@ test("SVG 扩展节点源码使用协作文本，图片节点仍拒绝正文编�
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "bitmap", nodeType: "image", metadata: { content: "/media/image" } }]);
     assert.throws(() => db.getCanvasText("canvas", { nodeId: "bitmap", field: "content" }), /不是可协作文本/);
 });
+
+test("add_node 的 index 决定节点数组层级：组垫在成员下面，越界 index 退回追加", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "member", nodeType: "image", position: { x: 0, y: 0 }, width: 100, height: 100 },
+        { type: "add_node", id: "group", nodeType: "group", position: { x: -24, y: -44 }, width: 148, height: 168, index: 0 },
+        { type: "add_node", id: "later", nodeType: "text", index: 99 },
+    ]);
+    const project = db.getCanvasProject("canvas")!;
+    const ids = project.nodes.map((node) => String(node.id));
+    assert.deepEqual(ids.slice(0, 2), ["group", "text"], "组应插到数组最前，成员保持原有相对顺序");
+    assert.equal(ids.at(-1), "later", "越界 index 不能把节点插丢，退回追加");
+});
+
+test("add_node 未给尺寸时按类型默认规格落地，未知类型用兜底尺寸", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "conf", nodeType: "config", position: { x: 0, y: 0 } },
+        { type: "add_node", id: "custom", nodeType: "demo:panel", position: { x: 600, y: 0 } },
+    ]);
+    const byId = new Map(db.getCanvasProject("canvas")!.nodes.map((node) => [String(node.id), node]));
+    assert.deepEqual([byId.get("conf")!.width, byId.get("conf")!.height], [420, 540], "配置节点应与界面默认尺寸一致");
+    assert.deepEqual([byId.get("custom")!.width, byId.get("custom")!.height], [340, 240], "未知类型用共享兜底尺寸");
+});

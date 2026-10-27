@@ -124,8 +124,8 @@ test("向既有画布批量导入新实体时生成细粒度节点和连线操�
     const next = { ...structuredClone(base), nodes: [...base.nodes, image, prompt], connections: [connection] } as any;
 
     assert.deepEqual(diffCanvasProject(base, next), [
-        { type: "add_node", id: "image-a", nodeType: "image", title: "导入图片", position: { x: 320, y: 0 }, width: 320, height: 180, metadata: { storageKey: "media/image-a.png" } },
-        { type: "add_node", id: "prompt-a", nodeType: "text", title: "导入提示词", position: { x: 320, y: 240 }, width: 280, height: 160, metadata: { content: "镜头提示词" } },
+        { type: "add_node", id: "image-a", nodeType: "image", title: "导入图片", position: { x: 320, y: 0 }, width: 320, height: 180, metadata: { storageKey: "media/image-a.png" }, index: 1 },
+        { type: "add_node", id: "prompt-a", nodeType: "text", title: "导入提示词", position: { x: 320, y: 240 }, width: 280, height: 160, metadata: { content: "镜头提示词" }, index: 2 },
         { type: "connect_nodes", id: "connection-a", fromNodeId: "image-a", toNodeId: "prompt-a", role: "reference", order: 0 },
     ]);
 });
@@ -351,4 +351,35 @@ test("只有作用域基线、没有完整画布时，宁可等远端也不造 1
     const ghost = fresh.useCanvasStore.getState().projects.find((item) => item.id === "revive-orphan") as any;
     assert.equal(ghost, undefined, "无完整画布可用时应跳过本地投影，等远端加载，而不是造 1 节点画布");
     buckets.get("infinite-canvas-command-outbox")!.delete("op-orphan");
+});
+
+test("提交已解析的 op 原样入队：不重新求差分，也不丢显式字段", async () => {
+    const project = {
+        id: "ops-pass", title: "意图画布", createdAt: "2026-01-01", updatedAt: "2026-01-01", revision: 1,
+        nodes: [
+            { id: "n", type: "config", title: "配置", position: { x: 0, y: 0 }, width: 420, height: 540, metadata: { prompt: "旧" } },
+        ],
+        connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines",
+        showImageInfo: false, globalPrompt: "", viewport: { x: 0, y: 0, k: 1 },
+    } as any;
+    useBackendStore.setState({ connected: false });
+    useCanvasStore.getState().replaceProjects([project]);
+
+    // productionImageInput 是 diffCanvasProject 固定跳过的字段；只有原样提交 op 才会出现在队列里。
+    const operations = [
+        { type: "update_node", id: "n", metadata: { prompt: "新", productionImageInput: { shotId: "shot-1" } } },
+        { type: "add_node", id: "m", nodeType: "text", title: "新节点", position: { x: 600, y: 0 }, width: 240, height: 120, metadata: { content: "正文" } },
+    ];
+    const next = useCanvasStore.getState().applyCanvasOperations("ops-pass", operations);
+    assert.ok(next, "应返回本地投影");
+    assert.deepEqual(next!.nodes.map((node) => node.id), ["n", "m"], "本地按同一份 op 回放新增节点");
+    assert.deepEqual(next!.nodes[0].metadata, operations[0].metadata);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const outbox = buckets.get("infinite-canvas-command-outbox")!;
+    const command = [...outbox.values()].find((value: any) => value?.projectId === "ops-pass") as any;
+    assert.ok(command, "应入队一条命令");
+    assert.deepEqual(command.operations, operations, "入队的就是调用方解析好的 op，不能重新求差分");
+    await flushCanvasSyncNow();
+    useCanvasStore.getState().deleteProjects(["ops-pass"]);
 });

@@ -9,7 +9,7 @@ export function shouldStartCanvasNodeDrag(target: Element, isH3: boolean, event?
     const onConnectionHandle = target.closest("[data-connection-handle]");
     const onNodePanel = target.closest("[data-canvas-node-panel]");
     const explicitDragHandle = Boolean(dragHandle && (!interactive || interactiveHandle));
-    const video = target.closest("video");
+    const video = event ? target.closest("video") : null;
     const videoBounds = video?.getBoundingClientRect();
     const onVideoDragSurface = Boolean(videoBounds && event && event.clientY < videoBounds.bottom - Math.min(56, videoBounds.height * 0.25));
 

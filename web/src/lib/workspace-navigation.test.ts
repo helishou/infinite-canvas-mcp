@@ -65,7 +65,7 @@ test("project filters select matching tabs, including legacy catalogue routes", 
 });
 
 test("canvas details keep compact global navigation without catalogue tabs", () => {
-    assert.deepEqual(resolveWorkspaceNavigation("/canvas/project-a", "?from=dramas&workspace=storyboard"), { area: "projects", compact: true });
+    assert.deepEqual(resolveWorkspaceNavigation("/canvas/project-a", "?from=dramas&workspace=storyboard"), { area: "freeCanvas", compact: true });
     assert.equal(resolveWorkspaceNavigation("/canvas/").compact, false);
 });
 

@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { canvasNodeDefaultSize } from "@basketikun/canvas-agent/canvas/node-sizes";
+
 import i18n from "@/i18n";
 
 import type { CanvasNodeDefinition } from "@/types/canvas-plugin";
@@ -54,7 +56,7 @@ export function isRegisteredNodeType(type: string) {
     return definitions.has(type);
 }
 
-const FALLBACK_SPEC = { width: 340, height: 240, title: i18n.t("canvas.node.node"), metadata: {} as CanvasNodeDefinition["defaultMetadata"] };
+const FALLBACK_SPEC = { ...canvasNodeDefaultSize("unknown"), title: i18n.t("canvas.node.node"), metadata: {} as CanvasNodeDefinition["defaultMetadata"] };
 
 // Provide default size, title, and metadata shared by createCanvasNode and agent operations.
 export function getNodeSpec(type: string) {

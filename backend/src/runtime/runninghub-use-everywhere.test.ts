@@ -61,6 +61,24 @@ describe("runninghub-use-everywhere", () => {
         assert.equal(inputOf(wf, 4, "prompt").link, null, "STRING 输入不该被 CLIP/VAE 通道填上");
     });
 
+    it("移除广播节点后不留悬空连线，否则 UI→API 转换会报「连线引用了不存在的节点」", () => {
+        const result = flattenUseEverywhere(workflow());
+        const wf = result.workflow as any;
+        const ids = new Set(wf.nodes.map((node: any) => node.id));
+        for (const row of wf.links) {
+            assert.ok(ids.has(row[1]), `link ${row[0]} 的来源 ${row[1]} 已不存在`);
+            assert.ok(ids.has(row[3]), `link ${row[0]} 的目标 ${row[3]} 已不存在`);
+        }
+        for (const node of wf.nodes) {
+            for (const input of node.inputs || []) {
+                if (input.link === null || input.link === undefined) continue;
+                assert.ok(wf.links.some((row: any[]) => row[0] === input.link), `${node.id}.${input.name} 引用了不存在的 link ${input.link}`);
+            }
+        }
+        // 广播节点的上游不该再挂着指向它的 link
+        assert.equal(wf.links.some((row: any[]) => row[3] === 3), false);
+    });
+
     it("没有广播节点时原样返回", () => {
         const plain = { nodes: [{ id: 1, type: "SaveImage", inputs: [], outputs: [] }], links: [] } as any;
         const result = flattenUseEverywhere(plain);

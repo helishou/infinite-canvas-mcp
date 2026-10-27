@@ -13,15 +13,14 @@ test("overview does not reuse published Clip or frame bindings after draft regro
 
 test("overview resolves only the current draft Clip's exact node and segment", () => {
   const value = production({ clipGroups: [{ id: "NEW", shotIds: ["S1"], nodeId: "video", segmentId: "new" }] });
-  const result = productionOverviewMedia(value, [{ id: "video", metadata: { segments: [null, { id: "old", resultStorageKey: "old.mp4" }, { id: "new", resultStorageKey: "new.mp4" }] } }], "S1");
+  const result = productionOverviewMedia(value, [{ id: "video", metadata: { segments: [null, { id: "old", productionClipProjection: { targetId: "OLD" }, resultStorageKey: "old.mp4" }, { id: "new", productionClipProjection: { targetId: "NEW" }, resultStorageKey: "new.mp4" }] } }], "S1");
   assert.deepEqual(result, { clip: { id: "NEW", storageKey: "new.mp4", inputOutdated: false } });
 });
 
-test("overview carries outdated input evidence from Clip records and runtime results", () => {
-  for (const [groupOutdated, resultOutdated] of [[true, false], [false, true]]) {
-    const value = production({ clipGroups: [{ id: "C1", shotIds: ["S1"], nodeId: "video", segmentId: "clip", inputOutdated: groupOutdated }] });
-    assert.equal(productionOverviewMedia(value, [{ id: "video", metadata: { segments: [{ id: "clip", resultStorageKey: "old.mp4", inputOutdated: resultOutdated }] } }], "S1").clip?.inputOutdated, true);
-  }
+test("overview carries outdated input evidence from runtime results", () => {
+  const value = production({ clipGroups: [{ id: "C1", shotIds: ["S1"], nodeId: "video", segmentId: "clip" }] });
+  const result = productionOverviewMedia(value, [{ id: "video", metadata: { segments: [{ id: "clip", productionClipProjection: { targetId: "C1" }, resultStorageKey: "old.mp4", inputOutdated: true }] } }], "S1");
+  assert.equal(result.clip?.inputOutdated, true);
 });
 
 test("overview never falls back to a published asset and preserves current frame outdated status", () => {

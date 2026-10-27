@@ -15,7 +15,7 @@ export function applyH3GlobalSettings(segment: H3Segment, metadata: Record<strin
         .map(([key, value]) => [key, value === null ? undefined : value]));
     const firstShotId = segment.storyboardShots?.[0]?.referenceBindingId;
     const firstShotRef = segment.referenceBindings?.find(ref => ref.id === firstShotId);
-    const mode = String(segment.mode || segment.taskMode || "").toLowerCase();
+    const mode = String(segment.taskMode || segment.mode || "").toLowerCase();
     const explicitFirstFrame = (["i2v", "i2va", "fl2v", "fl2va"].includes(mode))
         ? segment.referenceBindings?.some(ref => ref.enabled !== false && !["video", "audio"].includes(String(ref.mediaType || "image"))) === true
         : Boolean(firstShotRef && firstShotRef.enabled !== false && !["video", "audio"].includes(String(firstShotRef.mediaType || "image")) && firstShotRef.role === "storyboard");

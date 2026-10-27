@@ -19,6 +19,7 @@
     "./http": "./dist/server/http.js",
     "./plugin-mcp": "./dist/server/plugin-mcp.js",
     "./schemas": "./dist/canvas/schemas.js",
+    "./canvas/node-sizes": "./dist/canvas/node-sizes.js",
     "./state-summary": "./dist/canvas/state-summary.js",
     "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
     "./runtime-fields": "./dist/canvas/runtime-fields.js",

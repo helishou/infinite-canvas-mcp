@@ -11,6 +11,7 @@ import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "./database-snapshots.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
+import { syncH3ModeEdits } from "./drama/h3-mode-sync.js";
 import { syncImageReferenceEdits } from "./drama/image-inputs.js";
 import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
@@ -2580,7 +2581,8 @@ export class BackendDatabase {
                 committedOperations.push(operation);
                 operationResults.push(...result);
             }
-            const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...entitySync.updates];
+            const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...entitySync.updates,
+                ...syncH3ModeEdits(this, id, current, project, context)];
             if (imageInputBaseline) {
                 const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
                 productionUpdates.push(...synced.updates);
@@ -4130,15 +4132,21 @@ export class BackendDatabase {
         return this.getTask(id)!;
     }
 
-    updateTask(id: string, patch: { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null }): RuntimeTask {
+    updateTask(id: string, patch: { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string }): RuntimeTask {
         const current = this.getTask(id);
         if (!current) throw new Error(`Task not found: ${id}`);
-        const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
+        const next = {
+            ...current,
+            ...patch,
+            ...(patch.executor ? { params: { ...current.params, executor: patch.executor } } : {}),
+            updatedAt: new Date().toISOString(),
+        };
         this.db.prepare(
-            "UPDATE tasks SET status = ?, progress = ?, result_json = ?, error = ?, updated_at = ? WHERE id = ?"
+            "UPDATE tasks SET status = ?, progress = ?, params_json = ?, result_json = ?, error = ?, updated_at = ? WHERE id = ?"
         ).run(
             next.status,
             Math.max(0, Math.min(1, next.progress)),
+            encodeStoredJson(next.params),
             next.result == null ? null : JSON.stringify(next.result),
             next.error || null,
             next.updatedAt,
@@ -4192,7 +4200,7 @@ export class BackendDatabase {
                    AND t.status IN ('succeeded', 'failed', 'cancelled')
                    AND EXISTS (
                        SELECT 1 FROM generation_logs l
-                       WHERE l.id = json_extract(t.params_json, '$.canvasBinding.generationLogId')
+                       WHERE l.id = json_extract(stored_json_text(t.params_json), '$.canvasBinding.generationLogId')
                          AND l.runtime_task_id = t.id
                          AND l.status IN ('queued', 'running')
                    ))

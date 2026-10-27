@@ -130,7 +130,10 @@ export class CanvasVideoDispatcher {
                 executor: plan.kind, ...(input.workflowReferenceCount !== undefined ? { workflowReferenceCount: input.workflowReferenceCount } : {}),
             }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []) },
         }).id : null;
-        void this.execute(plan, task, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
+        // Hybrid selection must inspect the live ComfyUI queue immediately before dispatch.
+        // The task already has its authoritative canvas binding at this point; executor is
+        // updated to the selected provider before any child job is submitted.
+        void this.execute(plan, task, logId, startedAt, true).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor: plan.kind };
     }
 
@@ -181,7 +184,14 @@ export class CanvasVideoDispatcher {
         return cancelled;
     }
 
-    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number) {
+    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number, selectHybridProvider = false) {
+        if (selectHybridProvider) {
+            plan = await this.selectHybridProvider(plan, task.id);
+            if (plan.kind !== task.executor) {
+                this.stores.tasks.update(task.id, { executor: plan.kind });
+                task = this.stores.tasks.get(task.id) || { ...task, executor: plan.kind };
+            }
+        }
         this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
         const media = await this.dispatch(plan, task.id);
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
@@ -194,6 +204,38 @@ export class CanvasVideoDispatcher {
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [media] } });
         this.stores.tasks.addEvent(task.id, "result", { media: [media] });
         if (logId) this.stores.logs.update(logId, { status: "success", outputs: [media], finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - startedAt) });
+    }
+
+    /** Resolve hybrid routing against both Backend-tracked work and ComfyUI's actual queue. */
+    private async selectHybridProvider(plan: Plan, currentTaskId: string): Promise<Plan> {
+        if (plan.kind !== "workflow" || !plan.workflow) return plan;
+        const workflowConfig = this.workflows.getConfig(plan.workflow);
+        const requestedTarget = plan.input.runTarget ?? workflowConfig?.runTarget ?? "local";
+        if (requestedTarget !== "hybrid") return plan;
+
+        const trackedLocalBusy = this.stores.tasks.list({ kind: "workflow", limit: 500 })
+            .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status))
+            || this.stores.tasks.list({ kind: "canvas-video", limit: 500 })
+                .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status) && task.executor === "workflow");
+        let comfyBusy: boolean;
+        try {
+            const baseUrl = (plan.input.comfyUrl || this.comfy.getUrl()).replace(/\/$/, "");
+            const response = await fetch(`${baseUrl}/queue`, { signal: AbortSignal.timeout(5000) });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const queue = await response.json() as { queue_running?: unknown; queue_pending?: unknown };
+            if (!Array.isArray(queue.queue_running) || !Array.isArray(queue.queue_pending)) throw new Error("响应缺少 queue_running/queue_pending");
+            comfyBusy = queue.queue_running.length > 0 || queue.queue_pending.length > 0;
+        } catch (error) {
+            throw new Error(`本地+RH 无法确认 ComfyUI 队列状态，未提交任务：${messageOf(error)}`);
+        }
+        if (!trackedLocalBusy && !comfyBusy) return plan;
+
+        const profileId = workflowConfig?.runningHubProfileId;
+        const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+        if (!profileId || !profile) {
+            throw new Error("本地 ComfyUI 正忙，但当前工作流没有绑定有效的 RunningHub 工作流；请先绑定 RH 工作流后重试");
+        }
+        return { ...plan, kind: "runninghub-workflow", runninghubProfileId: profileId };
     }
 
     private async dispatch(plan: Plan, taskId: string): Promise<Record<string, unknown>> {

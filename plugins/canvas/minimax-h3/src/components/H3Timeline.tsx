@@ -118,6 +118,14 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const productionClipMembershipOwned = Boolean(metadata.productionSceneId)
         || segments.some((segment) => Boolean(segment.productionClipProjection?.targetId));
     const productionClipMembershipTitle = "制作绑定的 Clip 列表由制作台维护";
+    // 正式制作 Clip 的新增操作直通制作台命令日志；制作台未连接时保持禁用。
+    const productionMembershipSync = ctx.production?.addClipAtBoundary
+        ? (segmentId: string, position: "before" | "after") => {
+            void ctx.production!.addClipAtBoundary!({ nodeId: ctx.node.id, segmentId, position })
+                .then(result => { if (!result.sourceSaved) throw new Error("制作台未保存 Clip 变更"); })
+                .catch(error => window.dispatchEvent(new CustomEvent("minimax-h3:production-edit-error", { detail: { message: error instanceof Error ? error.message : String(error) } })));
+        }
+        : undefined;
     const comfyParams = metadata.comfyParams && typeof metadata.comfyParams === "object" ? metadata.comfyParams as Record<string, unknown> : {};
     const motionGroups = useMemo(() => {
         const outgoing = segments.map((segment) => resolveH3Runtime(segment as unknown as Record<string, unknown>, {}, metadata, defaults).params.motionContextEnabled === true);
@@ -554,7 +562,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             if (target && (clipEl || gridEl)) return;
         }
         if (!target) return;
-        const mode = String(target.mode || target.taskMode || "ref2va");
+        const mode = String(target.taskMode || target.mode || "ref2va");
         if (mode === "t2v") return;
         const characterPayload = event.dataTransfer.getData("application/x-infinite-canvas-ref");
         if (sourceSegment && sourceSegment.id !== target.id) {
@@ -651,14 +659,23 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         ctx.updateMetadata({ segments: next, selectedSegmentId: clip.id, playhead: Number(next.find((item) => item.id === clip.id)?.start || 0), h3PlaybackAll: false });
     };
     const addSegment = () => {
-        if (productionClipMembershipOwned) return;
+        if (productionClipMembershipOwned) {
+            if (productionMembershipSync) {
+                const target = selected || segments[segments.length - 1];
+                if (target) productionMembershipSync(String(target.id), "after");
+            }
+            return;
+        }
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const basis = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
         insertClipAt(previousIndex >= 0 ? previousIndex + 1 : segments.length, buildClipAfter(basis));
     };
     // Clip 右键菜单用：在 index 的左边/右边插入新 Clip（继承该 Clip 设置）。
     const addClipNear = (index: number, side: -1 | 1) => {
-        if (productionClipMembershipOwned) return;
+        if (productionClipMembershipOwned) {
+            if (productionMembershipSync && segments[index]) productionMembershipSync(String(segments[index].id), side === 1 ? "after" : "before");
+            return;
+        }
         const basis = segments[index];
         if (!basis) return;
         insertClipAt(side === 1 ? index + 1 : index, buildClipAfter(basis));
@@ -671,7 +688,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     };
     const renderRefGrid = (segment: H3Segment) => {
         const allRefs = refsForSegment(segment);
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
         const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardTrackItems(segment).length);
         const orderedEntries = orderReferencesForSubmission(allRefs.map((ref, index) => ({ ref, index })),
@@ -868,22 +885,22 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item"
-                    disabled={productionClipMembershipOwned}
-                    title={productionClipMembershipOwned ? productionClipMembershipTitle : "在这个 Clip 左边插入一个新 Clip（继承本 Clip 的模式等设置）"}
+                    disabled={productionClipMembershipOwned && !productionMembershipSync}
+                    title={productionClipMembershipOwned ? (productionMembershipSync ? "在这个 Clip 左边插入一个新 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "在这个 Clip 左边插入一个新 Clip（继承本 Clip 的模式等设置）"}
                     onClick={(event) => { event.stopPropagation(); addClipNear(timelineMenuClipIndex, -1); setTimelineMenu(null); }}
                 >在左边添加 Clip</button>
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item"
-                    disabled={productionClipMembershipOwned}
-                    title={productionClipMembershipOwned ? productionClipMembershipTitle : "在这个 Clip 右边插入一个新 Clip（继承本 Clip 的模式等设置）"}
+                    disabled={productionClipMembershipOwned && !productionMembershipSync}
+                    title={productionClipMembershipOwned ? (productionMembershipSync ? "在这个 Clip 右边插入一个新 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "在这个 Clip 右边插入一个新 Clip（继承本 Clip 的模式等设置）"}
                     onClick={(event) => { event.stopPropagation(); addClipNear(timelineMenuClipIndex, 1); setTimelineMenu(null); }}
                 >在右边添加 Clip</button>
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item is-danger"
                     disabled={productionClipMembershipOwned || segments.length <= 1}
-                    title={productionClipMembershipOwned ? productionClipMembershipTitle : segments.length <= 1 ? "至少保留一个 Clip" : "删除这个 Clip"}
+                    title={productionClipMembershipOwned ? "正式制作 Clip 的删除请在制作台通过拆分/合并边界维护" : segments.length <= 1 ? "至少保留一个 Clip" : "删除这个 Clip"}
                     onClick={(event) => { event.stopPropagation(); removeClip(timelineMenuClipIndex); setTimelineMenu(null); }}
                 >删除 Clip</button>
             </> : timelineMenu.kind === "reference" ? <>
@@ -985,7 +1002,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             />
         </div>
         <div className="minimax-track-gutter">
-            <button type="button" className="minimax-video-add" disabled={productionClipMembershipOwned} title={productionClipMembershipOwned ? productionClipMembershipTitle : "添加 Clip"} onClick={addSegment}><H3Icon name="plus" /></button>
+            <button type="button" className="minimax-video-add" disabled={productionClipMembershipOwned && !productionMembershipSync} title={productionClipMembershipOwned ? (productionMembershipSync ? "添加 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "添加 Clip"} onClick={addSegment}><H3Icon name="plus" /></button>
         </div>
         {timelineMenuNode}
     </div>

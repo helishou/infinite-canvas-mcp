@@ -55,5 +55,5 @@ test("Home uses actual drama ownership while retaining pins, recents and stable 
     assert.match(home, /homePinnedProject:\$\{entry.id\}/);
     assert.match(data, /homePinnedProject:\$\{projectId\}/);
     assert.match(home, /const latest = sorted\[0\]/);
-    assert.match(home, /navigate\(`\/canvas\/\$\{encodeURIComponent\(id\)\}`\)/);
+    assert.match(home, /openDestination\(`\/canvas\/\$\{encodeURIComponent\(id\)}`\)/);
 });

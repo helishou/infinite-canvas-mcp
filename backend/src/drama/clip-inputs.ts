@@ -3,7 +3,7 @@ import { hasExecutableH3Prompt, inputHash } from "./canvas-inputs.js";
 import { outgoingDirectorBoundary } from "@basketikun/canvas-agent/drama/production-validation";
 import { isH3StyleTemplateId } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
-import { resolveH3Runtime, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { canonicalH3TaskMode, resolveH3Runtime, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
@@ -632,12 +632,24 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
         let segment = buildProductionClip(project, data, group, segmentId);
+        const authoritativeH3Mode = existing ? canonicalH3TaskMode(existing.taskMode ?? existing.mode) : "";
+        if (existing && ["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(authoritativeH3Mode)) {
+            // A bound H3 Clip owns its mode. The source-side mode is a synchronized
+            // projection and must never make production refreshes flip the user's H3 mode.
+            segment.taskMode = authoritativeH3Mode;
+            const projection = object(segment.productionClipProjection);
+            const fieldHashes = { ...object(projection.fieldHashes), taskMode: clipFieldHash(authoritativeH3Mode) };
+            segment.productionClipProjection = { ...projection, fieldHashes, inputHash: clipInputHash(segment) };
+        }
         const compiledReferenceBindings = structuredClone(segment.referenceBindings);
         if (existing) {
             const groups = [["referenceBindings", "storyboardShots", "duration"], ["h3CharacterGroups"],
                 ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
             const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
+            // The bound H3 Clip is the mode authority even when an older projection
+            // receipt was created from a different source-side mode.
+            baseline.taskMode = clipFieldHash(existing.taskMode ?? null);
             // Character image bindings are a projection of the Subject picture choice.
             // A stale H3 reference must not outrank the image selected in the production UI.
             const subjectRegistry = object(data.director?.source).subject_registry;
@@ -783,7 +795,12 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
         result.status = "ready";
         result.referenceCount = segment.referenceBindings.length; result.inputHash = segment.productionClipProjection.inputHash;
         return { segment, result };
-    } catch (error) { result.diagnostics.push({ code: "CLIP_INPUT_BLOCKED", message: error instanceof Error ? error.message : String(error) }); return { result }; }
+    } catch (error) {
+        const compilation = error as { code?: string; staleReason?: string };
+        result.diagnostics.push({ code: compilation.code?.startsWith("COMPILATION_ARTIFACT_") ? compilation.code : "CLIP_INPUT_BLOCKED",
+            message: error instanceof Error ? error.message : String(error), ...(compilation.staleReason ? { staleReason: compilation.staleReason } : {}) });
+        return { result };
+    }
 }
 function emptyProductionClip(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, defaults: Record<string, unknown>) {
     const director = data.director!;
@@ -826,7 +843,7 @@ function layoutSceneForClip(data: EpisodeProductionData, group: EpisodeProductio
  * gates node creation and every addition inside a Shot-local projection.
  */
 export function clipInputOperations(project: Record<string, any>, data: EpisodeProductionData, layout: ProductionLayoutPlan,
-    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set(), onlyTargets?: ReadonlySet<string>, overwriteCompiledPromptTargets?: ReadonlySet<string>, forceBoundaryTargets?: ReadonlySet<string>) {
+    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set(), onlyTargets?: ReadonlySet<string>, overwriteCompiledPromptTargets?: ReadonlySet<string>, forceBoundaryTargets?: ReadonlySet<string>, pendingCompilationTargets?: ReadonlySet<string>) {
     const operations: CanvasOperation[] = [], referenceSync: ReferenceSync[] = [];
     const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
     const pendingNodes = new Map<string, CanvasOperation>();
@@ -883,7 +900,10 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         const nodeMetadata = pendingNode ? object(pendingNode.metadata) : object(node?.metadata);
         const existingSegments = Array.isArray(nodeMetadata.segments) ? nodeMetadata.segments as Array<Record<string, any>> : [];
         const existing = existingSegments.find(segment => segment.id === segmentId || segment.productionClipProjection?.targetId === group.id);
-        const projected = productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true);
+        const pendingCompilation = pendingCompilationTargets?.has(group.id) === true;
+        const projected: ReturnType<typeof productionClipProjection> = pendingCompilation
+            ? { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] } }
+            : productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true);
         if (existing && forceBoundaryTargets?.has(group.id)) {
             const boundary = data.director?.boundaries.find(item => item.from === group.id);
             const boundaryPatch = {
@@ -897,12 +917,12 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
                 operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: boundaryPatch });
             }
         }
-        referenceSync.push(projected.result);
+        if (!pendingCompilation) referenceSync.push(projected.result);
         const retained = retainedProjectedSegments.get(nodeId) || new Set<string>();
         if (existing) retained.add(String(existing.id));
         retainedProjectedSegments.set(nodeId, retained);
         if (existing) {
-            if (!projected.segment) {
+            if (!projected.segment && !pendingCompilation) {
                 const storyboard = formalStoryboardTrack(data, group, existing, Array.isArray(project.referenceCatalog) ? project.referenceCatalog : []);
                 if (storyboard && (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
                     || canonicalProduction(existing.referenceBindings || []) !== canonicalProduction(storyboard.referenceBindings || existing.referenceBindings || [])

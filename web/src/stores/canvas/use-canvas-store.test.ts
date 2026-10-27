@@ -112,6 +112,19 @@ test("拖出有序组后撤销和重做不覆盖同批次恢复的其他成员�
 
 const VIEWPORT = { x: 0, y: 0, k: 1 };
 
+test("撤销删除和中间插入都按 next 顺序回放，节点不会掉到最上层", () => {
+    const node = (id: string) => ({ id, type: "image", title: id, position: { x: 0, y: 0 }, width: 340, height: 240, metadata: {} });
+    const before = makeProject([node("a"), node("b"), node("c")]);
+    // 撤销删除 b：add_node 必须带回原位置，而不是追加到 c 之后。
+    const afterDelete = makeProject([node("a"), node("c")]);
+    const restored = applyBackendCanvasDelta(afterDelete, diffCanvasProject(afterDelete, before), 2);
+    assert.deepEqual(restored.nodes.map((item) => item.id), ["a", "b", "c"]);
+    // 同一批里既有删除又有中间插入：被删节点此刻仍在回放数组中，插入位置要按锚点算。
+    const next = makeProject([node("b"), node("x"), node("c")]);
+    const replayed = applyBackendCanvasDelta(before, diffCanvasProject(before, next), 2);
+    assert.deepEqual(replayed.nodes.map((item) => item.id), ["b", "x", "c"]);
+});
+
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {
     return {
         id,

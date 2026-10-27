@@ -59,15 +59,40 @@ const diagnosticForAction = (item: DiagnosticLike, action: ProductionBlockingAct
 }, action);
 const isGlobalCompilationBlocker = (item: DiagnosticLike) =>
     !item.targetId && diagnosticForAction(item, "compile") && GLOBAL_COMPILE_BLOCKER_CODES.includes(item.code as typeof GLOBAL_COMPILE_BLOCKER_CODES[number]);
-const hasUnusableCompilerResult = (exitCode: number, artifacts: unknown, scope?: CompilationScope) => {
+const unusableCompilerResultDiagnostic = (exitCode: number, artifacts: unknown, scope?: CompilationScope, diagnostics: DiagnosticLike[] = []): DiagnosticLike | undefined => {
     const rows = Array.isArray(artifacts) ? artifacts as Array<Record<string, unknown>> : [];
-    if (exitCode !== 0 && rows.length === 0) return true;
+    if (exitCode !== 0 && rows.length === 0) return {
+        code: "COMPILER_EXITED_WITHOUT_OUTPUT", path: "compile.output", severity: "error", blocksCompilation: true, blockingActions: ["compile"],
+        message: `编译器以退出码 ${exitCode} 结束，且没有生成任何目标产物。请查看编译器错误日志后修复原因再编译。`,
+    };
     const targetIds = scope?.targetIds?.map(String).filter(Boolean);
-    if (!targetIds?.length) return false;
+    if (!targetIds?.length) return undefined;
     const scoped = rows.filter(item => targetIds.includes(String(item.targetId || "")));
     // A scoped run may partially succeed, but a packet with no ready output in its
     // requested range cannot be presented as an applicable compilation.
-    return !scoped.some(item => item.status === "ready");
+    if (scoped.some(item => item.status === "ready")) return undefined;
+    const statuses = targetIds.map(targetId => {
+        const targetArtifacts = scoped.filter(item => String(item.targetId || "") === targetId);
+        if (!targetArtifacts.length) return `${targetId}：没有产物`;
+        const causes = new Set<string>();
+        for (const artifact of targetArtifacts) {
+            if (artifact.status === "draft") causes.add("产物处于草稿状态");
+            const receipt = artifact.receipt && typeof artifact.receipt === "object" ? artifact.receipt as Record<string, any> : {};
+            const resultDiagnostics = receipt.diagnostics && typeof receipt.diagnostics === "object" ? receipt.diagnostics as Record<string, unknown> : {};
+            if (resultDiagnostics.accepted === false) causes.add("提示词验收未通过");
+            if (resultDiagnostics.formatPass && resultDiagnostics.formatPass !== "PASSED") causes.add(`格式校验未通过（${String(resultDiagnostics.formatPass)}）`);
+            if (Array.isArray(resultDiagnostics.blockers)) for (const blocker of resultDiagnostics.blockers) if (String(blocker).trim()) causes.add(String(blocker).trim());
+        }
+        for (const diagnostic of diagnostics) {
+            if (String(diagnostic.targetId || "") === targetId && diagnostic.message?.trim()) causes.add(diagnostic.message.trim());
+        }
+        const summary = [...causes].slice(0, 5).join("；") || "编译器未返回具体拒绝原因";
+        return `${targetId}：${[...new Set(targetArtifacts.map(item => String(item.status || "未知状态")))].join("/")}；原因：${summary}`;
+    });
+    return {
+        code: "SCOPED_COMPILATION_HAS_NO_READY_OUTPUT", path: "compile.output", severity: "error", blocksCompilation: true, blockingActions: ["compile"],
+        message: `本次编译范围内没有可用产物（${statuses.join("；")}）。请根据各目标诊断修正输入后重新编译。`,
+    };
 };
 const hasBlockingArtifactDiagnostics = (value: unknown) => {
     if (Array.isArray(value)) return value.some(item => item && typeof item === "object" && diagnosticForAction(item as DiagnosticLike, "compile"));
@@ -438,9 +463,24 @@ export class ProductionCompilationService {
         if (!job || job.id !== id || job.owner !== owner) throw new Error("编译回执不存在或不属于当前制作对象");
         const kind = owner.includes("/canvas/") || owner === "canvas" ? "canvas" : owner.includes("/scenes/") || owner === "scene" ? "scene" : "episode";
         const application = job.application || this.applicationReceipt(job);
-        const blocking = job.diagnostics.find((item: DiagnosticLike) => diagnosticForAction(item, "compile"));
+        const diagnostics = [...job.diagnostics];
+        const genericScopedBlock = diagnostics.findIndex((item: DiagnosticLike) => item.code === "SCOPED_COMPILATION_HAS_NO_READY_OUTPUT" && !item.message?.includes("原因："));
+        if (job.status === "blocked" && genericScopedBlock >= 0) {
+            const packet = this.tryLoadPacket(job.preparedId, owner, id);
+            const detail = packet && unusableCompilerResultDiagnostic(packet.exitCode, packet.director?.artifacts, job.scope, packet.diagnostics || []);
+            if (detail) diagnostics[genericScopedBlock] = detail;
+        }
+        const blocking = diagnostics.find((item: DiagnosticLike) => diagnosticForAction(item, "compile"))
+            // Keep a useful explanation in the status response even when a compiler
+            // failure was detected from its exit/artifact result rather than a diagnostic.
+            || (job.status === "blocked" ? diagnostics.find((item: DiagnosticLike) => item.message?.trim()) : undefined);
         const blockingDiagnostic = blocking ? { code: blocking.code, path: blocking.path, targetId: blocking.targetId, shotId: blocking.shotId,
             origin: blocking.origin, matchedText: blocking.matchedText, blocksCompilation: blocking.blocksCompilation, message: blocking.message, nextAction: blocking.nextAction } : undefined;
+        const statusDiagnostic = job.status === "blocked" && !blockingDiagnostic ? {
+            code: "COMPILATION_OUTPUT_UNUSABLE",
+            path: "compile.output",
+            message: "这条编译记录没有保存具体诊断，暂时无法从回执确认阻塞原因。请查看对应的编译器日志。",
+        } : undefined;
         const nextAction = job.status === "queued" || job.status === "running"
             ? { action: "wait", tool: "production_get_compilation", input: { kind, id, operationId }, message: "沿原 operationId 查询；不要换 ID 重提。" }
             : job.status === "succeeded" ? { action: application ? "read_run" : "review", tool: application ? "production_get_compilation" : "production_apply_compilation", input: { kind, id, ...(application ? { operationId } : { preparedId: job.preparedId }) }, message: application ? "编译已应用，读取原应用回执。" : "编译成功，应用 preparedId。" }
@@ -450,10 +490,10 @@ export class ProductionCompilationService {
             engineRuntimeId: job.director.engine.runtimeId, compilerHash: job.director.engine.compilerHash,
             ...(job.compilerInputFingerprint ? { compilerInputFingerprint: job.compilerInputFingerprint } : {}),
             ...(job.reusedFromOperationId ? { reused: true, reusedFromOperationId: job.reusedFromOperationId } : {}),
-            ...(blockingDiagnostic ? { blockingDiagnostic } : {}), nextAction,
+            ...((blockingDiagnostic || statusDiagnostic) ? { blockingDiagnostic: blockingDiagnostic || statusDiagnostic } : {}), nextAction,
             ...(job.status === "succeeded" ? { preparedId: job.preparedId } : {}), ...(job.continuityReceipt ? { continuityReceipt: job.continuityReceipt } : {}), application, mediaSubmitted: false };
-        if (view === "status") return { ...base, diagnosticCount: job.diagnostics.length, targetCount: job.result?.targets?.length || 0 };
-        const items = view === "diagnostics" ? job.diagnostics : job.result?.targets || [];
+        if (view === "status") return { ...base, diagnosticCount: diagnostics.length, targetCount: job.result?.targets?.length || 0 };
+        const items = view === "diagnostics" ? diagnostics : job.result?.targets || [];
         if (!count) throw new Error("查询编译列表必须指定 pageSize");
         return { ...base, items: items.slice(offset, offset + count), total: items.length, nextOffset: offset + count < items.length ? offset + count : null };
     }
@@ -575,7 +615,9 @@ export class ProductionCompilationService {
                         job.result = this.shortResult(job.preparedId, packet);
                         job.diagnostics = packet.diagnostics;
                         job.continuityReceipt = packet.continuityReceipt;
-                        job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts, job.scope) ? "blocked" : "succeeded";
+                        const unusable = unusableCompilerResultDiagnostic(packet.exitCode, packet.director?.artifacts, job.scope, job.diagnostics);
+                        if (unusable) job.diagnostics.push(unusable);
+                        job.status = hasFatalCompilationError(job.diagnostics) || Boolean(unusable) ? "blocked" : "succeeded";
                     } else {
                         job.status = "interrupted";
                         job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }];
@@ -596,7 +638,10 @@ export class ProductionCompilationService {
                 if (fs.existsSync(this.file(job.preparedId))) {
                     const { packetHash, ...packet } = JSON.parse(fs.readFileSync(this.file(job.preparedId), "utf8"));
                     if (hash(packet) === packetHash && packet.owner === owner && packet.id === job.id) {
-                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.continuityReceipt = packet.continuityReceipt; job.status = hasFatalCompilationError(job.diagnostics) || hasUnusableCompilerResult(packet.exitCode, packet.director?.artifacts, job.scope) ? "blocked" : "succeeded";
+                        job.result = this.shortResult(job.preparedId, packet); job.diagnostics = packet.diagnostics; job.continuityReceipt = packet.continuityReceipt;
+                        const unusable = unusableCompilerResultDiagnostic(packet.exitCode, packet.director?.artifacts, job.scope, job.diagnostics);
+                        if (unusable) job.diagnostics.push(unusable);
+                        job.status = hasFatalCompilationError(job.diagnostics) || Boolean(unusable) ? "blocked" : "succeeded";
                     } else { job.status = "interrupted"; job.diagnostics = [{ code: "INVALID_COMPILATION_PACKET", severity: "error", message: "恢复的编译包完整性校验失败" }]; }
                 } else { job.status = "interrupted"; job.diagnostics = [{ code: "COMPILATION_INTERRUPTED", severity: "error", message: "服务重启中断编译；已确认未完成，不自动重跑" }]; }
                 this.saveJob(job);
@@ -800,7 +845,9 @@ export class ProductionCompilationService {
                     fs.writeFileSync(temporary, JSON.stringify({ ...packet, packetHash: hash(packet) }), "utf8"); fs.renameSync(temporary, this.file(job.preparedId));
                 }
                 job.result = this.shortResult(job.preparedId, packet); job.diagnostics = compiled.diagnostics;
-                job.status = hasFatalCompilationError(compiled.diagnostics) || hasUnusableCompilerResult(compiled.exitCode, compiled.director?.artifacts, job.scope) ? "blocked" : "succeeded";
+                const unusable = unusableCompilerResultDiagnostic(compiled.exitCode, compiled.director?.artifacts, job.scope, compiled.diagnostics);
+                if (unusable) job.diagnostics.push(unusable);
+                job.status = hasFatalCompilationError(job.diagnostics) || Boolean(unusable) ? "blocked" : "succeeded";
             } catch (error) {
                 const superseded = this.cancelledJobs.has(key) || (error as any)?.code === "COMPILATION_SUPERSEDED";
                 const errorCode = String((error as any)?.code || "");
