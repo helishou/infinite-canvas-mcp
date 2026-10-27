@@ -15,6 +15,8 @@ type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0
 const editors = new Map<string, { token: symbol; handler: Handler }>();
 const storyboardEditors = new Map<string, { token: symbol; handler: StoryboardHandler }>();
 const boundaryEditors = new Map<string, { token: symbol; handler: ContinuationBoundaryHandler }>();
+const membershipEditors = new Map<string, { token: symbol; handler: ClipMembershipHandler }>();
+type ClipMembershipHandler = (input: { nodeId: string; segmentId: string; position: "before" | "after" }) => Promise<{ sourceSaved: boolean; targetId?: string }>;
 const pendingPromptCompiles = new Map<string, PendingPromptCompile>();
 type PendingPromptCompile = { expectedRevision: number; operationId: string; staleRetries?: number; waitedMs?: number };
 // 已发送未确认的编译先用原 operationId 取回执：刷新页面或重新打开浮层后仍能接回同一次编译。
@@ -76,6 +78,11 @@ export function registerProductionStoryboardEditor(projectId: string, handler: S
     const token = Symbol(projectId);
     storyboardEditors.set(projectId, { token, handler });
     return () => { if (storyboardEditors.get(projectId)?.token === token) storyboardEditors.delete(projectId); };
+}
+export function registerProductionClipMembershipEditor(projectId: string, handler: ClipMembershipHandler) {
+    const token = Symbol(projectId);
+    membershipEditors.set(projectId, { token, handler });
+    return () => { if (membershipEditors.get(projectId)?.token === token) membershipEditors.delete(projectId); };
 }
 export function registerProductionBoundaryEditor(projectId: string, handler: ContinuationBoundaryHandler) {
     const token = Symbol(projectId);
@@ -390,6 +397,15 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const latestSegment = rows(latestNode?.metadata?.segments).find(segment => String(segment.id || "") === input.segmentId);
             return latestSegment ? { ...result, segment: latestSegment } : result;
         } catch { return result; }
+    }, addClipAtBoundary: async (input: { nodeId: string; segmentId: string; position: "before" | "after" }) => {
+        await flush();
+        const node = getNode(input.nodeId), segments = node?.metadata?.segments;
+        const clip = Array.isArray(segments) ? segments.find(item => item.id === input.segmentId) : undefined;
+        const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
+        if (!clip || typeof projection?.targetId !== "string") throw new Error("CLIP_MEMBERSHIP_NOT_FORMAL: 当前 Clip 不是正式制作 Clip，请在 H3 工作台本地管理");
+        const editor = membershipEditors.get(projectId);
+        if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY: 制作台未连接，无法在 H3 端新增 Clip");
+        return editor.handler({ nodeId: input.nodeId, segmentId: input.segmentId, position: input.position });
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
         return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
     }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };

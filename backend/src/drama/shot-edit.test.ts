@@ -196,6 +196,29 @@ test("insert and reorder keep Clip and existing Shot IDs stable", () => {
     editDirectorShot(d, { type: "edit_director_shot", action: "move", shotId: "N", targetShotId: "S2", position: "before" });
     assert.deepEqual((d.source as any).segments[0].shot_ids, ["S1", "N", "S2"]); assert.deepEqual((d.source as any).shots.map((shot: any) => shot.story_order), [0, 1, 2]);
 });
+test("anchor insert creates a new Clip at the boundary with its first Shot and reconciles boundaries", () => {
+    const d = fixture();
+    (d.source as any).segments = [{ id: "C", mode: "T2VA", shot_ids: ["S1"] }, { id: "C2", mode: "T2VA", shot_ids: ["S2"] }];
+    editDirectorShot(d, { type: "edit_director_shot", action: "insert", anchorShotId: "S1", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", scene_id: "SC", timeline_id: "T", duration_frames: 96, title: "新片段首镜", visual: "边界处插入的新镜头。", camera: { framing: "CU", editorial_reason: "补一拍" }, subject_usages: [], utterance_refs: [], keyframes: [] } });
+    const source = d.source as any;
+    assert.deepEqual(source.segments.map((segment: any) => segment.id), ["C", "NEW", "C2"]);
+    assert.deepEqual(source.segments[1].shot_ids, ["N"]);
+    assert.deepEqual(source.shots.map((shot: any) => shot.id), ["S1", "N", "S2"]);
+    assert.deepEqual(source.shots.map((shot: any) => shot.story_order), [0, 1, 2]);
+    assert.deepEqual(d.boundaries.map((edge: any) => [edge.from, edge.to]), [["C", "NEW"], ["NEW", "C2"]]);
+    assert.ok(d.shotInputs.N, "新镜头须有 shotInputs 占位");
+});
+test("anchor insert rejects out-of-window duration, unknown anchor and scope mismatch", () => {
+    const short = fixture();
+    assert.throws(() => editDirectorShot(short, { type: "edit_director_shot", action: "insert", anchorShotId: "S2", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", duration_frames: 24, title: "太短", visual: "不足四秒。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /4–15 秒/);
+    const missing = fixture();
+    assert.throws(() => editDirectorShot(missing, { type: "edit_director_shot", action: "insert", anchorShotId: "NOPE", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", duration_frames: 96, title: "锚缺失", visual: "锚点不存在。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /锚点镜头不存在/);
+    const scope = fixture();
+    (scope.source as any).segments = [{ id: "C", mode: "T2VA", shot_ids: ["S1"] }, { id: "C2", mode: "T2VA", shot_ids: ["S2"] }];
+    const foreign = structuredClone(scope);
+    assert.throws(() => editDirectorShot(foreign, { type: "edit_director_shot", action: "insert", anchorShotId: "S1", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", scene_id: "OTHER", timeline_id: "T", duration_frames: 96, title: "跨场次", visual: "场次不符。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /场次和时间线/);
+});
+
 test("insert and split reject transition labels in camera.framing and leave the source untouched", () => {
     const insert = fixture();
     assert.throws(() => editDirectorShot(insert, { type: "edit_director_shot", action: "insert", shotId: "S1", shot: { id: "N", duration_frames: 24, title: "推近", visual: "起幅中景，随后推近至指尖占满画框的特写。", camera: { framing: "MS转CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /不在有效词表/);

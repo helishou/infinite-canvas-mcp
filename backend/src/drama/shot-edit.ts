@@ -223,9 +223,24 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         } else {
             const segment = structuredClone(operation.segment || {});
             if (!segment.id || rows(source.segments).some(row => row.id === segment.id)) reject("SHOT_NEW_CLIP", "segment.id", "首镜需要新的 Clip 身份及执行模式");
-            segment.shot_ids = [authored.id]; source.segments = [...rows(source.segments), segment]; shots.push(authored);
+            segment.shot_ids = [authored.id];
+            const anchor = operation.anchorShotId ? shots.find(row => row.id === operation.anchorShotId) : undefined;
+            if (operation.anchorShotId) {
+                if (!anchor) reject("SHOT_NOT_FOUND", `shots.${operation.anchorShotId}`, "新增 Clip 的锚点镜头不存在");
+                const anchorGroup = clip(source, anchor.id);
+                if (!anchorGroup) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
+                for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== anchor[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增 Clip 须沿用锚点镜头所在的场次和时间线");
+                Object.assign(authored, { scene_id: anchor.scene_id, timeline_id: anchor.timeline_id, ...(anchor.source_scene_id ? { source_scene_id: anchor.source_scene_id } : {}) });
+                shots.splice(shots.indexOf(anchor) + 1, 0, authored);
+                const segments = rows(source.segments);
+                source.segments = [...segments.slice(0, segments.indexOf(anchorGroup) + 1), segment, ...segments.slice(segments.indexOf(anchorGroup) + 1)];
+            } else { source.segments = [...rows(source.segments), segment]; shots.push(authored); }
         }
         if (!Number.isInteger(authored.duration_frames) || authored.duration_frames <= 0) reject("SHOT_DURATION", `shots.${authored.id}.duration_frames`, "镜头时长必须为正整数帧");
+        if (operation.anchorShotId) {
+            const seconds = Number(authored.duration_frames) / (Number(source.fps_num || 24) / Number(source.fps_den || 1));
+            if (!Number.isFinite(seconds) || seconds < 4 || seconds > 15) reject("CLIP_DURATION_OUT_OF_RANGE", `shots.${authored.id}.duration_frames`, `新 Clip 时长 ${seconds.toFixed(2)} 秒，必须在 4–15 秒范围内`);
+        }
         requireShotFraming(authored.camera, String(authored.id));
         next.shotInputs[authored.id] = { assetIds: [], keyframePolicy: "none" };
     } else if (operation.action === "delete") {
