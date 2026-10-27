@@ -329,6 +329,8 @@ export class CanvasSession {
         sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals, runtime: this.runtimeStateSnapshot });
         if (!statusOnly && activeThreadId && this.codexState.threadId === activeThreadId) this.codexReplayEvents.forEach((event) => sendEvent(res, event.type, event.payload));
         const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now(), runtime: this.runtimeStateSnapshot }), RUNTIME_HEARTBEAT_INTERVAL_MS);
+        // 心跳是尽力而为的保活：不该独自把进程/测试挂在事件循环上（与宽限窗同规则）。
+        timer.unref?.();
         res.on("close", () => {
             clearInterval(timer);
             logger.info("SSE client disconnected", { clientId, statusOnly });
