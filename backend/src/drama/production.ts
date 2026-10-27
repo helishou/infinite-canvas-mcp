@@ -92,6 +92,7 @@ export type ProductionRecord = { episodeId: string; revision: number; draft: Epi
 export type CompiledPromptTranslationRequest = { expectedRevision: number; operationId: string; targetIds: string[] };
 export type ProductionTargetOccupancy = { targetId: string; status: string; runId?: string; taskIds: string[]; tasks: Array<{ taskId: string; status: string }>; nextAction: NonNullable<ProductionDiagnostic["nextAction"]> };
 const activePromptTranslations = new Map<string, Promise<void>>();
+const readinessStampBootId = crypto.randomUUID();
 const activePromptTranslationControllers = new Map<string, AbortController>();
 export type ProductionRun = { episodeId: string; version: number; runId?: string; targets?: string[]; engine?: Record<string, unknown> | null; settings?: Record<string, unknown>; executionSnapshot?: CanvasExecutionSnapshot | null; status: string; plan: ProductionImpact; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; updatedAt: string };
 export type ProductionBatch = {
@@ -2047,6 +2048,18 @@ export class EpisodeProductionService {
             const candidate = stage === "edit" && isSubjectPromptAssembly(director.source) ? { ...director, artifacts: [] } : director;
             await assertAchengSource(candidate, stage, checkedEngine as AchengRuntime, scope);
         }
+    }
+
+    /** readiness 条件请求（If-None-Match）的输入戳：PRAGMA data_version 在每次事务提交后必递增，
+     *  未提交任何写入 ⇒ 数据库状态逐字节不变 ⇒ readiness 结果必然相同，可安全返回 304 跳过 1.2s 全量计算。
+     *  bootId 防止进程重启后 data_version 归零与旧客户端缓存戳撞号。 */
+    readinessInputStamp(episodeId: string, source: "draft" | "published" = "draft", runId?: string): string | null {
+        const linked = this.linked(episodeId);
+        const targetId = linked ? linked.id : episodeId;
+        const production = this.prepare("SELECT revision FROM episode_productions WHERE episode_id = ?").get(targetId) as { revision: number } | undefined;
+        if (!production) return null;
+        const dataVersion = (this.prepare("PRAGMA data_version").get() as { data_version: number } | undefined)?.data_version ?? 0;
+        return crypto.createHash("sha256").update(`${targetId}|${source}|${runId ?? ""}|${production.revision}|${dataVersion}|${readinessStampBootId}`).digest("hex").slice(0, 20);
     }
 
     workflowReadiness(episodeId: string, source: "draft" | "published" = "draft", runId?: string): DirectorReadiness {

@@ -839,6 +839,35 @@ test("HTTP hashes the source itself through the shared production contract", asy
     }
 });
 
+test("readiness conditional requests 304 while inputs unchanged and revalidate after writes", async t => {
+    const { service, db } = fixture(t);
+    const app = express(); app.use(express.json());
+    registerDramaProductionRoutes(app, service);
+    registerDramaProductionRoutes(app, new EpisodeProductionService(db, undefined, undefined, true, () => {}), undefined, "/canvas/projects/:episodeId/production");
+    const server = app.listen(0, "127.0.0.1"); await new Promise<void>(resolve => server.once("listening", resolve));
+    t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const post = (path: string, body: unknown) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal((await post("/canvas/projects/canvas/production/ops", { operationId: "cond-edit", expectedRevision: 0, ops: [{ type: "set_director_production", director: doc() }] })).status, 200);
+    const first = await fetch(base + "/drama/episodes/ep/production/readiness");
+    assert.equal(first.status, 200);
+    const etag = first.headers.get("etag");
+    assert.ok(etag && etag.startsWith('"rd-'), "readiness must expose an input-stamp ETag");
+    const body1 = await first.text();
+    const again = await fetch(base + "/drama/episodes/ep/production/readiness", { headers: { "if-none-match": etag! } });
+    assert.equal(again.status, 304);
+    assert.equal(await again.text(), "");
+    // 任何写入（含无任务参与的画布提交）都会推进 data_version：旧 ETag 必须重新校验拿到 200。
+    assert.equal((await post("/canvas/projects/canvas/production/ops", { operationId: "cond-edit-2", expectedRevision: 1, ops: [{ type: "set_director_production", director: doc(3) }] })).status, 200);
+    const changed = await fetch(base + "/drama/episodes/ep/production/readiness", { headers: { "if-none-match": etag! } });
+    assert.equal(changed.status, 200);
+    const etag2 = changed.headers.get("etag");
+    assert.notEqual(etag2, etag);
+    assert.notEqual((await changed.text()).length, body1.length);
+    const settled = await fetch(base + "/drama/episodes/ep/production/readiness", { headers: { "if-none-match": etag2! } });
+    assert.equal(settled.status, 304);
+});
+
 test("HTTP director operations round-trip and project facade shares the episode revision", async t => {
     const { service, db } = fixture(t);
     const app = express(); app.use(express.json());

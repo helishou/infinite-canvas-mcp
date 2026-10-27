@@ -257,6 +257,15 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const view = z.enum(["full", "summary", "targets"]).default("full").parse(req.query.view);
             const pageSize = z.coerce.number().int().positive().max(50).default(20).parse(req.query.pageSize);
             const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+            // 条件请求短路：输入戳（制作稿修订 + SQLite data_version）未变 ⇒ 结果必然一致，
+            // 直接 304，跳过 1.2s 的全量 readiness 计算（前端轮询/浏览器 revalidate 实测 2000+ 次）。
+            const stamp = service.readinessInputStamp(req.params.episodeId, source, runId);
+            if (stamp) {
+                const etag = `"rd-${stamp}"`;
+                const incoming = String(req.headers["if-none-match"] || "");
+                if (incoming.split(",").some(candidate => candidate.trim().replace(/^W\//, "") === etag)) { res.status(304).end(); return; }
+                res.setHeader("ETag", etag);
+            }
             const readiness = service.workflowReadiness(req.params.episodeId, source, runId);
             if (view === "full") return void res.json({ ok: true, readiness });
             const targets = Array.isArray(readiness.targets) ? readiness.targets : [];
