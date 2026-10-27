@@ -23,5 +23,3 @@ export function projectedContinuityBlock(block: any): any {
 /** 新登记使用的规范化摘要输入；与 Skill 侧 coverage_digest 序列化一致。 */
 export const continuityCoverageDigestValue = (sceneId: any, block: any) => ({ scene_id: sceneId === null || sceneId === undefined ? "" : String(sceneId), block: projectedContinuityBlock(block) });
 
-/** 旧版摘要输入；只用于继续接受已写入的历史覆盖行。 */
-export const continuityLegacyDigestValue = (sceneId: any, block: any) => ({ scene_id: sceneId, block });

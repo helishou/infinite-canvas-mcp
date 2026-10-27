@@ -474,7 +474,7 @@ test("actual panel status cannot borrow a saved pass for dirty inputs, while pub
     const pending = expressionFrom("./continuity-panel.tsx", "pendingLedgerEdits");
     const label = expressionFrom("./continuity-panel.tsx", "stateLabel");
     const status = new Function("context", `with (context) { const ledgerDirty = ${dirty}; const pendingLedgerEdits = ${pending}; return ${label}; }`);
-    const context = { continuityPreviewStatus, editable: true, legacy: false, changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, stable: (value: string) => value, formalLedger: "saved", ledgerKey: "new draft", sourceHash: "draft-hash", report: { status: "passed", sourceHash: "draft-hash" } };
+    const context = { continuityPreviewStatus, editable: true, ledgerUnsupported: false, changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, stable: (value: string) => value, formalLedger: "saved", ledgerKey: "new draft", sourceHash: "draft-hash", report: { status: "passed", sourceHash: "draft-hash" } };
     assert.equal(status(context), "unsaved");
     assert.equal(status({ ...context, ledgerKey: "saved" }), "passed");
     assert.equal(status({ ...context, ledgerKey: "saved", sourceHash: "new-hash" }), "stale");

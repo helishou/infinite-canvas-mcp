@@ -2,9 +2,9 @@ import { continuityEventAnchor } from './continuity-event-anchor';
 type Row = Record<string, any>;
 export const continuityReasonLength = (value: string) => Array.from(value.trim()).length;
 export type ContinuityChangeInput = { shotId: string; factId: string; frame: string; after: string; reason: string; sourceBlockId: string };
-/** 规范化摘要为准；同时携带旧格式，继续接受已按旧规则写入的覆盖行。 */
-export type ContinuitySourceDigest = string | { digest: string; legacy?: string };
-export const continuityDigestRef = (value?: ContinuitySourceDigest) => typeof value === 'string' ? { digest: value, accepted: [value] } : value ? { digest: value.digest, accepted: value.legacy ? [value.digest, value.legacy] : [value.digest] } : undefined;
+/** 规范化摘要为准；覆盖行按当前规则摘要校验。 */
+export type ContinuitySourceDigest = string;
+export const continuityDigestRef = (value?: string) => value ? { digest: value, accepted: [value] } : undefined;
 /** Both editing surfaces use the same atomic six-collection ledger update. */
 export function appendContinuityChange(ledger: Row, shots: Row[], input: ContinuityChangeInput, sourceDigest: ContinuitySourceDigest | undefined, makeId: () => string, local: boolean, persistLocal = local): { eventId: string; ledger: Row } {
     const shot = shots.find(row => row.id === input.shotId), fact = (ledger.facts || []).find((row: Row) => row.id === input.factId), digest = continuityDigestRef(sourceDigest);

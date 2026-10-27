@@ -35,7 +35,7 @@ const fixture = () => ({ contract_version: 2, facts: [{ id: "F", allowed_values:
 function harness(patch: Record<string, any> = {}, locale: any = zhCN) {
     const checks: string[] = [], saves: any[] = [], snapshots: string[] = [], notices: string[] = [];
     const c: Record<string, any> = {
-        stable: JSON.stringify, formalLedger: fixture(), ledger: fixture(), editable: true, legacy: false,
+        stable: JSON.stringify, formalLedger: fixture(), ledger: fixture(), editable: true, ledgerUnsupported: false,
         continuityLedgerFactDescriptions,
         changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, busy: false, snapshotLoading: false,
         sourceHash: "source", report: { sourceHash: "source", snapshot: "draft", status: "passed", report: { diagnostics: [] } },
@@ -136,15 +136,15 @@ test("busy and switching snapshots block checking at both the button and handler
     }
 });
 
-test("legacy diagnosis and an unchanged empty ledger are not false unsaved edits", async () => {
+test("unsupported ledger diagnosis and an unchanged empty ledger are not false unsaved edits", async () => {
     const empty = { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] };
-    for (const patch of [{ legacy: true, report: { sourceHash: "source", snapshot: "draft", status: "diagnosticOnly" } }, { formalLedger: empty, ledger: structuredClone(empty), report: undefined }]) {
-        const { c, checks, render } = harness({ savedLedgerKey: "legacy", ...patch });
+    for (const patch of [{ ledgerUnsupported: true, report: { sourceHash: "source", snapshot: "draft", status: "diagnosticOnly" } }, { formalLedger: empty, ledger: structuredClone(empty), report: undefined }]) {
+        const { c, checks, render } = harness({ savedLedgerKey: "unsupported", ...patch });
         assert.equal(c.ledgerDirty, false);
         assert.equal(c.pendingLedgerEdits, false);
         assert.equal(checkAction(render).props.disabled, false);
         assert.equal(blockedHint(render), undefined);
-        assert.equal(c.stateLabel, patch.legacy ? "diagnosticOnly" : "unchecked");
+        assert.equal(c.stateLabel, patch.ledgerUnsupported ? "diagnosticOnly" : "unchecked");
         await c.checkSavedLedger();
         assert.deepEqual(checks, ["draft"]);
     }

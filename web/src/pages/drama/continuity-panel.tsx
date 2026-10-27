@@ -13,20 +13,16 @@ import { continuityPresentation } from "./continuity-presentation";
 import { records } from "./director-display";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
 import { readContinuityLedgerDraft, rebaseContinuityLedger, continuityLedgerConflicts } from "./continuity-ledger-draft";
-import { continuityCoverageDigestValue, continuityLegacyDigestValue } from "./continuity-source-digest";
+import { continuityCoverageDigestValue } from "./continuity-source-digest";
 
 type Row = Record<string, any>;
 const blankLedger = () => ({ contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] });
 const id = () => `C_${crypto.randomUUID()}`;
 const stable = (value: any): string => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
 async function sourceDigest(sceneId: string, block: Row) {
-  const hash = async (value: any) => {
-    const bytes = new TextEncoder().encode(stable(value));
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, "0")).join("");
-  };
-  const [digest, legacy] = await Promise.all([hash(continuityCoverageDigestValue(sceneId, block)), hash(continuityLegacyDigestValue(sceneId, block))]);
-  return { digest, legacy };
+  const bytes = new TextEncoder().encode(stable(continuityCoverageDigestValue(sceneId, block)));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, "0")).join("");
 }
 
 function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disabled, onSave, summary }: { from: string; to: string; fromLabel: string; toLabel: string; boundary?: Row; disabled: boolean; onSave: (value: Row) => void; summary?: ReactNode }) {
@@ -53,7 +49,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const { t } = useTranslation();
   const { modal } = App.useApp();
   const [lastDeletion, setLastDeletion] = useState<{ sourceKey: string; rows: Array<{ collection: ContinuityLedgerCollection; row: Row; index: number }> }>();
-  const legacy = Boolean(savedLedger && savedLedger.contract_version !== 2);
+  const ledgerUnsupported = Boolean(savedLedger && savedLedger.contract_version !== 2);
   const formalLedger = savedLedger?.contract_version === 2 ? savedLedger : blankLedger();
   const ledgerV2 = savedLedger?.contract_version === 2;
   const retained = readContinuityLedgerDraft(ledgerV2 ? draftValue : undefined, formalLedger);
@@ -61,7 +57,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const [invalidLedgerDraft, setInvalidLedgerDraft] = useState(retained.invalid);
   const [ledger, setLedger] = useState<Row>(retained.value);
   const [sourceConflict, setSourceConflict] = useState(stable(retained.base) !== stable(formalLedger) && stable(retained.value) !== stable(formalLedger));
-  const savedLedgerKey = savedLedger?.contract_version === 2 ? stable(savedLedger) : "legacy";
+  const savedLedgerKey = savedLedger?.contract_version === 2 ? stable(savedLedger) : "unsupported";
   const previousSource = useRef({ sourceHash, ledgerKey: savedLedgerKey });
   const [recordContext, setRecordContext] = useState<{ shotId: string; factId: string; visibleStart: number; eventId?: string }>();
   const [changeDraft, setChangeDraft] = useState<ContinuityChangeInput>();
@@ -103,7 +99,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
 
   useEffect(() => {
     if (savedLedger?.contract_version === 2) {
-      const localChanged = previousSource.current.ledgerKey !== "legacy" && stable(ledger) !== stable(baselineLedger.current);
+      const localChanged = previousSource.current.ledgerKey !== "unsupported" && stable(ledger) !== stable(baselineLedger.current);
       if (localChanged && stable(ledger) !== savedLedgerKey) {
         if (continuityLedgerConflicts(baselineLedger.current, ledger, savedLedger).length) { setSourceConflict(true); previousSource.current = { sourceHash, ledgerKey: savedLedgerKey }; return; }
         const merged = rebaseContinuityLedger(baselineLedger.current, ledger, savedLedger);
@@ -113,8 +109,8 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
       baselineLedger.current = structuredClone(savedLedger); setLedger(structuredClone(savedLedger)); setSourceConflict(false);
     }
     else if (!savedLedger) setLedger(blankLedger());
-    // A legacy ledger is only displayed as a read-only diagnostic. It never
-    // becomes an implicit v2 baseline in the editor.
+    // A malformed (non-v2) ledger is only displayed as a read-only diagnostic.
+    // It never becomes an implicit v2 baseline in the editor.
     previousSource.current = { sourceHash, ledgerKey: savedLedgerKey };
   }, [sourceHash, savedLedgerKey]);
   useEffect(() => {
@@ -128,7 +124,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   }, [ledgerKey, savedLedgerKey, ledgerV2, editable, invalidLedgerDraft, draftValue, onDraftChange]);
   const invalidEventPositions = ledgerV2 && source ? continuityEventPositionIssues(source, ledger) : [];
   const saveLedger = async () => {
-    if (!editable || legacy || changeDraft || snapshotLoading || busy || sourceConflict || invalidLedgerDraft || invalidEventPositions.length) return;
+    if (!editable || ledgerUnsupported || changeDraft || snapshotLoading || busy || sourceConflict || invalidLedgerDraft || invalidEventPositions.length) return;
     // The save contract needs a model-readable description per allowed value; fill missing ones before writing.
     const next = continuityLedgerFactDescriptions(ledger);
     if (next !== ledger) setLedger(next);
@@ -215,7 +211,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     } catch (error) { message.error(t("director.atomic.eventError." + (error instanceof Error ? error.message : "EVENT_FIELDS_REQUIRED"))); }
   };
   const activeEditContext = useRef({ key: "", editable, busy, alive: true });
-  activeEditContext.current = { key: sourceHash + stable(source), editable: editable && !sourceConflict && !invalidLedgerDraft && !legacy && !snapshotLoading, busy, alive: true };
+  activeEditContext.current = { key: sourceHash + stable(source), editable: editable && !sourceConflict && !invalidLedgerDraft && !ledgerUnsupported && !snapshotLoading, busy, alive: true };
   useEffect(() => { activeEditContext.current.alive = true; return () => { activeEditContext.current.alive = false; }; }, []);
   const latestLedger = useRef(ledger); latestLedger.current = ledger;
   const createChange = async (input: ContinuityChangeInput): Promise<string | undefined> => {
@@ -242,11 +238,11 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const oldBlock = sourceBlocks.find(row => row.id === event.source_anchor?.block_id);
     if (!oldBlock) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
     const oldDigest = await sourceDigest(oldBlock.sceneId, oldBlock.sourceBlock);
-    if (coverage.some(row => ![oldDigest.digest, oldDigest.legacy].includes(row.source_digest))) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
+    if (coverage.some(row => row.source_digest !== oldDigest)) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
     const digest = await sourceDigest(block.sceneId, block.sourceBlock), source_anchor = { ...event.source_anchor, block_id: blockId };
     if (!activeEditContext.current.alive || !activeEditContext.current.editable || activeEditContext.current.busy || activeEditContext.current.key !== contextKey) { message.warning(t("director.workspace.continuity.subjectTimeline.sourceChanged")); return false; }
     if (stable(latestLedger.current) !== stable(ledger)) { message.warning(t("director.workspace.continuity.subjectTimeline.sharedEvidence")); return false; }
-    setLedger(current => ({ ...current, events: records(current.events).map(row => row.id === eventId ? { ...row, source_anchor } : row), requirements: records(current.requirements).map(row => requirements.some(item => item.id === row.id) ? { ...row, source_anchor } : row), coverage: records(current.coverage).map(row => coverage.some(item => item.id === row.id) ? { ...row, source_anchor, source_digest: digest.digest } : row) }));
+    setLedger(current => ({ ...current, events: records(current.events).map(row => row.id === eventId ? { ...row, source_anchor } : row), requirements: records(current.requirements).map(row => requirements.some(item => item.id === row.id) ? { ...row, source_anchor } : row), coverage: records(current.coverage).map(row => coverage.some(item => item.id === row.id) ? { ...row, source_anchor, source_digest: digest } : row) }));
     message.success(t("director.workspace.continuity.subjectTimeline.evidenceUpdated")); return true;
   };
   const addEvent = () => createChange({ shotId, factId, frame: eventFrame, after: eventAfter, reason: eventReason, sourceBlockId });
@@ -269,8 +265,8 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const initial = Array.isArray(ledger.initial) ? ledger.initial : [];
   const ledgerSections = (["facts", "timelines", "initial", "events", "requirements", "coverage"] as const).map(collection => ({ collection, rows: Array.isArray(ledger[collection]) ? ledger[collection] as Row[] : [] }));
   const display = continuityPresentation({ facts: factRows, timelines: timeRows, scenes, locations, characters, assets, shots, segments, sourceBlocks }, (key, values) => t(`director.workspace.continuity.${key}`, values));
-  const ledgerDirty = editable && !legacy && ledgerKey !== stable(formalLedger);
-  const pendingLedgerEdits = ledgerDirty || Boolean(changeDraft) || editable && !legacy && (sourceConflict || invalidLedgerDraft);
+  const ledgerDirty = editable && !ledgerUnsupported && ledgerKey !== stable(formalLedger);
+  const pendingLedgerEdits = ledgerDirty || Boolean(changeDraft) || editable && !ledgerUnsupported && (sourceConflict || invalidLedgerDraft);
   const stateLabel = continuityPreviewStatus(report, sourceHash, pendingLedgerEdits);
   const checkBlockReason = changeDraft ? "finishChangeBeforeCheck" : sourceConflict || invalidLedgerDraft ? "resolveDraftBeforeCheck" : ledgerDirty ? "saveBeforeCheck" : undefined;
   const checkBlocked = busy || snapshotLoading || Boolean(checkBlockReason);
@@ -299,19 +295,19 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const title = collection === "facts" ? display.fact(row.id) : collection === "timelines" ? display.timeline(row.id) : collection === "coverage" ? display.scene(String(sourceBlocks.find(block => block.id === sourceId)?.sceneId || "")) : display.fact(row.fact_id);
     return <article key={`${collection}:${row.id || index}`} className="min-w-0 rounded-xl border border-border p-4" data-continuity-entry={collection} data-continuity-entry-id={`${collection}:${row.id || index}`} tabIndex={-1}>
       <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">{title}</h4>{collection === "facts" ? <span className="text-xs text-muted-foreground">{t(`director.workspace.continuity.objectKindValue.${row.object_kind}`, { defaultValue: t("director.workspace.continuity.objectKindValue.asset") })}</span> : row.timeline_id ? <span className="text-xs text-muted-foreground">{display.timeline(row.timeline_id)}</span> : null}</div>
-      {collection === "facts" && <><label className="mt-3 grid gap-1 text-xs"><span>{t("director.crud.factName")}</span><Input value={row.display_name || row.name || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, display_name: event.target.value } : fact) }))} /></label>
-        {subjectAssembly && editable && <div className="mt-3 space-y-2">{(row.allowed_values || []).map((value: string) => <label key={value} className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.stateDescription", { value: display.value(row.id, value) })}</span><Input.TextArea value={row.value_descriptions?.[value] || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} autoSize={{ minRows: 1, maxRows: 4 }} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, value_descriptions: { ...fact.value_descriptions, [value]: event.target.value } } : fact) }))} /></label>)}</div>}
+      {collection === "facts" && <><label className="mt-3 grid gap-1 text-xs"><span>{t("director.crud.factName")}</span><Input value={row.display_name || row.name || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, display_name: event.target.value } : fact) }))} /></label>
+        {subjectAssembly && editable && <div className="mt-3 space-y-2">{(row.allowed_values || []).map((value: string) => <label key={value} className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.stateDescription", { value: display.value(row.id, value) })}</span><Input.TextArea value={row.value_descriptions?.[value] || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} autoSize={{ minRows: 1, maxRows: 4 }} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, value_descriptions: { ...fact.value_descriptions, [value]: event.target.value } } : fact) }))} /></label>)}</div>}
         <div className="mt-3 space-y-3">{initial.filter((state: Row) => state.fact_id === row.id).map((state: Row, stateIndex: number) => <div key={stateIndex}><p className="text-xs text-muted-foreground">{display.timeline(state.timeline_id)} · {t("director.workspace.continuity.initialValue")}</p><p className="mt-1 break-words text-sm leading-relaxed">{display.value(row.id, state.value)}</p></div>)}{!initial.some((state: Row) => state.fact_id === row.id) && <p className="text-sm text-muted-foreground">{t("director.workspace.continuity.initialMissing")}</p>}</div>
         <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.availableStates", { count: row.allowed_values?.length || 0 })}</summary><ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed">{(row.allowed_values || []).map((value: string) => <li key={value} className="break-words">{display.value(row.id, value)}</li>)}</ul></details>
       </>}
-      {collection === "timelines" && editable && !legacy && <Input className="mt-2" aria-label={t("director.crud.timelineName")} value={row.display_name || row.name || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, timelines: records(current.timelines).map(item => item.id === row.id ? { ...item, display_name: event.target.value } : item) }))} />}
+      {collection === "timelines" && editable && !ledgerUnsupported && <Input className="mt-2" aria-label={t("director.crud.timelineName")} value={row.display_name || row.name || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, timelines: records(current.timelines).map(item => item.id === row.id ? { ...item, display_name: event.target.value } : item) }))} />}
       {collection === "timelines" && <p className="mt-2 text-sm text-muted-foreground">{t("director.workspace.continuity.timelineSummary", { facts: initial.filter((state: Row) => state.timeline_id === row.id).length, events: (ledger.events || []).filter((event: Row) => event.timeline_id === row.id).length })}</p>}
-      {collection === "initial" && <><p className="mt-2 text-xs text-muted-foreground">{t("director.workspace.continuity.subjectTimeline.initialScope")}</p>{editable && !legacy ? <Select className="mt-2 w-full" aria-label={t("director.workspace.continuity.initialValue")} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} value={row.value} options={[...new Set([...(factRows.find(fact => fact.id === row.fact_id)?.allowed_values || []), "unknown"])].map(value => ({ value, label: display.value(row.fact_id, value) }))} onChange={value => setLedger(current => ({ ...current, initial: records(current.initial).map(item => item.timeline_id === row.timeline_id && item.fact_id === row.fact_id ? { ...item, value } : item) }))} /> : <p className="mt-2 break-words text-sm leading-relaxed">{display.value(row.fact_id, row.value)}</p>}</>}
-      {collection === "events" && <>{subjectAssembly && <Button size="small" disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => { setWorkbenchEventId(String(row.id)); setActiveView("workbench"); }}>{t("director.workspace.continuity.subjectTimeline.editEvent")}</Button>}<p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {Number.isFinite(subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots)) ? t(subjectAssembly ? "director.workspace.continuity.subjectTimeline.localFrameOnly" : "director.workspace.continuity.atFrame", { frame: subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots) }) : t("director.workspace.continuity.subjectTimeline.invalidPositionSave")}</p>{stateChange(row.fact_id, row.before, row.after)}{(row.display_reason || row.reason) && <p className="mt-3 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
+      {collection === "initial" && <><p className="mt-2 text-xs text-muted-foreground">{t("director.workspace.continuity.subjectTimeline.initialScope")}</p>{editable && !ledgerUnsupported ? <Select className="mt-2 w-full" aria-label={t("director.workspace.continuity.initialValue")} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} value={row.value} options={[...new Set([...(factRows.find(fact => fact.id === row.fact_id)?.allowed_values || []), "unknown"])].map(value => ({ value, label: display.value(row.fact_id, value) }))} onChange={value => setLedger(current => ({ ...current, initial: records(current.initial).map(item => item.timeline_id === row.timeline_id && item.fact_id === row.fact_id ? { ...item, value } : item) }))} /> : <p className="mt-2 break-words text-sm leading-relaxed">{display.value(row.fact_id, row.value)}</p>}</>}
+      {collection === "events" && <>{subjectAssembly && <Button size="small" disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => { setWorkbenchEventId(String(row.id)); setActiveView("workbench"); }}>{t("director.workspace.continuity.subjectTimeline.editEvent")}</Button>}<p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {Number.isFinite(subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots)) ? t(subjectAssembly ? "director.workspace.continuity.subjectTimeline.localFrameOnly" : "director.workspace.continuity.atFrame", { frame: subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots) }) : t("director.workspace.continuity.subjectTimeline.invalidPositionSave")}</p>{stateChange(row.fact_id, row.before, row.after)}{(row.display_reason || row.reason) && <p className="mt-3 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
       {collection === "requirements" && <><p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {t(`director.workspace.continuity.requirementKind.${row.kind}`, { defaultValue: t("director.workspace.continuity.otherRequirement") })}</p>{row.value !== undefined && <p className="mt-2 break-words text-sm">{display.value(row.fact_id, row.value)}</p>}{(row.event_ids || []).map((eventId: string) => { const event = (ledger.events || []).find((item: Row) => item.id === eventId); return event ? <div key={eventId}>{stateChange(row.fact_id, event.before, event.after)}</div> : <p key={eventId} className="mt-2 text-sm text-muted-foreground">{t("director.workspace.continuity.missingEvent")}</p>; })}</>}
       {collection === "coverage" && <><p className="mt-2 text-sm">{t(`director.workspace.continuity.coverageKind.${row.evidence_kind}`, { defaultValue: t("director.workspace.continuity.otherCoverage") })}</p>{row.fact_ids?.length > 0 && <p className="mt-2 text-xs text-muted-foreground">{row.fact_ids.map((factId: string) => display.fact(factId)).join(" · ")}</p>}{row.shot_ids?.length > 0 && <p className="mt-1 text-xs text-muted-foreground">{row.shot_ids.map((shotId: string) => display.target(shotId)).join(" · ")}</p>}{(row.display_reason || row.reason) && <p className="mt-2 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
       {sourceId && <p className="mt-3 break-words border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">{t("director.workspace.continuity.scriptEvidence")}: {display.source(sourceId)}</p>}
-      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.technicalDetails")}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/30 p-3 text-xs">{JSON.stringify(row, null, 2)}</pre></details>{editable && !legacy && <Button danger size="small" disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => removeEntry(collection as ContinuityLedgerCollection, row)}>{t("director.workspace.continuity.removeEntry")}</Button>}
+      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.technicalDetails")}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/30 p-3 text-xs">{JSON.stringify(row, null, 2)}</pre></details>{editable && !ledgerUnsupported && <Button danger size="small" disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => removeEntry(collection as ContinuityLedgerCollection, row)}>{t("director.workspace.continuity.removeEntry")}</Button>}
     </article>;
   };
 
@@ -349,7 +345,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     { type: "group" as const, key: "reading", label: t("director.workspace.continuity.crud.stateViews"), children: readingViews.filter(view => view !== "workbench").map(view => ({ key: view, label: viewName(view) })) },
     { type: "group" as const, key: "management", label: t("director.workspace.continuity.crud.reviewViews"), children: managementViews.map(view => ({ key: view, label: viewName(view) })) },
   ];
-  if (legacy) return <Alert type="error" showIcon message={t("director.workspace.unsupportedProductionFormat")} />;
+  if (ledgerUnsupported) return <Alert type="error" showIcon message={t("director.workspace.unsupportedProductionFormat")} />;
   return <section className={activeView === "workbench" ? "continuity-workspace-main" : "space-y-3"} data-continuity-workspace>
     <header className="continuity-view-tools" aria-label={t("director.workspace.tab.continuity")}><h2 className={titleAlreadyVisible ? "sr-only" : "m-0 text-base font-semibold"}>{t("director.workspace.tab.continuity")}</h2>
       <nav className="production-view-tabs" aria-label={t("director.workspace.continuity.views")}>
@@ -383,7 +379,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     {invalidLedgerDraft && <Alert type="warning" showIcon message={t("director.atomic.invalidDraft")} description={<details><summary>{t("director.atomic.reviewDraft")}</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{draftValue}</pre><Button disabled={busy} size="small" onClick={() => { baselineLedger.current = structuredClone(formalLedger); setLedger(structuredClone(formalLedger)); setInvalidLedgerDraft(false); setSourceConflict(false); onDraftChange?.(undefined); }}>{t("director.atomic.resetDraft")}</Button></details>} />}
     {!editable && <Alert type="info" showIcon message={t("director.workspace.continuity.publishedReadOnly")} />}
     {activeView !== "workbench" && report?.report?.semanticDiscovery === "not_performed" && <p className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">{t("director.workspace.continuity.registeredCoverageOnly")}</p>}
-    {activeView === "workbench" && ledgerV2 && workbenchSource && <ContinuityTimelineWorkbench recordContext={recordContext} onRecordContext={setRecordContext} changeDraft={changeDraft} onChangeDraft={setChangeDraft} focusEventId={workbenchEventId} source={workbenchSource} subjectAssembly={subjectAssembly} ledger={ledger} savedLedger={formalLedger} shots={workbenchShots} display={display} sourceBlocks={sourceBlocks} disabled={busy || snapshotLoading || !editable || sourceConflict || invalidLedgerDraft || legacy} editable={editable} dirty={ledgerDirty} busy={busy} saveBlocked={invalidEventPositions.length > 0} actions={{
+    {activeView === "workbench" && ledgerV2 && workbenchSource && <ContinuityTimelineWorkbench recordContext={recordContext} onRecordContext={setRecordContext} changeDraft={changeDraft} onChangeDraft={setChangeDraft} focusEventId={workbenchEventId} source={workbenchSource} subjectAssembly={subjectAssembly} ledger={ledger} savedLedger={formalLedger} shots={workbenchShots} display={display} sourceBlocks={sourceBlocks} disabled={busy || snapshotLoading || !editable || sourceConflict || invalidLedgerDraft || ledgerUnsupported} editable={editable} dirty={ledgerDirty} busy={busy} saveBlocked={invalidEventPositions.length > 0} actions={{
       update: setLedger,
       openEntry: (collection, row) => { setActiveView("ledger"); setLedgerCategory(collection); if (row) setEntryFocus(`${collection}:${row.id || records(ledger[collection]).indexOf(row)}`); },
       openBoundary: from => { setEntryFocus(`boundary:${from}`); setActiveView("boundaries"); },
@@ -394,7 +390,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
         {readableFactRows}
       </tbody></table></div> : <div className="continuity-empty-state" data-continuity-empty-state>
         <p role="status">{(activeView === "objects" ? filterObject : filterTarget) !== "all" ? t("director.workspace.continuity.subjectTimeline.empty") : factRows.length === 0 ? t("director.workspace.continuity.emptyEntries") : t("director.workspace.continuity.subjectTimeline.empty")}</p>
-        {(activeView === "objects" ? filterObject : filterTarget) !== "all" && <Button data-continuity-empty-action size="small" onClick={() => activeView === "objects" ? setFilterObject("all") : setFilterTarget("all")}>{t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`)}</Button>}        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && !legacy && <Button data-continuity-empty-action size="small" onClick={openManualLedger}>{t("director.workspace.continuity.manualEditing")}</Button>}
+        {(activeView === "objects" ? filterObject : filterTarget) !== "all" && <Button data-continuity-empty-action size="small" onClick={() => activeView === "objects" ? setFilterObject("all") : setFilterTarget("all")}>{t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`)}</Button>}        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && !ledgerUnsupported && <Button data-continuity-empty-action size="small" onClick={openManualLedger}>{t("director.workspace.continuity.manualEditing")}</Button>}
       </div>}
     </section>}
     {activeView === "ledger" && <div className="space-y-4">
@@ -428,7 +424,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
         <BoundaryContinuityRow from={String(segment.id)} to={String(next.id)} fromLabel={display.clip(String(segment.id))} toLabel={display.clip(String(next.id))} boundary={boundaries.find(row => row.from === segment.id && row.to === next.id)} disabled={busy || !editable || sourceConflict || snapshotLoading} onSave={onBoundary} summary={<div className="space-y-2 text-xs text-muted-foreground"><div className="flex flex-wrap items-center gap-2"><span>{fromShot ? display.target(String(fromShot.id)) : display.clip(String(segment.id))} → {toShot ? display.target(String(toShot.id)) : display.clip(String(next.id))}</span><Tag color={unknown ? "gold" : differences.length ? "red" : "green"}>{t("director.workspace.continuity.crud.ledgerState")} · {unknown ? t("director.workspace.continuity.stateUnknown") : differences.length ? t("director.workspace.continuity.stateDifference") : t("director.workspace.continuity.stateContinuous")}</Tag></div>{differences.length > 0 && <p>{differences.map(key => `${display.fact(key)}：${display.value(key, left[key])} → ${display.value(key, right[key])}`).join(" · ")}</p>}</div>} />
       </div>;
     })}</div>}
-    {!legacy && editable && activeView !== "workbench" && <details open={manualOpen} onToggle={event => setManualOpen(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.workspace.continuity.manualEditing")}</summary><div className="mt-4 space-y-4"><div><h3 className="font-medium">{t("director.workspace.continuity.timelineAndFacts")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.continuity.factsHelper")}</p></div>
+    {!ledgerUnsupported && editable && activeView !== "workbench" && <details open={manualOpen} onToggle={event => setManualOpen(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.workspace.continuity.manualEditing")}</summary><div className="mt-4 space-y-4"><div><h3 className="font-medium">{t("director.workspace.continuity.timelineAndFacts")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.continuity.factsHelper")}</p></div>
       <div className="grid gap-4 lg:grid-cols-2">
 <fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="timelines"><legend className="px-1 text-sm font-medium">{t("director.micro.continuityTimelines")}</legend><div className="grid gap-3"><Input aria-label={t("director.crud.timelineName")} placeholder={t("director.crud.timelineName")} value={newTimelineName} onChange={event => setNewTimelineName(event.target.value)} />
 <Button disabled={busy || !newTimelineName.trim()} onClick={addTimeline}>{t("director.workspace.continuity.addTimeline")}</Button></div></fieldset>

@@ -25,7 +25,7 @@ function harness() {
  message:{warning:(s:any)=>notices.push(s),error:(s:any)=>notices.push(s)},t:(s:string)=>s,records:(value:any)=>Array.isArray(value)?value:[],stable:JSON.stringify,
  React:{createElement: (...args:any[])=>args},Button:'button', display:{fact:(s:string)=>s,timeline:(s:string)=>s,target:(s:string)=>s,source:(s:string)=>s},
  modal:{confirm:(options:any)=>{c.dialog=options;return {destroy(){}};},info:(options:any)=>{c.blocked=options;return {destroy(){}};}},
- ledger:fixture(),editable:true,legacy:false,changeDraft:undefined,snapshotLoading:false,busy:false,sourceConflict:false,invalidLedgerDraft:false,invalidEventPositions:[],onSave:async()=>true};
+ ledger:fixture(),editable:true,ledgerUnsupported:false,changeDraft:undefined,snapshotLoading:false,busy:false,sourceConflict:false,invalidLedgerDraft:false,invalidEventPositions:[],onSave:async()=>true};
  return {c,writes,notices};
 }
 for (const name of ['addHold','addExemption']) {
@@ -63,8 +63,8 @@ test('actual delete and undo preserve unrelated edits and remove only the confir
  const {c,writes}=eventHarness();handler('removeEntry',c)('events',c.latestLedger.current.events[0]);c.dialog.onOk();assert.equal(writes.length,1);assert.equal(c.latestLedger.current.events.length,0);assert.ok(c.lastDeletion);
  c.latestLedger.current.facts[0].display_name='Unrelated edit';handler('undoDeletion',c)();assert.equal(c.latestLedger.current.events[0].id,'E');assert.equal(c.latestLedger.current.facts[0].display_name,'Unrelated edit');assert.equal(c.lastDeletion,undefined);
 });
-test('save rejects readonly, legacy, snapshot-loading and invalid drafts without a request; only receipt success clears undo',async()=>{
- for(const patch of [{editable:false},{legacy:true},{changeDraft:{}},{snapshotLoading:true},{busy:true},{sourceConflict:true},{invalidLedgerDraft:true},{invalidEventPositions:[{}]}]){
+test('save rejects readonly, unsupported ledger, snapshot-loading and invalid drafts without a request; only receipt success clears undo',async()=>{
+ for(const patch of [{editable:false},{ledgerUnsupported:true},{changeDraft:{}},{snapshotLoading:true},{busy:true},{sourceConflict:true},{invalidLedgerDraft:true},{invalidEventPositions:[{}]}]){
   const {c}=harness();let calls=0;Object.assign(c,patch);c.onSave=async()=>{calls++;return true;};await handler('saveLedger',c)();assert.equal(calls,0);
  }
  const {c}=harness();c.lastDeletion={rows:[]};c.onSave=async()=>false;await handler('saveLedger',c)();assert.ok(c.lastDeletion);c.onSave=async()=>true;await handler('saveLedger',c)();assert.equal(c.lastDeletion,undefined);
