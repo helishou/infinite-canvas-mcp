@@ -50,3 +50,6 @@ handoff
 web/public/prompt-sources/mj-assets/
 .agentproblem
 node-compile-cache/
+
+# 一次性交付/实验产物，不入库（磁盘保留）
+deliveries/
