@@ -17,6 +17,7 @@
     "dev:watch": "node ../scripts/dev-backend-watch.mjs",
     "dev:once": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
     "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
     "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
     "reconcile-shared-asset-consumers": "tsx src/maintenance/reconcile-shared-asset-consumers.ts",

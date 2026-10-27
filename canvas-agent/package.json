@@ -54,6 +54,7 @@
     "debug": "tsx src/index.ts --debug",
     "test": "node ../scripts/test.mjs",
     "build": "node scripts/build-tsc.mjs && node --stack-size=8000 scripts/bundle-production-sop.mjs",
+    "check": "node --stack-size=8000 node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
     "start": "node dist/index.js",
     "prepack": "corepack pnpm run build"
   },

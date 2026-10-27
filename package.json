@@ -21,6 +21,7 @@
         "build": "corepack pnpm run build:plugins && corepack pnpm --filter @basketikun/canvas-agent run build && corepack pnpm --filter @helishou/infinite-canvas-backend run build && corepack pnpm --filter infinite-canvas run build",
         "build:plugins": "node scripts/build-official-plugins.mjs",
         "typecheck": "corepack pnpm --filter @basketikun/canvas-agent run build && corepack pnpm --filter infinite-canvas run typecheck",
+        "check:all": "node scripts/check-all.mjs",
         "acheng:status": "node scripts/acheng-engine.mjs status",
         "acheng:update": "node scripts/acheng-engine.mjs update",
         "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
