@@ -75,7 +75,14 @@ export class CodexAppClient {
         const launch = requireCodexLaunch();
         logger.info("Starting Codex app-server", { executable: launch.command, source: launch.source });
         fixCcSwitchModelCatalog();
-        const child = spawn(launch.command, [...launch.args, "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        // 本机 MCP（127.0.0.1）绝不能走系统代理：代理在 Backend 热重载窗口会把连不上
+        // 的上游包装成 HTTP 502，rmcp 直接 fatal 关闭传输。给子进程补齐 NO_PROXY。
+        const childEnv = { ...process.env };
+        const localBypass = ["127.0.0.1", "localhost", "::1"];
+        const existingNoProxy = String(childEnv.NO_PROXY || childEnv.no_proxy || "").split(",").map(item => item.trim()).filter(Boolean);
+        childEnv.NO_PROXY = [...existingNoProxy, ...localBypass.filter(item => !existingNoProxy.includes(item))].join(",");
+        delete childEnv.no_proxy;
+        const child = spawn(launch.command, [...launch.args, "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: childEnv });
         const client = new CodexAppClient(child, emit);
         let stopped = false;
         const stop = () => {
