@@ -67,6 +67,7 @@ export function watchHttpOperation(
     logger: SlowOperationLogger,
     operation: string,
     details: Record<string, unknown> = {},
+    contentTypeProbe?: () => string,
 ) {
     const operationId = nextId();
     const startedAt = performance.now();
@@ -74,8 +75,11 @@ export function watchHttpOperation(
     let streaming = false;
     let reportedPending = false;
     let finished = false;
+    const pendingIsStreaming = () => streaming || (contentTypeProbe !== undefined && isStreamingContentType(contentTypeProbe()));
     const timer = setTimeout(() => {
-        if (streaming) return;
+        // SSE 连接建立后可能长时间不发第一个事件；headers 已声明流式就不再记 pending，
+        // 否则每条挂着的 /mcp、/events 连接都会挤满慢请求统计。
+        if (pendingIsStreaming()) return;
         reportedPending = true;
         logger.warn("slow-operation-pending", {
             operationId,
@@ -104,7 +108,10 @@ export function watchHttpOperation(
             if (finished) return;
             finished = true;
             clearTimeout(timer);
-            if (isStreamingContentType(contentType) || streaming) {
+            if (isStreamingContentType(contentType) || streaming || pendingIsStreaming()) {
+                const streamType = (contentType || contentTypeProbe?.() || "").toLowerCase();
+                // SSE 的首事件时刻是业务时机而非服务端应答延迟，不记 first-byte。
+                if (streamType.startsWith("text/event-stream")) return;
                 const firstByteMs = Math.round((firstByteAt ?? performance.now()) - startedAt);
                 if (firstByteMs < SLOW_OPERATION_THRESHOLD_MS) return;
                 logger.warn("slow-operation-first-byte", { operationId, operation, firstByteMs, outcome, ...details });

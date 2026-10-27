@@ -30,16 +30,30 @@ test("SSE 长连接按连接存活时间结束时不报慢请求", async () => {
     assert.deepEqual(warnings, []);
 });
 
-test("流式响应仍记录过慢的首字节", async () => {
-    const { warnings, logger } = recorder();
-    const watch = watchHttpOperation(logger, "GET /mcp");
+test("SSE 的首事件延迟不是服务端慢应答：完全静默；媒体下载仍记录过慢的首字节", async () => {
+    const sse = recorder();
+    const sseWatch = watchHttpOperation(sse.logger, "GET /mcp", {}, () => "text/event-stream");
     await sleep(160);
-    watch.markFirstByte("text/event-stream");
-    watch.finish("connection-closed", "text/event-stream");
-    const firstByte = warnings.at(-1);
+    sseWatch.markFirstByte("text/event-stream");
+    sseWatch.finish("connection-closed", "text/event-stream");
+    assert.equal(sse.warnings.length, 0);
+
+    const media = recorder();
+    const mediaWatch = watchHttpOperation(media.logger, "GET /media/:storageKey");
+    await sleep(160);
+    mediaWatch.markFirstByte("video/mp4");
+    mediaWatch.finish("http-200", "video/mp4");
+    const firstByte = media.warnings.at(-1);
     assert.equal(firstByte?.message, "slow-operation-first-byte");
     assert.ok(Number(firstByte?.details.firstByteMs) >= 120);
-    assert.equal(warnings.filter((item) => item.message === "slow-operation-finished").length, 0);
+});
+
+test("已声明流式但尚未发出首字节的 SSE 连接不记 pending", async () => {
+    const { warnings, logger } = recorder();
+    const watch = watchHttpOperation(logger, "GET /mcp", {}, () => "text/event-stream");
+    await sleep(160);
+    watch.finish("connection-closed", "text/event-stream");
+    assert.equal(warnings.length, 0);
 });
 
 test("普通 JSON 请求按总耗时记录，短请求不记录", async () => {
