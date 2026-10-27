@@ -27,7 +27,16 @@ type AiConfig = Record<string, unknown> & { channels: ModelChannel[] };
 type WorkflowReader = Pick<WorkflowStore, "list" | "get">;
 
 /** 把工作流收进模型目录；工作流文件仍是内部执行资源，不再作为生成入口。 */
+const stableSerialize = (value: unknown): string =>
+  Array.isArray(value)
+    ? `[${value.map(stableSerialize).join(",")}]`
+    : value && typeof value === "object"
+      ? `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize((value as Record<string, unknown>)[key])}`).join(",")}}`
+      : JSON.stringify(value);
+
 export class WorkflowModelCatalog {
+  private lastSyncedFingerprint: { inputHash: string; listHash: string } | null = null;
+
   constructor(
     private readonly workflows: WorkflowReader,
     private readonly settings: Pick<SettingStore, "get" | "set">,
@@ -47,6 +56,13 @@ export class WorkflowModelCatalog {
     const originalChannelCount = readChannelCount(value);
     const config = normalizeConfig(value);
     const items = await this.workflows.list();
+    // 前端每次保存配置都会走到这里：逐项 workflows.get() 读全量 JSON 实测 >1s。
+    // 输入与清单指纹都没变时直接复用上次同步结果，不重复扫盘。
+    const inputHash = stableSerialize(value);
+    const listHash = items.map((item) => `${item.name}|${item.title}|${item.fieldCount}`).join(";");
+    if (this.lastSyncedFingerprint && this.lastSyncedFingerprint.inputHash === inputHash && this.lastSyncedFingerprint.listHash === listHash) {
+      return { config, changed: false, added: [] };
+    }
     const processed = new Set(
       readStrings(this.settings.get(PROCESSED_WORKFLOWS_KEY)),
     );
@@ -111,6 +127,7 @@ export class WorkflowModelCatalog {
       processed.add(item.name);
     }
     this.settings.set(PROCESSED_WORKFLOWS_KEY, [...processed]);
+    this.lastSyncedFingerprint = { inputHash, listHash };
     return { config, changed, added };
   }
 

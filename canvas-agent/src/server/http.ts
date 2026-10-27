@@ -28,6 +28,7 @@ import {
   listCodexModels,
   listCodexSkills,
   listCodexThreads,
+  invalidateCodexThreadsCache,
   readCodexThread,
   recordUserInterrupt,
   resolveCodexApproval,
@@ -1410,6 +1411,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     handler: (req: Request, res: Response) => unknown | Promise<unknown>,
   ) {
     return route(async (req, res) => {
+      // 变更路由会改变线程集合：先失效避免处理器读到变更前缓存，结束后再失效一次。
+      invalidateCodexThreadsCache();
       if (!session.beginCodexMutation())
         return res
           .status(409)
@@ -1423,6 +1426,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         return await handler(req, res);
       } finally {
         session.endCodexMutation();
+        invalidateCodexThreadsCache();
       }
     });
   }

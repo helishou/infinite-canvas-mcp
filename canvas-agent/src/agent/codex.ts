@@ -154,8 +154,30 @@ export async function resumeCodexThread(emit: AgentEmit, threadId: string, cwd?:
     return { thread, messages, settledTurnIds: settledTurnIds(history.thread, supplementalItems), historyReady: history.historyReady };
 }
 
-/** 查询当前工作空间中的 Codex 线程。 */
+/** 线程列表经 CLI 实测 ~2s 且前端轮询频繁：短 TTL 缓存成功结果并单飞合并并发请求；
+ *  任何会话变更路由都会经 invalidateCodexThreadsCache 失效，避免新线程不可见。 */
+const CODEX_THREADS_TTL_MS = 2_000;
+type CodexThreadsResult = { data: unknown[]; nextCursor: unknown; backwardsCursor: unknown };
+const codexThreadsCache = new Map<string, { at: number; value: CodexThreadsResult }>();
+const codexThreadsInFlight = new Map<string, Promise<CodexThreadsResult>>();
+export function invalidateCodexThreadsCache() {
+    codexThreadsCache.clear();
+    codexThreadsInFlight.clear();
+}
 export async function listCodexThreads(emit: AgentEmit, options: { cwd: string; searchTerm?: string; limit?: number }) {
+    const key = `${options.cwd}|${options.searchTerm || ""}|${options.limit || 40}`;
+    const cached = codexThreadsCache.get(key);
+    if (cached && Date.now() - cached.at < CODEX_THREADS_TTL_MS) return cached.value;
+    const inFlight = codexThreadsInFlight.get(key);
+    if (inFlight) return inFlight;
+    const pending = fetchCodexThreads(emit, options).then((value) => {
+        codexThreadsCache.set(key, { at: Date.now(), value });
+        return value;
+    }).finally(() => { codexThreadsInFlight.delete(key); });
+    codexThreadsInFlight.set(key, pending);
+    return pending;
+}
+async function fetchCodexThreads(emit: AgentEmit, options: { cwd: string; searchTerm?: string; limit?: number }): Promise<CodexThreadsResult> {
     const app = await getCodexApp(emit);
     const result = await app.listThreads({
         limit: options.limit || 40,
@@ -169,9 +191,19 @@ export async function listCodexThreads(emit: AgentEmit, options: { cwd: string; 
     return { data, nextCursor: field(result, "nextCursor") || null, backwardsCursor: field(result, "backwardsCursor") || null };
 }
 
-/** 查询当前账号可用于新任务的 Codex 模型。 */
-export async function listCodexModels(emit: AgentEmit) {
-    return await (await getCodexApp(emit)).listModels();
+/** 查询当前账号可用于新任务的 Codex 模型。冷查询经 CLI 实测 ~1.4s：30s TTL 缓存成功结果并单飞合并，失败不缓存。 */
+const CODEX_MODELS_TTL_MS = 30_000;
+async function fetchCodexModels(emit: AgentEmit) { return await (await getCodexApp(emit)).listModels(); }
+type CodexModelsResult = Awaited<ReturnType<typeof fetchCodexModels>>;
+let codexModelsCache: { at: number; value: CodexModelsResult } | null = null;
+let codexModelsInFlight: Promise<CodexModelsResult> | null = null;
+export async function listCodexModels(emit: AgentEmit): Promise<CodexModelsResult> {
+    if (codexModelsCache && Date.now() - codexModelsCache.at < CODEX_MODELS_TTL_MS) return codexModelsCache.value;
+    if (codexModelsInFlight) return codexModelsInFlight;
+    const pending = fetchCodexModels(emit).then((value) => { codexModelsCache = { at: Date.now(), value }; return value; })
+        .finally(() => { codexModelsInFlight = null; });
+    codexModelsInFlight = pending;
+    return pending;
 }
 
 /** 查询当前工作空间的原生 Skill 列表。 */
