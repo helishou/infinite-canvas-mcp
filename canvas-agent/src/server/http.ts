@@ -1,6 +1,5 @@
 import { executeDirectorSubagentTool } from "../agent/delegation.js";
 import { isProductionTool, executeProductionTool } from "../drama/production-tools.js";
-import { removedToolNotice, migrateToolGuidance } from "../canvas/tool-migrations.js";
 export { CanvasSession } from "../canvas/session.js";
 import { ZodError } from "zod";
 import { toolInputSchemas } from "../canvas/schemas.js";
@@ -11,6 +10,7 @@ import { productionWorkspaceRequest } from "../drama/production-workspace-contra
 import { productionToolPreflight } from "../drama/production-tool-preflight.js";
 import path from "node:path";
 import express, {
+  type Express,
   type NextFunction,
   type Request,
   type Response,
@@ -28,7 +28,9 @@ import {
   listCodexModels,
   listCodexSkills,
   listCodexThreads,
+  invalidateCodexThreadsCache,
   readCodexThread,
+  recordUserInterrupt,
   resolveCodexApproval,
   resolveCodexSkill,
   resumeCodexThread,
@@ -85,8 +87,17 @@ export type AgentHttpOptions = {
   settings?: LlmSettings;
 };
 
+export type AgentHttpRuntime = {
+  app: Express;
+  config: CanvasAgentConfig;
+  session: CanvasSession;
+  skillStore: SkillStore;
+  backend: ReturnType<typeof createBackendClient>;
+  comfyUi: ComfyUiClient;
+};
+
 /** 创建 Agent Express 应用；嵌入 Backend 时不监听端口。 */
-export function createAgentApp(options: AgentHttpOptions = {}) {
+export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime {
   const config = loadConfig(true);
   const port =
     Number(process.env.PORT) ||
@@ -106,6 +117,15 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       : {}),
   });
   const session = new CanvasSession(initialWorkspace.activeThreadId || "", projectId => backend.post(`/canvas/projects/${encodeURIComponent(projectId)}/mcp-export`, {}));
+  const resolveActiveDramaId = async () => {
+    const pinned = session.activeDramaId();
+    if (pinned) return { dramaId: pinned, source: "session-pinned" as const };
+    const projectId = session.focusedCanvasProjectId();
+    if (!projectId) return { dramaId: "", source: "none" as const };
+    const result = await backend.get<{ context?: { dramaId?: string | null } }>(`/canvas/projects/${encodeURIComponent(projectId)}/production-context`);
+    const dramaId = String(result.context?.dramaId || "").trim();
+    return { dramaId, source: dramaId ? "browser-focused" as const : "none" as const };
+  };
   const llm = options.settings ? new LlmAgent(options.settings, backend.backendUrl, backend.backendToken) : undefined;
   const useLlm = () => {
     const id = ensureSiteWorkspace(config).activeThreadId || "";
@@ -349,8 +369,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
   });
   app.get(agentRoute("/codex/state"), (_req, res) => res.json({ ok: true, runtime: session.runtimeStateSnapshot }));
   app.post("/canvas/activate", (req, res) => {
-    session.activateClient(String(req.query.clientId || ""));
-    res.json({ ok: true });
+    // 焦点提示是幂等的：网页重连握手完成前上报会被忽略，由随后的 hello 补发，不作为请求失败。
+    res.json({ ok: true, activated: session.activateClient(String(req.query.clientId || "")) });
   });
   app.post("/canvas/result", (req, res) => {
     const ok = session.resolveResult(
@@ -666,9 +686,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     "/api/tools",
     route(async (req, res) => {
       const name = String(req.body?.name || "");
-      const notice = removedToolNotice(name);
-      if (notice) return void res.status(400).json(notice);
       const rawInput = objectBody(req.body?.input);
+      if (!Object.hasOwn(toolInputSchemas, name)) return void res.status(404).json({ ok: false, error: `Unknown tool: ${name}` });
       const schema = toolInputSchemas[name as keyof typeof toolInputSchemas];
       const input = schema ? schema.parse(rawInput) as Record<string, unknown> : rawInput;
       const blockedProduction = await productionToolPreflight(backend, name, input);
@@ -676,7 +695,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       if (name === "director_subagent") return void res.json({ ok: true, result: await executeDirectorSubagentTool(backend, input) });
       if (isProductionTool(name)) return void res.json({ ok: true, result: await executeProductionTool(backend, name, input) });
       const workspaceRequest = productionWorkspaceRequest(name, input);
-      if (workspaceRequest) return void res.json({ ok: true, result: migrateToolGuidance(workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input })) });
+      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input }) });
       if (isCollaborationTool(name))
         return void res.json({
           ok: true,
@@ -704,17 +723,34 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
           ok: true,
           result: await comfyUi.cancel(String(input.taskId || "")),
         });
-      if (name === "drama_get_project")
-        return void res.json({ ok: true, result: await backend.getDramaProject(String(input.dramaId || "")) });
-      if (name === "drama_list_episodes")
+      if (name === "drama_set_active_project") {
+        const dramaId = String(input.dramaId || "").trim();
+        if (dramaId) await backend.getDramaProject(dramaId);
+        session.setActiveDramaId(dramaId || null);
+        const active = await resolveActiveDramaId();
+        return void res.json({ ok: true, result: { ok: true, activeDramaId: active.dramaId || null, source: active.source } });
+      }
+      if (name === "drama_get_project") {
+        const requestedId = String(input.dramaId || "").trim();
+        const active = requestedId ? undefined : await resolveActiveDramaId();
+        const dramaId = requestedId || active?.dramaId || "";
+        if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+        return void res.json({ ok: true, result: await backend.getDramaProject(dramaId, input.view === "full" ? "full" : "summary") });
+      }
+      if (name === "drama_list_episodes") {
+        const requestedId = String(input.dramaId || "").trim();
+        const active = requestedId ? undefined : await resolveActiveDramaId();
+        const dramaId = requestedId || active?.dramaId || "";
+        if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
         return void res.json({
           ok: true,
-          result: await backend.listDramaEpisodes(String(input.dramaId || "")),
+          result: await backend.listDramaEpisodeSummaries(dramaId, Number(input.page || 1), Number(input.pageSize || 20)),
         });
+      }
       if (name === "drama_get_episode")
         return void res.json({
           ok: true,
-          result: await backend.getDramaEpisode(String(input.episodeId || "")),
+          result: await backend.getDramaEpisode(String(input.episodeId || ""), input.view === "full" ? "full" : "summary", input.canvasView === "full" ? "full" : "ref"),
         });
       if (name === "drama_create_episode") {
         const { dramaId, ...episode } = input;
@@ -754,14 +790,18 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         if (input.runtimeId) query.set("runtimeId", String(input.runtimeId));
         if (input.operationType) query.set("operationType", String(input.operationType));
         if (input.moduleId) query.set("moduleId", String(input.moduleId));
+        if (input.includeRequests) query.set("includeRequests", "true");
+        if (input.includePatchFields) query.set("includePatchFields", "true");
+        if (input.includeSourceContract) query.set("includeSourceContract", "true");
         return void res.json({ ok: true, result: await backend.get(`/production/contract?${query}`) });
       }
-      if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"].includes(name)) {
+      if (["production_compile", "production_get_compilation", "production_apply_compilation", "production_translate_compiled_prompts", "production_diagnose_bindings"].includes(name)) {
         const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(String(input.id))}/production` : `/drama/episodes/${encodeURIComponent(String(input.id))}/production`;
         const params = new URLSearchParams({ view: String(input.view || "status"), offset: String(input.offset || 0), ...(input.pageSize ? { pageSize: String(input.pageSize) } : {}) });
         const result = name === "production_get_compilation" ? await backend.get(`${base}/compilations/${encodeURIComponent(String(input.operationId))}?${params}`)
           : name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
           : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
+          : name === "production_translate_compiled_prompts" ? await backend.post(`${base}/translate-compiled-prompts`, { expectedRevision: input.expectedRevision, operationId: input.operationId, targetIds: input.targetIds })
           : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director, scope: input.scope });
         return void res.json({ ok: true, result });
       }
@@ -1371,6 +1411,8 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
     handler: (req: Request, res: Response) => unknown | Promise<unknown>,
   ) {
     return route(async (req, res) => {
+      // 变更路由会改变线程集合：先失效避免处理器读到变更前缓存，结束后再失效一次。
+      invalidateCodexThreadsCache();
       if (!session.beginCodexMutation())
         return res
           .status(409)
@@ -1384,6 +1426,7 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
         return await handler(req, res);
       } finally {
         session.endCodexMutation();
+        invalidateCodexThreadsCache();
       }
     });
   }
@@ -1411,6 +1454,11 @@ export function createAgentApp(options: AgentHttpOptions = {}) {
       const ok = useLlm()
         ? llm!.interrupt(skillDraftRunning ? undefined : requestedThreadId)
         : await interruptCodexTurn(skillDraftRunning ? undefined : requestedThreadId);
+      // Skill 草稿的停止不是生产 turn，不打标记；其余手动停止记录当前 turn，历史读取据此区分「已停止」与意外离线。
+      if (ok && !skillDraftRunning) {
+        const scope = session.codexEventScope;
+        void recordUserInterrupt(ensureSiteWorkspace(config).workspacePath, requestedThreadId || scope.threadId, scope.turnId);
+      }
       res
         .status(ok ? 200 : 409)
         .json({ ok, ...(ok ? {} : { error: "当前没有可停止的任务" }) });
@@ -1783,5 +1831,5 @@ function withAttachmentContext(
         `${index + 1}. attachmentId=${item.id}, name=${JSON.stringify(item.name)}`,
     )
     .join("\n");
-  return `${prompt}\n\n本轮可用图片附件（顺序与图片输入一致）：\n${list}\n需要把附件放入画布或作为生成参考图时，先调用 canvas_create_attachment_nodes，再使用返回的画布节点 ID 创建生成流程。`;
+  return `${prompt}\n\n本轮可用图片附件（顺序与图片输入一致）：\n${list}\nMCP 只创建智能生成节点，不要尝试把附件转换成普通图片节点。`;
 }

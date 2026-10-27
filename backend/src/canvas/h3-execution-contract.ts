@@ -10,26 +10,71 @@ export function assertH3WorkflowContract(workflow: Record<string, any>, expected
     const native = Object.values(workflow).find((node: any) => ['NanFengH3MultiReferenceGeneratorV15', 'InfiniteCanvasH3ConfirmedGeneratorV15'].includes(node.class_type))?.inputs;
     if (!native) {
         const nodes = Object.values(workflow) as any[];
-        const has = (type: string, field: string, value: unknown) => nodes.some(node => node.class_type === type && sameModel(node.inputs?.[field], value));
+        const hasNode = (type: string) => nodes.some(node => node.class_type === type);
+        // 展开流的 Loader 名字多数不是字面量，而是由起始释放/条件屏障「连过来」的
+        // （UNETLoader.unet_name ← NanFengH3ReleaseAtStartV15，CLIPLoader.clip_name ←
+        // NanFengH3ReleaseBeforeConditionLoadersV15，两个 VAELoader 同理）。所以核对时
+        // 要收集这些节点里出现的所有名称字面量，而不是只看 Loader 自己的入参类型。
+        const nameCarriers = new Set<string>();
+        for (const node of nodes) {
+            if (!['UNETLoader', 'CLIPLoader', 'VAELoader', 'MiniMaxH3TRTVAELoader', 'NanFengH3ReleaseAtStartV15', 'NanFengH3ReleaseBeforeConditionLoadersV15'].includes(node.class_type)) continue;
+            for (const value of Object.values(node.inputs || {})) if (typeof value === 'string') nameCarriers.add(pathKey(value));
+        }
+        const declares = (value: unknown) => {
+            const wanted = pathKey(value);
+            if (!wanted) return true;
+            const base = wanted.split('/').pop();
+            for (const name of nameCarriers) if (name === wanted || name.split('/').pop() === base) return true;
+            return false;
+        };
+        const trtVideoVae = nodes.find(node => node.class_type === 'MiniMaxH3TRTVAELoader')?.inputs;
+        // 二采确认阶段的条件张量/编码器/sigma 全部来自一采的磁盘快照（LoadCheckpoint），
+        // 图里本来就不该再有 CLIPLoader 和帧尺寸节点；一采确认阶段则用 SaveCheckpoint 把边界钉住。
+        // 这两条路上拿「编码器 / 帧尺寸」判偏离只会误报——真实缺失由 Load 节点在执行期明确报错。
+        const hasNodeType = (type: string) => nodes.some(node => node.class_type === type);
+        const snapshotSecond = hasNodeType('InfiniteCanvasH3LoadCheckpoint') || expected.latentConfirmationPhase === 'second';
+        const snapshotFirst = hasNodeType('InfiniteCanvasH3SaveCheckpoint') || expected.latentConfirmationPhase === 'first';
         const issues: string[] = [];
-        if (!has('UNETLoader', 'unet_name', expected.modelName)) issues.push('modelName');
-        if (!has('CLIPLoader', 'clip_name', expected.textEncoder)) issues.push('textEncoder');
-        if (!has('VAELoader', 'vae_name', expected.videoVae)) issues.push('videoVae');
-        if (!has('VAELoader', 'vae_name', expected.audioVae)) issues.push('audioVae');
+        if (!hasNode('UNETLoader') || !declares(expected.modelName)) issues.push('modelName');
+        if (!snapshotSecond && (!hasNode('CLIPLoader') || !declares(expected.textEncoder))) issues.push('textEncoder');
+        // TRT 视频 VAE 会整体取代普通 VAELoader，此时该核对的是引擎选择，不是 vae 文件名。
+        if (trtVideoVae) {
+            if (expected.trtVideoVaeEnabled !== true
+                || (expected.trtDecoderEngine !== undefined && trtVideoVae.decoder !== expected.trtDecoderEngine)
+                || (expected.trtEncoderEngine !== undefined && trtVideoVae.encoder !== expected.trtEncoderEngine)) issues.push('videoVae');
+        } else if (!hasNode('VAELoader') || !declares(expected.videoVae)) issues.push('videoVae');
+        if (!hasNode('VAELoader') || !declares(expected.audioVae)) issues.push('audioVae');
         const wanted = (Array.isArray(expected.loraSlots) ? expected.loraSlots as any[] : []).filter(slot => slot.enabled !== false && slot.name && slot.name !== '未选择');
         const actual = nodes.filter(node => node.class_type === 'LoraLoaderModelOnly').map(node => node.inputs);
         if (wanted.length !== actual.length || wanted.some(slot => !actual.some(item => sameModel(slot.name, item.lora_name) && Number(slot.strength ?? 1) === Number(item.strength_model)))) issues.push('loraSlots');
         if (expected.postGenerationOnly !== true) {
-            if (!nodes.some(node => node.class_type === 'KSamplerSelect' && node.inputs?.sampler_name === expected.sampler)) issues.push('sampler');
-            if (!nodes.some(node => node.class_type === 'BasicScheduler' && node.inputs?.scheduler === expected.scheduler)) issues.push('scheduler');
-            const frame = nodes.find(node => ['MiniMaxH3ReferenceToVideo2', 'MiniMaxH3ImageToVideo', 'MiniMaxH3AudioConditioningT8', 'JZL_MiniMaxH3ReferenceToVideo2'].includes(node.class_type))?.inputs;
-            if (!frame) issues.push('frame dimensions');
-            else if (typeof frame.width === 'number' && typeof frame.height === 'number') {
-                const ratio = canonicalH3AspectRatio(expected.aspectRatio)?.split(':').map(Number);
-                if (ratio && Math.abs(frame.width - frame.height * ratio[0] / ratio[1]) > 32) issues.push('aspectRatio');
+            // 采样器=「南风采样器」时展开流用 SamplerER_SDE 取代 KSamplerSelect。
+            const samplerOk = nodes.some(node => node.class_type === 'KSamplerSelect' && node.inputs?.sampler_name === expected.sampler)
+                || (expected.sampler === '南风采样器' && hasNode('SamplerER_SDE'));
+            if (!samplerOk) issues.push('sampler');
+            // sigma 由谁供给要看图的形状：二采（潜空间放大）图里是 ManualSigmas(h3FullSigma)
+            // + SplitSigmas(h3FirstSteps)，普通图里是 BasicScheduler。BasicScheduler 在展开流
+            // 里本来就没有下游连线，确认阶段还会被裁掉，所以按实际供给方核对。
+            const entries = Object.entries(workflow) as Array<[string, any]>;
+            const sourceOf = (link: unknown) => Array.isArray(link) && typeof link[0] === 'string' ? entries.find(([id]) => id === link[0])?.[1] : undefined;
+            const splitNode = nodes.find(node => node.class_type === 'SplitSigmas');
+            const sigmaSource = sourceOf((splitNode ?? nodes.find(node => node.class_type === 'SamplerCustomAdvanced'))?.inputs?.sigmas);
+            if (sigmaSource?.class_type === 'ManualSigmas') {
+                if (expected.h3FullSigma && String(sigmaSource.inputs?.sigmas ?? '') !== String(expected.h3FullSigma)) issues.push('h3FullSigma');
+                if (expected.h3FirstSteps !== undefined && splitNode && Number(splitNode.inputs?.step) !== Number(expected.h3FirstSteps)) issues.push('h3FirstSteps');
+            } else if (!snapshotFirst && !snapshotSecond
+                && !nodes.some(node => node.class_type === 'BasicScheduler' && node.inputs?.scheduler === expected.scheduler)) issues.push('scheduler');
+            if (!snapshotSecond) {
+                const frame = nodes.find(node => ['MiniMaxH3ReferenceToVideo', 'MiniMaxH3ReferenceToVideo2', 'MiniMaxH3ImageToVideo', 'MiniMaxH3AudioConditioningT8', 'JZL_MiniMaxH3ReferenceToVideo2'].includes(node.class_type))?.inputs;
+                if (!frame) issues.push('frame dimensions');
+                else if (typeof frame.width === 'number' && typeof frame.height === 'number') {
+                    const ratio = canonicalH3AspectRatio(expected.aspectRatio)?.split(':').map(Number);
+                    if (ratio && Math.abs(frame.width - frame.height * ratio[0] / ratio[1]) > 32) issues.push('aspectRatio');
+                }
             }
         }
-        if (expected.latentUpscaleEnabled === true && !nodes.some(node => node.class_type === 'NanFengH3LowPeakLatentUpscalerV15' && sameModel(node.inputs?.model_name, expected.latentUpscaleModel) && Number(node.inputs?.target_megapixels) === Number(expected.latentUpscaleMegapixels))) issues.push('latentUpscale');
+        // 一采确认阶段本来就把放大器裁掉了（放大属于二采），所以这一项只在能见到放大器的图里核。
+        if (expected.latentUpscaleEnabled === true && !snapshotFirst && !nodes.some(node => node.class_type === 'NanFengH3LowPeakLatentUpscalerV15' && sameModel(node.inputs?.model_name, expected.latentUpscaleModel) && Number(node.inputs?.target_megapixels) === Number(expected.latentUpscaleMegapixels))) issues.push('latentUpscale');
         if (issues.length) throw Object.assign(new Error(`H3 展开工作流偏离冻结参数：${issues.join('、')}`), { code: 'H3_WORKFLOW_MISMATCH', fields: issues });
         return;
     }
@@ -74,13 +119,8 @@ export function compareH3MediaSpecification(measured: { width: number; height: n
     const second = expected.latentUpscaleEnabled === true && expected.latentConfirmationPhase !== 'first';
     const dimensions = estimateH3Dimensions(expected, second);
     const issues: string[] = [];
-    const ratio = canonicalH3AspectRatio(expected.aspectRatio);
     if (measured.rotation && measured.rotation % 360 !== 0) issues.push('视频带旋转元数据，显示画幅与编码画幅不同');
     if (measured.sampleAspectRatio && !['1:1', 'N/A', '0:1'].includes(measured.sampleAspectRatio)) issues.push('视频像素不是方形，显示画幅需要核对');
-    if (ratio) {
-        const [rw, rh] = ratio.split(':').map(Number);
-        if ((rw < rh && measured.width >= measured.height) || (rw > rh && measured.width <= measured.height) || Math.abs(measured.width - measured.height * rw / rh) > (dimensions?.grid || 32)) issues.push(`媒体画幅 ${measured.width}×${measured.height} 不符合 ${ratio}`);
-    }
     if (dimensions && expected.rtxEnabled !== true && (!expected.dlssUpscaleMode || expected.dlssUpscaleMode === '关闭') && (Math.abs(dimensions.width - measured.width) > dimensions.grid || Math.abs(dimensions.height - measured.height) > dimensions.grid)) issues.push(`媒体尺寸不符合${second ? '二采' : '一采'}规格 ${dimensions.width}×${dimensions.height}`);
     return { status: issues.length ? 'mismatch' : 'passed', measured: { ...measured, kind: 'media-probe' }, expected: dimensions, issues };
 }

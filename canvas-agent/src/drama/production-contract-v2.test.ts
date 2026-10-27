@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema } from "./production-contract.js";
+import { defaultRequiredShotKeyframes, directorModules, directorProductionSchema, directorSourceV2Diagnostics, promptSourceMapSchema, resolveSubjectPictureBindingIds } from "./production-contract.js";
 import { compilationScopeInput } from "./compilation-scope.js";
 import { subjectShotWindows, subjectStateProjection } from "./subject-assembly.js";
 
 function source() {
     return {
+        version: 2,
         prompt_assembly: { version: 2 },
         fps_num: 24, fps_den: 1,
         character_registry: [{ id: "SHUANZI", name: "栓子" }],
@@ -26,6 +27,7 @@ function source() {
             ], keyframes: [], utterance_refs: [] },
         ],
         segments: [{ id: "C1", shot_ids: ["S1", "S2"], mode: "Ref2VA" }],
+        script_scenes: [{ id: "SC_A", scene_id: "ROOM", blocks: [{ id: "B1", kind: "action", text: "栓子站在院中，手里攥着鸡蛋。" }] }],
         utterances: [],
         ledger: { contract_version: 2, facts: [
             { id: "F_SHUANZI_LOCATION", object_kind: "character", object_id: "SHUANZI", allowed_values: ["outside", "threshold"], value_descriptions: { outside: "Shuanzi remains outside the coop window.", threshold: "Shuanzi stands near the doorway." } },
@@ -36,6 +38,56 @@ function source() {
 
 test("Subject assembly v2 accepts node-bound pictures, sparse shot keyframes and Subject-owned ledger facts", () => {
     assert.deepEqual(directorSourceV2Diagnostics(source()), []);
+});
+test("a newly authored keyframe defaults to required while an explicit optional choice is preserved", () => {
+    const candidate = source();
+    delete (candidate.shots[0].keyframes[0] as any).requiredForSubmission;
+    assert.equal(defaultRequiredShotKeyframes(candidate), true);
+    assert.equal((candidate.shots[0].keyframes[0] as any).requiredForSubmission, true);
+
+    const explicitOptional = source();
+    (explicitOptional.shots[0].keyframes[0] as any).requiredForSubmission = false;
+    assert.equal(defaultRequiredShotKeyframes(explicitOptional), false);
+    assert.equal((explicitOptional.shots[0].keyframes[0] as any).requiredForSubmission, false);
+});
+
+test("keyframe outfit references are validated against the selected Subject clothing bindings", () => {
+    const candidate = source();
+    candidate.subject_registry[0].pictureBindings.push({ id: "SHUANZI_OUTFIT", assetId: "AST_SHUANZI_OUTFIT", sourceNode: { projectId: "CANVAS", nodeId: "IMG_SHUANZI_OUTFIT" }, selection: { mode: "latest_success" }, provides: ["clothing"], retain: ["costume"], exclude: [], applicableState: {}, defaultFor: [] });
+    (candidate.shots[0].keyframes[0] as any).subjectPictureBindingIds = { SHUANZI: ["SHUANZI_OUTFIT"] };
+    assert.deepEqual(directorSourceV2Diagnostics(candidate), []);
+    (candidate.shots[0].keyframes[0] as any).subjectPictureBindingIds = { EGG: ["SHUANZI_OUTFIT"] };
+    assert.ok(directorSourceV2Diagnostics(candidate).some(issue => issue.path.join(".").includes("subjectPictureBindingIds")));
+});
+test("the Director source root version is the sole production format gate", () => {
+    for (const version of [undefined, 1, 3]) {
+        const candidate = source();
+        if (version === undefined) delete (candidate as any).version;
+        else (candidate as any).version = version;
+        assert.ok(directorSourceV2Diagnostics(candidate).some(issue => issue.message.startsWith("UNSUPPORTED_PRODUCTION_FORMAT:")));
+    }
+    // 旧版兼容注释（曾静默放行缺少装配标记的草稿，无升级引导）：
+    // const noAssemblyMarker = source();
+    // delete (noAssemblyMarker as any).prompt_assembly;
+    // assert.deepEqual(directorSourceV2Diagnostics(noAssemblyMarker), []);
+    const noAssemblyMarker = source();
+    delete (noAssemblyMarker as any).prompt_assembly;
+    const assemblyIssues = directorSourceV2Diagnostics(noAssemblyMarker);
+    assert.equal(assemblyIssues.length, 1);
+    assert.equal(assemblyIssues[0].path.join("."), "prompt_assembly.version");
+    assert.match(assemblyIssues[0].message, /Prompt Assembly 结构不受支持/);
+    const oldLedger = source();
+    (oldLedger.ledger as any).contract_version = 1;
+    assert.ok(directorSourceV2Diagnostics(oldLedger).some(issue => issue.path.join(".") === "ledger.contract_version"));
+    const oldShot = source();
+    (oldShot.shots[0] as any).prompt_contract_version = 1;
+    assert.ok(directorSourceV2Diagnostics(oldShot).some(issue => issue.path.join(".") === "shots.0.prompt_contract_version"));
+    const rejected = directorProductionSchema.safeParse({
+        schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "4.3.9" },
+        source: oldLedger, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [],
+    });
+    assert.equal(rejected.success, false);
+    if (!rejected.success) assert.ok(rejected.error.issues.some(issue => issue.path.join(".").includes("ledger.contract_version")));
 });
 test("Subject and keyframe bindings can inherit a smart node's independent reference selection", () => {
     const value = source();
@@ -70,6 +122,32 @@ test("missing or ambiguous default images do not block saving a visible Subject 
     assert.deepEqual(directorSourceV2Diagnostics(ambiguous), []);
 });
 
+test("explicit empty picture selection is schema-compatible, excluded from compilation scope, and never falls back", () => {
+    const value = source();
+    const usage = value.shots[0].subject_usages[0] as any;
+    usage.pictureBindingMode = "explicit";
+    usage.pictureBindingIds = [];
+    assert.deepEqual(directorSourceV2Diagnostics(value), []);
+    const production = directorProductionSchema.parse({
+        schemaVersion: 1,
+        engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" },
+        source: value, sourceHash: "b".repeat(64),
+        modules: Object.fromEntries(directorModules.map(module => [module, { status: "planned", evidence: [], unresolved: [] }])),
+        artifacts: [], assets: Object.fromEntries(["AST_SHUANZI", "AST_EGG", "KF_S1"].map(id => [id, { assetId: id, version: "v1", status: "planned" }])),
+        shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {},
+    });
+    const savedUsage = production.source.shots[0].subject_usages[0];
+    assert.equal(savedUsage.pictureBindingMode, "explicit");
+    assert.deepEqual(resolveSubjectPictureBindingIds(production.source.subject_registry[0], savedUsage), { bindingIds: [], issues: [] });
+    const scope = compilationScopeInput(production, { targetIds: ["C1"], output: "selected" });
+    assert.deepEqual(scope.director.source.shots[0].subject_usages[0].pictureBindingIds, []);
+    assert.deepEqual(scope.director.source.subject_registry[0].pictureBindings, []);
+
+    const invalid = structuredClone(value);
+    (invalid.shots[0].subject_usages[0] as any).pictureBindingIds = ["UNKNOWN_BINDING"];
+    assert.ok(directorSourceV2Diagnostics(invalid).some(item => item.path.join(".").includes("pictureBindingIds")));
+});
+
 test("Clip compilation scope includes only selected Subject bindings and submitted keyframes", () => {
     const authored = source();
     const production = directorProductionSchema.parse({
@@ -99,6 +177,19 @@ test("Subject ledger replay derives different start/end states per Shot without 
     assert.equal(states.S2.start.find(value => value.factId === "F_SHUANZI_LOCATION")?.value, "outside");
     assert.equal(states.S2.end.find(value => value.factId === "F_SHUANZI_LOCATION")?.value, "threshold");
     assert.equal(JSON.stringify(value), authored);
+});
+
+test("state events may be confirmed without a script line, but any supplied anchor must exist", () => {
+    const value = source();
+    value.ledger.initial = [{ timeline_id: "main", fact_id: "F_SHUANZI_LOCATION", value: "outside" }];
+    value.ledger.events = [{ id: "E1", timeline_id: "main", fact_id: "F_SHUANZI_LOCATION", shot_id: "S1", local_frame: 12, before: "outside", after: "threshold", source_anchor: { block_id: "B1" } }];
+    assert.deepEqual(directorSourceV2Diagnostics(value), []);
+    const unanchored = structuredClone(value);
+    delete (unanchored.ledger.events[0] as any).source_anchor;
+    assert.deepEqual(directorSourceV2Diagnostics(unanchored), []);
+    const ghostAnchor = structuredClone(value);
+    (ghostAnchor.ledger.events[0] as any).source_anchor.block_id = "NOPE";
+    assert.ok(directorSourceV2Diagnostics(ghostAnchor).some(issue => issue.message.includes("状态事件引用了未知剧本块")));
 });
 
 test("Subject assembly v2 locates unknown image bindings, facts, missing value prose and clip gaps", () => {

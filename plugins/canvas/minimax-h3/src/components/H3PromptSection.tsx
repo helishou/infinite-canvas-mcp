@@ -5,14 +5,15 @@ import type { H3Ref, H3ReferenceRetention, H3Segment, H3SubjectDefinition } from
 import { H3Icon } from "./H3Icon";
 import { StoryboardDialogueStrip } from "./StoryboardDialogueStrip";
 import type { StoryboardSpeakerOption } from "./StoryboardDialogueStrip";
-import { inferReferenceRole, refsForSegment, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
+import { inferReferenceRole, refsForSegment, refsForSubmission, segmentRefsPatch, withSegmentRefs } from "../services/h3-data";
 import { sameRef } from "../services/h3-compatibility";
 import { orderedGroupStoryboardRefs } from "../services/h3-refs";
 import { storyboardShotMarkers } from "../services/h3-storyboard-markers";
+import { storyboardTrackItems } from "../services/h3-storyboard-track";
 import { alignStoryboardShotsToReferences } from "../services/storyboard-shot-alignment";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { persistPromptCandidate, promptJobs, setPromptJob } from "../services/h3-prompt-jobs";
-import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
+import { buildPromptEnhancementInput, buildStoryboardPromptSections, ensureCharacterGroupSubjectDefinitions, ensureCharacterGroupSubjects, mergeSubjectDefinitions, sha256Text, storyboardPromptFingerprint, toSubjectDefinitions } from "../services/storyboard-prompt";
 import { matchStyleTemplatePrefix } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { extractDialogues, stripDialogueSpeakers, injectDialogueSpeakers, parseSubjectSpeakerMap, collectSpeakerIds } from "../services/storyboard-dialogue";
 import { h3ThemeVars } from "../h3-theme";
@@ -20,8 +21,9 @@ import { h3Label, useH3Locale } from "../h3-locale";
 import { promptEnhanceImagePayload } from "../services/prompt-enhance-references";
 import { captureH3PromptRequest } from "../services/h3-prompt-request";
 import { translateH3Prompt } from "../services/h3-prompt-translation";
-import { literalPromptSubjects } from "../services/prompt-subject-definitions";
+import { bindLiteralSubjectsToReferences, literalPromptSubjects } from "../services/prompt-subject-definitions";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
+import { createH3Id } from "../services/h3-id";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
 import { formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, stripDuplicateTransition, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-rules";
 import { orderStoryboardImageReferences, orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
@@ -442,7 +444,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
   const markers = storyboardShotMarkers(normalizedDescription);
   if (!markers.length) return {
     openingDescription: normalizedDescription.trim(),
-    shots: [{ id: crypto.randomUUID(), description: "", switchTime: "", transitionType: "cut" as const }],
+    shots: [{ id: createH3Id(), description: "", switchTime: "", transitionType: "cut" as const }],
   };
   return {
     openingDescription: normalizedDescription.slice(0, markers[0].index!).trim(),
@@ -541,7 +543,7 @@ function parseStoryboardDescription(description: string, imageRefs: H3Ref[], all
         break;
       }
       return {
-        id: crypto.randomUUID(),
+        id: createH3Id(),
         description: stripDialogueSpeakers(body),
         switchTime: index > 0 ? switchTime : "",
         preciseCut: index > 0 && Boolean(switchTime),
@@ -653,37 +655,38 @@ export function H3PromptSection({
   const suggestionState = getReact().useSyncExternalStore(suggestions.subscribe, suggestions.getSnapshot);
  const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
   const productionProjection = selected?.productionClipProjection as Record<string, unknown> | undefined;
+  const hasProductionCompileTarget = typeof productionProjection?.targetId === "string" && Boolean(productionProjection.targetId);
   const promptSubjectSection = readPromptSection(prompt, "subject_definitions");
   const literalSubjects = useMemo(() => literalPromptSubjects(`subject_definitions:\n${promptSubjectSection}`), [promptSubjectSection]);
   const TextEditor = ctx.TextEditor;
-  const mode = String(selected?.mode || selected?.taskMode || "ref2va");
+  const mode = String(selected?.taskMode || selected?.mode || "ref2va");
   const promptMode = mode in H3_PROMPT_MODE_CONFIG ? mode as keyof typeof H3_PROMPT_MODE_CONFIG : "ref2va";
   const structuredPromptV2 = productionProjection?.promptAssemblyVersion === 2;
-  const [manualOverrideSegmentId, setManualOverrideSegmentId] = useState<string | null>(null);
-  const [manualPromptModeError, setManualPromptModeError] = useState<string | null>(null);
   const [promptDiffersFromCompiled, setPromptDiffersFromCompiled] = useState(false);
   const compilerPromptHash = typeof productionProjection?.promptHash === "string" ? productionProjection.promptHash : "";
   useEffect(() => {
     let current = true;
-    if (!structuredPromptV2 || !textStatus.ready || !compilerPromptHash) {
+    if (!hasProductionCompileTarget || !textStatus.ready || !compilerPromptHash) {
       setPromptDiffersFromCompiled(false);
       return () => { current = false; };
     }
-    void crypto.subtle.digest("SHA-256", new TextEncoder().encode(prompt)).then((digest) => {
-      const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-      if (current) setPromptDiffersFromCompiled(hash !== compilerPromptHash);
+    void sha256Text(prompt).then((hash) => {
+      if (current) setPromptDiffersFromCompiled(hash !== null && hash !== compilerPromptHash);
     }).catch(() => { if (current) setPromptDiffersFromCompiled(false); });
     return () => { current = false; };
-  }, [structuredPromptV2, textStatus.ready, prompt, compilerPromptHash]);
-  const manualPromptEditMode = structuredPromptV2 && Boolean(selected?.id) && manualOverrideSegmentId === selected?.id;
-  const manualPromptOverride = structuredPromptV2 && (manualPromptEditMode || promptDiffersFromCompiled);
-  const showPromptEditor = !structuredPromptV2 || manualPromptEditMode;
+  }, [hasProductionCompileTarget, textStatus.ready, prompt, compilerPromptHash]);
   const canReverseSyncPrompt = structuredPromptV2 && promptDiffersFromCompiled && productionProjection?.promptSourceMapAvailable === true
     && Boolean(productionProjection.artifactId && productionProjection.promptHash && productionProjection.sourceHash);
   const [promptReverseSyncing, setPromptReverseSyncing] = useState(false);
   const [promptReverseSyncError, setPromptReverseSyncError] = useState<string | null>(null);
   const promptReverseRequest = useRef(0);
-  useEffect(() => { promptReverseRequest.current++; setPromptReverseSyncing(false); setPromptReverseSyncError(null); }, [ctx.projectId, ctx.node.id, selected?.id]);
+  const [promptCompileBusy, setPromptCompileBusy] = useState(false);
+  const [promptCompileError, setPromptCompileError] = useState<string | null>(null);
+  const promptCompileRequest = useRef(0);
+  useEffect(() => {
+    promptReverseRequest.current++; setPromptReverseSyncing(false); setPromptReverseSyncError(null);
+    promptCompileRequest.current++; setPromptCompileBusy(false); setPromptCompileError(null);
+  }, [ctx.projectId, ctx.node.id, selected?.id]);
   const requestPromptReverseSync = async () => {
     if (!canReverseSyncPrompt || !selected?.id || promptReverseSyncing) return;
     const input = { nodeId: ctx.node.id, segmentId: selected.id, prompt,
@@ -698,15 +701,28 @@ export function H3PromptSection({
     } catch (error) { if (request === promptReverseRequest.current) setPromptReverseSyncError(error instanceof Error ? error.message : String(error)); }
     finally { if (request === promptReverseRequest.current) setPromptReverseSyncing(false); }
   };
-  const toggleManualPromptOverride = async () => {
-    if (!selected?.id) return;
-    setManualPromptModeError(null);
-    if (!manualPromptEditMode) { setManualOverrideSegmentId(selected.id); return; }
+  const compileCurrentPrompt = async () => {
+    if (!selected?.id || !textStatus.ready || textStatus.blocked || promptCompileBusy) return;
+    const segmentId = selected.id, nodeId = ctx.node.id, target = { nodeId, segmentId, field: "prompt" as const };
+    const request = ++promptCompileRequest.current;
+    setPromptCompileBusy(true); setPromptCompileError(null);
     try {
-      await ctx.flush();
-      setManualOverrideSegmentId(null);
+      if (!ctx.production) throw new Error("宿主制作编译服务尚未就绪；当前 Prompt 已保留。");
+      await textDocument.flush();
+      const originalText = textDocument.getSnapshot().text;
+      const { prompt: compiledPrompt } = await ctx.production.compilePrompt({ nodeId, segmentId });
+      const currentDocument = ctx.textDocument(target);
+      await currentDocument.flush();
+      const current = currentDocument.getSnapshot();
+      if (current.text !== originalText && current.text !== compiledPrompt) throw new Error("编译期间 Prompt 又被修改；本次编译结果没有覆盖新修改，请再次编译。");
+      if (current.text !== compiledPrompt) {
+        const replaced = await ctx.replaceText(target, currentDocument.getDocumentId(), current.text, compiledPrompt);
+        if (!replaced) throw new Error("Prompt 在写回时再次变化；当前修改已保留，请再次编译。");
+      }
     } catch (error) {
-      setManualPromptModeError(error instanceof Error ? error.message : String(error));
+      if (request === promptCompileRequest.current) setPromptCompileError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === promptCompileRequest.current) setPromptCompileBusy(false);
     }
   };
   const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
@@ -767,13 +783,36 @@ export function H3PromptSection({
   type Translation = { segmentId: string; prompt: string; text: string };
   const [translation, setTranslation] = useState<Translation | null>(null);
   const [translating, setTranslating] = useState(false);
+  const [productionPromptTranslating, setProductionPromptTranslating] = useState(false);
   const [isTranslated, setIsTranslated] = useState(false);
   const [translateError, setTranslateError] = useState<string | null>(null);
+  type EnglishPromptToggle = { documentId: string; originalPrompt: string; translatedPrompt: string; cached: boolean };
+  const [englishPromptToggles, setEnglishPromptToggles] = useState<Record<string, EnglishPromptToggle>>({});
+  const [englishPromptTranslating, setEnglishPromptTranslating] = useState(false);
+  const [englishPromptError, setEnglishPromptError] = useState<string | null>(null);
+  const activeEnglishPromptToggle = selected?.id ? englishPromptToggles[selected.id] : undefined;
+  const englishPromptApplied = Boolean(activeEnglishPromptToggle && activeEnglishPromptToggle.translatedPrompt === prompt);
   const [copiedError, setCopiedError] = useState(false);
   // 用来在异步翻译返回时校验 prompt 是否已被用户改掉，避免显示错配的中文
-  const promptRef = useRef({ prompt, segmentId: selected?.id });
-  promptRef.current = { prompt, segmentId: selected?.id };
+  const promptRef = useRef({ prompt, segmentId: selected?.id, documentId: textDocument.getDocumentId() });
+  promptRef.current = { prompt, segmentId: selected?.id, documentId: textDocument.getDocumentId() };
+  const englishPromptRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string; documentId: string } | null>(null);
   const translationRequestRef = useRef<{ controller: AbortController; prompt: string; segmentId?: string } | null>(null);
+  useEffect(() => {
+    setProductionPromptTranslating(false);
+    const applyProductionTranslation = (detail?: { projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }) => {
+      if (detail?.projectId !== ctx.projectId || detail.nodeId !== ctx.node.id || detail.segmentId !== selected?.id) return;
+      setProductionPromptTranslating(detail.translating === true);
+    };
+    const onProductionTranslation = (event: Event) => applyProductionTranslation((event as CustomEvent<{ projectId?: string; nodeId?: string; segmentId?: string; translating?: boolean }>).detail);
+    const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("production-h3-prompt-translation") : null;
+    if (channel) channel.onmessage = event => applyProductionTranslation(event.data);
+    window.addEventListener("production-h3-prompt-translation", onProductionTranslation);
+    return () => {
+      window.removeEventListener("production-h3-prompt-translation", onProductionTranslation);
+      channel?.close();
+    };
+  }, [ctx.projectId, ctx.node.id, selected?.id]);
   useEffect(() => {
     const request = translationRequestRef.current;
     if (request && (request.prompt !== prompt || request.segmentId !== selected?.id)) {
@@ -781,9 +820,25 @@ export function H3PromptSection({
       translationRequestRef.current = null;
       setTranslating(false);
     }
+    const englishRequest = englishPromptRequestRef.current;
+    if (englishRequest && (englishRequest.prompt !== prompt || englishRequest.segmentId !== selected?.id || englishRequest.documentId !== promptRef.current.documentId)) {
+      englishRequest.controller.abort();
+      englishPromptRequestRef.current = null;
+      setEnglishPromptTranslating(false);
+    }
+    if (selected?.id) {
+      setEnglishPromptToggles(current => {
+        const active = current[selected.id];
+        if (!active || prompt === active.translatedPrompt) return current;
+        const next = { ...current };
+        delete next[selected.id];
+        return next;
+      });
+    }
     setTranslateError(null);
+    setEnglishPromptError(null);
   }, [selected?.id, prompt]);
-  useEffect(() => () => { translationRequestRef.current?.controller.abort(); }, []);
+  useEffect(() => () => { translationRequestRef.current?.controller.abort(); englishPromptRequestRef.current?.controller.abort(); }, []);
   const loadStoryboardPrompt = (sourcePrompt: string) => {
     const summary = promptMode === "ref2va" ? readPromptSection(sourcePrompt, "summary") : "";
     const { openingDescription, shots: parsedShots } = parseStoryboardDescription(readPromptSection(sourcePrompt, storyboardSection), imageRefs, [...imageRefs, ...videoRefs, ...audioRefs]);
@@ -941,7 +996,7 @@ export function H3PromptSection({
       const index = shots.findIndex((shot) => shot.id === shotId);
       if (index < 0) return shots;
       const first = { ...shots[index], pictureBindingId: bindingIds[0] };
-      const added = bindingIds.slice(1).map((pictureBindingId) => ({ id: crypto.randomUUID(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" as const, pictureBindingId }));
+      const added = bindingIds.slice(1).map((pictureBindingId) => ({ id: createH3Id(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" as const, pictureBindingId }));
       return [...shots.slice(0, index), first, ...added, ...shots.slice(index + 1)];
     });
   };
@@ -993,7 +1048,7 @@ export function H3PromptSection({
   };
   const addSubjectDefinition = () => {
     commitSubjectDefinitions([...subjectDefinitionsRef.current, {
-      id: `subject-${crypto.randomUUID()}`,
+      id: `subject-${createH3Id()}`,
       name: "",
       profile: "",
       pictures: [],
@@ -1040,16 +1095,24 @@ export function H3PromptSection({
     ],
     [imageRefs, videoRefs, audioRefs],
   );
-  const storyboardPictureOptions = imageRefs.flatMap((ref, index) => isStoryboardPictureRef(ref) && ref.bindingId
-    ? [{
-      ref,
-      value: ref.bindingId,
-      label: <span className="nfh3-storyboard-picture-option">
-        {ref.url ? <img src={ref.url} alt="" /> : null}
-        <span>{`<Picture ${index + 1}> · ${storyboardRefDisplayName(ref.name) || "未命名分镜图"}`}</span>
-      </span>,
-    }]
-    : []);
+  const storyboardPictureOptions = (() => {
+    const seen = new Set<string>();
+    return (selected ? storyboardTrackItems(selected) : []).flatMap(({ ref }) => {
+      if (!ref || !isStoryboardPictureRef(ref) || !ref.bindingId || seen.has(ref.bindingId)) return [];
+      seen.add(ref.bindingId);
+      const index = imageRefs.findIndex((item) => item.bindingId === ref.bindingId);
+      if (index < 0) return [];
+      const imageUrl = ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url;
+      return [{
+        ref,
+        value: ref.bindingId,
+        label: <span className="nfh3-storyboard-picture-option">
+          {imageUrl ? <img src={imageUrl} alt="" /> : null}
+          <span>{`<Picture ${index + 1}> · ${storyboardRefDisplayName(ref.name) || "未命名分镜图"}`}</span>
+        </span>,
+      }];
+    });
+  })();
   const canvasNodes = storyboardMode ? ctx.getNodes() : [];
   const orderedStoryboardGroups = canvasNodes.filter((node) => node.type === "group" && node.metadata?.orderedGroup)
     .map((group) => ({ value: `ordered-group:${group.id}`, label: `导入有序组 · ${group.title || "未命名组"}` }));
@@ -1246,16 +1309,22 @@ export function H3PromptSection({
       const latestMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
       const latestSegment = segmentsFor(latestMetadata).find((item) => item.id === selected?.id);
       if (!latestSegment) throw new Error("当前 Clip 已不存在，无法对齐分镜图顺序。");
-      const previousRefs = refsForSegment(latestSegment);
-      const orderedRefs = orderStoryboardReferencesFirst(previousRefs,
-        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+      const previousRefs = refsForSubmission(latestSegment);
+      const previousTrackBindingIds = new Set((latestSegment.storyboardShots || []).flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []));
+      const currentTrackBindingIds = new Set(storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []));
+      const removedTrackBindingIds = new Set([...previousTrackBindingIds].filter((id) => !currentTrackBindingIds.has(id)));
+      const currentRefs = previousRefs.filter((ref) => !(ref.bindingId && removedTrackBindingIds.has(ref.bindingId) && isStoryboardPictureRef(ref)));
+      const orderedRefs = orderStoryboardReferencesFirst(currentRefs,
+        [...currentTrackBindingIds],
         (ref) => ref.bindingId, isStoryboardPictureRef);
-      const orderChanged = orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
+      const orderChanged = orderedRefs.length !== previousRefs.length || orderedRefs.some((ref, index) => ref.bindingId !== previousRefs[index]?.bindingId);
       const shotOrder = orderStoryboardImageReferences(latestSegment.storyboardShots || [],
-        storyboardShotsRef.current.flatMap((shot) => shot.pictureBindingId ? [shot.pictureBindingId] : []),
+        [...currentTrackBindingIds],
         (shot) => shot.referenceBindingId,
-        (shot) => Boolean(shot.referenceBindingId && previousRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
-      const trackChanged = shotOrder.some((shot, index) => shot.id !== latestSegment.storyboardShots?.[index]?.id);
+        (shot) => Boolean(shot.referenceBindingId && currentRefs.some((ref) => ref.bindingId === shot.referenceBindingId && isStoryboardPictureRef(ref))));
+      const previousTrack = latestSegment.storyboardShots || [];
+      const trackChanged = shotOrder.length !== previousTrack.length || shotOrder.some((shot, index) =>
+        shot.id !== previousTrack[index]?.id || shot.referenceBindingId !== previousTrack[index]?.referenceBindingId || shot.duration !== previousTrack[index]?.duration);
       if (orderChanged || trackChanged) {
         const activeDocument = ctx.textDocument(textTarget);
         await activeDocument.flush();
@@ -1267,7 +1336,13 @@ export function H3PromptSection({
           throw new Error("分镜图顺序更新时提示词发生并发修改，请重试。");
         }
         const updated = withSegmentRefs({ ...latestSegment, ...(trackChanged ? { storyboardShots: shotOrder } : {}) }, orderedRefs);
-        ctx.updateMetadata({ segments: segmentsFor(ctx.getNode(ctx.node.id)?.metadata || latestMetadata).map((item) => item.id === latestSegment.id ? updated : item) });
+        if (latestSegment.productionClipProjection?.targetId || ctx.node.metadata?.productionOwnerKind && ctx.node.metadata?.productionOwnerId || ctx.node.metadata?.productionSceneId) {
+          if (!ctx.production) throw new Error("正式制作 Clip 的分镜需要制作台 Shot 操作接收；当前工作台未连接。");
+          const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> });
+          if (!result.sourceSaved) throw new Error("制作台未保存分镜参考顺序。");
+        } else {
+          ctx.updateMetadata({ segments: segmentsFor(ctx.getNode(ctx.node.id)?.metadata || latestMetadata).map((item) => item.id === latestSegment.id ? updated : item) });
+        }
       }
       storyboardDirtyRef.current = false;
       setStoryboardDirty(false);
@@ -1284,7 +1359,7 @@ export function H3PromptSection({
     if (enhancing) return;
     const targetSegmentId = selected?.id;
     if (!targetSegmentId || promptJobs(ctx)[targetSegmentId]?.status === "running") return;
-    const requestId = crypto.randomUUID();
+    const requestId = createH3Id();
     let job = { requestId, base: "", documentId: "" };
     try {
       const request = captureH3PromptRequest(ctx, targetSegmentId);
@@ -1301,9 +1376,9 @@ export function H3PromptSection({
           ctx.ai.defaultModel("text") ||
           "",
       );
-      const targetMode = String(target.mode || target.taskMode || "ref2va");
+      const targetMode = String(target.taskMode || target.mode || "ref2va");
       const normalizedMode = targetMode === "t2v" ? "t2va" : targetMode === "i2v" ? "i2va" : targetMode === "fl2v" ? "fl2va" : "ref2va";
-      const references = refsForSegment(target);
+       const references = refsForSubmission(target);
       const missingAddress = references.filter((ref) => !ref.url && !ref.storageKey);
       if (missingAddress.length) {
         const names = missingAddress.map((ref) => ref.name || "未命名参考").join("、");
@@ -1338,18 +1413,21 @@ export function H3PromptSection({
         .filter((ref) => ref.type === "image" && isStoryboardPictureRef(ref))
         .sort((left, right) => (storyboardOrder.get(left.bindingId || "") ?? Number.MAX_SAFE_INTEGER) - (storyboardOrder.get(right.bindingId || "") ?? Number.MAX_SAFE_INTEGER));
       const hasExplicitHardCut = /(?:\b(?:hard[- ]cut|the\s+(?:shot|camera)\s+cuts?\s+to)\b|\[Transition:\s*cut\]|硬切)/iu.test(promptAtCall);
-      let transitionPlan = "";
       let transitionInstruction = "";
       if (storyboardMode && storyboardImageRefs.length >= 2) {
-        if (!hasExplicitHardCut) transitionPlan = await analyzeStoryboardTransitions(ctx, storyboardImageRefs, model);
-        const lastOrd = storyboardImageRefs.length;
+        // 在最终增强调用中一次性逐对推理，避免每一对分镜都另起一个模型请求。
+        const imageReferences = references.filter((ref) => ref.type === "image");
+        const storyboardSequence = storyboardImageRefs.map((ref, index) => {
+          const pictureOrdinal = imageReferences.indexOf(ref) + 1;
+          return `第${index + 1}帧=<Picture ${pictureOrdinal}>${ref.name ? `（${ref.name}）` : ""}`;
+        }).join(" → ");
+        const lastPictureOrdinal = imageReferences.indexOf(storyboardImageRefs[storyboardImageRefs.length - 1]) + 1;
         transitionInstruction = [
-          `只有标记为 storyboard 的参考图才是本段分镜帧序列（图1为起始姿势，图${lastOrd}为目标姿势）；角色转面图、人物身份图和风格参考图不是过渡帧。`,
+          `本段分镜帧的固定顺序为：${storyboardSequence}。只有这些 storyboard 图片是过渡帧；角色转面图、人物身份图和风格参考图不是过渡帧。`,
           hasExplicitHardCut
             ? `严格保留用户已经写明的切镜边界；需要 hard cut 的位置保持 hard cut，不要把切镜改写成跨镜连续运动。`
-            : `从图1的姿势出发，依次经过每一对相邻分镜帧（图k→图k+1）的连续动作，最终收尾于图${lastOrd}的姿势；不得瞬移或重置。`,
-          `末句必须明确落到图${lastOrd}的目标姿势（例如图1站立、图2蹲下，则末句写“此人缓缓蹲下成蹲姿”）。`,
-          transitionPlan ? `按下面的「过渡计划」落实每段肢体、重心、朝向的具体变化。` : `没有生成跨镜过渡计划时，只依据各镜自己的分镜图和正文描述。`,
+            : `在本次提示词编写中，逐对比较该顺序中每两张相邻分镜图，推断肢体运动、重心转移、身体朝向和视线变化，并将这些动作写入详细描述；不得瞬移或重置。`,
+          `动作应从第一帧姿势出发，并在末句明确落到最后一帧 <Picture ${lastPictureOrdinal}> 的目标姿势。`,
         ].join("\n");
       }
       const structure = normalizedMode === "ref2va"
@@ -1383,7 +1461,6 @@ export function H3PromptSection({
       const userPrompt = buildPromptEnhancementInput({
         currentPrompt: promptAtCall,
         manifest,
-        transitionPlan,
       });
       const refPayload = promptEnhanceImagePayload(references);
       const result = await ctx.ai.generateText(userPrompt, {
@@ -1482,6 +1559,68 @@ export function H3PromptSection({
     }
   };
 
+  const handleEnglishPromptToggle = async () => {
+    const segmentId = selected?.id;
+    if (!segmentId || englishPromptTranslating || enhancing) return;
+    setEnglishPromptTranslating(true);
+    const existing = englishPromptToggles[segmentId];
+    const target = { nodeId: ctx.node.id, segmentId, field: "prompt" as const };
+    const document = ctx.textDocument(target);
+    try {
+      await document.flush();
+      const snapshot = document.getSnapshot();
+      if (!snapshot.ready || snapshot.blocked) throw new Error(snapshot.error || "提示词尚未同步，暂时无法切换翻译。");
+      if (document.getDocumentId() !== promptRef.current.documentId || promptRef.current.segmentId !== segmentId) {
+        throw new Error("当前 Clip 已变化，请重新选择后再翻译。");
+      }
+      if (existing && snapshot.text === existing.translatedPrompt) {
+        if (existing.documentId !== document.getDocumentId()) throw new Error("原提示词与当前文本对象不匹配，保留当前内容，请重新翻译。");
+        const restored = await ctx.replaceText(target, existing.documentId, existing.translatedPrompt, existing.originalPrompt);
+        if (!restored) throw new Error("提示词在切回原文时发生并发修改，当前内容已保留。");
+        setEnglishPromptToggles(current => {
+          const next = { ...current };
+          delete next[segmentId];
+          return next;
+        });
+        setEnglishPromptError(null);
+        return;
+      }
+
+      const promptAtCall = snapshot.text;
+      if (!promptAtCall.trim()) throw new Error("请先输入提示词。");
+      const documentId = document.getDocumentId();
+      const controller = new AbortController();
+      englishPromptRequestRef.current = { controller, prompt: promptAtCall, segmentId, documentId };
+      setEnglishPromptTranslating(true);
+      setEnglishPromptError(null);
+      const result = await ctx.ai.translateH3Prompt(promptAtCall, { signal: controller.signal });
+      if (controller.signal.aborted || promptRef.current.prompt !== promptAtCall || promptRef.current.segmentId !== segmentId || promptRef.current.documentId !== documentId) return;
+      const latestDocument = ctx.textDocument(target);
+      await latestDocument.flush();
+      const latest = latestDocument.getSnapshot();
+      if (latestDocument.getDocumentId() !== documentId || !latest.ready || latest.blocked || latest.text !== promptAtCall) {
+        throw new Error("提示词在翻译期间发生变化，译文未写入。");
+      }
+      const translatedPrompt = result.translatedText.trim();
+      if (!translatedPrompt) throw new Error("翻译模型没有返回提示词，原文已保留。");
+      if (translatedPrompt === promptAtCall) {
+        englishPromptRequestRef.current = null;
+        setEnglishPromptTranslating(false);
+        return;
+      }
+      // Stop the prompt-change watcher from treating our own compare-and-swap as a user edit.
+      englishPromptRequestRef.current = null;
+      const replaced = await ctx.replaceText(target, documentId, promptAtCall, translatedPrompt);
+      if (!replaced) throw new Error("提示词在翻译写回时发生并发修改，原文已保留。");
+      setEnglishPromptToggles(current => ({ ...current, [segmentId]: { documentId, originalPrompt: promptAtCall, translatedPrompt, cached: result.cached } }));
+    } catch (error) {
+      if (!(error instanceof Error && error.name === "AbortError")) setEnglishPromptError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (englishPromptRequestRef.current?.segmentId === segmentId) englishPromptRequestRef.current = null;
+      setEnglishPromptTranslating(false);
+    }
+  };
+
   const insertAtCursor = (text: string) => editorRef.current?.insert(text, { prefixNewline: true });
 
   const editorReferences = useMemo(() => {
@@ -1501,7 +1640,27 @@ export function H3PromptSection({
       if (group?.[1].subjectId) aliases.add(group[1].subjectId);
       subjects.set(canonicalId, aliases);
     };
-    const definedSubjects = subjectDefinitions.length ? subjectDefinitions : null;
+    // 正文自带 subject_definitions 时，`<Subject N>` 的含义由正文定义。若 Clip 上保存的
+    // 实体清单整份都来自已被替换的参考（仍按旧序号贴 沈砚/红绡 这类名字），引用块改按正文
+    // 渲染；清单仍有当前参考/角色组认领时保持原语义（说话人名册、@ 插入形态不变）。
+    const promptOwnedSubjects = literalSubjects.length
+      ? bindLiteralSubjectsToReferences(literalSubjects, {
+        // 正文只写了“图片里的人物”这类描述时，引用块显示被引用素材自己的名字。
+        referenceName: (subject) => subject.pictureOrdinal ? imageRefs[subject.pictureOrdinal - 1]?.name : undefined,
+      })
+      : undefined;
+    const liveSubjectIds = new Set<string>();
+    mentionItems.forEach(({ ref }) => {
+      [ref.bindingId, ref.subjectId, ref.groupId, ...(ref.storyboardSubjectIds || [])]
+        .forEach((id) => { if (id) liveSubjectIds.add(id); });
+    });
+    Object.entries(selected?.h3CharacterGroups || {}).forEach(([groupId, group]) => {
+      [groupId, group.id, group.subjectId, group.characterNodeId].forEach((id) => { if (id) liveSubjectIds.add(id); });
+    });
+    const savedDefinitionsBacked = subjectDefinitions.some((definition) => liveSubjectIds.has(definition.id));
+    const definedSubjects = promptOwnedSubjects?.length && subjectDefinitions.length && !savedDefinitionsBacked
+      ? promptOwnedSubjects
+      : subjectDefinitions.length ? subjectDefinitions : null;
     mentionItems.filter(({ ref }) => ref.type === "image").forEach(({ ref }) => {
       addSubject(subjectIdForRef(ref));
       addSubject(ref.groupId);
@@ -1528,7 +1687,7 @@ export function H3PromptSection({
           (ref.storyboardSubjectIds || []).includes(definition.id) ||
           tags.some((tag) => {
             const match = /^<Picture\s+(\d+)>$/iu.exec(tag);
-            return match ? mentionItems[Number(match[1]) - 1]?.ref === ref : false;
+            return match ? mentionItems.filter((item) => item.ref.type === "image")[Number(match[1]) - 1]?.ref === ref : false;
           })
         ))?.ref;
       };
@@ -1649,16 +1808,30 @@ export function H3PromptSection({
       <span key="prompt-header" className="nfh3-prompt-header">
         <span className="nfh3-prompt-header-main">
           <H3Icon key="prompt-icon" name="prompt" /> <span key="prompt-label">{h3Label(locale, "prompt")}</span>{" "}
-          {!storyboardMode && showPromptEditor ? <>
+          {!storyboardMode ? <>
             <button
               key="enhance"
               type="button"
-              disabled={enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
+              disabled={enhancing || englishPromptTranslating || !textStatus.ready || textStatus.blocked || !prompt.trim()}
               onClick={() => void enhancePrompt()}
               title={!textStatus.ready ? "等待提示词同步" : textStatus.blocked ? "提示词编辑尚未同步" : !prompt.trim() ? "请先输入提示词" : "调用当前文本模型增强提示词"}
             >
               {enhancing ? "增强中…" : "增强提示词"}
             </button>
+            <button
+              key="translate-prompt-english"
+              type="button"
+              disabled={productionPromptTranslating || englishPromptTranslating || enhancing || !textStatus.ready || textStatus.blocked || !prompt.trim()}
+              onClick={() => void handleEnglishPromptToggle()}
+              aria-label={productionPromptTranslating ? "制作台正在翻译为英文提示词" : undefined}
+              aria-pressed={englishPromptApplied}
+              title={productionPromptTranslating ? "制作台正在翻译为英文提示词" : englishPromptApplied ? "切回翻译前的原提示词" : "用设置中的翻译模型翻译为英文；再次点击可切回原提示词"}
+            >
+              {productionPromptTranslating ? "制作台翻译中…" : englishPromptTranslating ? "翻译中…" : englishPromptApplied ? "切回原文" : "翻译提示词"}
+            </button>
+            {englishPromptApplied && activeEnglishPromptToggle ? <span role="status" aria-live="polite" style={{ fontSize: 12, opacity: 0.75 }}>
+              {activeEnglishPromptToggle.cached ? "已复用翻译缓存" : "译文已写回当前 Clip"}
+            </span> : null}
             <label
               key="storyboard-toggle"
               style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 22, marginLeft: 6, opacity: imageRefs.length >= 2 ? 1 : 0.45, cursor: imageRefs.length >= 2 ? "pointer" : "not-allowed" }}
@@ -1674,26 +1847,29 @@ export function H3PromptSection({
             </label>
           </> : null}
         </span>
-        {structuredPromptV2 ? <Button size="small" disabled={!selected?.id || (!manualPromptOverride && (!textStatus.ready || textStatus.blocked))} onClick={() => void toggleManualPromptOverride()}>
-          {manualPromptEditMode ? "完成人工编辑" : manualPromptOverride ? "继续编辑人工覆盖" : "人工覆盖 Prompt"}
-        </Button> : null}
+        {selected?.id && !storyboardMode && hasProductionCompileTarget ? <>
+          <Button size="small" title="按当前正式制作源稿重新编译并应用此 Clip 的 Prompt"
+            disabled={!textStatus.ready || textStatus.blocked || promptCompileBusy} loading={promptCompileBusy} onClick={() => void compileCurrentPrompt()}>
+            {promptCompileBusy ? "正在编译…" : "生成编译 Prompt"}
+          </Button>
+        </> : null}
         {mode === "ref2va" && !structuredPromptV2 ? <button type="button" className="nfh3-prompt-view-toggle" title="打开结构化分镜提示词编辑器" onClick={openStoryboard}>
           {storyboardSaving ? "保存中…" : "分镜编辑"}
         </button> : null}
       </span>
-      {structuredPromptV2 && !manualPromptEditMode ? <div className="minimax-prompt-help-panel" role="note">
-        {manualPromptOverride
-          ? "检测到画布 Prompt 与最近一次编译结果不同；此人工覆盖已保留。需要常规修改时请维护分镜源稿。"
+      {englishPromptError ? <div className="minimax-prompt-reference-error" role="alert">翻译提示词失败：{englishPromptError}</div> : null}
+      {hasProductionCompileTarget ? <div className="minimax-prompt-help-panel" role="note">
+        {promptDiffersFromCompiled
+          ? "当前 Prompt 已人工修改并保存。点击“生成编译 Prompt”可按最新制作源稿重新编译并应用到此 Clip。"
           : compilerPromptHash
-            ? "Prompt 由 Subject、Shot、连续性和已选图片自动编译。日常修改请在制作工作台维护分镜源稿；人工覆盖仅用于特殊修正。"
-            : "当前 Clip 尚无可用的编译 Prompt；源稿修改后由 Backend 自动编译。"}
-        {manualPromptOverride && canReverseSyncPrompt ? <Button size="small" loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
-        {manualPromptOverride && !canReverseSyncPrompt ? <span>当前编译回执没有可用的唯一来源映射，不能自动反向同步。</span> : null}
-        {manualPromptOverride && !manualPromptEditMode ? <Input.TextArea className="nfh3-authored-prompt" value={prompt} readOnly aria-label="保留的人工 Prompt 覆盖" autoSize={{ minRows: 8, maxRows: 22 }} /> : null}
+            ? "此处显示并编辑当前 Clip 的编译 Prompt。点击“生成编译 Prompt”可随时用最新制作源稿重建。"
+            : "当前 Clip 尚无可用的编译 Prompt；点击“生成编译 Prompt”从最新制作源稿生成。"}
+        {promptDiffersFromCompiled && canReverseSyncPrompt ? <Button size="small" loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
+        {promptDiffersFromCompiled && !canReverseSyncPrompt ? <span>当前编译回执没有可用的唯一来源映射，人工 Prompt 仍保留在此 Clip。</span> : null}
       </div> : null}
       {promptReverseSyncError ? <div className="minimax-prompt-reference-error" role="alert">反向同步未完成：{promptReverseSyncError}</div> : null}
-      {manualPromptModeError ? <div className="minimax-prompt-reference-error" role="alert">切换回编译预览失败：{manualPromptModeError}</div> : null}
-      {!storyboardMode && showPromptEditor ? <div key="prompt-modes" className="minimax-prompt-modes">
+      {promptCompileError ? <div className="minimax-prompt-reference-error" role="alert">编译 Prompt 未完成：{promptCompileError}</div> : null}
+      {!storyboardMode ? <div key="prompt-modes" className="minimax-prompt-modes">
         <span className="minimax-prompt-mode-tools">
         {Object.keys(toolBlocks).map((label) => (
           <button
@@ -1715,12 +1891,12 @@ export function H3PromptSection({
           说明
         </button>
       </div> : null}
-      {!storyboardMode && showPromptEditor && helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
+      {!storyboardMode && helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
         <b>{modeConfig.title}</b>
         <span>字段：{modeConfig.fields}</span>
         <span>{modeConfig.refs}</span>
       </div> : null}
-      {!storyboardMode && showPromptEditor ? <small key="prompt-syntax" className="minimax-prompt-syntax">
+      {!storyboardMode ? <small key="prompt-syntax" className="minimax-prompt-syntax">
         <code key="subject">&lt;Subject N&gt; 指认主体（独立编号）</code>{" "}
         <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
         <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
@@ -1756,11 +1932,11 @@ export function H3PromptSection({
           </span>
         ) : null}
       </small> : null}
-      {!storyboardMode && showPromptEditor && (suggestionState.error || suggestionState.pending) ? <div role="status" className="minimax-prompt-help-panel">
+      {!storyboardMode && (suggestionState.error || suggestionState.pending) ? <div role="status" className="minimax-prompt-help-panel">
         {suggestionState.error || "候选正在保存"}{suggestionState.pending ? "；未确认结果已保留为本地草稿" : ""}
         <button type="button" onClick={() => void suggestions.refresh(true).catch(() => {})}>重新同步候选</button>
       </div> : null}
-      {!storyboardMode && showPromptEditor ? suggestionState.items.filter((item) => item.status === "pending").map((item) => (
+      {!storyboardMode ? suggestionState.items.filter((item) => item.status === "pending").map((item) => (
         <details key={item.id} className="minimax-prompt-help-panel">
           <summary>{item.documentId !== textDocument.getDocumentId() ? "旧文本对象的强化候选（只读保留）" : "待确认的强化候选（仅对应此 Clip）"}</summary>
           <textarea className="nfh3-authored-prompt" value={item.text} readOnly aria-label="待确认的强化提示词" />
@@ -1769,11 +1945,11 @@ export function H3PromptSection({
           <button type="button" disabled={!item.revision} onClick={() => void suggestions.dismiss(item.id).catch(() => {})}>保留原文并忽略此候选</button>
         </details>
       )) : null}
-      {!storyboardMode && showPromptEditor && enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
+      {!storyboardMode && enhancement?.text && enhancement.status === "suggestion" && !suggestionState.items.some((item) => item.id === enhancement.requestId) ? <details className="minimax-prompt-help-panel">
         <summary>候选尚未存入草稿，请先复制保留</summary>
         <textarea className="nfh3-authored-prompt" value={enhancement.text} readOnly aria-label="未保存的强化提示词" />
       </details> : null}
-      {!storyboardMode && showPromptEditor ? <div key="prompt-actions" className="nfh3-prompt-actions">
+      {!storyboardMode ? <div key="prompt-actions" className="nfh3-prompt-actions">
        <Select
          className="minimax-prompt-model"
 
@@ -1799,7 +1975,7 @@ export function H3PromptSection({
           {String(ctx.node.metadata?.smartStoryboardStatus || "") === "loading" ? "智能分镜生成中…" : String(ctx.node.metadata?.smartStoryboardStatus || "") === "error" ? "分镜失败·点击重试" : "智能分镜"}
         </button>
       </div> : null}
-      {!storyboardMode && showPromptEditor ? <div key="prompt-options" className="nfh3-prompt-options">
+      {!storyboardMode ? <div key="prompt-options" className="nfh3-prompt-options">
         <label>
           <span>恒定触发词</span>
           <input
@@ -1818,14 +1994,12 @@ export function H3PromptSection({
               : "输入 @ 选择图片引用；插入后显示为缩略图块"}
         </span>
       </div> : null}
-      {showPromptEditor && unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
+      {unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
         发现 {unresolvedReferenceMarkers.length} 处未匹配的主体或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
       </div> : null}
       <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`}>
-        {/* 原提示词编辑器始终挂载：翻译只做叠加展示，绝不卸载/改写原文。 */}
-        {selected && structuredPromptV2 && !manualPromptOverride ? <div className="minimax-compiled-prompt-preview">
-          <Input.TextArea className="nfh3-authored-prompt" value={prompt} readOnly aria-label="编译生成的 Prompt（只读）" autoSize={{ minRows: 8, maxRows: 22 }} />
-        </div> : selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
+        {/* 编译 Prompt 与人工修改共用同一持久文本对象；编译按钮显式重建当前 Clip。 */}
+        {selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         {/* 翻译结果：纯只读展示面板，独立存在，不影响上面的原提示词编辑器与文档。 */}
         {isTranslated && translation && translation.segmentId === selected?.id && translation.prompt === prompt
           ? <textarea readOnly value={translation.text} aria-label="中文翻译（只读）" className="minimax-prompt-translation nfh3-authored-prompt" />
@@ -1835,13 +2009,13 @@ export function H3PromptSection({
           type="button"
           onClick={() => void handleTranslateToggle()}
           disabled={translating || (!isTranslated && !prompt.trim())}
-          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}`}
-          aria-label={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : "查看中文翻译"}
-          title={isTranslated ? "切换回原提示词" : translating ? "正在翻译" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
+          className={`minimax-prompt-translate${isTranslated ? " is-translated" : ""}${translating ? " is-translating" : ""}`}
+          aria-label={translating ? "正在翻译为中文" : isTranslated ? "切换回原提示词" : "查看中文翻译"}
+          title={translating ? "正在翻译为中文" : isTranslated ? "切换回原提示词" : !prompt.trim() ? "请先输入提示词" : "查看中文翻译"}
         >
           {translating ? "…" : isTranslated ? "EN" : "译"}
         </button>
-        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译…</div> : null}
+        {translating ? <div className="minimax-prompt-translate-status" role="status">正在翻译为中文…</div> : null}
         {translateError ? <div key="prompt-translate-error" className="minimax-prompt-translate-error" role="alert">翻译失败：{translateError}</div> : null}
       </div>
       <Modal
@@ -1878,7 +2052,7 @@ export function H3PromptSection({
             </label>
             <span className="nfh3-storyboard-composite-hint">{boundStoryboardImageCount < 2 ? "绑定至少两张分镜图后可用" : "未绑定到镜头的分镜图仍单独提交"}</span>
             <button type="button" onClick={() => {
-              updateStoryboardShots((shots) => [...shots, { id: crypto.randomUUID(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" }]);
+              updateStoryboardShots((shots) => [...shots, { id: createH3Id(), description: "", switchTime: "", preciseCut: false, transitionType: "cut" }]);
             }}>添加分镜</button>
           </div>
           <div className="nfh3-storyboard-fields">
@@ -2194,33 +2368,3 @@ export function H3PromptSection({
   );
 }
 
-// 分镜图参考过渡分析：只对连续相邻的 storyboard 分镜帧提取「姿势如何连续过渡」的可执行动作，
-// 供增强提示词把段尾落到下一张分镜姿势（如站→蹲，末句写「此人蹲了下来」）。
-async function analyzeStoryboardTransitions(
-  ctx: CanvasNodeContext,
-  refs: H3Ref[],
-  model: string,
-): Promise<string> {
-  const lines: string[] = [];
-  for (let k = 0; k < refs.length - 1; k++) {
-    const from = refs[k];
-    const to = refs[k + 1];
-    const fromOrd = k + 1;
-    const toOrd = k + 2;
-    try {
-      const res = await ctx.ai.generateText(
-        `下面是连续分镜姿势序列中的两张 storyboard 分镜帧：图${fromOrd}（起始姿势）与图${toOrd}（目标姿势）。只提取从图${fromOrd}到图${toOrd}的连续过渡动作：主体肢体如何运动、重心如何转移、身体朝向/视线/姿态如何变化，用若干可执行的自然语言短句描述这段过渡（不重复身份、服装、外观，只写动作与姿态变化）。只返回过渡动作正文，不要追问、不要写英文模板。`,
-        {
-          model,
-          system: "你是 H3 分镜姿势过渡分析器。严格按图序对比两张关键帧，只输出从前者到后者的连续动作描述，不编造图中未出现的变化。",
-          references: promptEnhanceImagePayload([from, to]),
-        },
-      );
-      const text = res.text.trim();
-      if (text) lines.push(`图${fromOrd}→图${toOrd}：${text}`);
-    } catch {
-      lines.push(`图${fromOrd}→图${toOrd}：（过渡分析失败，请人工核对姿势变化）`);
-    }
-  }
-  return lines.join("\n\n");
-}

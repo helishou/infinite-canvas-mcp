@@ -86,11 +86,11 @@ test("drama cards open the drama workbench rather than an internal canvas or sta
     assert.equal(destination.searchParams.get("from"), "agent");
 });
 
-test("the unified directory is additive and preserves all nineteen established routes", () => {
+test("the unified directory is additive and preserves all established routes", () => {
     const router = readFileSync(new URL("../../router.tsx", import.meta.url), "utf8");
     const paths = [...router.matchAll(/path:\s*"([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(new Set(paths), new Set([
-        "/", "/projects", "/production", "/director", "/director/:projectId", "/image", "/video", "/assets", "/prompts", "/canvas", "/canvas/performance", "/canvas/:id", "/drama", "/drama/episodes/:episodeId/production", "/drama/scenes/:sceneId/production", "/workflows", "/config", "/diagnostics/mcp", "/pelican-bike", "*",
+        "/", "/projects", "/production", "/director", "/director/:projectId", "/image", "/video", "/assets", "/prompts", "/canvas", "/canvas/performance", "/canvas/:id", "/drama", "/drama/episodes/:episodeId/production", "/drama/scenes/:sceneId/production", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local", "/pelican-bike", "*",
     ]));
     assert.match(router, /const CanvasProjectPage = lazy\(loadCanvasProjectPage\)/, "the existing draft-safe lazy project loader must stay in use");
 });

@@ -21,7 +21,7 @@ test("upper placement flips below a trigger near the top instead of creating an 
     const layout = canvasSettingsPosition(anchor(220, 70), { width: 390, height: 700 }, "topRight");
     assert.equal("top" in layout ? layout.top : undefined, 118);
     assert.equal(layout.maxHeight, 570);
-    assert.equal(layout.left, 12);
+    assert.equal(layout.left, 20);
 });
 
 test("preferred placement is retained when there is enough space", () => {

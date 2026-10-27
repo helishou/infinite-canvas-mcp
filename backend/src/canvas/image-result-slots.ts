@@ -9,6 +9,24 @@ export function imageSourceStatus(project: CanvasProject, nodeId: string, source
         metadataDelete: binding ? ["errorDetails"] : ["runtimeTaskId", "errorDetails"] }];
 }
 
+/** Keep character images explicitly linked to a smart image node on its latest successful output. */
+export function linkedCharacterImageUpdates(project: CanvasProject, sourceNodeId: string, outputs: Record<string, unknown>[]) {
+    const media = outputs.filter(output => output.url).at(-1);
+    if (!media) return [] as CanvasOperation[];
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+    return nodes.flatMap((node): CanvasOperation[] => {
+        if (node.type !== "character" || !Array.isArray(node.metadata?.characterImages)) return [];
+        let changed = false;
+        const characterImages = node.metadata.characterImages.map((image: Record<string, unknown>) => {
+            if (String(image.sourceNodeId || "") !== sourceNodeId) return image;
+            changed = true;
+            return { ...image, url: media.url, storageKey: media.storageKey || "", width: media.width || image.width,
+                height: media.height || image.height, bytes: media.bytes || 0, mimeType: media.mimeType || "image/png" };
+        });
+        return changed ? [{ type: "update_node", id: String(node.id), metadata: { characterImages } }] : [];
+    });
+}
+
 /** 仅修改本次绑定的现有槽位；远端删除的槽位不能被迟到结果重建。 */
 export function imageSlotStatus(project: CanvasProject, nodeId: string, ids: string[] | undefined, status: string, errorDetails?: string) {
     if (!ids) return {};

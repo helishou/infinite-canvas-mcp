@@ -20,6 +20,54 @@ export function productionSceneIdsForShots(scenes: ReturnType<typeof productionS
     return scenes.filter(scene => matched.has(scene.id)).map(scene => scene.id);
 }
 
+/**
+ * Reuse the existing episode H3 node when a legacy environment scene id is
+ * replaced by its script-occurrence id. Existing clip bindings are the strongest
+ * evidence of the scene's physical node; a freshly derived stable ID must not
+ * split one scene across a second H3 node during source migration.
+ */
+export function existingProductionSceneH3NodeId(
+    project: Record<string, any>,
+    production: EpisodeProductionData,
+    owner: { kind: "episode" | "canvas" | "scene"; id: string },
+    sceneId: string,
+) {
+    const scenes = production.director ? productionSceneEntries(production.director.source) : [];
+    const scene = scenes.find(item => item.id === sceneId);
+    if (!scene) return undefined;
+    const nodes = arr(project.nodes);
+    const byId = new Map(nodes.map(node => [String(node.id || ""), node]));
+    const counts = new Map<string, number>();
+    for (const group of production.clipGroups) {
+        const groupScenes = productionSceneIdsForShots(scenes, group.shotIds);
+        if (groupScenes.length === 1 && groupScenes[0] === sceneId && group.nodeId) {
+            counts.set(String(group.nodeId), (counts.get(String(group.nodeId)) || 0) + 1);
+        }
+    }
+    const eligible = (nodeId: string) => {
+        const node = byId.get(nodeId), metadata = obj(node?.metadata);
+        return node?.type === "minimax-h3:video"
+            && metadata.productionOwnerId === owner.id
+            && metadata.productionOwnerKind === owner.kind
+            && !metadata.productionArchiveLabel;
+    };
+    const candidates = new Set<string>(counts.keys());
+    for (const node of nodes) {
+        const metadata = obj(node.metadata), nodeId = String(node.id || "");
+        if (metadata.productionOwnerId === owner.id && metadata.productionOwnerKind === owner.kind
+            && (metadata.productionSceneId === sceneId || metadata.productionSceneId === scene.environmentId)) candidates.add(nodeId);
+    }
+    return [...candidates].filter(eligible).sort((left, right) => {
+        const leftCount = counts.get(left) || 0, rightCount = counts.get(right) || 0;
+        if (leftCount !== rightCount) return rightCount - leftCount;
+        const leftMeta = obj(byId.get(left)?.metadata), rightMeta = obj(byId.get(right)?.metadata);
+        const leftExact = leftMeta.productionSceneId === sceneId ? 1 : 0;
+        const rightExact = rightMeta.productionSceneId === sceneId ? 1 : 0;
+        if (leftExact !== rightExact) return rightExact - leftExact;
+        return left.localeCompare(right);
+    })[0];
+}
+
 type Node = Record<string, any>;
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 type Input = { canvasId: string; owner: Owner; production: EpisodeProductionData; project: Record<string, any>; previous?: ProductionLayoutPlan | null; h3Defaults?: Record<string, unknown> };
@@ -46,7 +94,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const diagnostics: ProductionLayoutPlan["diagnostics"] = [];
     const units = new Map<string, DraftUnit>(), activeIds = new Set<string>();
     const plan = arr(director?.source.asset_plan);
-    const scripts = director ? productionScriptNodes(production, owner) : [];
+    const scripts = director ? productionScriptNodes(production, owner).filter(script => nodeById.has(script.id)) : [];
     const scenes = director ? productionSceneEntries(director.source) : [];
     const sceneByShot = new Map<string, string>();
     for (const scene of scenes) for (const shotId of scene.shotIds) if (!sceneByShot.has(shotId)) sceneByShot.set(shotId, scene.id);
@@ -92,11 +140,30 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
                 if (priorMember && !nodeById.has(member.nodeId)) { member.position = priorMember.position; member.size = priorMember.size; }
             }
         }
+        let repairedDetachedVideo = false;
         for (const member of active.members) {
             const actual = nodeById.get(member.nodeId);
-            if (actual?.position) { member.position = { x: Number(actual.position.x), y: Number(actual.position.y) }; member.size = { width: size(actual.width, member.size.width), height: size(actual.height, member.size.height) }; }
+            if (actual?.position) {
+                const sceneBounds = member.role === "video" && active.sceneId ? sceneGeometry.get(active.sceneId) : undefined;
+                const actualSize = { width: size(actual.width, member.size.width), height: size(actual.height, member.size.height) };
+                const outsideScene = Boolean(sceneBounds && (
+                    Number(actual.position.x) < sceneBounds.position.x
+                    || Number(actual.position.y) < sceneBounds.position.y
+                    || Number(actual.position.x) + actualSize.width > sceneBounds.position.x + sceneBounds.width
+                    || Number(actual.position.y) + actualSize.height > sceneBounds.position.y + sceneBounds.height
+                ));
+                if (outsideScene) repairedDetachedVideo = true;
+                else {
+                    member.position = { x: Number(actual.position.x), y: Number(actual.position.y) };
+                    member.size = actualSize;
+                }
+            }
         }
-        const anchor = active.members.find(member => nodeById.has(member.nodeId));
+        if (repairedDetachedVideo) {
+            const video = active.members.find(member => member.role === "video")!;
+            active.bounds = { position: { ...video.position }, size: { ...video.size } };
+        }
+        const anchor = repairedDetachedVideo ? undefined : active.members.find(member => nodeById.has(member.nodeId));
         const priorAnchor = anchor && old?.members.find(member => member.nodeId === anchor.nodeId);
         const templateAnchor = anchor && templatePositions.get(anchor.nodeId);
         if (anchor && !old && templateAnchor) {
@@ -120,14 +187,16 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     };
 
     const frameAssetIds = new Set(shotsByKeyframeAsset.keys());
-    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id));
+    const sharedEntityAssets = new Set(explicitAssets.filter(({ item }) => Boolean(item.sharedSource)
+        && ["character", "scene", "prop"].includes(String(item.kind || ""))).map(item => item.id));
+    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id) && !sharedEntityAssets.has(item.id));
     const multiSceneFrames = explicitAssets.filter(item => frameAssetIds.has(item.id) && new Set((shotsByKeyframeAsset.get(item.id) || []).map(shotId => sceneByShot.get(shotId)).filter(Boolean)).size > 1).map(item => item.id);
     const assetOrder = [...new Set([...standaloneAssets.map(item => item.id), ...multiSceneFrames])];
     // Keep the first asset row below the fixed canvas toolbar and review actions.
     const assetAreaTop = 280;
     for (let index = 0; index < standaloneAssets.length; index++) {
         const { id, item } = standaloneAssets[index];
-        const shared = String(item.canvas_scope || "") === "shared" || Boolean(director?.assets[id]?.sharedSource);
+        const shared = String(item.canvas_scope || "") === "shared" || Boolean(item.sharedSource);
         const boundId = String(director?.assets[id]?.nodeId || ""), bound = boundId ? nodeById.get(boundId) : undefined;
         const sharedProjectionId = shared && owner.kind === "episode" ? productionSharedProjectionNodeId(owner.id, id) : "";
         const existingId = String(sharedProjectionId && bound?.metadata?.sharedAssetOrigin?.assetId !== id ? sharedProjectionId : boundId || sharedProjectionId || productionLayoutStableId("production-asset", owner.id, id));
@@ -144,7 +213,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     const sceneGeometry = new Map<string, { position: Position; height: number; width: number; framesTopOffset: number; videoTopOffset: number; videoNodeHeights: number[] }>();
     for (const scene of scenes) {
         const sceneScripts = scriptByScene.get(scene.id) || [], frameShots = sceneFrameAssets.get(scene.id) || [];
-        const groupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(groupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
+        const legacyGroupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(legacyGroupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
         const groupPosition = groupNode?.position ? { x: Number(groupNode.position.x), y: Number(groupNode.position.y) } : priorGroup?.bounds.position || { x: 0, y: sceneY };
         const framesTopOffset = 70 + sceneScripts.length * 380 + (frameShots.length ? 40 : 0);
         const frameBottomOffset = frameShots.length ? framesTopOffset + Math.ceil(frameShots.length / 3) * 1000 + 780 : framesTopOffset;
@@ -157,10 +226,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => videoSize(nodeId).width + 80)));
         const requiredGroupSize = { width: Math.max(width, size(groupNode?.width, width)), height: Math.max(height, size(groupNode?.height, height)) };
         sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoNodeHeights: videoHeights });
+        // Keep a logical scene anchor in the plan for target lookup and stable
+        // scene bounds. Scene groups are no longer materialized onto the canvas.
         const sceneUnit = createUnit(`scene:${scene.id}`, "scene", [`scene:${scene.id}`], scene.id, groupPosition, requiredGroupSize,
-            [{ role: "scene", nodeId: groupId, nodeType: "group", position: groupPosition, size: requiredGroupSize }]);
+            [{ role: "scene", nodeId: productionLayoutStableId("production-scene-layout", owner.id, scene.id), nodeType: "layout-region", position: groupPosition, size: requiredGroupSize }]);
         sceneUnit.bounds.size = requiredGroupSize;
-        sceneUnit.members[0].size = sceneUnit.bounds.size;
         for (let index = 0; index < sceneScripts.length; index++) {
             const script = sceneScripts[index], node = nodeById.get(script.id), preferred = { x: groupPosition.x + 40, y: groupPosition.y + 70 + index * 380 };
             createUnit(`script:${script.scriptId}`, "script", [`script:${script.scriptId}`], scene.id, node?.position || preferred,
@@ -194,7 +264,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const sceneVideoIds = sceneId ? videoNodesByScene.get(sceneId) || [] : [];
         const videoIndex = sceneVideoIds.indexOf(nodeId);
         const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 100, 0);
-        const position = existing?.position || (geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) });
+        const preferred = geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) };
+        const position = existing?.position && geometry && Number(existing.position.x) >= geometry.position.x && Number(existing.position.y) >= geometry.position.y
+            && Number(existing.position.x) + videoSize(nodeId).width <= geometry.position.x + geometry.width
+            && Number(existing.position.y) + videoSize(nodeId).height <= geometry.position.y + geometry.height
+            ? existing.position : preferred;
         const { width, height } = videoSize(nodeId);
         const targets = [...videoGroups.filter(item => item.nodeId === nodeId && item.group).map(item => `segment:${item.group!.id}`), ...(sceneId ? [`scene:${sceneId}`] : [])];
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
@@ -205,7 +279,11 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         if (explicit.length > 1) throw new Error("制作实体重复绑定到多个节点");
         const nodeId = explicit[0]?.id || entityNodeId(owner, entity.kind, entity.entityId);
         const position = { x: -1260, y: 280 + index * 580 };
-        createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
+        const sharedAssetId = explicitAssets.find(({ item }) => Boolean(item.sharedSource)
+            && String(item.kind || "") === entity.kind
+            && String(item.entity_id || item.id || item.asset_id || "") === entity.entityId)?.id;
+        createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`,
+            ...(sharedAssetId ? [`asset:${sharedAssetId}`] : [])], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
     }
 
     // Old materialized nodes remain layout anchors even if their source object was later removed.

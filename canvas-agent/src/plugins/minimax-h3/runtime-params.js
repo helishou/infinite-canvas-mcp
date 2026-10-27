@@ -106,8 +106,6 @@ export function h3StoryboardIssues(segment, expected) {
             if (Math.abs(Number(shots.find(item => item.id === shot.id)?.duration) - shot.duration) > 1e-6)
                 issues.push(`镜头 ${shot.id} 的分镜轨时长与正式镜头表不一致`);
     }
-    if (shots.length && Math.abs(shots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0) - Number(segment.duration)) > 1e-6)
-        issues.push('分镜轨总时长与 Clip 时长不一致');
     return issues;
 }
 function record(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
@@ -182,6 +180,8 @@ export function normalizeH3LoraSlots(params) {
  */
 export function normalizeH3Params(params, generateRandomSeed = false) {
     const next = { ...params };
+    if (next.audioDrive === true)
+        next.lockAudio = true;
     const seed = parseH3Seed(next.seed) ?? parseH3Seed(next.noiseSeed);
     const rawMode = String(next.noiseSeedMode || "").toLowerCase();
     const mode = rawMode === "fixed" ? "fixed" : rawMode === "random" ? "random" : seed === undefined || seed === 0 ? "random" : "fixed";

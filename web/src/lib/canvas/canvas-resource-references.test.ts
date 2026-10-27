@@ -43,7 +43,7 @@ test("无关节点更新和裁剪变化保留引用数组，关联资源变化�
     assert.equal(select([a], nodes, [], buildCanvasGraphIndex(nodes, [])).get("a"), first.get("a"));
 });
 
-test("智能生成节点只把主图作为下游参考输入", () => {
+test("智能生成节点按引用策略把当前引用的结果作为下游参考输入", () => {
     const source: CanvasNodeData = {
         id: "source",
         type: CanvasNodeType.Config,
@@ -64,14 +64,41 @@ test("智能生成节点只把主图作为下游参考输入", () => {
         },
     };
     const target: CanvasNodeData = { ...source, id: "target", title: "目标智能节点", metadata: { smart: true, generationMode: "image" } };
+    // 缺省跟随当前主图（primaryImageId）；主图缺失时按契约取第一条可引用归档，显式 latest_success 策略直接跟随最新。
     const resources = nodeResourceItems(source);
     assert.deepEqual(resources.map((resource) => resource.storageKey), ["media/second.png"]);
-    assert.deepEqual(nodeResourceItems({ ...source, metadata: { ...source.metadata, content: "", images: source.metadata!.images!.map((image) => ({ ...image, content: "" })) } }).map((resource) => resource.storageKey), ["media/second.png"]);
+    assert.deepEqual(nodeResourceItems({ ...source, metadata: { ...source.metadata, primaryImageId: "gone" } }).map((resource) => resource.storageKey), ["media/first.png"]);
+    assert.deepEqual(nodeResourceItems({ ...source, metadata: { ...source.metadata, smartImageReferenceSelection: { mode: "latest_success" } } }).map((resource) => resource.storageKey), ["media/third.png"]);
 
     const inputs = buildNodeGenerationInputs("target", [source, target], [{ id: "connection", fromNodeId: "source", toNodeId: "target" }], buildCanvasGraphIndex([source, target], [{ id: "connection", fromNodeId: "source", toNodeId: "target" }]));
     assert.deepEqual(inputs.map((input) => input.type), ["image"]);
     assert.deepEqual(inputs.map((input) => input.type === "image" && input.image ? input.image.storageKey : undefined), ["media/second.png"]);
     assert.deepEqual(sourceNodeReferenceImages(source).map((image) => image.storageKey), ["media/second.png"]);
+});
+
+test("智能生成节点显式钉选历史结果时下游参考锁定那张", () => {
+    const source: CanvasNodeData = {
+        id: "source",
+        type: CanvasNodeType.Config,
+        title: "源智能节点",
+        position: { x: 0, y: 0 },
+        width: 340,
+        height: 240,
+        metadata: {
+            smart: true,
+            generationMode: "image",
+            primaryImageId: "image-3",
+            smartImageReferenceSelection: { mode: "selected_result", resultId: "image-2" },
+            images: [
+                { id: "image-1", status: "success", content: "first.png", storageKey: "media/first.png", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+                { id: "image-2", status: "success", content: "second.png", storageKey: "media/second.png", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+                { id: "image-3", status: "success", content: "third.png", storageKey: "media/third.png", naturalWidth: 100, naturalHeight: 100, bytes: 1, mimeType: "image/png" },
+            ],
+        },
+    };
+    assert.deepEqual(nodeResourceItems(source).map((resource) => resource.storageKey), ["media/second.png"]);
+    // 取消显式选择回到跟随最新。
+    assert.deepEqual(nodeResourceItems({ ...source, metadata: { ...source.metadata, smartImageReferenceSelection: undefined } }).map((resource) => resource.storageKey), ["media/third.png"]);
 });
 
 test("智能生图节点二次生成只读取自身文本入边，不借用下游配置节点的图片", () => {

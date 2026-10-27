@@ -103,6 +103,29 @@ test("automatic Clip refresh is superseded when the target input changes and nev
     db.close();
 });
 
+test("automatic Clip refresh carries the compiler target diagnostic instead of replacing it with a generic not-ready error", async () => {
+    const { db, store } = makeStore();
+    try {
+        const source = director(), entry = store.register("edit-diagnostic", 4, source, source, "CLIP_A");
+        const service = {
+            clipRefreshStore: () => store,
+            get: () => ({ revision: 4, draft: { director: source } }),
+            resolveSubjectPictureInputs: (_id: string, value: DirectorProduction) => value,
+            targetOccupancy: () => [],
+        };
+        const compilations = {
+            enqueue: () => ({ status: "succeeded", preparedId: "prepared-not-ready" }),
+            getCompilation: (_id: string, _owner: string, _operationId: string, view?: string) => view === "targets"
+                ? { items: [{ targetId: "CLIP_A", status: "blocked", diagnostics: [{ code: "INVALID_SUBJECT_SOURCE", path: "shots.S1.camera", message: "framing is required" }] }], total: 1 }
+                : { status: "succeeded", preparedId: "prepared-not-ready" },
+        };
+        new ClipRefreshCoordinator(service as any, compilations as any, "owner").wake("EP");
+        await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(store.get(entry.compilationOperationId)?.status, "blocked");
+        assert.deepEqual(store.get(entry.compilationOperationId)?.diagnostics, [{ code: "INVALID_SUBJECT_SOURCE", path: "shots.S1.camera", message: "framing is required" }]);
+    } finally { db.close(); }
+});
+
 
 test("refresh receipts resolve both public operation identity and compilation identity within their owner", () => {
  const { db, store } = makeStore();
@@ -112,5 +135,28 @@ test("refresh receipts resolve both public operation identity and compilation id
   assert.equal(store.get(entry.compilationOperationId)?.operationId, entry.operationId);
   assert.equal(new ClipRefreshStore(db, {kind:"episode",id:"OTHER"}).get(entry.operationId), undefined);
   assert.equal(store.get("edit"), undefined);
+ } finally { db.close(); }
+});
+
+test("a parent edit operation returns one aggregated status for all its targeted Clip refreshes", () => {
+ const { db, store } = makeStore();
+ try {
+  const first = job("parent:clip:CLIP_A", "CLIP_A", "2026-02-01T00:00:00.000Z", "succeeded");
+  const second = job("parent:clip:CLIP_B", "CLIP_B", "2026-02-01T00:00:01.000Z", "compiling");
+  first.application = { revision: 5, sourceHash: "s", referenceSync: [{ targetId: "CLIP_A", status: "ready" }, { targetId: "UNRELATED", status: "blocked" }] };
+  first.parentOperationId = "parent"; second.parentOperationId = "parent";
+  const insert = db.prepare("INSERT INTO production_clip_refresh_jobs(owner_kind,owner_id,operation_id,parent_operation_id,compilation_id,status,job_json) VALUES(?,?,?,?,?,?,?)");
+  for (const item of [first, second]) insert.run(item.owner.kind, item.owner.id, item.operationId, item.parentOperationId, item.compilationOperationId, item.status, JSON.stringify(item));
+  const coordinator = new ClipRefreshCoordinator({ clipRefreshStore: () => store } as any, {} as any, "owner");
+  const summary: any = coordinator.inspect("EP", "parent");
+  assert.equal(summary.targetCount, 2);
+  assert.equal(summary.status, "running");
+  assert.deepEqual(summary.counts, { ready: 1, running: 1, blocked: 0, failed: 0, translated: 0, translating: 0, translationRetryRequired: 0, translationRejectedStale: 0 });
+  assert.deepEqual(summary.phases, { source: "saved", compilation: "running", application: "pending", translation: "not_started", mediaSubmitted: false });
+  assert.deepEqual(summary.targets.map((item: any) => item.segmentId), ["CLIP_A", "CLIP_B"]);
+  assert.equal(summary.mediaSubmitted, false);
+  const one: any = coordinator.inspect("EP", first.operationId);
+  assert.deepEqual(one.phases, { source: "saved", compilation: "succeeded", application: "ready", translation: "not_started", mediaSubmitted: false });
+  assert.deepEqual(one.referenceSync.map((item: any) => item.targetId), ["CLIP_A"], "a per-Clip receipt never carries unrelated sync blockers");
  } finally { db.close(); }
 });

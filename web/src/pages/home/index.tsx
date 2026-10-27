@@ -1,11 +1,17 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Alert, App, Button, Empty, Input, Modal, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
 import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
+import { fetchProductionCanvasContext } from "@/services/backend-api";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
+import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
+import { PageHeader } from "@/components/layout/page-header";
+import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
+import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { cn } from "@/lib/utils";
 import { collectOutputs, projectCover, taskDestination, type WorkbenchOutput } from "./workbench-data";
 import { WorkbenchMediaPreview } from "./workbench-media";
@@ -15,9 +21,14 @@ type ProjectFilter = "all" | "canvas" | "drama" | "pinned";
 const surface = "rounded-[10px] border border-border bg-card";
 
 export default function IndexPage() {
+    return <WorkbenchCanvas><HomeWorkbench /></WorkbenchCanvas>;
+}
+
+function HomeWorkbench() {
     const { t, i18n } = useTranslation();
     const { message } = App.useApp();
     const navigate = useNavigate();
+    const canvasHost = useWorkbenchCanvas();
     const projects = useCanvasStore((s) => s.projects);
     const folders = useCanvasStore((s) => s.folders);
     const hydrated = useCanvasStore((s) => s.hydrated);
@@ -40,9 +51,14 @@ export default function IndexPage() {
     const [outputsOpen, setOutputsOpen] = useState(false);
     const [creating, setCreating] = useState(false);
     const [name, setName] = useState("");
+    const openDestinationRequest = useRef(0);
     const outputs = useMemo(() => collectOutputs(data.logs), [data.logs]);
     const folderFor = (p: CanvasProject) => data.canvasOwners.get(p.id);
     const isDrama = (p: CanvasProject) => data.canvasOwners.has(p.id);
+    const dramaDestination = (p: CanvasProject) => {
+        const episode = data.canvasEpisodes.get(p.id);
+        return episode ? dramaWorkbenchPath(episode.dramaId, episode.episodeId) : `/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`;
+    };
     const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const ordinaryProjects = sorted.filter((p) => !isDrama(p));
     const entries = [
@@ -57,7 +73,55 @@ export default function IndexPage() {
         nodes: project.summary?.nodeCount ?? project.nodes.length,
         connections: project.summary?.connectionCount ?? project.connections.length,
     });
-    const openProject = (id: string) => navigate(`/canvas/${encodeURIComponent(id)}`);
+    const openDestination = async (destination: string) => {
+        const requestId = ++openDestinationRequest.current;
+        const target = canvasHostLocation(destination, "");
+        if (target) {
+            const openInOverlay = () => canvasHost?.openCanvas({ projectId: target.projectId, nodeId: target.search.get("nodeId") || undefined, segmentId: target.search.get("segmentId") || undefined });
+            if (data.canvasOwners.has(target.projectId)) {
+                openInOverlay();
+                return;
+            }
+            // The latest-project card is available before the drama ownership queries finish.
+            // Resolve that one clicked project so an early click cannot escape the production layout.
+            if (!data.dramaReady && data.connected) {
+                try {
+                    const { context } = await fetchProductionCanvasContext(target.projectId);
+                    if (requestId !== openDestinationRequest.current) return;
+                    if (["episode", "scene", "shared-assets"].includes(context.role)) {
+                        openInOverlay();
+                        return;
+                    }
+                } catch (error) {
+                    if (requestId !== openDestinationRequest.current) return;
+                    message.error(error instanceof Error ? error.message : String(error));
+                    return;
+                }
+            }
+        }
+        if (requestId !== openDestinationRequest.current) return;
+        navigate(destination);
+    };
+    const openProject = (id: string) => openDestination(`/canvas/${encodeURIComponent(id)}`);
+    const continueEditing = async (projectId: string) => {
+        const requestId = ++openDestinationRequest.current;
+        const knownDrama = data.canvasOwners.get(projectId);
+        if (knownDrama || !data.dramaReady && data.connected) {
+            try {
+                const { context } = await fetchProductionCanvasContext(projectId);
+                if (requestId !== openDestinationRequest.current) return;
+                if (["episode", "scene", "shared-assets"].includes(context.role) && (context.dramaId || knownDrama?.id)) {
+                    canvasHost?.switchProductionCanvas({ projectId, dramaId: context.dramaId || knownDrama!.id, episodeId: context.episodeId || undefined, keepCanvasOpen: true });
+                    return;
+                }
+            } catch (error) {
+                if (requestId !== openDestinationRequest.current) return;
+                message.error(error instanceof Error ? error.message : String(error));
+                return;
+            }
+        }
+        if (requestId === openDestinationRequest.current) openProject(projectId);
+    };
     const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
     const extraCover = useProjectCoverResults(coverProjects.filter((p) => !projectCover(p, outputs, folderFor(p))).map((p) => [p.id, p.updatedAt]));
@@ -107,47 +171,38 @@ export default function IndexPage() {
         </section>
     );
 
+    const pageActions = (
+        <>
+            {hasWork ? creationActions : null}
+            <Button icon={<ListChecks className="size-4" />} onClick={() => setTasksOpen(true)}>
+                {t("home.workbench.tasks")}
+            </Button>
+            <Button
+                type="primary"
+                disabled={!hydrated || !data.connected}
+                icon={<Plus className="size-4" />}
+                onClick={() => {
+                    setName(t("canvas.defaultTitle", { count: projects.length + 1 }));
+                    setCreating(true);
+                }}
+            >
+                {t("canvas.create")}
+            </Button>
+        </>
+    );
+
     return (
         <main className="ui-controls min-h-full bg-background text-foreground" data-testid="home-workbench">
-            <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-8 lg:px-12">
-                <div className="mb-5 flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-                    <div className="min-w-0">
-                        <h1 className="ui-page-title">{t(hasWork ? "home.workbench.title" : "productionCanvas.entryTitle")}</h1>
-                        {!hasWork && <p className="ui-body mt-1 text-muted-foreground">{t("landing.canvasSubtitle")}</p>}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-2">
-                        {hasWork && creationActions}
-                        <Button icon={<ListChecks className="size-4" />} onClick={() => setTasksOpen(true)}>
-                            {t("home.workbench.tasks")}
-                        </Button>
-                        <Button
-                            type="primary"
-                            disabled={!hydrated || !data.connected}
-                            icon={<Plus className="size-4" />}
-                            onClick={() => {
-                                setName(t("canvas.defaultTitle", { count: projects.length + 1 }));
-                                setCreating(true);
-                            }}
-                        >
-                            {t("canvas.create")}
-                        </Button>
-                    </div>
-                </div>
+            <div className="mx-auto max-w-[1440px] px-4 pt-6 pb-24 sm:px-6 lg:px-8">
+                <PageHeader
+                    className="mb-5"
+                    width="gallery"
+                    title={t(hasWork ? "home.workbench.title" : "productionCanvas.entryTitle")}
+                    description={!hasWork ? t("landing.canvasSubtitle") : undefined}
+                    actions={pageActions}
+                />
                 {!hasWork && creationActions}
-                {!data.connected && (
-                    <Alert
-                        className="mb-5"
-                        type="warning"
-                        showIcon
-                        title={t("home.workbench.offline")}
-                        action={
-                            <Button size="small" onClick={() => navigate("/config")}>
-                                {t("home.workbench.settings")}
-                            </Button>
-                        }
-                    />
-                )}
-                {(data.errors.length > 0 || data.dramaError) && (
+                {data.connected && (data.errors.length > 0 || data.dramaError) && (
                     <Alert
                         className="mb-5"
                         type="warning"
@@ -166,7 +221,7 @@ export default function IndexPage() {
                             <button
                                 type="button"
                                 className={cn("relative shrink-0 overflow-hidden bg-muted/30", latestCover ? "h-40 w-full sm:h-auto sm:w-[28%]" : "w-20 sm:w-36")}
-                                onClick={() => openProject(latest.id)}
+                                onClick={() => void continueEditing(latest.id)}
                                 aria-label={t("landing.openCanvasNamed", { name: latest.title })}
                             >
                                 <div className="absolute inset-0"><WorkbenchMediaPreview media={latestCover} label={latestCover ? latest.title : t("landing.noPreview")} /></div>
@@ -182,8 +237,8 @@ export default function IndexPage() {
                                     </p>
                                 </div>
                                 <div className="flex shrink-0 flex-col items-start gap-2">
-                                    <Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => openProject(latest.id)}>{t("home.workbench.continue")}</Button>
-                                    {isDrama(latest) && <Link to={`/production?dramaId=${encodeURIComponent(folderFor(latest)?.id || "")}&workspace=series`} className="ui-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="size-4" /></Link>}
+                                    <Button icon={<ArrowRight className="size-4" />} iconPlacement="end" onClick={() => void continueEditing(latest.id)}>{t("home.workbench.continue")}</Button>
+                                    {isDrama(latest) && <Link to={dramaDestination(latest)} className="ui-caption inline-flex items-center gap-1 text-muted-foreground hover:text-foreground">{t("productionCanvas.backDrama")}<ArrowRight className="size-4" /></Link>}
                                 </div>
                             </div>
                         </> : <div className="flex items-start gap-4 p-5"><Workflow className="mt-0.5 size-6 shrink-0 text-muted-foreground" /><div><h2 className="ui-panel-title">{t("home.workbench.firstProject")}</h2><p className="ui-body mt-1 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div></div>}
@@ -300,7 +355,7 @@ export default function IndexPage() {
                                                 />
                                             </Tooltip>
                                         </div>
-                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="ui-caption inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground" to={`/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-4" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
+                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="ui-caption inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground" to={dramaDestination(p)}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-4" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
                                     </article>
                                 );
                             })}
@@ -424,9 +479,7 @@ export default function IndexPage() {
                 destroyOnHidden
             >
                 <div className="max-h-[65vh] overflow-y-auto">
-                    {!data.connected ? (
-                        <Empty description={t("home.workbench.offline")} />
-                    ) : data.tasks.length ? (
+                    {!data.connected ? null : data.tasks.length ? (
                         data.tasks.map((task) => {
                             const destination = taskDestination(task, projectIds);
                             return (
@@ -440,7 +493,7 @@ export default function IndexPage() {
                                         </div>
                                         <Tag color={task.status === "failed" ? "error" : task.status === "running" ? "processing" : task.status === "succeeded" ? "success" : "default"}>{t(`home.workbench.status_${task.status}`)}</Tag>
                                         {destination && (
-                                            <Button size="small" onClick={() => navigate(destination)}>
+                                            <Button size="small" onClick={() => openDestination(destination)}>
                                                 {t("home.workbench.openSource")}
                                             </Button>
                                         )}

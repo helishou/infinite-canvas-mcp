@@ -28,7 +28,7 @@ export function productionScriptGroups(blocks: Record<string, any>[]): Productio
  */
 function shotNamesSceneOccurrence(shot: Record<string, any>, group: { key: string; sceneId: string; blocks: Record<string, any>[] }, occurrencesPerEnvironment: Map<string, number>): boolean {
     const named = String(shot.source_scene_id || "");
-    if (named) return named === group.key || named === group.sceneId;
+    if (named) return named === group.key || named === group.sceneId || group.blocks.some(block => String(block.id || "") === named);
     const beats = new Set(group.blocks.flatMap(block => Array.isArray(block.beat_ids) ? block.beat_ids.map(String) : []));
     if (beats.size > 0) return (shot.story_beat_ids || []).some((id: unknown) => beats.has(String(id)));
     return String(shot.scene_id || "") === group.sceneId && occurrencesPerEnvironment.get(group.sceneId) === 1;

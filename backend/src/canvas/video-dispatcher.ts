@@ -13,6 +13,7 @@ import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../runtime/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
 import { generationSettingsSnapshot } from "./generation-settings.js";
+import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -32,6 +33,7 @@ export type CanvasVideoGenerationInput = {
     size?: string;
     seconds?: string;
     resolution?: string;
+    runTarget?: "local" | "cloud" | "hybrid";
     width?: number;
     height?: number;
     params?: Record<string, unknown>;
@@ -51,6 +53,28 @@ export class CanvasVideoDispatcher {
         private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
         /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
         private readonly runningHub?: RunningHubBackend) {}
+
+    /** H3 父日志记录自选模型实际工作流输入，沿用执行器字段过滤和显示名映射。 */
+    generationSettings(input: CanvasVideoGenerationInput) {
+        const plan = this.plan(this.prepare(input));
+        const params = { ...(plan.input.params || {}) };
+        const workflowFields = plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : [];
+        if (plan.workflow) {
+            const configured = recordOf(params.selectedVideoModelFieldValues);
+            const selected = recordOf(configured[`${plan.input.model}::${plan.workflow}`] ?? configured[plan.workflow]);
+            Object.assign(params, selected);
+        } else if (plan.kind === "direct") {
+            const configured = recordOf(params.selectedVideoModelFieldValues);
+            Object.assign(params, recordOf(configured[`direct:${plan.input.model}`]));
+        }
+        delete params.selectedVideoModelFieldValues;
+        return generationSettingsSnapshot(params, {
+            ...(plan.workflow ? { workflow: plan.workflow } : {}),
+            executor: plan.kind,
+            ...(plan.input.runTarget ? { runTarget: plan.input.runTarget } : {}),
+            ...(plan.input.workflowReferenceCount !== undefined ? { workflowReferenceCount: plan.input.workflowReferenceCount } : {}),
+        }, workflowFields);
+    }
 
     start(raw: CanvasVideoGenerationInput, onCreated?: (task: RuntimeTask) => void) {
         let input = this.prepare(raw);
@@ -73,6 +97,8 @@ export class CanvasVideoDispatcher {
         const targetSize = targetNode || { width: 340, height: 190 };
         const task = this.stores.tasks.create(taskId, "canvas-video", input, {
             projectId: input.projectId, nodeId: input.nodeId, executor: plan.kind, model: input.model,
+            ...(plan.workflow ? { workflow: plan.workflow } : {}),
+            ...(input.runTarget ? { runTarget: input.runTarget } : {}),
             videoTargetSize: project ? { width: targetSize.width, height: targetSize.height } : undefined,
             ...(input.params?.parentTaskId ? { parentTaskId: input.params.parentTaskId } : {}),
             ...(input.params?.canvasBinding ? { canvasBinding: input.params.canvasBinding } : {}),
@@ -104,7 +130,10 @@ export class CanvasVideoDispatcher {
                 executor: plan.kind, ...(input.workflowReferenceCount !== undefined ? { workflowReferenceCount: input.workflowReferenceCount } : {}),
             }, plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : []) },
         }).id : null;
-        void this.execute(plan, task, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
+        // Hybrid selection must inspect the live ComfyUI queue immediately before dispatch.
+        // The task already has its authoritative canvas binding at this point; executor is
+        // updated to the selected provider before any child job is submitted.
+        void this.execute(plan, task, logId, startedAt, true).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor: plan.kind };
     }
 
@@ -155,7 +184,14 @@ export class CanvasVideoDispatcher {
         return cancelled;
     }
 
-    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number) {
+    private async execute(plan: Plan, task: RuntimeTask, logId: string | null, startedAt: number, selectHybridProvider = false) {
+        if (selectHybridProvider) {
+            plan = await this.selectHybridProvider(plan, task.id);
+            if (plan.kind !== task.executor) {
+                this.stores.tasks.update(task.id, { executor: plan.kind });
+                task = this.stores.tasks.get(task.id) || { ...task, executor: plan.kind };
+            }
+        }
         this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
         const media = await this.dispatch(plan, task.id);
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
@@ -168,6 +204,38 @@ export class CanvasVideoDispatcher {
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result: { media: [media] } });
         this.stores.tasks.addEvent(task.id, "result", { media: [media] });
         if (logId) this.stores.logs.update(logId, { status: "success", outputs: [media], finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - startedAt) });
+    }
+
+    /** Resolve hybrid routing against both Backend-tracked work and ComfyUI's actual queue. */
+    private async selectHybridProvider(plan: Plan, currentTaskId: string): Promise<Plan> {
+        if (plan.kind !== "workflow" || !plan.workflow) return plan;
+        const workflowConfig = this.workflows.getConfig(plan.workflow);
+        const requestedTarget = plan.input.runTarget ?? workflowConfig?.runTarget ?? "local";
+        if (requestedTarget !== "hybrid") return plan;
+
+        const trackedLocalBusy = this.stores.tasks.list({ kind: "workflow", limit: 500 })
+            .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status))
+            || this.stores.tasks.list({ kind: "canvas-video", limit: 500 })
+                .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status) && task.executor === "workflow");
+        let comfyBusy: boolean;
+        try {
+            const baseUrl = (plan.input.comfyUrl || this.comfy.getUrl()).replace(/\/$/, "");
+            const response = await fetch(`${baseUrl}/queue`, { signal: AbortSignal.timeout(5000) });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const queue = await response.json() as { queue_running?: unknown; queue_pending?: unknown };
+            if (!Array.isArray(queue.queue_running) || !Array.isArray(queue.queue_pending)) throw new Error("响应缺少 queue_running/queue_pending");
+            comfyBusy = queue.queue_running.length > 0 || queue.queue_pending.length > 0;
+        } catch (error) {
+            throw new Error(`本地+RH 无法确认 ComfyUI 队列状态，未提交任务：${messageOf(error)}`);
+        }
+        if (!trackedLocalBusy && !comfyBusy) return plan;
+
+        const profileId = workflowConfig?.runningHubProfileId;
+        const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+        if (!profileId || !profile) {
+            throw new Error("本地 ComfyUI 正忙，但当前工作流没有绑定有效的 RunningHub 工作流；请先绑定 RH 工作流后重试");
+        }
+        return { ...plan, kind: "runninghub-workflow", runninghubProfileId: profileId };
     }
 
     private async dispatch(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
@@ -216,16 +284,27 @@ export class CanvasVideoDispatcher {
             this.track(taskId, childId);
             try {
                 // 平台提交、任务状态与媒体归档都交给 RunningHubBackend；视频档自身校验出视频结果。
+                const profile = runningHub.listWorkflowProfiles().find((item) => item.id === plan.runninghubProfileId);
+                if (!profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+                const localConfig = plan.workflow ? this.workflows.getConfig(plan.workflow) : null;
+                const localValues = workflowValues(plan.input, plan.workflow || "");
+                const values = bridgeLocalWorkflowValues(profile.fields || [], localConfig?.fields || [], localValues);
+                const [references, videos, audios] = await Promise.all([
+                    Promise.all((plan.input.references || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                    Promise.all((plan.input.videoReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                    Promise.all((plan.input.audioReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
+                ]);
                 const task = await runningHub.runWorkflow(plan.runninghubProfileId!, {
                     prompt: plan.input.prompt,
-                    references: plan.input.references || [],
-                    videoReferences: plan.input.videoReferences || [],
-                    audioReferences: plan.input.audioReferences || [],
-                }, { ...(plan.input.params || {}) }, {
+                    references,
+                    videos,
+                    audios,
+                }, values, {
                     parentTaskId: taskId,
                     projectId: plan.input.projectId,
                     nodeId: plan.input.nodeId,
                     model: plan.input.model,
+                    ...(localConfig?.outputNodes?.length ? { outputNodes: localConfig.outputNodes } : {}),
                     ...(plan.input.seconds ? { seconds: plan.input.seconds } : {}),
                     ...(plan.input.size ? { size: plan.input.size } : {}),
                     ...(plan.input.width && plan.input.height ? { width: plan.input.width, height: plan.input.height } : {}),
@@ -294,6 +373,20 @@ export class CanvasVideoDispatcher {
             if (resolved.binding.provider === "runninghub") {
                 if (!this.runningHub) throw new Error(`模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`);
                 return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: resolved.binding.profileId };
+            }
+            const workflowConfig = this.workflows.getConfig(resolved.binding.workflow);
+            const profileId = workflowConfig?.runningHubProfileId;
+            const requestedTarget = input.runTarget ?? workflowConfig?.runTarget ?? "local";
+            const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+            if (requestedTarget === "cloud" && !profileId) throw new Error("当前本地工作流没有绑定 RunningHub 工作流");
+            if (requestedTarget === "cloud" && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+            const localBusy = requestedTarget === "hybrid" && (
+                this.stores.tasks.list({ kind: "workflow", limit: 500 }).some((task) => ["queued", "running"].includes(task.status))
+                || this.stores.tasks.list({ kind: "canvas-video", limit: 500 }).some((task) => ["queued", "running"].includes(task.status) && task.executor === "workflow")
+            );
+            if ((requestedTarget === "cloud" || localBusy) && profileId && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+            if (profileId && profile && (requestedTarget === "cloud" || localBusy)) {
+                return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: profileId, workflow: resolved.binding.workflow };
             }
             return { input: withParams, kind: "workflow", workflow: resolved.binding.workflow };
         }
@@ -380,6 +473,20 @@ function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) {
 function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "audio" || field.node.split(",").some((id) => /(?:^|_)LoadAudio/.test((workflow[id] as any)?.class_type || "")); }
 function emptyWorkflowConfig(name: string): WorkflowConfig { return { title: name, backend: "", operation: "", description: "", fields: [] }; }
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
+    const values = { ...(input.params || {}) };
+    const configured = recordOf(values.selectedVideoModelFieldValues);
+    Object.assign(values, recordOf(configured[`${input.model}::${workflow}`] ?? configured[workflow]));
+    delete values.selectedVideoModelFieldValues;
+    // Keep generic canvas video settings available to RunningHub's node::input
+    // bridge. The local WorkflowExecutor applies these same fallback values before
+    // injecting its fields; without this, RH keeps profile.fieldValue (often 12s).
+    for (const key of ["seconds", "size", "resolution", "width", "height"] as const) {
+        if (values[key] === undefined && input[key] !== undefined) values[key] = input[key];
+    }
+    if (values.seconds === undefined && values.duration !== undefined) values.seconds = values.duration;
+    return values;
+}
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }
 function firstMedia(task: RuntimeTask) { const media = task.result?.media; const values = Array.isArray(media) ? media : media && typeof media === "object" ? [media] : []; const output = values.find((item: any) => String(item?.mimeType || "").startsWith("video/")) || values[0]; if (!output || typeof output !== "object") throw new Error("视频任务完成但没有返回媒体"); return output as Record<string, unknown>; }

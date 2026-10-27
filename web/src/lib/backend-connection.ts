@@ -1,10 +1,45 @@
 type Connection = { url: string; token: string };
 let active: Connection | undefined;
 
+function isLoopbackHost(hostname: string) {
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(hostname.toLowerCase());
+}
+
+/** Local Vite pages can proxy to the Backend even when opened through a LAN IP. */
+export function shouldUseViteBackendProxy(value: string) {
+    if (typeof window === "undefined" || window.location.port !== "3001") return false;
+    try {
+        const page = new URL(window.location.href);
+        const backend = new URL(value, page.origin);
+        return backend.port === "17370" && backend.pathname === "/" && (isLoopbackHost(backend.hostname) || backend.hostname === page.hostname);
+    } catch {
+        return false;
+    }
+}
+
+export function viteBackendAgentEndpoint(value: string) {
+    return shouldUseViteBackendProxy(value) ? "/agent" : `${value.replace(/\/$/, "")}/agent`;
+}
+
 export function defaultBackendUrl(): string {
     const configured = typeof window === "undefined" ? undefined : window.__RUNTIME_CONFIG__?.BACKEND_URL;
     const value = configured?.trim() || import.meta.env?.VITE_BACKEND_URL?.trim();
-    return value ? new URL(value, window.location.origin).href.replace(/\/$/, "") : "http://127.0.0.1:17370";
+    if (value) return new URL(value, window.location.origin).href.replace(/\/$/, "");
+    if (typeof window !== "undefined" && window.location.protocol === "http:") {
+        const hostname = window.location.hostname;
+        const octets = hostname.split(".").map(Number);
+        if (octets.length === 4 && octets.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+            const [a, b] = octets;
+            const isPrivateLan = a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+            if (isPrivateLan) {
+                const backend = new URL(window.location.origin);
+                backend.port = "17370";
+                backend.pathname = "/";
+                return backend.origin;
+            }
+        }
+    }
+    return "http://127.0.0.1:17370";
 }
 
 export function normalizeBackendAddress(value: string) {

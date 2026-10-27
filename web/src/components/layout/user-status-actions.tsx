@@ -47,7 +47,7 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     const themeButton = <AnimatedThemeToggler theme={theme} onThemeChange={setTheme} className={naturalIconClass} style={iconStyle} aria-label={themeLabel} title={themeLabel} />;
 
     return (
-        <div className="inline-flex shrink-0 items-center gap-0.5">
+        <div className="inline-flex shrink-0 items-center gap-1">
             {onOpenPlugins ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />
@@ -64,7 +64,7 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
                 </button>
             ) : null}
             {variant !== "canvas" ? (
-                <div className="hidden items-center gap-0.5 sm:inline-flex">
+                <div className="hidden items-center gap-1 sm:inline-flex">
                     {languageButton}
                     {themeButton}
                 </div>

@@ -52,13 +52,14 @@ type NodeGenerationGroupInput = {
 export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGroupInput;
 
 export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string, index?: CanvasGraphIndex, loopContext?: CanvasLoopRuntimeContext): NodeGenerationContext {
-    const formal = productionImageInput(nodes.find(node => node.id === nodeId));
-    if (formal) {
+    const sourceNode = nodes.find(node => node.id === nodeId);
+    const formal = productionImageInput(sourceNode);
+    const hasLiveReferenceList = Array.isArray(sourceNode?.metadata?.canvasReferenceNodeIds);
+    if (formal && !hasLiveReferenceList) {
         const referenceImages = formal.references.map(ref => ({ id: `${ref.nodeId}:${ref.label}`, name: `${ref.label} · ${ref.assetId} · ${ref.role}`, type: "image/png", dataUrl: "", storageKey: ref.storageKey }));
         return { prompt, referenceImages, loopInputImages: [], referenceVideos: [], referenceAudios: [], textCount: 0, imageCount: referenceImages.length, videoCount: 0, audioCount: 0 };
     }
     const inputs = buildNodeGenerationInputs(nodeId, nodes, connections, index, loopContext);
-    const sourceNode = nodes.find((node) => node.id === nodeId);
     const separateLoopImages = Boolean(loopContext?.nodeId && (
         sourceNode?.type === CanvasNodeType.Loop && (sourceNode.metadata?.generationMode || "image") === "image"
         || sourceNode?.type === CanvasNodeType.Image
@@ -443,12 +444,15 @@ export function buildNodeResponseMessages(context: NodeGenerationContext): AiTex
     ];
 }
 
-export async function hydrateNodeGenerationContext(context: NodeGenerationContext) {
+export async function hydrateNodeGenerationContext(context: NodeGenerationContext, options: { preserveStorageKeys?: boolean } = {}) {
     const { imageToDataUrl } = await import("@/services/image-storage");
+    const hydrateImage = (image: ReferenceImage) => options.preserveStorageKeys && image.storageKey
+        ? Promise.resolve({ ...image, dataUrl: "" })
+        : imageToDataUrl(image).then(dataUrl => ({ ...image, dataUrl }));
     return {
         ...context,
-        referenceImages: await Promise.all(context.referenceImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
-        loopInputImages: await Promise.all(context.loopInputImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) }))),
+        referenceImages: await Promise.all(context.referenceImages.map(hydrateImage)),
+        loopInputImages: await Promise.all(context.loopInputImages.map(hydrateImage)),
     };
 }
 

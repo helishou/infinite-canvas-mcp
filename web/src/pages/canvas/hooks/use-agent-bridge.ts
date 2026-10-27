@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type Dispatch, type MutableR
 
 import i18n from "@/i18n";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
+import { planCanvasAgentOperations, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { flushCanvasSyncNow, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasConnection, CanvasNodeData, ContextMenuState } from "@/types/canvas";
@@ -66,21 +66,19 @@ export function useAgentBridge(params: AgentBridgeParams) {
                     ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes" as const, fromNodeId, toNodeId: op.nodeId, role: "reference", order })),
                 ];
             });
-            const next = applyCanvasAgentOps(
-                before,
-                [...safeOps.filter((op) => op.type !== "run_generation"), ...promptPersistenceOps, ...referenceOps],
-            );
-            nodesRef.current = next.nodes;
-            connectionsRef.current = next.connections;
-            selectedNodeIdsRef.current = new Set(next.selectedNodeIds);
+            // 意图 → 显式后端 op；提交后本地按同一份 op 回放，不再用整图快照求差分。
+            const plan = planCanvasAgentOperations(before, [...safeOps.filter((op) => op.type !== "run_generation"), ...promptPersistenceOps, ...referenceOps]);
             setAgentUndoSnapshot(before);
-            setNodes(next.nodes);
-            setConnections(next.connections);
-            setSelectedNodeIds(new Set(next.selectedNodeIds));
+            const next = plan.operations.length ? useCanvasStore.getState().applyCanvasOperations(projectId, plan.operations) : null;
+            const nodes = next?.nodes ?? nodesRef.current;
+            const connections = next?.connections ?? connectionsRef.current;
+            const selected = plan.selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+            nodesRef.current = nodes;
+            connectionsRef.current = connections;
+            selectedNodeIdsRef.current = new Set(selected);
+            setSelectedNodeIds(new Set(selected));
             setSelectedConnectionId(null);
             setContextMenu(null);
-            // Agent 批量操作后立即提交节点和连线，浏览器视口始终由本地 UI 持有。
-            useCanvasStore.getState().updateProject(projectId, { nodes: next.nodes, connections: next.connections });
             if (generationOps.length) {
                 const uniqueGenerationOps = [...new Map(generationOps.map((op) => [op.nodeId, op])).values()];
                 void flushCanvasSyncNow().then(() => {
@@ -91,9 +89,9 @@ export function useAgentBridge(params: AgentBridgeParams) {
                     });
                 });
             }
-            return { ...next, projectId, title: projectTitle, viewport: undefined };
+            return { ...before, nodes, connections, selectedNodeIds: selected, viewport: undefined };
         },
-        [projectTitle, projectId],
+        [projectTitle, projectId, setSelectedConnectionId, setContextMenu, setSelectedNodeIds],
     );
     const undoAgentOps = useCallback(() => {
         if (!agentUndoSnapshot) return null;

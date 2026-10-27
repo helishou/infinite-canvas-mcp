@@ -18,7 +18,8 @@ function handler(name: string, context: Record<string, any>): (...args: any[]) =
 function harness() {
     const selected: any[] = [], drafts: any[] = [], points: any[] = [], writes: any[] = [];
     const c: any = { disabled: false, changeDraft: undefined, creating: false, creatingRef: { current: false }, confirmedDraft: { current: false }, triggerElement: { current: null },
-        continuityTrackPoint, viewFor: () => ({ duration: 96, segments: [{ start: 12, end: 36, value: 'closed' }, { start: 36, end: 60, value: 'open' }], markers: [{ frame: 36, event: { id: 'E' } }] }),
+        continuityTrackPoint, continuityBlocksForShot: () => [{ id: 'B' }], continuityDefaultEvidenceBlockId: (blocks: any[]) => blocks.length === 1 ? blocks[0].id : '', source: {}, sourceBlocks: [], fullShots: [{ id: 'S' }],
+        viewFor: () => ({ duration: 96, segments: [{ start: 12, end: 36, value: 'closed' }, { start: 36, end: 60, value: 'open' }], markers: [{ frame: 36, event: { id: 'E' } }] }),
         select: (...value: any[]) => selected.push(value), setInlinePoint: (value: any) => points.push(value), onChangeDraft: (value: any) => drafts.push(value), setCreating: (value: boolean) => writes.push(value),
     };
     return { c, selected, drafts, points, writes };
@@ -34,11 +35,11 @@ test('the track opens the exact clicked state or existing event without writing 
     open('F', 'S', trigger, 8 / 96);
     assert.equal(selected.length, 2); assert.equal(drafts.length, 0); assert.equal(c.triggerElement.current, trigger);
 });
-test('inline create preserves the chosen position but never invents after-state, reason or evidence', () => {
+test('inline create preselects unambiguous script evidence for the user to confirm, without inventing after-state or reason', () => {
     const { c, selected, drafts } = harness();
     handler('beginInlineChange', c)('F', 'S', 18);
     assert.deepEqual(selected, [['F', 'S', undefined, 18]]);
-    assert.deepEqual(drafts, [{ factId: 'F', shotId: 'S', frame: '18', after: '', reason: '', sourceBlockId: '' }]);
+    assert.deepEqual(drafts, [{ factId: 'F', shotId: 'S', frame: '18', after: '', reason: '', sourceBlockId: 'B' }]);
 });
 test('disabled, absent and out-of-presence targets cannot start a change; another target cannot steal an unfinished form', () => {
     for (const patch of [{ disabled: true }, { creating: true }, { changeDraft: { shotId: 'original', reason: 'Keep me' } }, { viewFor: () => undefined }]) {

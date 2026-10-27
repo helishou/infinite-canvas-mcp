@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { createStores } from "../stores/index.js";
 import { EpisodeProductionService } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { directorHash } from "./director.js";
-import { directorProductionSchema } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, directorProductionSchema } from "@basketikun/canvas-agent/drama/production-contract";
 import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import { startServer } from "../server.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
@@ -23,27 +24,43 @@ function fixture(t: test.TestContext, bound = true) {
     db.upsertCanvasFolder({ id: "drama", name: "剧目", isDrama: true, createdAt: new Date().toISOString() });
     if (bound) db.createCanvasProject({ id: "canvas", nodes: [], connections: [] });
     db.upsertDramaEpisode({ id: "ep", dramaId: "drama", episodeNumber: 1, title: "第一集", synopsis: "", canvasId: bound ? "canvas" : null });
-    const source = { prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [{ id: "C1", name: "同名", appearance: { description: "机械人", identity: "保留身份" } }, { id: "C2", name: "同名", description: "另一个角色" }], scene_registry: [{ id: "S1", name: "船舱", description: "铁壁" }], shots: [], segments: [], utterances: [], asset_plan: [{ id: "P1", kind: "prop", asset_name: "扳手", description: "生锈" }, { id: "STYLE", kind: "style", asset_name: "风格" }], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [{ id: "C1", name: "同名", appearance: { description: "机械人", identity: "保留身份" } }, { id: "C2", name: "同名", description: "另一个角色" }], scene_registry: [{ id: "S1", name: "船舱", description: "铁壁" }], shots: [], segments: [], utterances: [], asset_plan: [{ id: "P1", kind: "prop", asset_name: "扳手", description: "生锈" }, { id: "STYLE", kind: "style", asset_name: "风格" }], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director = directorProductionSchema.parse({ schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: directorHash(source), assets: {}, shotInputs: {}, modules: {}, artifacts: [], boundaries: [], unresolved: [], workflow: {}, executionAuthorized: false });
     const service = new EpisodeProductionService(db, new BackendEventBus(), dir, false, () => {});
     const saved = service.edit("ep", { operationId: "init", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     return { db, service, saved, runner: new EpisodeProductionRunner(service, createStores(db), {} as any) };
 }
 const entity = (db: BackendDatabase, id: string) => (db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.metadata?.productionEntity?.entityId === id);
+const projectionHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex");
+function clipProjectionInputHash(segment: Record<string, any>) {
+    const fields: Array<[string, unknown]> = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"].map(key => [key, segment[key] ?? null]);
+    if (segment.productionClipProjection?.styleTemplateDeclared === true) fields.push(["styleTemplateDeclared", true]);
+    return projectionHash(fields);
+}
 
-test("source creates one typed node per registry identity, excludes style, and preparation replays without duplication", t => {
+test("source creates one typed node per registry identity, excludes style, and preparation replays without duplication", async t => {
     const f = fixture(t);
     assert.deepEqual((f.db.getCanvasProject("canvas")!.nodes as any[]).filter(node => node.metadata?.productionEntity).map(node => node.type).sort(), ["character", "character", "prop", "scene"]);
     assert.notEqual(entity(f.db, "C1").id, entity(f.db, "C2").id);
-    assert.throws(() => f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:missing"], "invalid-entity"), /制作实体不存在/);
+    await assert.rejects(() => f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:missing"], "invalid-entity"), /制作实体不存在/);
     assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("invalid-entity"), undefined);
-    const result = f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:C1"], "prepare-entities");
-    const replay = f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:C1"], "prepare-entities");
+    const result = await f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:C1"], "prepare-entities");
+    const replay = await f.runner.prepareTargets("ep", f.saved.revision, ["entity:character:C1"], "prepare-entities");
     assert.equal(replay.replayed, true); assert.equal(result.revision, replay.revision);
     assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).filter(node => node.metadata?.productionEntity).length, 4);
 });
 
-test("node edits and workbench edits share the draft, retain structured fields, geometry and adjacent entities", t => {
+test("deleting an episode Subject also removes its bound canvas entity node", async t => {
+    const f = fixture(t), current = f.service.get("ep"), source = structuredClone(current.draft.director!.source) as any;
+    source.subject_registry.push({ id: "SUB_C1", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "C1" }, pictureBindings: [] });
+    const registered = await f.service.edit("ep", { operationId: "register-delete-subject", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: { ...current.draft.director!, source, sourceHash: directorHash(source) } }] });
+    const nodeId = entity(f.db, "C1").id;
+    await f.service.edit("ep", { operationId: "delete-subject-and-node", expectedRevision: registered.revision, ops: [{ type: "delete_director_subject", id: "SUB_C1" }] });
+    assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).some(node => node.id === nodeId), false);
+    assert.equal((f.service.get("ep").draft.director!.source.subject_registry as any[]).some(subject => subject.id === "SUB_C1"), false);
+});
+
+test("node edits and workbench edits share the draft, retain structured fields, geometry and adjacent entities", async t => {
     const f = fixture(t), node = entity(f.db, "C1"), before = f.service.get("ep");
     const ops = [{ type: "update_node", id: node.id, patch: { title: "铆钉", position: { x: 123, y: 456 } }, metadata: { characterName: "铆钉", characterDescription: "蓝色机械人" } }];
     const commit = f.db.applyCanvasProjectOperations("canvas", Number(f.db.getCanvasProject("canvas")!.revision), ops, { operationId: "edit-node" });
@@ -54,7 +71,7 @@ test("node edits and workbench edits share the draft, retain structured fields, 
     const replay = f.db.applyCanvasProjectOperations("canvas", commit.revision - 1, ops, { operationId: "edit-node" });
     assert.equal(replay.duplicated, true);
     const current = f.service.get("ep");
-    f.service.edit("ep", { operationId: "edit-workbench", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "character", id: "C1", patch: { name: "新名字" } }] });
+    await f.service.edit("ep", { operationId: "edit-workbench", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "character", id: "C1", patch: { name: "新名字" } }] });
     assert.equal(entity(f.db, "C1").metadata.characterName, "新名字");
     assert.equal(entity(f.db, "C1").metadata.characterDescription, "蓝色机械人");
     assert.deepEqual(entity(f.db, "C1").position, { x: 123, y: 456 });
@@ -62,9 +79,77 @@ test("node edits and workbench edits share the draft, retain structured fields, 
     assert.throws(() => f.db.applyCanvasProjectOperations("canvas", Number(f.db.getCanvasProject("canvas")!.revision), [{ type: "update_node", id: node.id, metadata: { productionEntity: { ...node.metadata.productionEntity, entityId: "C2" } } }], { operationId: "forge" }), /Backend/);
 });
 
+test("character voice binding and description sync through the production source used by compilation", async t => {
+    const f = fixture(t), node = entity(f.db, "C1");
+    const voiceMetadata = {
+        characterVoiceUrl: "/media/voice.wav", characterVoiceName: "清冷女声",
+        characterVoiceStorageKey: "voice-key", characterVoiceAssetId: "VOICE_1",
+        characterVoiceDescription: "中低音域，清亮克制，语速偏慢。",
+    };
+    f.db.applyCanvasProjectOperations("canvas", Number(f.db.getCanvasProject("canvas")!.revision), [{ type: "update_node", id: node.id, metadata: voiceMetadata }], { operationId: "bind-character-voice" });
+    const character = (f.service.get("ep").draft.director!.source.character_registry as any[]).find(item => item.id === "C1");
+    assert.equal(character.voice_description, voiceMetadata.characterVoiceDescription);
+    assert.deepEqual(character.voice, { url: voiceMetadata.characterVoiceUrl, name: voiceMetadata.characterVoiceName, storageKey: voiceMetadata.characterVoiceStorageKey, assetId: voiceMetadata.characterVoiceAssetId });
+    const current = f.service.get("ep");
+    await f.service.edit("ep", { operationId: "edit-character-voice", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "character", id: "C1", patch: { voice_description: "沙哑低沉，尾音短促。" } }] });
+    assert.equal(entity(f.db, "C1").metadata.characterVoiceDescription, "沙哑低沉，尾音短促。");
+    assert.equal(entity(f.db, "C1").metadata.characterVoiceStorageKey, "voice-key");
+});
+
 test("prop image resolves into the same generation reference path as scene images", () => {
     const result = resolveCanvasImageReferenceNode({ id: "prop", type: "prop", metadata: { propImage: { storageKey: "archived-prop", name: "扳手" } } });
     assert.equal(result[0].storageKey, "archived-prop"); assert.equal(result[0].name, "扳手");
+});
+
+test("a Subject identity picture projects onto its prop node and follows later source image updates", async t => {
+    const f = fixture(t), current = f.service.get("ep");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "prop-picture", nodeType: "config", title: "扳手身份图", metadata: {
+        generationMode: "image", status: "success", storageKey: "prop-image-v1", content: "/media/prop-image-v1.png", mimeType: "image/png", naturalWidth: 640, naturalHeight: 640,
+    } }], { runtimeWrite: true });
+    await f.service.edit("ep", { operationId: "register-prop-picture-subject", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: {
+        id: "SUBJECT_P1", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "asset", id: "P1" },
+        pictureBindings: [{ id: "P1-identity", assetId: "P1", sourceNode: { projectId: "canvas", nodeId: "prop-picture" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["扳手身份"], exclude: [], applicableState: {}, defaultFor: ["identity"] }],
+    } }] });
+    assert.equal(entity(f.db, "P1").metadata.propImage.storageKey, "prop-image-v1");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "prop-picture", metadata: { storageKey: "prop-image-v2", content: "/media/prop-image-v2.png" } }], { runtimeWrite: true, source: { kind: "task", clientId: "task:prop-picture" } });
+    assert.equal(entity(f.db, "P1").metadata.propImage.storageKey, "prop-image-v2");
+    assert.equal(entity(f.db, "P1").metadata.propImage.url, "/media/prop-image-v2.png");
+});
+
+test("scene image source changes flow into linked H3 scene references and mark prior output outdated", async t => {
+    const f = fixture(t), scene = entity(f.db, "S1"), current = f.service.get("ep");
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "scene-picture", nodeType: "image", title: "场景图", metadata: {
+        status: "success", storageKey: "scene-image-v1", content: "/media/scene-image-v1.png", mimeType: "image/png",
+    } }], { runtimeWrite: true });
+    await f.service.edit("ep", { operationId: "register-scene-picture-subject", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: {
+        id: "SUBJECT_S1", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "scene", id: "S1" },
+        pictureBindings: [{ id: "S1-identity", assetId: "S1", sourceNode: { projectId: "canvas", nodeId: "scene-picture" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: ["场景身份"], exclude: [], applicableState: {}, defaultFor: ["identity"] }],
+    } }] });
+    const referenceBindings = [
+        { id: "scene-ref", assetId: "scene-asset", label: "场景", role: "scene", mediaType: "image", sourceNodeId: scene.id, url: "/media/scene-image-v1.png", storageKey: "scene-image-v1", mimeType: "image/png", enabled: true },
+        { id: "manual-ref", assetId: "manual-asset", label: "手动参考", role: "other", mediaType: "image", url: "/media/manual.png", storageKey: "manual-image", mimeType: "image/png", enabled: true },
+    ];
+    const segment: Record<string, any> = { id: "clip", prompt: "雨夜廊下", referenceBindings, result: "/media/old-clip.mp4", resultStorageKey: "video:old-clip", productionClipProjection: { fieldHashes: { referenceBindings: projectionHash(referenceBindings) } } };
+    segment.productionClipProjection.inputHash = clipProjectionInputHash(segment);
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "h3", nodeType: "minimax-h3:video", title: "H3", metadata: { segments: [segment] } }], { runtimeWrite: true });
+
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "scene-picture", metadata: { storageKey: "scene-image-v2", content: "/media/scene-image-v2.png" } }], { runtimeWrite: true });
+
+    const project = f.db.getCanvasProject("canvas")!, nextScene = (project.nodes as any[]).find(node => node.id === scene.id), h3 = (project.nodes as any[]).find(node => node.id === "h3");
+    const nextSegment = h3.metadata.segments[0];
+    assert.equal(nextScene.metadata.sceneImage.storageKey, "scene-image-v2");
+    assert.equal(nextSegment.referenceBindings[0].storageKey, "scene-image-v2");
+    assert.equal(nextSegment.referenceBindings[0].url, "/media/scene-image-v2.png");
+    assert.equal(nextSegment.referenceBindings[1].storageKey, "manual-image");
+    assert.equal(nextSegment.inputOutdated, true);
+    assert.equal(nextSegment.resultStorageKey, "video:old-clip");
+    assert.equal(nextSegment.productionClipProjection.fieldHashes.referenceBindings, projectionHash(nextSegment.referenceBindings));
+    assert.equal(nextSegment.productionClipProjection.inputHash, clipProjectionInputHash(nextSegment));
+
+    f.db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: scene.id, metadata: { sceneImage: { url: "/media/scene-image-v3.png", storageKey: "scene-image-v3", mimeType: "image/png" } } }], {
+        runtimeWrite: true, source: { kind: "system", clientId: "system:shared-library", label: "同步共享资产" },
+    });
+    assert.equal((f.db.getCanvasProject("canvas")!.nodes as any[]).find(node => node.id === "h3").metadata.segments[0].referenceBindings[0].storageKey, "scene-image-v3");
 });
 
 test("renaming a typed node title writes its entity name and replays the original unmodified command", t => {
@@ -83,11 +168,11 @@ test("saving entities on an unbound episode creates and binds its canvas in the 
     assert.equal((f.db.getCanvasProject(canvasId)!.nodes as any[]).filter(node => node.metadata?.productionEntity).length, 4);
 });
 
-test("workbench edits on a promoted entity persist as reference intent until explicit library update", t => {
+test("workbench edits on a promoted entity persist as reference intent until explicit library update", async t => {
     const f = fixture(t), node = entity(f.db, "C1");
     const asset = f.db.upsertAsset({ id: "shared-C1", kind: "character", dramaId: "drama", title: node.title, coverUrl: "", tags: [], folderId: null, note: null, source: "Canvas", metadata: {}, data: { images: [], description: node.metadata.characterDescription }, createdAt: "now", updatedAt: "now" }, { operationId: "promote-entity", canvasSource: { projectId: "canvas", nodeId: node.id } });
     const current = f.service.get("ep");
-    f.service.edit("ep", { operationId: "workbench-reference-edit", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "character", id: "C1", patch: { name: "本集名称" } }] });
+    await f.service.edit("ep", { operationId: "workbench-reference-edit", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "character", id: "C1", patch: { name: "本集名称" } }] });
     const reference = entity(f.db, "C1");
     assert.equal(reference.metadata.characterName, "本集名称");
     assert.equal(reference.metadata.sharedAssetReference.edits["metadata.characterName"].value, "本集名称");

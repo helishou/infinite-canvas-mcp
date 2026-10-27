@@ -14,7 +14,7 @@ export function SmartImageNodePicker({ canvasId, canvasNodes, assets = {}, asset
     const { t } = useTranslation();
     const [opened, setOpened] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(""), [retry, setRetry] = useState(0);
     const projects = useCanvasStore(state => state.projects);
-    const idsKey = JSON.stringify([...new Set(Object.values(assets).flatMap(asset => asset.sharedSource?.sourceProjectId && asset.sharedSource.sourceProjectId !== canvasId ? [String(asset.sharedSource.sourceProjectId)] : []))].sort());
+    const idsKey = JSON.stringify([...new Set(assetPlan.flatMap(plan => plan.sharedSource?.sourceProjectId && plan.sharedSource.sourceProjectId !== canvasId ? [String(plan.sharedSource.sourceProjectId)] : []))].sort());
     useEffect(() => {
         if (!opened) return;
         let active = true; setLoading(true); setError("");
@@ -28,7 +28,7 @@ export function SmartImageNodePicker({ canvasId, canvasNodes, assets = {}, asset
         if (opened && selected && known && !loading && !choices.some(choice => imageChoiceKey(choice) === selected)) onUnavailable?.();
     }, [opened, selected, value?.projectId, canvasId, projects, loading, choices, onUnavailable]);
     const available = choices.filter(choice => !excluded.has(imageChoiceKey(choice)) || imageChoiceKey(choice) === selected);
-    const options = available.map(choice => ({ value: imageChoiceKey(choice)!, label: `${choice.title || t("director.crud.imageNode")} · ${t(choice.shared ? "director.nodePicker.shared" : "director.nodePicker.current")}` }));
+    const options = available.map(choice => ({ value: imageChoiceKey(choice)!, label: `${choice.title || t("director.crud.imageNode")} · ${t(choice.sharedProjection ? "director.nodePicker.sharedProjection" : choice.shared ? "director.nodePicker.shared" : "director.nodePicker.current")}` }));
     if (selected && !options.some(option => option.value === selected)) options.push({ value: selected, label: t("director.crud.boundImage") });
     return <div className="min-w-0 flex-1 space-y-1">
         <Select className="w-full" showSearch optionFilterProp="label" value={selected} disabled={disabled} placeholder={placeholder} loading={loading} options={options} onOpenChange={open => { if (open) setOpened(true); }} onChange={key => { const choice = choices.find(choice => imageChoiceKey(choice) === key); if (choice) onChange(choice); }} />

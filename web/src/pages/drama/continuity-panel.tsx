@@ -1,38 +1,28 @@
-import { analyzeContinuityDeletion, applyContinuityDeletion, restoreContinuityDeletion, continuityLedgerEntryId, type ContinuityLedgerCollection } from "./continuity-ledger-mutations";
+import { analyzeContinuityDeletion, applyContinuityDeletion, restoreContinuityDeletion, continuityLedgerEntryId, continuityLedgerFactDescriptions, type ContinuityLedgerCollection } from "./continuity-ledger-mutations";
 import { appendContinuityHold, appendContinuityExemption, normalizedContinuityValues } from "./continuity-ledger-evidence";
 import { useBlocker } from "react-router-dom";
 import { appendContinuityChange, type ContinuityChangeInput } from "./continuity-event-draft";
 import { ContinuityTimelineWorkbench } from "./continuity-timeline-workbench";
-import { continuityLocalFrame, continuityReadProjection, continuityEventPositionIssues, continuityPreviewStatus, continuitySourceBlocks, continuityBlocksForShot } from "./continuity-timeline-model";
+import { continuityLocalFrame, continuityReadProjection, continuityEventPositionIssues, continuityPreviewStatus, continuitySourceBlocks, continuityBlocksForShot, continuityDefaultEvidenceBlockId, continuityWorkbenchSource } from "./continuity-timeline-model";
 import { ChevronDown, CircleHelp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Dropdown, Input, message, Popover, Select, Switch, Tag } from "antd";
 import { useTranslation } from "react-i18next";
 import type { ProductionContinuity } from "@/services/backend-api";
-import { useAgentStore } from "@/stores/use-agent-store";
 import { continuityPresentation } from "./continuity-presentation";
 import { records } from "./director-display";
 import { continuityEventAnchor, continuityEventFrame } from "./continuity-event-anchor";
 import { readContinuityLedgerDraft, rebaseContinuityLedger, continuityLedgerConflicts } from "./continuity-ledger-draft";
+import { continuityCoverageDigestValue } from "./continuity-source-digest";
 
 type Row = Record<string, any>;
 const blankLedger = () => ({ contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] });
 const id = () => `C_${crypto.randomUUID()}`;
 const stable = (value: any): string => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
-function ledgerV2FromAgent(text: string): Row | null {
-  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match => match[1]);
-  for (const candidate of [...fenced.reverse(), text]) {
-    try {
-      const value = JSON.parse(candidate.trim());
-      if (value && typeof value === "object" && value.contract_version === 2 && ["facts", "timelines", "initial", "events", "requirements", "coverage"].every(key => Array.isArray(value[key]))) return value;
-    } catch { /* Check the next fenced block or the complete message. */ }
-  }
-  return null;
-}
 async function sourceDigest(sceneId: string, block: Row) {
-  const bytes = new TextEncoder().encode(stable({ scene_id: sceneId, block }));
+  const bytes = new TextEncoder().encode(stable(continuityCoverageDigestValue(sceneId, block)));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest)).map(value => value.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(digest)).map(item => item.toString(16).padStart(2, "0")).join("");
 }
 
 function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disabled, onSave, summary }: { from: string; to: string; fromLabel: string; toLabel: string; boundary?: Row; disabled: boolean; onSave: (value: Row) => void; summary?: ReactNode }) {
@@ -49,31 +39,32 @@ function BoundaryContinuityRow({ from, to, fromLabel, toLabel, boundary, disable
   </article>;
 }
 
-export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, agentThreadId, busy, snapshotLoading = false, titleAlreadyVisible = false, editable, onSave, onPreviewUpgrade, onCheck, onLocate, onAskDirector, onRequestAgentUpgrade, onBoundary, onSnapshot }: {
+export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subjectAssembly = false, draftValue, onDraftChange, scenes, locations = [], shots, segments, boundaries, characters, assets, report, workId, busy, snapshotLoading = false, titleAlreadyVisible = false, editable, onSave, onCheck, onLocate, onAskDirector, onBoundary, onSnapshot }: {
   source?: Row; ledger?: Row; sourceHash: string; scenes: Row[]; locations?: Row[]; shots: Row[]; segments: Row[]; boundaries: Row[]; characters: Row[]; assets: Row[]; report?: ProductionContinuity;
-  workId?: string; agentThreadId?: string;
+  workId?: string;
   subjectAssembly?: boolean;
   draftValue?: string; onDraftChange?: (value: string | undefined) => void;
-  snapshotLoading?: boolean; titleAlreadyVisible?: boolean; busy: boolean; editable: boolean; onSave: (ledger: Row, upgradePreview?: Row) => Promise<boolean>; onPreviewUpgrade: (ledger: Row, fromSourceHash: string) => Promise<Row>; onCheck: () => Promise<void>; onLocate: (kind: string, id: string) => void; onAskDirector?: (scope: { workspace: "continuity"; targetId?: string; workId?: string; instruction: string }) => void; onRequestAgentUpgrade?: (instruction: string, workId?: string) => Promise<{ id: string; threadId?: string } | undefined>; onBoundary: (value: Row) => void; onSnapshot?: (value: "draft" | "published") => void;
+  snapshotLoading?: boolean; titleAlreadyVisible?: boolean; busy: boolean; editable: boolean; onSave: (ledger: Row) => Promise<boolean>; onCheck: () => Promise<void>; onLocate: (kind: string, id: string) => void; onAskDirector?: (scope: { workspace: "continuity"; targetId?: string; workId?: string; instruction: string; autoSend?: boolean }) => void; onBoundary: (value: Row) => void; onSnapshot?: (value: "draft" | "published") => void;
 }) {
   const { t } = useTranslation();
   const { modal } = App.useApp();
   const [lastDeletion, setLastDeletion] = useState<{ sourceKey: string; rows: Array<{ collection: ContinuityLedgerCollection; row: Row; index: number }> }>();
-  const legacy = Boolean(savedLedger && savedLedger.contract_version !== 2);
+  const ledgerUnsupported = Boolean(savedLedger && savedLedger.contract_version !== 2);
   const formalLedger = savedLedger?.contract_version === 2 ? savedLedger : blankLedger();
-  const retained = readContinuityLedgerDraft(subjectAssembly ? draftValue : undefined, formalLedger);
+  const ledgerV2 = savedLedger?.contract_version === 2;
+  const retained = readContinuityLedgerDraft(ledgerV2 ? draftValue : undefined, formalLedger);
   const baselineLedger = useRef(retained.base);
   const [invalidLedgerDraft, setInvalidLedgerDraft] = useState(retained.invalid);
   const [ledger, setLedger] = useState<Row>(retained.value);
   const [sourceConflict, setSourceConflict] = useState(stable(retained.base) !== stable(formalLedger) && stable(retained.value) !== stable(formalLedger));
-  const savedLedgerKey = savedLedger?.contract_version === 2 ? stable(savedLedger) : "legacy";
+  const savedLedgerKey = savedLedger?.contract_version === 2 ? stable(savedLedger) : "unsupported";
   const previousSource = useRef({ sourceHash, ledgerKey: savedLedgerKey });
   const [recordContext, setRecordContext] = useState<{ shotId: string; factId: string; visibleStart: number; eventId?: string }>();
   const [changeDraft, setChangeDraft] = useState<ContinuityChangeInput>();
   const leaveBlocker = useBlocker(Boolean(changeDraft));
   useEffect(() => { if (!changeDraft) return; const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; }; window.addEventListener("beforeunload", warn); return () => window.removeEventListener("beforeunload", warn); }, [Boolean(changeDraft)]);
   const [workbenchEventId, setWorkbenchEventId] = useState<string>();
-  const [activeView, setActiveView] = useState<"workbench" | "objects" | "shots" | "ledger" | "issues" | "timeline" | "boundaries">(subjectAssembly ? "workbench" : "objects");
+  const [activeView, setActiveView] = useState<"workbench" | "objects" | "shots" | "ledger" | "issues" | "timeline" | "boundaries">(ledgerV2 ? "workbench" : "objects");
   const [manualOpen, setManualOpen] = useState(false);
   const [ledgerCategory, setLedgerCategory] = useState("facts");
   const [entryFocus, setEntryFocus] = useState("");
@@ -105,20 +96,10 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
   const [sourceBlockId, setSourceBlockId] = useState("");
   const [exemptionReason, setExemptionReason] = useState("");
   const [reviewRef, setReviewRef] = useState("");
-  const [draftText, setDraftText] = useState("");
-  const [draftError, setDraftError] = useState("");
-  const [proposedLedger, setProposedLedger] = useState<Row | null>(null);
-  const [upgradePreview, setUpgradePreview] = useState<Row | null>(null);
-  const [agentUpgradeRequest, setAgentUpgradeRequest] = useState<{ id: string; threadId: string; baselineIds: string[]; sourceHash: string } | null>(null);
-  const [agentUpgradeStarting, setAgentUpgradeStarting] = useState(false);
-  const agentUpgradeProcessing = useRef("");
-  const agentMessages = useAgentStore(state => state.messages);
-  const agentBusy = useAgentStore(state => state.sending || state.waiting || ["preparing", "running"].includes(state.conversation.status));
-  const agentTaskResult = useAgentStore(state => state.scopedTaskResult);
 
   useEffect(() => {
     if (savedLedger?.contract_version === 2) {
-      const localChanged = previousSource.current.ledgerKey !== "legacy" && stable(ledger) !== stable(baselineLedger.current);
+      const localChanged = previousSource.current.ledgerKey !== "unsupported" && stable(ledger) !== stable(baselineLedger.current);
       if (localChanged && stable(ledger) !== savedLedgerKey) {
         if (continuityLedgerConflicts(baselineLedger.current, ledger, savedLedger).length) { setSourceConflict(true); previousSource.current = { sourceHash, ledgerKey: savedLedgerKey }; return; }
         const merged = rebaseContinuityLedger(baselineLedger.current, ledger, savedLedger);
@@ -128,20 +109,28 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
       baselineLedger.current = structuredClone(savedLedger); setLedger(structuredClone(savedLedger)); setSourceConflict(false);
     }
     else if (!savedLedger) setLedger(blankLedger());
-    // A legacy ledger is only displayed as a read-only diagnostic. It never
-    // becomes an implicit v2 baseline in the editor.
+    // A malformed (non-v2) ledger is only displayed as a read-only diagnostic.
+    // It never becomes an implicit v2 baseline in the editor.
     previousSource.current = { sourceHash, ledgerKey: savedLedgerKey };
   }, [sourceHash, savedLedgerKey]);
+  useEffect(() => {
+    if (ledgerV2) setActiveView("workbench");
+  }, [ledgerV2]);
   const ledgerKey = stable(ledger);
   useEffect(() => {
-    if (!subjectAssembly || !editable || !onDraftChange || invalidLedgerDraft) return;
+    if (!ledgerV2 || !editable || !onDraftChange || invalidLedgerDraft) return;
     const next = ledgerKey === savedLedgerKey ? undefined : JSON.stringify({ version: 1, base: baselineLedger.current, value: ledger });
     if (next !== draftValue) onDraftChange(next);
-  }, [ledgerKey, savedLedgerKey, subjectAssembly, editable, invalidLedgerDraft, draftValue, onDraftChange]);
-  const invalidEventPositions = subjectAssembly && source ? continuityEventPositionIssues(source, ledger) : [];
-  const saveLedger = async () => { if (editable && !legacy && !changeDraft && !snapshotLoading && !busy && !sourceConflict && !invalidLedgerDraft && !invalidEventPositions.length && await onSave(ledger)) setLastDeletion(undefined); };
+  }, [ledgerKey, savedLedgerKey, ledgerV2, editable, invalidLedgerDraft, draftValue, onDraftChange]);
+  const invalidEventPositions = ledgerV2 && source ? continuityEventPositionIssues(source, ledger) : [];
+  const saveLedger = async () => {
+    if (!editable || ledgerUnsupported || changeDraft || snapshotLoading || busy || sourceConflict || invalidLedgerDraft || invalidEventPositions.length) return;
+    // The save contract needs a model-readable description per allowed value; fill missing ones before writing.
+    const next = continuityLedgerFactDescriptions(ledger);
+    if (next !== ledger) setLedger(next);
+    if (await onSave(next)) setLastDeletion(undefined);
+  };
   useEffect(() => { setLastDeletion(undefined); }, [sourceHash, stable(source), savedLedgerKey, editable]);
-  useEffect(() => { setProposedLedger(null); setUpgradePreview(null); setAgentUpgradeRequest(null); agentUpgradeProcessing.current = ""; }, [sourceHash]);
 
   const sourceBlocks: Row[] = useMemo(() => continuitySourceBlocks(scenes), [stable(scenes)]);
   const factRows = Array.isArray(ledger.facts) ? ledger.facts as Row[] : [];
@@ -156,6 +145,13 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const current = latestLedger.current, plan = analyzeContinuityDeletion(source, current, collection, entryId);
     const removedRows = plan.removals.flatMap(removal => records(current[removal.collection]).flatMap((item, index) => continuityLedgerEntryId(removal.collection, item) === removal.id ? [{ collection: removal.collection, row: structuredClone(item), index }] : []));
     const snapshot = stable({ plan, rows: removedRows });
+    if (collection === "facts" && plan.allowed) {
+      try {
+        const next = applyContinuityDeletion(source, current, collection, entryId);
+        latestLedger.current = next; setLedger(next); setLastDeletion({ sourceKey, rows: removedRows });
+      } catch { message.warning(t("director.workspace.continuity.crud.deleteChanged")); }
+      return;
+    }
     const rowLabel = (group: string, identity: string) => {
       const item = records(current[group]).find(item => continuityLedgerEntryId(group as ContinuityLedgerCollection, item) === identity);
       if (group === "facts") return display.fact(identity);
@@ -190,6 +186,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
 
   const changeFact = (nextId: string) => { setFactId(nextId); const fact = factRows.find(item => item.id === nextId); setEventAfter(fact?.allowed_values?.[0] || ""); };
   const addTimeline = () => { if (!newTimelineName.trim()) return; const timeline = id(); append("timelines", { id: timeline, display_name: newTimelineName.trim() }); setTimelineId(timeline); setNewTimelineName(""); };
+  const openManualLedger = () => { setLedgerCategory("facts"); setActiveView("ledger"); setManualOpen(true); };
   const addFact = () => {
     const allowed = normalizedContinuityValues(factValues);
     if (!newFactId.trim() || !objectId || !allowed.length || !availableObjects.some(row => String(row.id || row.asset_id) === objectId)) return;
@@ -214,18 +211,18 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     } catch (error) { message.error(t("director.atomic.eventError." + (error instanceof Error ? error.message : "EVENT_FIELDS_REQUIRED"))); }
   };
   const activeEditContext = useRef({ key: "", editable, busy, alive: true });
-  activeEditContext.current = { key: sourceHash + stable(source), editable: editable && !sourceConflict && !invalidLedgerDraft && !legacy && !snapshotLoading, busy, alive: true };
+  activeEditContext.current = { key: sourceHash + stable(source), editable: editable && !sourceConflict && !invalidLedgerDraft && !ledgerUnsupported && !snapshotLoading, busy, alive: true };
   useEffect(() => { activeEditContext.current.alive = true; return () => { activeEditContext.current.alive = false; }; }, []);
   const latestLedger = useRef(ledger); latestLedger.current = ledger;
   const createChange = async (input: ContinuityChangeInput): Promise<string | undefined> => {
     const contextKey = activeEditContext.current.key;
     const shot = shots.find(row => row.id === input.shotId);
-    const block = continuityBlocksForShot({ ...source, script_scenes: scenes, shots }, sourceBlocks, shot).find(row => row.id === input.sourceBlockId);
-    if (!shot || !block) return;
+    const block = input.sourceBlockId ? continuityBlocksForShot({ ...source, script_scenes: scenes, shots }, sourceBlocks, shot).find(row => row.id === input.sourceBlockId) : undefined;
+    if (!shot || input.sourceBlockId && !block) return;
     try {
-      const digest = await sourceDigest(block.sceneId, block.sourceBlock);
+      const digest = block ? await sourceDigest(block.sceneId, block.sourceBlock) : undefined;
       if (!activeEditContext.current.alive || !activeEditContext.current.editable || activeEditContext.current.busy || activeEditContext.current.key !== contextKey) { message.warning(t("director.workspace.continuity.subjectTimeline.sourceChanged")); return; }
-      const result = appendContinuityChange(latestLedger.current, shots, input, digest, id, subjectAssembly);
+      const result = appendContinuityChange(latestLedger.current, shots, input, digest, id, true, subjectAssembly);
       latestLedger.current = result.ledger; setLedger(result.ledger); return result.eventId;
     } catch (error) { message.error(t("director.atomic.eventError." + (error instanceof Error ? error.message : "INVALID_EVENT_FRAME"))); }
   };
@@ -260,71 +257,16 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
       latestLedger.current = next; setLedger(next);
     } catch (error) { message.error(t("director.atomic.eventError." + (error instanceof Error ? error.message : "EVENT_FIELDS_REQUIRED"))); }
   };
-  const saveJson = async () => {
-    try {
-      const parsed = JSON.parse(draftText);
-      if (parsed.contract_version !== 2) throw new Error(t("director.workspace.continuity.ledgerV2Required"));
-      setDraftError("");
-      setProposedLedger(parsed);
-      setUpgradePreview(await onPreviewUpgrade(parsed, sourceHash));
-    } catch (error) { setDraftError(String(error)); }
-  };
-  const applyUpgrade = async () => {
-    if (!proposedLedger || !upgradePreview || !await onSave(proposedLedger, upgradePreview)) return;
-    setLedger(proposedLedger); setDraftText(""); setProposedLedger(null); setUpgradePreview(null);
-  };
-  const requestAgentUpgrade = async () => {
-    if (!onRequestAgentUpgrade || busy || agentUpgradeRequest || agentUpgradeStarting) return;
-    const agent = useAgentStore.getState();
-    if (agent.sending || agent.waiting || ["preparing", "running"].includes(agent.conversation.status)) {
-      message.warning(t("director.workspace.agentBusy"));
-      return;
-    }
-    const expectedThreadId = agentThreadId || agent.activeThreadId || agent.conversation.threadId;
-    const initialBaseline = agent.messages.filter(item => item.role === "assistant").map(item => item.id);
-    setAgentUpgradeStarting(true); setDraftError(""); setProposedLedger(null); setUpgradePreview(null);
-    try {
-      const task = await onRequestAgentUpgrade(t("director.workspace.continuity.upgradeAgentPrompt"), workId);
-      if (!task) return;
-      const threadId = task.threadId || expectedThreadId;
-      if (!threadId) { setDraftError(t("director.workspace.continuity.upgradeAgentJsonMissing")); return; }
-      const baselineIds = threadId === expectedThreadId ? initialBaseline : useAgentStore.getState().messages.filter(item => item.role === "assistant").map(item => item.id);
-      setAgentUpgradeRequest({ id: task.id, threadId, baselineIds, sourceHash });
-    } catch (error) { setDraftError(error instanceof Error ? error.message : String(error)); }
-    finally { setAgentUpgradeStarting(false); }
-  };
-  useEffect(() => {
-    const request = agentUpgradeRequest;
-    if (!request || agentBusy || agentUpgradeProcessing.current === request.id) return;
-    if (request.sourceHash !== sourceHash) { setAgentUpgradeRequest(null); setDraftError(t("director.workspace.continuity.sourceConflict")); return; }
-    const responses = agentMessages.filter(item => item.role === "assistant" && (!item.threadId || item.threadId === request.threadId) && !request.baselineIds.includes(item.id));
-    const result = [...responses].reverse().map(item => ledgerV2FromAgent(item.text)).find((value): value is Row => Boolean(value));
-    if (!result) {
-      if (agentTaskResult?.id === request.id && agentTaskResult.status === "failed") {
-        setAgentUpgradeRequest(null); setDraftError(agentTaskResult.error || t("director.workspace.agentTaskFailed"));
-      } else if (responses.length) {
-        setAgentUpgradeRequest(null); setDraftError(t("director.workspace.continuity.upgradeAgentJsonMissing"));
-      }
-      return;
-    }
-    agentUpgradeProcessing.current = request.id;
-    setDraftText(JSON.stringify(result, null, 2)); setProposedLedger(result); setDraftError("");
-    void onPreviewUpgrade(result, request.sourceHash).then(preview => {
-      if (agentUpgradeProcessing.current === request.id) setUpgradePreview(preview);
-    }).catch(error => {
-      if (agentUpgradeProcessing.current === request.id) setDraftError(error instanceof Error ? error.message : String(error));
-    }).finally(() => {
-      if (agentUpgradeProcessing.current === request.id) { agentUpgradeProcessing.current = ""; setAgentUpgradeRequest(null); }
-    });
-  }, [agentUpgradeRequest, agentBusy, agentMessages, agentTaskResult, onPreviewUpgrade, sourceHash, t]);
   const issues = report?.report?.diagnostics || report?.items || [];
-  const readProjection = useMemo(() => subjectAssembly && source ? continuityReadProjection(source, ledger, shots) : undefined, [subjectAssembly, source, ledgerKey, shots]);
+  const workbenchSource = useMemo(() => ledgerV2 && source ? continuityWorkbenchSource(source, ledger, shots) : source, [ledgerV2, source, ledgerKey, shots]);
+  const workbenchShots = workbenchSource ? records(workbenchSource.shots) : shots;
+  const readProjection = useMemo(() => ledgerV2 && source ? continuityReadProjection(source, ledger, shots) : undefined, [ledgerV2, source, ledgerKey, shots]);
   const timeline = readProjection?.trajectories || report?.report?.trajectories || {};
   const initial = Array.isArray(ledger.initial) ? ledger.initial : [];
   const ledgerSections = (["facts", "timelines", "initial", "events", "requirements", "coverage"] as const).map(collection => ({ collection, rows: Array.isArray(ledger[collection]) ? ledger[collection] as Row[] : [] }));
   const display = continuityPresentation({ facts: factRows, timelines: timeRows, scenes, locations, characters, assets, shots, segments, sourceBlocks }, (key, values) => t(`director.workspace.continuity.${key}`, values));
-  const ledgerDirty = editable && !legacy && ledgerKey !== stable(formalLedger);
-  const pendingLedgerEdits = ledgerDirty || Boolean(changeDraft) || editable && !legacy && (sourceConflict || invalidLedgerDraft);
+  const ledgerDirty = editable && !ledgerUnsupported && ledgerKey !== stable(formalLedger);
+  const pendingLedgerEdits = ledgerDirty || Boolean(changeDraft) || editable && !ledgerUnsupported && (sourceConflict || invalidLedgerDraft);
   const stateLabel = continuityPreviewStatus(report, sourceHash, pendingLedgerEdits);
   const checkBlockReason = changeDraft ? "finishChangeBeforeCheck" : sourceConflict || invalidLedgerDraft ? "resolveDraftBeforeCheck" : ledgerDirty ? "saveBeforeCheck" : undefined;
   const checkBlocked = busy || snapshotLoading || Boolean(checkBlockReason);
@@ -353,19 +295,19 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     const title = collection === "facts" ? display.fact(row.id) : collection === "timelines" ? display.timeline(row.id) : collection === "coverage" ? display.scene(String(sourceBlocks.find(block => block.id === sourceId)?.sceneId || "")) : display.fact(row.fact_id);
     return <article key={`${collection}:${row.id || index}`} className="min-w-0 rounded-xl border border-border p-4" data-continuity-entry={collection} data-continuity-entry-id={`${collection}:${row.id || index}`} tabIndex={-1}>
       <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="text-sm font-semibold">{title}</h4>{collection === "facts" ? <span className="text-xs text-muted-foreground">{t(`director.workspace.continuity.objectKindValue.${row.object_kind}`, { defaultValue: t("director.workspace.continuity.objectKindValue.asset") })}</span> : row.timeline_id ? <span className="text-xs text-muted-foreground">{display.timeline(row.timeline_id)}</span> : null}</div>
-      {collection === "facts" && <><label className="mt-3 grid gap-1 text-xs"><span>{t("director.crud.factName")}</span><Input value={row.display_name || row.name || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, display_name: event.target.value } : fact) }))} /></label>
-        {subjectAssembly && editable && <div className="mt-3 space-y-2">{(row.allowed_values || []).map((value: string) => <label key={value} className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.stateDescription", { value: display.value(row.id, value) })}</span><Input.TextArea value={row.value_descriptions?.[value] || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} autoSize={{ minRows: 1, maxRows: 4 }} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, value_descriptions: { ...fact.value_descriptions, [value]: event.target.value } } : fact) }))} /></label>)}</div>}
+      {collection === "facts" && <><label className="mt-3 grid gap-1 text-xs"><span>{t("director.crud.factName")}</span><Input value={row.display_name || row.name || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, display_name: event.target.value } : fact) }))} /></label>
+        {subjectAssembly && editable && <div className="mt-3 space-y-2">{(row.allowed_values || []).map((value: string) => <label key={value} className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.stateDescription", { value: display.value(row.id, value) })}</span><Input.TextArea value={row.value_descriptions?.[value] || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} autoSize={{ minRows: 1, maxRows: 4 }} onChange={event => setLedger(current => ({ ...current, facts: current.facts.map((fact: Row) => fact.id === row.id ? { ...fact, value_descriptions: { ...fact.value_descriptions, [value]: event.target.value } } : fact) }))} /></label>)}</div>}
         <div className="mt-3 space-y-3">{initial.filter((state: Row) => state.fact_id === row.id).map((state: Row, stateIndex: number) => <div key={stateIndex}><p className="text-xs text-muted-foreground">{display.timeline(state.timeline_id)} · {t("director.workspace.continuity.initialValue")}</p><p className="mt-1 break-words text-sm leading-relaxed">{display.value(row.id, state.value)}</p></div>)}{!initial.some((state: Row) => state.fact_id === row.id) && <p className="text-sm text-muted-foreground">{t("director.workspace.continuity.initialMissing")}</p>}</div>
         <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.availableStates", { count: row.allowed_values?.length || 0 })}</summary><ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed">{(row.allowed_values || []).map((value: string) => <li key={value} className="break-words">{display.value(row.id, value)}</li>)}</ul></details>
       </>}
-      {collection === "timelines" && editable && !legacy && <Input className="mt-2" aria-label={t("director.crud.timelineName")} value={row.display_name || row.name || ""} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, timelines: records(current.timelines).map(item => item.id === row.id ? { ...item, display_name: event.target.value } : item) }))} />}
+      {collection === "timelines" && editable && !ledgerUnsupported && <Input className="mt-2" aria-label={t("director.crud.timelineName")} value={row.display_name || row.name || ""} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onChange={event => setLedger(current => ({ ...current, timelines: records(current.timelines).map(item => item.id === row.id ? { ...item, display_name: event.target.value } : item) }))} />}
       {collection === "timelines" && <p className="mt-2 text-sm text-muted-foreground">{t("director.workspace.continuity.timelineSummary", { facts: initial.filter((state: Row) => state.timeline_id === row.id).length, events: (ledger.events || []).filter((event: Row) => event.timeline_id === row.id).length })}</p>}
-      {collection === "initial" && <><p className="mt-2 text-xs text-muted-foreground">{t("director.workspace.continuity.subjectTimeline.initialScope")}</p>{editable && !legacy ? <Select className="mt-2 w-full" aria-label={t("director.workspace.continuity.initialValue")} disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} value={row.value} options={[...new Set([...(factRows.find(fact => fact.id === row.fact_id)?.allowed_values || []), "unknown"])].map(value => ({ value, label: display.value(row.fact_id, value) }))} onChange={value => setLedger(current => ({ ...current, initial: records(current.initial).map(item => item.timeline_id === row.timeline_id && item.fact_id === row.fact_id ? { ...item, value } : item) }))} /> : <p className="mt-2 break-words text-sm leading-relaxed">{display.value(row.fact_id, row.value)}</p>}</>}
-      {collection === "events" && <>{subjectAssembly && <Button size="small" disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => { setWorkbenchEventId(String(row.id)); setActiveView("workbench"); }}>{t("director.workspace.continuity.subjectTimeline.editEvent")}</Button>}<p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {Number.isFinite(subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots)) ? t(subjectAssembly ? "director.workspace.continuity.subjectTimeline.localFrameOnly" : "director.workspace.continuity.atFrame", { frame: subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots) }) : t("director.workspace.continuity.subjectTimeline.invalidPositionSave")}</p>{stateChange(row.fact_id, row.before, row.after)}{(row.display_reason || row.reason) && <p className="mt-3 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
+      {collection === "initial" && <><p className="mt-2 text-xs text-muted-foreground">{t("director.workspace.continuity.subjectTimeline.initialScope")}</p>{editable && !ledgerUnsupported ? <Select className="mt-2 w-full" aria-label={t("director.workspace.continuity.initialValue")} disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} value={row.value} options={[...new Set([...(factRows.find(fact => fact.id === row.fact_id)?.allowed_values || []), "unknown"])].map(value => ({ value, label: display.value(row.fact_id, value) }))} onChange={value => setLedger(current => ({ ...current, initial: records(current.initial).map(item => item.timeline_id === row.timeline_id && item.fact_id === row.fact_id ? { ...item, value } : item) }))} /> : <p className="mt-2 break-words text-sm leading-relaxed">{display.value(row.fact_id, row.value)}</p>}</>}
+      {collection === "events" && <>{subjectAssembly && <Button size="small" disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => { setWorkbenchEventId(String(row.id)); setActiveView("workbench"); }}>{t("director.workspace.continuity.subjectTimeline.editEvent")}</Button>}<p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {Number.isFinite(subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots)) ? t(subjectAssembly ? "director.workspace.continuity.subjectTimeline.localFrameOnly" : "director.workspace.continuity.atFrame", { frame: subjectAssembly ? continuityLocalFrame(row, shots.find(shot => shot.id === row.shot_id) || {}) : continuityEventFrame(row, shots) }) : t("director.workspace.continuity.subjectTimeline.invalidPositionSave")}</p>{stateChange(row.fact_id, row.before, row.after)}{(row.display_reason || row.reason) && <p className="mt-3 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
       {collection === "requirements" && <><p className="mt-2 text-xs text-muted-foreground">{display.target(row.shot_id)} · {t(`director.workspace.continuity.requirementKind.${row.kind}`, { defaultValue: t("director.workspace.continuity.otherRequirement") })}</p>{row.value !== undefined && <p className="mt-2 break-words text-sm">{display.value(row.fact_id, row.value)}</p>}{(row.event_ids || []).map((eventId: string) => { const event = (ledger.events || []).find((item: Row) => item.id === eventId); return event ? <div key={eventId}>{stateChange(row.fact_id, event.before, event.after)}</div> : <p key={eventId} className="mt-2 text-sm text-muted-foreground">{t("director.workspace.continuity.missingEvent")}</p>; })}</>}
       {collection === "coverage" && <><p className="mt-2 text-sm">{t(`director.workspace.continuity.coverageKind.${row.evidence_kind}`, { defaultValue: t("director.workspace.continuity.otherCoverage") })}</p>{row.fact_ids?.length > 0 && <p className="mt-2 text-xs text-muted-foreground">{row.fact_ids.map((factId: string) => display.fact(factId)).join(" · ")}</p>}{row.shot_ids?.length > 0 && <p className="mt-1 text-xs text-muted-foreground">{row.shot_ids.map((shotId: string) => display.target(shotId)).join(" · ")}</p>}{(row.display_reason || row.reason) && <p className="mt-2 break-words text-sm text-muted-foreground">{row.display_reason || row.reason}</p>}</>}
       {sourceId && <p className="mt-3 break-words border-t border-border pt-3 text-xs leading-relaxed text-muted-foreground">{t("director.workspace.continuity.scriptEvidence")}: {display.source(sourceId)}</p>}
-      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.technicalDetails")}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/30 p-3 text-xs">{JSON.stringify(row, null, 2)}</pre></details>{editable && !legacy && <Button danger size="small" disabled={busy || !editable || legacy || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => removeEntry(collection as ContinuityLedgerCollection, row)}>{t("director.workspace.continuity.removeEntry")}</Button>}
+      <details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.technicalDetails")}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/30 p-3 text-xs">{JSON.stringify(row, null, 2)}</pre></details>{editable && !ledgerUnsupported && <Button danger size="small" disabled={busy || !editable || ledgerUnsupported || sourceConflict || invalidLedgerDraft || snapshotLoading} onClick={() => removeEntry(collection as ContinuityLedgerCollection, row)}>{t("director.workspace.continuity.removeEntry")}</Button>}
     </article>;
   };
 
@@ -394,23 +336,31 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
         }) : [];
 
   const reportCurrent = Boolean(sourceHash && report?.report && report.sourceHash === sourceHash && !pendingLedgerEdits && !["stale", "unsaved", "unchecked", "missing"].includes(stateLabel));
-  const readingViews = [...(subjectAssembly ? ["workbench"] : []), "objects", "shots", "timeline"];
+  const readingViews = ["objects", "shots", "timeline"];
   const managementViews = ["issues", "ledger", "boundaries"];
   const viewName = (view: string) => view === "issues"
     ? `${t("director.workspace.continuity.view.issues")}${reportCurrent ? ` · ${issues.length}` : ""}`
     : t(view === "workbench" ? "director.workspace.continuity.subjectTimeline.title" : `director.workspace.continuity.subjectTimeline.advanced.${view}`);
   const viewItems = [
-    { type: "group" as const, key: "reading", label: t("director.workspace.continuity.crud.stateViews"), children: readingViews.map(view => ({ key: view, label: viewName(view) })) },
+    { type: "group" as const, key: "reading", label: t("director.workspace.continuity.crud.stateViews"), children: readingViews.filter(view => view !== "workbench").map(view => ({ key: view, label: viewName(view) })) },
     { type: "group" as const, key: "management", label: t("director.workspace.continuity.crud.reviewViews"), children: managementViews.map(view => ({ key: view, label: viewName(view) })) },
   ];
+  if (ledgerUnsupported) return <Alert type="error" showIcon message={t("director.workspace.unsupportedProductionFormat")} />;
   return <section className={activeView === "workbench" ? "continuity-workspace-main" : "space-y-3"} data-continuity-workspace>
     <header className="continuity-view-tools" aria-label={t("director.workspace.tab.continuity")}><h2 className={titleAlreadyVisible ? "sr-only" : "m-0 text-base font-semibold"}>{t("director.workspace.tab.continuity")}</h2>
       <nav className="production-view-tabs" aria-label={t("director.workspace.continuity.views")}>
+        {ledgerV2 && <Button data-continuity-timeline-entry type={activeView === "workbench" ? "primary" : "default"} size="small" aria-pressed={activeView === "workbench"} onClick={() => { setEntryFocus(""); setActiveView("workbench"); }}>{t("director.workspace.continuity.subjectTimeline.title")}</Button>}
         <Dropdown trigger={["click"]} menu={{ selectable: true, selectedKeys: [activeView], items: viewItems, onClick: ({ key }) => { setEntryFocus(""); setActiveView(key as typeof activeView); } }}>
-          <Button data-continuity-view-selector size="small" aria-label={t("director.workspace.continuity.crud.currentView", { view: viewName(activeView) })}>{t("director.workspace.continuity.crud.currentView", { view: viewName(activeView) })}<ChevronDown className="size-3.5" /></Button>
+          <Button data-continuity-view-selector size="small" aria-label={t("director.workspace.continuity.views")}>{t("director.workspace.continuity.views")}<ChevronDown className="size-3.5" /></Button>
         </Dropdown>
       </nav>
       <div className="continuity-view-actions">
+        {(["objects", "shots"] as const).includes(activeView as "objects" | "shots") && <label className="continuity-object-filter" data-continuity-filter={activeView}>
+          <span>{t(`director.workspace.continuity.${activeView === "objects" ? "filterObject" : "filterTarget"}`)}</span>
+          <Select size="small" aria-label={t(`director.workspace.continuity.${activeView === "objects" ? "filterObject" : "filterTarget"}`)} value={activeView === "objects" ? filterObject : filterTarget}
+            options={[{ value: "all", label: t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`) }, ...(activeView === "objects" ? objectOptions : targetOptions)]}
+            onChange={activeView === "objects" ? setFilterObject : setFilterTarget} />
+        </label>}
         <span className="text-xs text-muted-foreground">{t("director.workspace.continuity.crud.sourceLabel")}</span><Select aria-label={t("director.workspace.continuity.snapshot")} value={report?.snapshot || "draft"} options={[{ value: "draft", label: t("director.workspace.continuity.snapshotDraft") }, { value: "published", label: t("director.workspace.continuity.snapshotPublished") }]} onChange={value => { if (changeDraft) { message.warning(t("director.workspace.continuity.subjectTimeline.finishDraft")); return; } onSnapshot?.(value); }} />
         <Tag color={stateLabel === "passed" ? "green" : ["blocked", "stale"].includes(stateLabel) ? "red" : "gold"}>{stateLabel === "unsaved" ? t("director.workspace.continuity.subjectTimeline.uncheckedDraft") : t(`director.workspace.continuity.status.${stateLabel}`)}</Tag>
         {report?.report?.semanticDiscovery === "not_performed" && <span className="text-xs text-muted-foreground" title={t("director.workspace.continuity.registeredCoverageOnly")}>{t("director.workspace.continuity.subjectTimeline.registeredOnlyBrief")}</span>}
@@ -425,22 +375,23 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     {invalidEventPositions.length > 0 && <p className="text-xs text-destructive" role="alert">{t("director.workspace.continuity.subjectTimeline.invalidPositionSave")}</p>}
     {lastDeletion && <div className="flex flex-wrap items-center gap-2 text-xs" role="status"><span>{t("director.workspace.continuity.crud.deletedDraft")}</span><Button size="small" disabled={busy || !editable || sourceConflict} onClick={undoDeletion}>{t("director.workspace.continuity.crud.undoDelete")}</Button></div>}
     {ledgerDirty && <p className="text-xs text-muted-foreground" data-continuity-unsaved>{t("director.workspace.continuity.subjectTimeline.draftDirty")}</p>}
-    {legacy && <Alert type="warning" showIcon message={t("director.workspace.continuity.legacyReadOnly")} description={t("director.workspace.continuity.legacyUpgradeHint")} />}
     {sourceConflict && <Alert type="warning" showIcon message={t("director.workspace.continuity.sourceConflict")} description={<details><summary>{t("director.atomic.reviewCurrentSource")}</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(formalLedger, null, 2)}</pre><Button disabled={busy} size="small" onClick={() => { try { setLedger(rebaseContinuityLedger(baselineLedger.current, ledger, formalLedger)); baselineLedger.current = structuredClone(formalLedger); setSourceConflict(false); } catch { message.error(t("director.atomic.ledgerIdsMissing")); } }}>{t("director.atomic.keepReviewedDraft")}</Button></details>} />}
     {invalidLedgerDraft && <Alert type="warning" showIcon message={t("director.atomic.invalidDraft")} description={<details><summary>{t("director.atomic.reviewDraft")}</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap text-xs">{draftValue}</pre><Button disabled={busy} size="small" onClick={() => { baselineLedger.current = structuredClone(formalLedger); setLedger(structuredClone(formalLedger)); setInvalidLedgerDraft(false); setSourceConflict(false); onDraftChange?.(undefined); }}>{t("director.atomic.resetDraft")}</Button></details>} />}
     {!editable && <Alert type="info" showIcon message={t("director.workspace.continuity.publishedReadOnly")} />}
     {activeView !== "workbench" && report?.report?.semanticDiscovery === "not_performed" && <p className="rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">{t("director.workspace.continuity.registeredCoverageOnly")}</p>}
-    {activeView === "workbench" && subjectAssembly && source && <ContinuityTimelineWorkbench recordContext={recordContext} onRecordContext={setRecordContext} changeDraft={changeDraft} onChangeDraft={setChangeDraft} focusEventId={workbenchEventId} source={source} ledger={ledger} savedLedger={formalLedger} shots={shots} display={display} sourceBlocks={sourceBlocks} disabled={busy || snapshotLoading || !editable || sourceConflict || invalidLedgerDraft || legacy} editable={editable} dirty={ledgerDirty} busy={busy} saveBlocked={invalidEventPositions.length > 0} actions={{
+    {activeView === "workbench" && ledgerV2 && workbenchSource && <ContinuityTimelineWorkbench recordContext={recordContext} onRecordContext={setRecordContext} changeDraft={changeDraft} onChangeDraft={setChangeDraft} focusEventId={workbenchEventId} source={workbenchSource} subjectAssembly={subjectAssembly} ledger={ledger} savedLedger={formalLedger} shots={workbenchShots} display={display} sourceBlocks={sourceBlocks} disabled={busy || snapshotLoading || !editable || sourceConflict || invalidLedgerDraft || ledgerUnsupported} editable={editable} dirty={ledgerDirty} busy={busy} saveBlocked={invalidEventPositions.length > 0} actions={{
       update: setLedger,
       openEntry: (collection, row) => { setActiveView("ledger"); setLedgerCategory(collection); if (row) setEntryFocus(`${collection}:${row.id || records(ledger[collection]).indexOf(row)}`); },
       openBoundary: from => { setEntryFocus(`boundary:${from}`); setActiveView("boundaries"); },
       createEvent: createChange, changeEvidence: changeEventEvidence, deleteEvent: event => removeEntry("events", event),
     }} />}
-    {(activeView === "objects" || activeView === "shots") && <section className="space-y-4" data-continuity-readable>
-      <Select className="w-full sm:max-w-80" aria-label={t(activeView === "objects" ? "director.workspace.continuity.filterObject" : "director.workspace.continuity.filterTarget")} value={activeView === "objects" ? filterObject : filterTarget} options={[{ value: "all", label: t("director.studio.filter.all") }, ...(activeView === "objects" ? objectOptions : targetOptions)]} onChange={activeView === "objects" ? setFilterObject : setFilterTarget} />
+    {(activeView === "objects" || activeView === "shots") && <section className="space-y-3" data-continuity-readable>
       {readableFactRows.length > 0 ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-border text-xs text-muted-foreground"><tr>{["objectProperty", "beforeChange", "eventDescription", "afterChange"].map(key => <th key={key} className="min-w-40 px-3 py-3 font-medium">{t("director.workspace.continuity." + key)}</th>)}</tr></thead><tbody>
         {readableFactRows}
-      </tbody></table></div> : <p className="production-empty-state">{t("director.atomic.noState")}</p>}
+      </tbody></table></div> : <div className="continuity-empty-state" data-continuity-empty-state>
+        <p role="status">{(activeView === "objects" ? filterObject : filterTarget) !== "all" ? t("director.workspace.continuity.subjectTimeline.empty") : factRows.length === 0 ? t("director.workspace.continuity.emptyEntries") : t("director.workspace.continuity.subjectTimeline.empty")}</p>
+        {(activeView === "objects" ? filterObject : filterTarget) !== "all" && <Button data-continuity-empty-action size="small" onClick={() => activeView === "objects" ? setFilterObject("all") : setFilterTarget("all")}>{t(`director.workspace.continuity.${activeView === "objects" ? "filterAllObjects" : "filterAllTargets"}`)}</Button>}        {(activeView === "objects" ? filterObject : filterTarget) === "all" && factRows.length === 0 && editable && !ledgerUnsupported && <Button data-continuity-empty-action size="small" onClick={openManualLedger}>{t("director.workspace.continuity.manualEditing")}</Button>}
+      </div>}
     </section>}
     {activeView === "ledger" && <div className="space-y-4">
       <p className="text-sm text-muted-foreground">{t("director.workspace.continuity.readableLedgerHint")}</p>
@@ -450,7 +401,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
     </div>}
     {activeView === "issues" && <p className="text-xs text-muted-foreground" role="status">{t(`director.workspace.continuity.subjectTimeline.${reportCurrent ? "savedReportTask" : "currentNotChecked"}`)}</p>}
     {activeView === "issues" && <div className="space-y-3"><div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4"><Select aria-label={t("director.workspace.continuity.filterScene")} value={filterScene} options={[{ value: "all", label: t("director.workspace.continuity.filterAllScenes") }, ...sceneIds.map(value => ({ value, label: display.scene(value) }))]} onChange={setFilterScene} /><Select aria-label={t("director.workspace.continuity.filterTarget")} value={filterTarget} options={[{ value: "all", label: t("director.workspace.continuity.filterAllTargets") }, ...targetOptions]} onChange={setFilterTarget} /><Select aria-label={t("director.workspace.continuity.filterObject")} value={filterObject} options={[{ value: "all", label: t("director.workspace.continuity.filterAllObjects") }, ...objectOptions]} onChange={setFilterObject} /><Select aria-label={t("director.workspace.continuity.filterCategory")} value={filterCategory} options={[{ value: "all", label: t("director.workspace.continuity.filterAllCategories") }, ...issueCategories.map(value => ({ value, label: t(`director.workspace.continuity.issueCategory.${value}`, { defaultValue: t("director.workspace.continuity.issueCategory.OTHER") }) }))]} onChange={setFilterCategory} /></div>{visibleIssues.length ? visibleIssues.map((issue, index) => { const targets = [...new Set([issue.targetId, ...(Array.isArray(issue.affectedTargets) ? issue.affectedTargets : [])].filter(Boolean).map(String))]; const fact = factRows.find(row => String(row.id) === String(issue.factId || "")); const sourceBlockId = String(issue.sourceBlockId || "") || String(issue.path || "").split(".blocks.")[1]?.split(".")[0]; const sourceBlock = sourceBlocks.find(block => String(block.id) === sourceBlockId); const displayValue = (value: unknown) => display.expected(String(issue.factId || ""), value); return <article key={`${issue.code}:${issue.targetId || ""}:${index}`} className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-border p-3"><div className="min-w-0"><div className="flex flex-wrap gap-2"><Tag color={issue.severity === "warning" ? "gold" : "red"}>{t(`director.workspace.continuity.issueCategory.${String(issue.code || "").split("_")[1]}`, { defaultValue: t("director.workspace.continuity.issueCategory.OTHER") })}</Tag>{fact && <Tag>{display.fact(fact.id)}</Tag>}{targets.map(target => <Tag key={target}>{display.target(target)}</Tag>)}</div><p className="mt-2 text-sm">{display.message(String(issue.display_message || issue.message || ""))}</p>{issue.expected !== undefined || issue.actual !== undefined ? <p className="mt-1 text-xs">{t("director.workspace.continuity.expectedActual", { expected: displayValue(issue.expected) ?? "—", actual: displayValue(issue.actual) ?? "—" })}</p> : null}{sourceBlock && <p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.continuity.sourceEvidence", { block: display.scene(sourceBlock.sceneId), text: sourceBlock.sourceBlock.text || "" })}</p>}<details className="mt-3"><summary className="cursor-pointer text-xs text-muted-foreground">{t("director.workspace.continuity.technicalDetails")}</summary><pre className="mt-2 whitespace-pre-wrap break-all text-xs">{JSON.stringify(issue, null, 2)}</pre></details></div><div className="flex flex-wrap gap-1">{targets.map(target => <Button key={target} size="small" onClick={() => onLocate(segments.some(item => String(item.id) === target) ? "segment" : "shot", target)}>{t("director.workspace.continuity.locate")} · {display.target(target)}</Button>)}{onAskDirector && <Button size="small" disabled={busy || !editable} onClick={() => onAskDirector({
-              workspace: "continuity", targetId: String(issue.targetId || targets[0] || ""), workId,
+              workspace: "continuity", targetId: String(issue.targetId || targets[0] || ""), workId, autoSend: true,
               instruction: `${t("director.workspace.continuity.handoffPrompt")}\n${JSON.stringify({ owner: report?.owner, workId, revision: report?.revision, publishedVersion: report?.publishedVersion, snapshot: report?.snapshot, sourceHash: report?.sourceHash, checkOperationId: report?.report?.operationId, issue: { code: issue.code, message: issue.message, path: issue.path, targetId: issue.targetId, affectedTargets: issue.affectedTargets, factId: issue.factId, expected: issue.expected, actual: issue.actual, sourceBlockId: issue.sourceBlockId }, sourceBlock: sourceBlock?.sourceBlock?.text }, null, 2)}`
             })}>{t("director.workspace.continuity.handoffToDirector")}</Button>}</div></article>; }) : <p className="rounded-xl border border-border p-4 text-sm text-muted-foreground">{!reportCurrent ? t("director.workspace.continuity.subjectTimeline.currentNotChecked") : visibleIssues.length === 0 && issues.length ? t("director.workspace.continuity.noFilterIssues") : t("director.workspace.continuity.noIssues")}</p>}</div>}
     {(activeView === "timeline" || activeView === "boundaries") && subjectAssembly && <p className="text-xs text-muted-foreground">{t("director.workspace.continuity.subjectTimeline.previewNotReport")}</p>}
@@ -473,7 +424,7 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
         <BoundaryContinuityRow from={String(segment.id)} to={String(next.id)} fromLabel={display.clip(String(segment.id))} toLabel={display.clip(String(next.id))} boundary={boundaries.find(row => row.from === segment.id && row.to === next.id)} disabled={busy || !editable || sourceConflict || snapshotLoading} onSave={onBoundary} summary={<div className="space-y-2 text-xs text-muted-foreground"><div className="flex flex-wrap items-center gap-2"><span>{fromShot ? display.target(String(fromShot.id)) : display.clip(String(segment.id))} → {toShot ? display.target(String(toShot.id)) : display.clip(String(next.id))}</span><Tag color={unknown ? "gold" : differences.length ? "red" : "green"}>{t("director.workspace.continuity.crud.ledgerState")} · {unknown ? t("director.workspace.continuity.stateUnknown") : differences.length ? t("director.workspace.continuity.stateDifference") : t("director.workspace.continuity.stateContinuous")}</Tag></div>{differences.length > 0 && <p>{differences.map(key => `${display.fact(key)}：${display.value(key, left[key])} → ${display.value(key, right[key])}`).join(" · ")}</p>}</div>} />
       </div>;
     })}</div>}
-    {!legacy && editable && activeView !== "workbench" && <details open={manualOpen} onToggle={event => setManualOpen(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.workspace.continuity.manualEditing")}</summary><div className="mt-4 space-y-4"><div><h3 className="font-medium">{t("director.workspace.continuity.timelineAndFacts")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.continuity.factsHelper")}</p></div>
+    {!ledgerUnsupported && editable && activeView !== "workbench" && <details open={manualOpen} onToggle={event => setManualOpen(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-sm font-medium">{t("director.workspace.continuity.manualEditing")}</summary><div className="mt-4 space-y-4"><div><h3 className="font-medium">{t("director.workspace.continuity.timelineAndFacts")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.continuity.factsHelper")}</p></div>
       <div className="grid gap-4 lg:grid-cols-2">
 <fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="timelines"><legend className="px-1 text-sm font-medium">{t("director.micro.continuityTimelines")}</legend><div className="grid gap-3"><Input aria-label={t("director.crud.timelineName")} placeholder={t("director.crud.timelineName")} value={newTimelineName} onChange={event => setNewTimelineName(event.target.value)} />
 <Button disabled={busy || !newTimelineName.trim()} onClick={addTimeline}>{t("director.workspace.continuity.addTimeline")}</Button></div></fieldset>
@@ -485,19 +436,18 @@ export function ContinuityPanel({ ledger: savedLedger, source, sourceHash, subje
 <section className="space-y-3 bg-muted/30 p-4 lg:col-span-2" data-continuity-form-group="context"><h3 className="text-sm font-medium">{t("director.micro.continuityContext")}</h3><p className="text-xs text-muted-foreground">{t("director.micro.continuityContextHint")}</p><div className="grid gap-3 sm:grid-cols-2"><Select aria-label={t("director.workspace.continuity.selectTimeline")} value={timelineId || undefined} placeholder={t("director.workspace.continuity.selectTimeline")} options={timeRows.map(row => ({ value: row.id, label: display.timeline(row.id) }))} onChange={setTimelineId} /><Select aria-label={t("director.workspace.continuity.selectFact")} value={factId || undefined} placeholder={t("director.workspace.continuity.selectFact")} options={factRows.map(row => ({ value: row.id, label: display.fact(row.id) }))} onChange={changeFact} /></div></section>
 <fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="initial"><legend className="px-1 text-sm font-medium">{t("director.workspace.continuity.initialValue")}</legend><div className="grid gap-3"><Select aria-label={t("director.workspace.continuity.initialValue")} value={initialValue || undefined} placeholder={t("director.workspace.continuity.initialValue")} options={[...(factRows.find(row => row.id === factId)?.allowed_values || []), "unknown"].map(value => ({ value, label: display.value(factId, value) }))} onChange={setInitialValue} />
 <Button disabled={busy || !timelineId || !factId || !initialValue} onClick={addInitial}>{t("director.workspace.continuity.setInitial")}</Button></div></fieldset>
-<fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="coverage"><legend className="px-1 text-sm font-medium">{t("director.micro.continuityEvidence")}</legend><div className="grid gap-3"><Select aria-label={t("director.workspace.continuity.shot")} value={shotId || undefined} placeholder={t("director.workspace.continuity.shot")} options={relevantShots.map(row => ({ value: row.id, label: display.target(row.id) }))} onChange={value => { setShotId(value); setSourceBlockId(""); setEventFrame(subjectAssembly ? "0" : String(shots.find(row => row.id === value)?.start_frame ?? "")); }} />
+<fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="coverage"><legend className="px-1 text-sm font-medium">{t("director.micro.continuityEvidence")}</legend><div className="grid gap-3"><Select aria-label={t("director.workspace.continuity.shot")} value={shotId || undefined} placeholder={t("director.workspace.continuity.shot")} options={relevantShots.map(row => ({ value: row.id, label: display.target(row.id) }))} onChange={value => { setShotId(value); const shot = shots.find(row => row.id === value); setSourceBlockId(continuityDefaultEvidenceBlockId(continuityBlocksForShot({ ...source, script_scenes: scenes, shots }, sourceBlocks, shot))); setEventFrame(subjectAssembly ? "0" : String(shot?.start_frame ?? "")); }} />
 <Select aria-label={t("director.workspace.continuity.sourceBlock")} value={sourceBlockId || undefined} placeholder={t("director.workspace.continuity.sourceBlock")} options={blocksForShot.map(row => ({ value: row.id, label: display.source(row.id) }))} onChange={setSourceBlockId} />
 <Button disabled={busy || !timelineId || !shotId || !factId || !sourceBlockId} onClick={() => void addHold()}>{t("director.workspace.continuity.addHold")}</Button></div></fieldset>
 <fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="events"><legend className="px-1 text-sm font-medium">{t("director.workspace.continuity.addChange")}</legend><div className="grid gap-3"><Input value={eventFrame} type="number" aria-label={t(subjectAssembly ? "director.atomic.localEventFrame" : "director.workspace.continuity.eventFrame")} placeholder={t(subjectAssembly ? "director.atomic.localEventFrame" : "director.workspace.continuity.eventFrame")} onChange={event => setEventFrame(event.target.value)} />
 <Select aria-label={t("director.workspace.continuity.eventAfter")} value={eventAfter || undefined} placeholder={t("director.workspace.continuity.eventAfter")} options={[...new Set([...(factRows.find(row => row.id === factId)?.allowed_values || []), "unknown"])].map((value: string) => ({ value, label: display.value(factId, value) }))} onChange={setEventAfter} />
 <Input value={eventReason} aria-label={t("director.workspace.continuity.eventReason")} placeholder={t("director.workspace.continuity.eventReason")} onChange={event => setEventReason(event.target.value)} />
-<Button disabled={busy || !timelineId || !shotId || !factId || !sourceBlockId || !eventReason.trim()} onClick={() => void addEvent()}>{t("director.workspace.continuity.addChange")}</Button></div></fieldset>
+<Button disabled={busy || !timelineId || !shotId || !factId || !eventAfter || !eventReason.trim()} onClick={() => void addEvent()}>{t("director.workspace.continuity.addChange")}</Button></div></fieldset>
 <fieldset className="min-w-0 space-y-3 rounded-lg border border-border p-4" data-continuity-form-group="exemptions"><legend className="px-1 text-sm font-medium">{t("director.workspace.continuity.markReviewed")}</legend><div className="grid gap-3"><Input value={exemptionReason} aria-label={t("director.workspace.continuity.exemptionReason")} placeholder={t("director.workspace.continuity.exemptionReason")} onChange={event => setExemptionReason(event.target.value)} />
 <Input value={reviewRef} aria-label={t("director.workspace.continuity.reviewRef")} placeholder={t("director.workspace.continuity.reviewRef")} onChange={event => setReviewRef(event.target.value)} />
 <Button disabled={busy || !exemptionReason.trim() || !reviewRef.trim()} onClick={() => void addExemption()}>{t("director.workspace.continuity.markReviewed")}</Button></div></fieldset>
 </div>
       <p className="text-xs text-muted-foreground">{t("director.workspace.continuity.ledgerCount", { facts: factRows.length, events: ledger.events?.length || 0, coverage: ledger.coverage?.length || 0 })}</p>
     </div></details>}
-    {legacy && editable && <div className="space-y-3"><Button type="primary" loading={agentUpgradeStarting || Boolean(agentUpgradeRequest)} disabled={busy || !onRequestAgentUpgrade} onClick={() => void requestAgentUpgrade()}>{t("director.workspace.continuity.upgradeWithAgent")}</Button><Input.TextArea value={draftText} disabled={busy || agentUpgradeStarting || Boolean(agentUpgradeRequest)} onChange={event => { setDraftText(event.target.value); setProposedLedger(null); setUpgradePreview(null); }} placeholder={t("director.workspace.continuity.upgradeJson")} autoSize={{ minRows: 5, maxRows: 12 }} />{draftError && <Alert type="error" message={draftError} />}<Button disabled={busy || agentUpgradeStarting || Boolean(agentUpgradeRequest) || !draftText.trim()} onClick={() => void saveJson()}>{t("director.workspace.continuity.previewUpgrade")}</Button>{upgradePreview && <div className="space-y-2 rounded-lg border border-border p-3"><Tag color={upgradePreview.report?.status === "passed" ? "green" : "orange"}>{t(`director.workspace.continuity.status.${upgradePreview.report?.status || "blocked"}`)}</Tag><p className="break-all text-xs">{t("director.workspace.continuity.upgradeSource")}: {upgradePreview.fromSourceHash}</p><p className="text-xs">{t("director.workspace.continuity.upgradeRuntime")}: {upgradePreview.targetRuntime?.version} · {upgradePreview.targetRuntime?.runtimeId}</p><p className="text-xs">{t("director.workspace.continuity.upgradeImpact", { count: upgradePreview.affectedTargets?.length || 0, unresolved: upgradePreview.report?.diagnostics?.length || 0 })}</p><div className="space-y-1 border-t border-border pt-2 text-xs text-muted-foreground"><p>{t("director.workspace.continuity.upgradeEquivalent", { count: upgradePreview.changeClassification?.equivalentConversions?.length || 0 })}</p><p>{t("director.workspace.continuity.upgradeHistorical", { count: upgradePreview.changeClassification?.historicalProjection?.length || 0 })}</p><p>{t("director.workspace.continuity.upgradeSemanticGaps", { count: upgradePreview.changeClassification?.semanticGaps?.length || 0 })}</p><p>{t("director.workspace.continuity.upgradeSpeculative", { count: upgradePreview.changeClassification?.speculativeSuggestions?.length || 0 })}</p></div>{(upgradePreview.activeRuns || []).length > 0 && <Alert type="warning" showIcon message={t("director.workspace.continuity.upgradeActiveRuns", { count: upgradePreview.activeRuns.length })} description={upgradePreview.activeRuns.map((run: Row) => `${run.runId} · ${run.status}`).join(" / ")} />}<Button type="primary" disabled={busy || (upgradePreview.activeRuns || []).length > 0} onClick={() => void applyUpgrade()}>{t("director.workspace.continuity.applyUpgrade")}</Button></div>}</div>}
   </section>;
 }

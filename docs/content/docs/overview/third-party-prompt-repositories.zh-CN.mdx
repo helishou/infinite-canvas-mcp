@@ -1,11 +1,11 @@
 ---
 title: 第三方提示词来源
-description: 当前内置的 7 个第三方提示词来源
+description: 当前内置的 7 个第三方提示词来源与 3 个本地 MJ 资产生成库（角色·人像 / 场景·环境 / 巨物·怪兽）
 ---
 
 # 第三方提示词来源
 
-应用内置以下 7 个来源。提示词数据统一从 [Image Prompts](https://github.com/yukkcat/image-prompts) 的标准 JSON 读取，原项目地址用于查看来源内容。
+应用内置以下 7 个第三方来源与 3 个本地来源（MJ 角色·人像 / MJ 场景·环境 / MJ 巨物·怪兽）。第三方提示词数据统一从 [Image Prompts](https://github.com/yukkcat/image-prompts) 的标准 JSON 读取，原项目地址用于查看来源内容。
 
 | 来源 | 原项目 |
 | --- | --- |
@@ -16,5 +16,7 @@ description: 当前内置的 7 个第三方提示词来源
 | Awesome GPT-4o | https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts |
 | YouMind GPT Image 2 | https://github.com/YouMind-OpenLab/awesome-gpt-image-2 |
 | YouMind Nano Banana Pro | https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts |
+
+本地来源「MJ 角色·人像」「MJ 场景·环境」「MJ 巨物·怪兽」随应用静态资源发布（`/prompt-sources/mj-char.json`、`mj-scene.json`、`mj-juwu.json`，共 493 条带 webp 缩略图的 Midjourney 提示词，按独码/混码、介质质感打标签），数据与图片由 `scripts/import-mj-asset-prompts.mjs` 从「MJ 码图对照库」HTML 生成（缩略图转 webp），可用同一脚本重新导入或更新。
 
 每个内置来源都可独立启用和拉取。配置页还支持添加自定义标准 JSON 来源，以及按周期批量更新；拉取失败时继续使用该来源上一次成功缓存。

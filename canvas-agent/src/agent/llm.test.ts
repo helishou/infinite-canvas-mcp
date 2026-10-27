@@ -9,7 +9,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { directorSubagentSchema } from "./delegation.js";
+import { directorSubagentDescription, directorSubagentSchema } from "./delegation.js";
 import { LlmAgent, readAgentFile, type LlmSettings } from "./llm.js";
 import { configuredLlmProviders, llmHistoryForProvider, parseLlmReply, requestLlm, type Json, type LlmProvider } from "./llm-provider.js";
 
@@ -70,6 +70,8 @@ test("Codex channel uses native model identity and effort catalog without HTTP c
     const catalog = agent.models([{ model: "native", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }]);
     assert.equal(catalog.data[0].model, "cli::native"); assert.equal(catalog.data[0].runtime, "codex"); assert.equal(catalog.data[0].defaultReasoningEffort, "high");
     agent.rememberCodexThread("codex-thread", "cli::native"); assert.equal(agent.codexThreadModel("codex-thread"), "cli::native");
+    assert.equal(agent.delegationModel("codex-thread", "other-channel::model"), "cli::native", "the selected parent model takes precedence over a model proposed by the tool caller");
+    assert.equal(agent.delegationModel("unknown-thread", "requested-channel::model"), "requested-channel::model", "explicit model remains a fallback when the parent selection is unavailable");
     assert.throws(() => agent.startThread(process.cwd()), /原生 Codex/);
 });
 
@@ -111,18 +113,22 @@ test("streamed tool arguments execute exactly once through MCP and persist for r
     assert.throws(() => agent.read(thread.id, path.join(cwd, "other")), /工作空间/);
 });
 
-test("API delegation binds the actual parent/channel and preserves an explicit canvas over the active canvas", async t => {
+test("API delegation binds the actual parent/channel and preserves the frontend model over a tool override", async t => {
     let requests = 0, delegated: Json | undefined;
+    const bodies: Json[] = [];
     const url = await modelServer(t, (_body, response) => {
+        bodies.push(_body);
         requests++;
-        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "delegate-1", function: { name: "director_subagent", arguments: JSON.stringify({ action: "spawn", projectId: "requested-canvas", parentThreadId: "wrong-director", operationId: "one", title: "核对分镜", role: "shots", prompt: "确认覆盖范围" }) } }] }, finish_reason: "tool_calls" }] }]);
+        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "delegate-1", function: { name: "director_subagent", arguments: JSON.stringify({ action: "spawn", projectId: "requested-canvas", parentThreadId: "wrong-director", operationId: "one", title: "核对分镜", role: "shots", prompt: "确认覆盖范围", model: "forged::model", effort: "low" }) } }] }, finish_reason: "tool_calls" }] }]);
         else sse(response, [{ choices: [{ delta: { content: "已派发，等待结果" }, finish_reason: "stop" }] }]);
     });
-    const { store } = settings(config(url));
+    const selectedConfig = config(url);
+    selectedConfig.channels.push({ ...selectedConfig.channels[0], id: "b", name: "B", models: [{ name: "selected", capability: "text" }] });
+    const { store } = settings(selectedConfig);
     const connect = async () => {
         const server = new McpServer({ name: "fixture", version: "1" });
         server.registerTool("canvas_set_active_project", { inputSchema: { id: z.string() } }, async () => ({ content: [{ type: "text", text: "bound" }] }));
-        server.registerTool("director_subagent", { inputSchema: directorSubagentSchema }, async input => { delegated = input; return { content: [{ type: "text", text: JSON.stringify({ taskId: "child-1", status: "queued" }) }] }; });
+        server.registerTool("director_subagent", { description: directorSubagentDescription, inputSchema: directorSubagentSchema }, async input => { delegated = input; return { content: [{ type: "text", text: JSON.stringify({ taskId: "child-1", status: "queued" }) }] }; });
         const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
         await server.connect(serverTransport);
         const client = new Client({ name: "fixture", version: "1" }); await client.connect(clientTransport); return client;
@@ -130,11 +136,18 @@ test("API delegation binds the actual parent/channel and preserves an explicit c
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "director-delegate-api-"));
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
     const agent = new LlmAgent(store, url, "", connect), thread = agent.startThread(cwd);
-    await agent.run("派一个分镜子代理", () => {}, [], { threadId: thread.id, cwd }, "real-canvas");
+    await agent.run("并行审阅整集的剧情和连续性", () => {}, [], { threadId: thread.id, cwd, model: "b::selected", effort: "high" }, "real-canvas");
     assert.equal(delegated?.projectId, "requested-canvas", "explicit project identity is never silently replaced by the active canvas");
     assert.equal(delegated?.parentThreadId, thread.id);
     assert.ok(delegated?.parentTurnId);
-    assert.equal(delegated?.model, thread.model);
+    assert.equal(delegated?.model, "b::selected", "the frontend-selected model is propagated to the worker");
+    assert.equal(delegated?.effort, "high", "the selected frontend reasoning effort is inherited");
+    assert.equal(bodies[0].model, "selected", "the main model request uses the selected channel model");
+    assert.ok(bodies[0].tools.some((tool: Json) => tool.function?.name === "director_subagent"), "custom model receives the subagent tool definition");
+    assert.match(String(bodies[0].tools.find((tool: Json) => tool.function?.name === "director_subagent")?.function?.description), /不得指定子代理模型/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /两个以上可独立审阅的专业面/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /单字段修改/);
+    assert.match(String(bodies[0].messages.find((message: Json) => message.role === "system")?.content), /收到真实 spawn 回执/);
     assert.equal(requests, 2);
 });
 
@@ -224,4 +237,63 @@ test("stopping a response restores idle state and cannot execute an unfinished t
     await run;
     assert.equal(finished, true); assert.equal(agent.read(thread.id).thread.status, "interrupted");
     assert.equal(agent.interrupt(thread.id), false);
+});
+
+test("用户附件入库一次、历史只留 media 引用，发模型前再展开成真实图片", async t => {
+    let uploaded = 0, mediaHits = 0, requests = 0;
+    const bodies: Json[] = [];
+    const server = http.createServer(async (request, response) => {
+        let raw = ""; for await (const chunk of request) raw += chunk;
+        if (request.url === "/media/upload") {
+            uploaded++;
+            response.writeHead(201, { "content-type": "application/json" });
+            response.end(JSON.stringify({ ok: true, media: { storageKey: "image:stored-1" } }));
+            return;
+        }
+        if (request.url?.startsWith("/media/")) {
+            mediaHits++;
+            response.writeHead(200, { "content-type": "image/png" });
+            response.end(Buffer.from("png"));
+            return;
+        }
+        requests++; bodies.push(JSON.parse(raw));
+        sse(response, [{ choices: [{ delta: { content: "看到了这张图" }, finish_reason: "stop" }] }]);
+    }).listen(0, "127.0.0.1");
+    await once(server, "listening");
+    t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+
+    const { store, data } = settings(config(url));
+    const connect = async () => {
+        const fixture = new McpServer({ name: "fixture", version: "1" });
+        // 空 tools 目录会让 fixture 不声明 tools/list（-32601），注册一个占位工具保证协议完整。
+        fixture.registerTool("fixture_read", { inputSchema: {} }, async () => ({ content: [{ type: "text", text: "fixture" }] }));
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await fixture.connect(serverTransport);
+        const client = new Client({ name: "fixture", version: "1" });
+        await client.connect(clientTransport);
+        return client;
+    };
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-llm-media-"));
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const agent = new LlmAgent(store, url, "", connect);
+    const thread = agent.startThread(cwd);
+    const events: Json[] = [];
+    await agent.run("看这张图", (type, payload) => events.push({ type, payload }), [{ name: "shot.png", type: "image/png", dataUrl: "data:image/png;base64,cG5n" }], { threadId: thread.id, cwd });
+
+    assert.equal(uploaded, 1, "附件只入库一次");
+    assert.equal(requests, 1, `必须发出一次模型请求（events=${JSON.stringify(events.filter(event => event.type === "agent_error"))}）`);
+    const parts = bodies[0].messages.flatMap((message: Json) => Array.isArray(message.content) ? message.content : []);
+    const image = parts.find((part: Json) => part.type === "image_url");
+    assert.equal(Buffer.from(String(image.image_url.url).split(",")[1], "base64").toString(), "png", "模型看到的是附件原始字节");
+    const saved = JSON.stringify(data.get(`agent.llm.thread:${thread.id}`));
+    assert.ok(saved.includes('"imageRef":"image:stored-1"'), "历史必须只存 media 引用");
+    assert.equal(saved.includes("cG5n"), false, "历史里不应再出现附件 base64");
+
+    // 新进程/新实例打开同一线程：缓存为空，必须回媒体库取图（这才是重启后的真实路径）。
+    const reopened = new LlmAgent(store, url, "", connect);
+    await reopened.run("再看一次", () => {}, [], { threadId: thread.id, cwd });
+    assert.ok(mediaHits >= 1, "重开线程后必须从 /media 取回图片");
+    const second = bodies[1].messages.flatMap((message: Json) => Array.isArray(message.content) ? message.content : []);
+    assert.equal(Buffer.from(String(second.find((part: Json) => part.type === "image_url").image_url.url).split(",")[1], "base64").toString(), "png");
 });

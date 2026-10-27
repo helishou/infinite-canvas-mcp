@@ -1,10 +1,10 @@
 import type { CanvasNodeImage, CanvasNodeMetadata } from "@/types/canvas";
 
-/** Browsing changes presentation only; it never restores inputs or changes formal reference selection. */
-export function smartImageBrowsePatch(image: CanvasNodeImage): Partial<CanvasNodeMetadata> {
+/** 设为主图：切换主显示，并把该图显式指定为当前有效结果（下一次生成以它为准）；新结果回写后恢复跟随最新。 */
+export function smartImagePrimaryPatch(image: CanvasNodeImage): Partial<CanvasNodeMetadata> {
     return { primaryImageId: image.id, content: image.content, storageKey: image.storageKey, naturalWidth: image.naturalWidth,
         naturalHeight: image.naturalHeight, bytes: image.bytes, mimeType: image.mimeType,
-        activeImageHistoryId: image.id, activeImageHistoryExplicit: false };
+        activeImageHistoryId: image.id, activeImageHistoryExplicit: true };
 }
 
 export function smartImageSettingsPatch(image: CanvasNodeImage): Partial<CanvasNodeMetadata> | undefined {

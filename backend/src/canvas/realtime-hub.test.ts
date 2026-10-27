@@ -51,3 +51,26 @@ test("文本选区只广播同项目，不写文档或 revision；清除和离�
         await new Promise<void>((resolve) => server.close(() => resolve())); db.close();
     }
 });
+
+test("LAN WebSocket accepts a tokenless private peer forwarded by the trusted dev proxy", { timeout: 10_000 }, async () => {
+    const db = new BackendDatabase(":memory:"), events = new BackendEventBus();
+    db.createCanvasProject({ id: "p", nodes: [], connections: [] });
+    const server = createServer();
+    const origin = "http://192.168.1.116:3001";
+    const hub = new CanvasRealtimeHub({ url: "http://localhost", port: 0, token: "test", origins: [origin], listenHost: "0.0.0.0" }, db, events, true);
+    hub.attach(server);
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const socket = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/canvas/realtime?projectId=p&clientId=lan`, {
+        headers: { Origin: origin, "x-forwarded-for": "192.168.1.44" },
+    });
+    try {
+        await once(socket, "open");
+        assert.equal(socket.readyState, WebSocket.OPEN);
+    } finally {
+        socket.terminate();
+        hub.close();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        db.close();
+    }
+});

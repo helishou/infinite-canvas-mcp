@@ -52,7 +52,7 @@ test("every built-in tool declared by the toolbar or image registry survives gro
     for (const name of ["baseToolbarTools", "nodeToolbarTools", "sharedTools"]) collect(variable(name), tree);
     const imageTree = ts.createSourceFile("image-tools.tsx", readFileSync(new URL("./canvas-image-toolbar-tools.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     collect(imageTree, imageTree);
-    assert.equal(ids.size, 36);
+    assert.equal(ids.size, 39);
     const groups = groupCanvasNodeActions([...ids].map(id => ({ id })));
     assert.deepEqual(groups.flatMap(group => group.actions.map(action => action.id)).sort(), [...ids].sort());
     assert.ok(!groups.some(group => group.id === "extensions"), "built-in actions must have deliberate sections");
@@ -62,13 +62,15 @@ test("menu projections preserve callbacks, disabled/loading/danger state and cur
     const active = { id: "plugin:active", label: "Active", title: "Active tool", active: true, disabled: true, loading: true, icon: "plain", onClick: () => undefined };
     const remove = { id: "delete", title: "Delete", danger: true, onClick: () => undefined };
     const allToolbarTools = [active, remove];
-    const actionMenuItems = evaluate<Array<{ children: Array<{ key: string; onClick: () => void; disabled?: boolean; danger?: boolean; icon?: unknown }> }>>(variable("actionMenuItems"), { React, LoaderCircle: () => null, groupCanvasNodeActions, allToolbarTools, t: (key: string) => key });
+    const dropdownTools = [active, remove];
+    const moreTools = [active];
+    const actionMenuItems = evaluate<Array<{ children: Array<{ key: string; onClick: () => void; disabled?: boolean; danger?: boolean; icon?: unknown }> }>>(variable("actionMenuItems"), { React, LoaderCircle: () => null, groupCanvasNodeActions, dropdownTools, t: (key: string) => key });
     const items = actionMenuItems.flatMap(group => group.children);
     assert.equal(items.find(item => item.key === active.id)?.onClick, active.onClick);
     assert.equal(items.find(item => item.key === active.id)?.disabled, true);
     assert.ok(React.isValidElement(items.find(item => item.key === active.id)?.icon));
     assert.equal(items.find(item => item.key === remove.id)?.danger, true);
-    const props = evaluate<{ selectedKeys: string[]; selectable: boolean }>(expression("menu"), { actionMenuItems, allToolbarTools, setActionsOpen: () => undefined });
+    const props = evaluate<{ selectedKeys: string[]; selectable: boolean }>(expression("menu"), { actionMenuItems, moreTools, setActionsOpen: () => undefined });
     assert.equal(props.selectable, true);
     assert.deepEqual(props.selectedKeys, [active.id]);
 });

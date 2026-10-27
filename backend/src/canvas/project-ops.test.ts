@@ -44,7 +44,7 @@ test("inserting an unrelated Clip does not inherit the legacy node's Motion Cont
     applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "fresh" } }]);
     const clips = (node.metadata as any).segments;
     assert.equal(clips.at(-1).motionContextEnabled, false);
-    assert.equal(clips.at(-1).tailFrameContinuation, false);
+    assert.equal(clips.at(-1).tailFrameContinuation, true);
     applyCanvasProjectOperations(project, [{ type: "add_h3_segment", nodeId: "h3-1", segment: { id: "explicit", motionContextEnabled: true } }]);
     assert.equal((node.metadata as any).segments.at(-1).motionContextEnabled, true);
     assert.equal((node.metadata as any).motionContextEnabled, true);

@@ -169,18 +169,18 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
             <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <label className="space-y-1">
-                        <span className="text-xs text-stone-500">{t("canvas.character.editName")}</span>
+                        <span className="text-xs text-muted-foreground">{t("canvas.character.editName")}</span>
                         <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("canvas.character.editNamePlaceholder")} />
                     </label>
                     <label className="space-y-1">
-                        <span className="text-xs text-stone-500">{t("canvas.character.voice")}</span>
+                        <span className="text-xs text-muted-foreground">{t("canvas.character.voice")}</span>
                         <div className="flex gap-2">
                             <Input
                                 value={voiceName || voiceUrl}
                                 onChange={(e) => { setVoiceName(e.target.value); setVoiceAssetId(""); }}
                                 placeholder={t("canvas.character.editVoicePlaceholder")}
                                 addonAfter={
-                                    <button type="button" className="text-stone-500 hover:text-stone-700" onClick={() => voiceInputRef.current?.click()}>
+                                    <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => voiceInputRef.current?.click()}>
                                         <UploadIcon className="size-3.5" />
                                     </button>
                                 }
@@ -208,19 +208,19 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
                     </label>
                 </div>
                 <label className="block space-y-1">
-                    <span className="text-xs text-stone-500">{t("canvas.character.editDescription")}</span>
+                    <span className="text-xs text-muted-foreground">{t("canvas.character.editDescription")}</span>
                     <Input.TextArea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("canvas.character.editDescriptionPlaceholder")} />
                 </label>
                 <div className="space-y-1">
                     <div className="flex items-center justify-between">
-                        <span className="text-xs text-stone-500">{t("canvas.character.editImages")}</span>
+                        <span className="text-xs text-muted-foreground">{t("canvas.character.editImages")}</span>
                         <Button size="small" icon={<ImagePlus className="size-3.5" />} onClick={onPickCanvasImage}>
                             {t("canvas.character.addImageFromCanvas")}
                         </Button>
                     </div>
                     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                         {images.map((image, idx) => (
-                            <div key={idx} className="relative rounded-md border border-stone-200 p-2 dark:border-stone-700">
+                            <div key={idx} className="relative rounded-md border border-border p-2 ">
                                 <AntImage src={image.url} alt={image.outfit || image.name} preview={{ src: image.url }} className="!h-24 !w-full !rounded !object-cover" />
                                 <div className="mt-1 space-y-1">
                                     <Input
@@ -230,7 +230,7 @@ export function CharacterNodeEditModal({ open, selectingCanvasImage, canvasImage
                                         placeholder={t("assets.character.outfitPlaceholder")}
                                     />
                                     <label className="block space-y-1">
-                                        <span className="text-xs text-stone-500">{t("canvas.character.imageRole")}</span>
+                                        <span className="text-xs text-muted-foreground">{t("canvas.character.imageRole")}</span>
                                         <Select
                                             size="small"
                                             className="w-full"

@@ -19,7 +19,7 @@ import { fetchBackendCanvasDrama } from "@/services/backend-api";
 import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
-import { useAssetStore, libraryErrorText, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
+import { dedupeAssetSources, useAssetStore, libraryErrorText, type Asset, type AssetKind, type AudioAsset, type ImageAsset } from "@/stores/use-asset-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { CUSTOM_PROMPTS_CATEGORY, useCustomPromptsStore } from "@/stores/use-custom-prompts-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
@@ -311,7 +311,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                 {selectMode ? null : <Select size="small" variant="borderless" className="w-20" value={typeFilter} onChange={setTypeFilter} options={NODE_FILTER_VALUES.map((value) => ({ value, label: value === "all" ? t("common.all") : t(`canvas.sidePanel.filter.${value}`) }))} />}
             </div>
             <div className="px-3 pb-2.5">
-                <Input ref={searchInputRef} size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} aria-label={t("canvas.navigation.searchLabel")} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} onPressEnter={() => { if (filtered[0]) onFocusNode(filtered[0].id); }} />
+                <Input ref={searchInputRef} size="small" allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} aria-label={t("canvas.navigation.searchLabel")} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} onPressEnter={() => { if (filtered[0]) onFocusNode(filtered[0].id); }} />
             </div>
             <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 {displayRows.length ? (
@@ -446,6 +446,7 @@ const ASSET_GROUPS: { kind: AssetKind; icon: typeof Square }[] = [
     { kind: "text", icon: FileText },
     { kind: "character", icon: User },
     { kind: "scene", icon: MapPinned },
+    { kind: "prop", icon: Package },
 ];
 const ALL_ASSET_DRAMAS = "__all-asset-dramas__";
 const UNASSIGNED_ASSET_DRAMA = "__unassigned-asset-drama__";
@@ -481,6 +482,7 @@ function buildInsertPayload(asset: Asset): InsertAssetPayload {
         };
     }
     if (asset.kind === "scene") return { kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt };
+    if (asset.kind === "prop") return { kind: "prop", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image };
     return { kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title };
 }
 
@@ -522,22 +524,22 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
     }, [projectId]);
     useEffect(() => {
         if (dramaQuery.isSuccess) {
-            setDramaFilter(dramaQuery.data.episode?.dramaId || ALL_ASSET_DRAMAS);
+            setDramaFilter(dramaQuery.data.episode?.dramaId || dramaQuery.data.drama?.id || ALL_ASSET_DRAMAS);
             setTagFilter("all");
         }
-    }, [dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
+    }, [dramaQuery.data?.drama?.id, dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
 
-    const scopedAssets = useMemo(() => assets.filter((asset) => {
+    const scopedAssets = useMemo(() => dedupeAssetSources(assets.filter((asset) => {
         if (dramaFilter === ALL_ASSET_DRAMAS) return true;
         if (dramaFilter === UNASSIGNED_ASSET_DRAMA) return !asset.dramaId || !dramaIds.has(asset.dramaId);
         return asset.dramaId === dramaFilter;
-    }), [assets, dramaFilter, dramaIds]);
+    })), [assets, dramaFilter, dramaIds]);
 
-    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
+    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
+        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
     }, [keyword, scopedAssets, tagFilter]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
@@ -576,7 +578,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
     return (
         <div className="flex h-full flex-col">
             <div className="flex items-center gap-2 px-3 pb-2 pt-1">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchAssets")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+                <Input size="small" allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} placeholder={t("canvas.sidePanel.searchAssets")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
                 <button
                     type="button"
                     disabled={uploading}
@@ -650,8 +652,9 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
 
 function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: CanvasTheme; onInsert: () => void; onRemove: () => void }) {
     const { t } = useTranslation();
+    const missingSource = asset.metadata?.sharedAssetMissing === true;
     const handleDragStart = (event: React.DragEvent<HTMLDivElement>) => {
-        if (asset.kind === "text") return;
+        if (asset.kind === "text" || missingSource) { event.preventDefault(); return; }
         // 角色资产：拖到画布生成 Character 节点，拖到 H3 ref 槽按角色组拆 outfit + voice。
         if (asset.kind === "character") {
             const ref = {
@@ -685,6 +688,15 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
             event.dataTransfer.setData("text/plain", payload);
             return;
         }
+        if (asset.kind === "prop") {
+            const ref = { type: "prop", kind: "prop", name: asset.title, productionAssetId: asset.id, propName: asset.data.name || asset.title, propDescription: asset.data.description, propImage: asset.data.image };
+            const payload = JSON.stringify(ref);
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("application/x-infinite-canvas-ref", payload);
+            event.dataTransfer.setData("application/json", payload);
+            event.dataTransfer.setData("text/plain", payload);
+            return;
+        }
         const ref = asset.kind === "image"
             ? { url: asset.data.dataUrl, dataUrl: asset.data.dataUrl, type: "image", kind: "image", name: asset.title, storageKey: asset.data.storageKey }
             : { url: asset.data.url, type: asset.kind, kind: asset.kind, name: asset.title, storageKey: asset.data.storageKey };
@@ -695,21 +707,24 @@ function AssetCard({ asset, theme, onInsert, onRemove }: { asset: Asset; theme: 
         event.dataTransfer.setData("text/plain", payload);
     };
     return (
-        <div draggable={asset.kind !== "text"} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" ? undefined : "grab" }}>
+        <div draggable={asset.kind !== "text" && !missingSource} onDragStart={handleDragStart} className="group relative aspect-square overflow-hidden rounded-xl border transition duration-200 hover:-translate-y-0.5 hover:shadow-lg" style={{ borderColor: theme.node.stroke, background: theme.node.panel, cursor: asset.kind === "text" || missingSource ? undefined : "grab" }}>
             <AssetCover asset={asset} />
+            {missingSource && <div className="absolute inset-x-1 bottom-1 rounded bg-black/70 px-2 py-1 text-center text-[11px] leading-tight text-white">{t("assets.sharedAssetMissing")}</div>}
             <div className="absolute inset-0 flex items-center justify-center gap-2.5 opacity-0 transition duration-200 group-hover:opacity-100">
                 <button
                     type="button"
+                    disabled={missingSource}
                     onClick={onInsert}
-                    className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-stone-900 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80"
+                    className="grid size-8 place-items-center rounded-full bg-white/90 text-foreground shadow-sm backdrop-blur transition hover:bg-white hover:text-foreground dark:bg-black/60 dark:hover:bg-black/80"
                     aria-label={t("canvas.sidePanel.inserted")}
                 >
                     <Plus className="size-4" />
                 </button>
-                <Popconfirm title={t("canvas.sidePanel.removeAssetTitle", { name: asset.title })} description={t("canvas.sidePanel.removeAssetDescription")} okText={t("common.delete")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
+                <Popconfirm disabled={missingSource} title={t("canvas.sidePanel.removeAssetTitle", { name: asset.title })} description={t("canvas.sidePanel.removeAssetDescription")} okText={t("common.delete")} cancelText={t("common.cancel")} okButtonProps={{ danger: true }} onConfirm={onRemove}>
                     <button
                         type="button"
-                        className="grid size-8 place-items-center rounded-full bg-white/90 text-stone-700 shadow-sm backdrop-blur transition hover:bg-white hover:text-red-500 dark:bg-black/60 dark:text-stone-100 dark:hover:bg-black/80 dark:hover:text-red-400"
+                        disabled={missingSource}
+                        className="grid size-8 place-items-center rounded-full bg-white/90 text-foreground shadow-sm backdrop-blur transition hover:bg-white hover:text-red-500 dark:bg-black/60 dark:hover:bg-black/80 dark:hover:text-red-400"
                         aria-label={t("canvas.sidePanel.removeAsset")}
                     >
                         <Trash2 className="size-4" />
@@ -747,9 +762,9 @@ function CharacterCover({ asset }: { asset: Extract<Asset, { kind: "character" }
     const preview = orderedImages.map((image) => previewUrlFor(image.storageKey)).find(Boolean);
     if (preview || covers.length) return <img src={preview || covers[0]} alt="" onError={() => setCovers((current) => current.slice(1))} className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
     return (
-        <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
-            <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.character")}</div>
-            <div className="text-[10px] text-stone-400 dark:text-stone-500">{count} {count === 1 ? "image" : "images"}</div>
+        <div className="size-full flex flex-col items-center justify-center gap-1 bg-muted">
+            <div className="text-[11px] font-medium text-muted-foreground">{t("assets.kinds.character")}</div>
+            <div className="text-[11px] text-muted-foreground dark:text-muted-foreground">{count} {count === 1 ? "image" : "images"}</div>
         </div>
     );
 }
@@ -763,11 +778,12 @@ function AssetCover({ asset }: { asset: Asset }) {
     }
     if (asset.kind === "character") return <CharacterCover asset={asset} />;
     if (asset.kind === "scene") return <SceneCover asset={asset} />;
+    if (asset.kind === "prop") return <PropCover asset={asset} />;
     if (asset.kind === "audio") {
         return (
-            <div className="size-full flex flex-col items-center justify-center gap-1 bg-stone-100 dark:bg-stone-800">
-                <div className="text-[11px] font-medium text-stone-500 dark:text-stone-400">{t("assets.kinds.audio")}</div>
-                {asset.data.durationMs ? <div className="text-[10px] text-stone-400 dark:text-stone-500">{Math.round(asset.data.durationMs / 1000)}s</div> : null}
+            <div className="size-full flex flex-col items-center justify-center gap-1 bg-muted">
+                <div className="text-[11px] font-medium text-muted-foreground">{t("assets.kinds.audio")}</div>
+                {asset.data.durationMs ? <div className="text-[11px] text-muted-foreground dark:text-muted-foreground">{Math.round(asset.data.durationMs / 1000)}s</div> : null}
             </div>
         );
     }
@@ -775,6 +791,12 @@ function AssetCover({ asset }: { asset: Asset }) {
 }
 
 function SceneCover({ asset }: { asset: Extract<Asset, { kind: "scene" }> }) {
+    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
+    return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
+}
+
+function PropCover({ asset }: { asset: Extract<Asset, { kind: "prop" }> }) {
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     useEffect(() => { void ensureImagePreview(asset.data.image.storageKey); }, [asset.data.image.storageKey]);
     return <img src={previewUrlFor(asset.data.image.storageKey) || asset.data.image.url || asset.coverUrl} alt="" className="size-full object-cover transition duration-300 group-hover:scale-[1.04]" />;
@@ -838,7 +860,7 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme
     return (
         <div className="flex h-full flex-col">
             <div className="px-3 pb-2.5 pt-1">
-                <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchPrompts")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+                <Input size="small" allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} placeholder={t("canvas.sidePanel.searchPrompts")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
@@ -849,9 +871,9 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, nodes, theme
                             sourceId={source.id}
                             sourceName={source.name}
                             keyword={keyword}
-                            open={!!expanded[source.id]}
+                            open={expanded[source.id]}
                             theme={theme}
-                            onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !prev[source.id] }))}
+                            onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !(prev[source.id] ?? true) }))}
                             onInsert={onInsert}
                             onView={setDetail}
                         />
@@ -887,7 +909,7 @@ function PromptSourceGroup({
     sourceId: string;
     sourceName: string;
     keyword: string;
-    open: boolean;
+    open?: boolean;
     theme: CanvasTheme;
     onToggle: () => void;
     onInsert: (payload: InsertAssetPayload) => void;
@@ -919,7 +941,7 @@ function PromptItemsGroup({
 }: {
     items: Prompt[];
     keyword: string;
-    open: boolean;
+    open?: boolean;
     sourceName: string;
     icon: LucideIcon;
     theme: CanvasTheme;
@@ -933,13 +955,21 @@ function PromptItemsGroup({
     headerAction?: ReactNode;
 }) {
     const { t } = useTranslation();
-    const showResults = open || !!keyword.trim();
+    // 搜索时默认展开全部分组（undefined 视为展开），但保留点击收起的能力；无关键词时按用户显式开关。
+    const hasKeyword = !!keyword.trim();
+    const showResults = hasKeyword ? open !== false : open;
     const filtered = useMemo(() => {
         const q = keyword.trim().toLowerCase();
         if (!q) return items;
         return items.filter((item) => [item.title, item.prompt, item.description, ...item.tags].join(" ").toLowerCase().includes(q));
     }, [items, keyword]);
     const insertPrompt = (item: Prompt) => onInsert({ kind: "text", content: item.prompt, title: item.title });
+    // 长列表直接全量渲染会一次性建几百个带缩略图的 DOM，搜索全展开时尤其卡。
+    // 分组内超过阈值先截断，点击「展开剩余」再补渲染；展开态随搜索词切换自动复位。
+    const COLLAPSE_LIMIT = 30;
+    const [expandedAll, setExpandedAll] = useState(false);
+    useEffect(() => { setExpandedAll(false); }, [keyword]);
+    const visible = filtered.length > COLLAPSE_LIMIT && !expandedAll ? filtered.slice(0, COLLAPSE_LIMIT) : filtered;
     return (
         <div>
             <div className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-xs font-semibold opacity-75 transition hover:opacity-100">
@@ -958,11 +988,18 @@ function PromptItemsGroup({
                     ) : error ? (
                         <button type="button" onClick={onRetry} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">{t("canvas.sidePanel.loadFailedRetry")}</button>
                     ) : filtered.length ? (
-                        <div className="space-y-1.5">
-                            {filtered.map((item) => (
-                                <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
-                            ))}
-                        </div>
+                        <>
+                            <div className="space-y-1.5">
+                                {visible.map((item) => (
+                                    <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
+                                ))}
+                            </div>
+                            {visible.length < filtered.length ? (
+                                <button type="button" onClick={() => setExpandedAll(true)} className="mt-1.5 w-full rounded-md py-1.5 text-center text-xs opacity-60 transition hover:bg-black/5 hover:opacity-100 dark:hover:bg-white/5">
+                                    {t("canvas.sidePanel.showMore", { count: filtered.length - visible.length })}
+                                </button>
+                            ) : null}
+                        </>
                     ) : (
                         <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : emptyText}</div>
                     )}
@@ -977,7 +1014,7 @@ function PromptRow({ item, theme, onInsert, onView }: { item: Prompt; theme: Can
     return (
         <div className="group relative flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-black/5 dark:hover:bg-white/5">
             {item.coverUrl ? (
-                <img src={item.coverUrl} alt="" className="size-10 shrink-0 rounded-md object-cover" loading="lazy" />
+                <img src={item.coverUrl} alt="" className="size-10 shrink-0 animate-image-in rounded-md bg-muted object-cover" loading="lazy" />
             ) : (
                 <span className="grid size-10 shrink-0 place-items-center rounded-md" style={{ background: theme.node.panel }}>
                     <FileText className="size-4 opacity-50" />

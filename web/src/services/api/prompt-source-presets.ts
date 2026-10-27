@@ -11,6 +11,9 @@ export type PromptSource = {
 
 export const PROMPT_REGISTRY_HOMEPAGE = "https://github.com/yukkcat/image-prompts";
 const PROMPT_REGISTRY_SOURCE_BASE = "https://raw.githubusercontent.com/yukkcat/image-prompts/main/dist/sources";
+// 仓库自带提示词源：由 scripts/import-mj-asset-prompts.mjs 生成（webp 缩略图 + 3 个分类 JSON），
+// 随 web 静态资源一起发布。
+const LOCAL_SOURCE_BASE = "/prompt-sources";
 
 export function createPromptSource(source?: Partial<PromptSource>): PromptSource {
     return {
@@ -31,8 +34,15 @@ export const DEFAULT_PROMPT_SOURCES: PromptSource[] = [
     registrySource("awesome-gpt4o-image-prompts", "Awesome GPT-4o", "https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts"),
     registrySource("youmind-gpt-image-2", "YouMind GPT Image 2", "https://github.com/YouMind-OpenLab/awesome-gpt-image-2"),
     registrySource("youmind-nano-banana-pro", "YouMind Nano Banana Pro", "https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts"),
+    localSource("mj-char-library", "MJ 角色·人像", "mj-char.json"),
+    localSource("mj-scene-library", "MJ 场景·环境", "mj-scene.json"),
+    localSource("mj-juwu-library", "MJ 巨物·怪兽", "mj-juwu.json"),
 ];
 
 function registrySource(id: string, name: string, homepage: string): PromptSource {
     return { id, name, url: `${PROMPT_REGISTRY_SOURCE_BASE}/${id}.json`, homepage, enabled: true, builtIn: true };
+}
+
+function localSource(id: string, name: string, file: string): PromptSource {
+    return { id, name, url: `${LOCAL_SOURCE_BASE}/${file}`, homepage: "", enabled: true, builtIn: true };
 }

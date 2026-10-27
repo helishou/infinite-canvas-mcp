@@ -27,6 +27,7 @@ test("H3 宿主清单版本一致且完整暴露参考素材 MCP 工具", () => 
         "h3_run_clip",
         "h3_get_task",
         "h3_cancel_task",
+        "h3_preview_run",
         "h3_move_clip",
         "h3_delete_clip",
         "h3_bind_existing_character_groups",

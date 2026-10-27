@@ -4,6 +4,7 @@ import { Clapperboard, FileText, FolderOpen, House, ImagePlus, Images, LayoutGri
 export const navigationTools = [
     { slug: "workbench", href: "/", icon: House },
     { slug: "projects", href: "/projects", icon: FolderOpen },
+    { slug: "freeCanvas", href: "/projects?type=canvas", icon: LayoutGrid },
     { slug: "generate", href: "/image", icon: Sparkles },
     { slug: "resources", href: "/assets", icon: Images },
     { slug: "workflows", href: "/workflows", icon: Workflow },

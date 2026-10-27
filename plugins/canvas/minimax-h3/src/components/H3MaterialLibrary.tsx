@@ -5,9 +5,10 @@ import { buildRestoreParamsPatch } from "../services/h3-segment-utils";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { H3Icon } from "./H3Icon";
 import { H3MaterialCard } from "./H3MaterialCard";
-import { message } from "antd";
+import { App } from "antd";
 import { h3Label, useH3Locale } from "../h3-locale";
 import { buildH3OutputPreview } from "../services/h3-output-preview";
+import { storyboardTrackItems } from "../services/h3-storyboard-track";
 
 type Props = { ctx: CanvasNodeContext; outputs: H3Ref[]; segments: H3Segment[]; selected?: H3Segment; patchSelected: (patch: Partial<H3Segment>) => void };
 const HISTORY_PAGE_SIZE = 40;
@@ -22,6 +23,7 @@ function formatOutputTime(value?: string): string {
 }
 
 export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
+    const { message } = App.useApp();
     const locale = useH3Locale();
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);
@@ -46,6 +48,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     }, []);
     const segmentKey = segments.map((item) => item.id).join("|");
     const segmentIndexes = useMemo(() => new Map(segments.map((item, index) => [item.id, index])), [segmentKey]);
+    const storyboardFrameTimesBySegment = useMemo(() => Object.fromEntries(segments.map((segment) => [segment.id, storyboardTrackItems(segment).map((item) => item.start)])), [segments]);
     const historyQueryKey = `${ctx.projectId}:${ctx.node.id}:${segmentKey}`;
     const loadNextHistoryPage = useCallback(async () => {
         const state = historyStateRef.current;
@@ -138,7 +141,8 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         const seenUrls = new Set<string>();
         const seenStorageKeys = new Set<string>();
         const unique: H3Ref[] = [];
-        for (const item of [...historyOutputs, ...outputs]) {
+        // 当前节点结果通常就是最新一轮；先展示它们，再追加按日志时间返回的历史结果。
+        for (const item of [...outputs, ...historyOutputs]) {
             if (seenUrls.has(item.url) || item.storageKey && seenStorageKeys.has(item.storageKey)) continue;
             seenUrls.add(item.url);
             if (item.storageKey) seenStorageKeys.add(item.storageKey);
@@ -176,6 +180,6 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>{h3Label(locale, "output")}</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties} onScroll={(event) => { const list = event.currentTarget; if (outputFilter === "all" && list.scrollLeft + list.clientWidth >= list.scrollWidth - 240) void loadNextHistoryPage(); }}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={ref.generationLogId ? `log:${ref.generationLogId}:${ref.storageKey || ref.url}` : `media:${ref.segmentId || ref.type}:${ref.storageKey || ref.url}`} ctx={ctx} ref={ref} locale={locale} compact removable restoreTitle={selected?.productionClipProjection ? "设为当前输出（保留当前提示词与参数）" : undefined} onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties} onScroll={(event) => { const list = event.currentTarget; if (outputFilter === "all" && list.scrollLeft + list.clientWidth >= list.scrollWidth - 240) void loadNextHistoryPage(); }}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={ref.generationLogId ? `log:${ref.generationLogId}:${ref.storageKey || ref.url}` : `media:${ref.segmentId || ref.type}:${ref.storageKey || ref.url}`} ctx={ctx} ref={ref} locale={locale} compact removable storyboardFrameTimes={storyboardFrameTimesBySegment[ref.segmentId || selected?.id || ""] || []} restoreTitle={selected?.productionClipProjection ? "设为当前输出（保留当前提示词与参数）" : undefined} onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl, ctx.node.id, storyboardFrameTimesBySegment); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
     </aside>;
 }

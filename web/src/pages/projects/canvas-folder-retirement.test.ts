@@ -29,7 +29,7 @@ test("canvas directory search and displayed counts include every former folder",
     assert.equal(visible(projects, "  canvas  ", matchesProjectQuery).length, 3);
     assert.deepEqual(visible(projects, "orphan", matchesProjectQuery), [projects[2]]);
     assert.deepEqual(visible(projects, "no match", matchesProjectQuery), []);
-    assert.match(source, /data-testid="canvas-directory-count">\{!hydrated \|\| !ownershipReady \? "—" : visibleProjects.length\}/);
+    assert.match(source, /data-testid="canvas-directory-count"[\s\S]{0,40}\{!hydrated \|\| !ownershipReady \? "—" : visibleProjects\.length\}/);
     assert.match(source, /ownershipUnavailable/);
     assert.match(source, /ownershipDescription/);
 });
@@ -55,5 +55,5 @@ test("Home uses actual drama ownership while retaining pins, recents and stable 
     assert.match(home, /homePinnedProject:\$\{entry.id\}/);
     assert.match(data, /homePinnedProject:\$\{projectId\}/);
     assert.match(home, /const latest = sorted\[0\]/);
-    assert.match(home, /navigate\(`\/canvas\/\$\{encodeURIComponent\(id\)\}`\)/);
+    assert.match(home, /openDestination\(`\/canvas\/\$\{encodeURIComponent\(id\)}`\)/);
 });

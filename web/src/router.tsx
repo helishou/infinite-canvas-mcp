@@ -25,6 +25,7 @@ const PromptsPage = lazy(() => import("@/pages/prompts"));
 const VideoPage = lazy(() => import("@/pages/video"));
 const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
+const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
 
 const pageFallback = <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">加载中…</div>;
 
@@ -36,6 +37,29 @@ function lazyPage(Page: LazyExoticComponent<ComponentType>) {
     );
 }
 
+// Exported so reports can collapse a concrete pathname to its route pattern without a second route table.
+export const appRoutes = [
+    { path: "/", element: lazyPage(HomePage) },
+    { path: "/projects", element: lazyPage(ProjectsPage) },
+    { path: "/production", element: lazyPage(ProductionHubPage) },
+    { path: "/director", element: lazyPage(LegacyDirectorPage) },
+    { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },
+    { path: "/image", element: lazyPage(ImagePage) },
+    { path: "/video", element: lazyPage(VideoPage) },
+    { path: "/assets", element: lazyPage(AssetsPage) },
+    { path: "/prompts", element: lazyPage(PromptsPage) },
+    { path: "/canvas", element: lazyPage(CanvasPage) },
+    { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
+    { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
+    { path: "/drama", element: lazyPage(ProductionAliasRedirect) },
+    { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionRedirect) },
+    { path: "/drama/scenes/:sceneId/production", element: lazyPage(SceneProductionRedirect) },
+    { path: "/workflows", element: lazyPage(WorkflowsPage) },
+    { path: "/config", element: lazyPage(ConfigPage) },
+    { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },
+    { path: "/analytics/local", element: lazyPage(LocalAnalyticsPage) },
+];
+
 export const router = createBrowserRouter([
     {
         element: (
@@ -44,27 +68,8 @@ export const router = createBrowserRouter([
                 <Outlet />
             </UserLayout>
         ),
-        children: [
-            { path: "/", element: lazyPage(HomePage) },
-            { path: "/projects", element: lazyPage(ProjectsPage) },
-            { path: "/production", element: lazyPage(ProductionHubPage) },
-            { path: "/director", element: lazyPage(LegacyDirectorPage) },
-            { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },
-            { path: "/image", element: lazyPage(ImagePage) },
-            { path: "/video", element: lazyPage(VideoPage) },
-            { path: "/assets", element: lazyPage(AssetsPage) },
-            { path: "/prompts", element: lazyPage(PromptsPage) },
-            { path: "/canvas", element: lazyPage(CanvasPage) },
-            { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
-            { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },
-            { path: "/drama", element: lazyPage(ProductionAliasRedirect) },
-            { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionRedirect) },
-            { path: "/drama/scenes/:sceneId/production", element: lazyPage(SceneProductionRedirect) },
-            { path: "/workflows", element: lazyPage(WorkflowsPage) },
-            { path: "/config", element: lazyPage(ConfigPage) },
-            { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },
-        ],
+        children: appRoutes,
     },
-    { path: "/pelican-bike", element: lazyPage(PelicanBikePage) },
+    { path: "/pelican-bike", element: <><AnalyticsTracker />{lazyPage(PelicanBikePage)}</> },
     { path: "*", element: lazyPage(NotFound) },
 ]);

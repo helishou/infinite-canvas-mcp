@@ -76,12 +76,16 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
             while (occupied.has(`custom/${fileName}`.toLocaleLowerCase()) || occupied.has(fileName.toLocaleLowerCase())) {
                 fileName = `${baseName}-${suffix++}.json`;
             }
+            // 优先用选中的档案；只填了 workflowId 时也回头找有没有对应的已存档案，能绑就绑。
+            const bindingProfile = profile || profiles.find((item) => item.workflowId === id);
             const config: WorkflowConfig = {
                 title,
                 backend: "",
                 operation: "",
                 description: `Imported from RunningHub workflow ${id}`,
                 fields: (inspected.fields || []).map(localField).filter((field): field is WorkflowField => field !== null),
+                // 下载即绑定：本地副本和它来自的云端档案配对，之后运行位置切「云端」不用再手选。
+                ...bindingProfile ? { runningHubProfileId: bindingProfile.id } : {},
             };
             const workflowPackage: WorkflowPackage = {
                 format: "infinite-canvas-workflow",
@@ -91,7 +95,11 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
                 config,
             };
             const uploaded = await importWorkflowPackage(fileName, workflowPackage);
-            message.success(`已生成本地副本 ${uploaded.name}；云端档案与本地副本此后各自独立`);
+            message.success(bindingProfile
+                ? t("runningHub.import.successBound", { name: uploaded.name, workflowId: id })
+                : t("runningHub.import.successCopy", { name: uploaded.name }));
+            // 同源本地工作流存在时，自定义字段配置会被继承过来——说清楚，避免以为又丢了一次。
+            if (uploaded.inheritedFrom) message.info(t("runningHub.import.inheritedFields", { source: uploaded.inheritedFrom }));
             setOpen(false);
             onImported(uploaded.name);
         } catch (reason) {
@@ -123,7 +131,7 @@ export function RunningHubWorkflowImport({ workflows, onImported }: { workflows:
             confirmLoading={importing}
             destroyOnClose
         >
-            <p className="mb-3 text-sm text-stone-500">{t("runningHub.import.description")}</p>
+            <p className="mb-3 text-sm text-muted-foreground">{t("runningHub.import.description")}</p>
             <Select
                 className="mb-3 w-full"
                 aria-label={t("runningHub.import.savedProfileLabel")}

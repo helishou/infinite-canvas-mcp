@@ -3,9 +3,9 @@ import fs from "node:fs";
 import { DB_FILE } from "../config.js";
 
 // Manual only. Default is read-only:
-//   npm run purge-scene-productions                 # 预览全部场次
-//   npm run purge-scene-productions -- --apply      # 执行
-//   npm run purge-scene-productions -- --drama <id> --apply
+//   corepack pnpm --filter @helishou/infinite-canvas-backend run purge-scene-productions # 预览全部场次
+//   corepack pnpm --filter @helishou/infinite-canvas-backend run purge-scene-productions -- --apply # 执行
+//   corepack pnpm --filter @helishou/infinite-canvas-backend run purge-scene-productions -- --drama <id> --apply
 //
 // Removes scene-production data and the scene canvas that belongs to it. The episode canvas,
 // episode production records, shared-asset canvas and every unrelated feature are untouched.

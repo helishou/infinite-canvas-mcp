@@ -142,9 +142,19 @@ export type StoryboardPromptReference = {
 
 export type StoryboardPromptShot = { description: string; referenceIds?: string[] };
 
-export async function storyboardPromptFingerprint(input: unknown) {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(input)));
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+export async function sha256Text(value: string, subtle: Pick<SubtleCrypto, "digest"> | null = globalThis.crypto?.subtle ?? null): Promise<string | null> {
+    if (!subtle || typeof subtle.digest !== "function") return null;
+    try {
+        const digest = await subtle.digest("SHA-256", new TextEncoder().encode(value));
+        return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+    } catch {
+        return null;
+    }
+}
+
+export async function storyboardPromptFingerprint(input: unknown, subtle: Pick<SubtleCrypto, "digest"> | null = globalThis.crypto?.subtle ?? null) {
+    const serialized = JSON.stringify(input) ?? "undefined";
+    return await sha256Text(serialized, subtle) ?? `raw:${serialized}`;
 }
 
 function subjectAppearsInShot(subject: StoryboardPromptSubject, shot: StoryboardPromptShot, subjectOrdinal: number) {
@@ -210,10 +220,11 @@ export function buildStoryboardPromptSections(subjects: StoryboardPromptSubject[
         const livePictures = subjectPictures(subject);
         const identityPictures = livePictures.filter((tag) => !blockingTags.has(tag));
         const blockingPictures = livePictures.filter((tag) => blockingTags.has(tag));
-        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
-        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
-        if (!details.length) details.push("visual features follow the linked reference");
-        return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
+        const pictureLinks = [
+            ...(identityPictures.length ? [`identity: ${identityPictures.join(", ")}`] : []),
+            ...(blockingPictures.length ? [`blocking: ${blockingPictures.join(", ")}`] : []),
+        ];
+        return `${subjectMarker(subject)} is ${identity || subject.id}${pictureLinks.length ? `; ${pictureLinks.join("; ")}` : ""}${details.length ? `. ${details.join("; ")}` : "."}`;
     }).join("\n");
 
     const referenceDefinitions = standaloneReferences.map((reference) => {

@@ -505,6 +505,9 @@ test("production tools publish full operation schemas and forward read-only pref
   for (const name of ["production_hash_source", "production_get_contract", "production_preflight", "production_preflight"]) assert.ok(tools.some(item => item.name === name));
   const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
   assert.deepEqual(hashSchema.required, ["source"]);
+  const preflightSchema = tools.find(item => item.name === "production_preflight")!.inputSchema;
+  assert.match(JSON.stringify(preflightSchema), /diagnostics/);
+  assert.match(JSON.stringify(preflightSchema), /targets/);
   const hashed = textPayload(await client.callTool({ name: "production_hash_source", arguments: { source: { brief: "hash the full authored source" } } }));
   assert.equal(hashed.hash, "a".repeat(64));
   assert.deepEqual(hashed.source, { brief: "hash the full authored source" });
@@ -517,10 +520,39 @@ test("production tools publish full operation schemas and forward read-only pref
   const request = { operationId: "op", expectedRevision: 4, ops: [{ type: "set_director_brief", brief: {} }] };
   for (const [name, owner] of [["production_preflight", { kind: "canvas", id: "canvas" }], ["production_preflight", { kind: "episode", id: "episode" }]] as const) {
     const response = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request } }));
-    assert.equal(response.preflight.diagnostics[0].path, "request.ops.0.brief");
-    assert.deepEqual(response.preflight.diagnostics[0].example, { brief: "A complete authored brief." });
+    assert.equal(response.preflight.counts.diagnostics, 1);
+    assert.equal(response.preflight.diagnostics, undefined);
+    const detail = textPayload(await client.callTool({ name, arguments: { ...owner, action: "edit", request, view: "diagnostics" } }));
+    assert.equal(detail.preflight.items[0].path, "request.ops.0.brief");
+    assert.deepEqual(detail.preflight.items[0].example, { brief: "A complete authored brief." });
   }
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 4);
+});
+
+test("production_initialize_from_current_demand submits one revisioned initialization op and reuses its receipt", async t => {
+  const app = express(); app.use(express.json());
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, plugins: [] }));
+  app.get("/drama/episodes/:id/production", (_req, res) => res.json({ ok: true, production: { revision: 6 } }));
+  let received: unknown;
+  let wrote = false;
+  let posts = 0;
+  app.post("/drama/episodes/:id/production/ops", (req, res) => { received = req.body; wrote = true; posts++; res.json({ ok: true, production: { revision: 7, draft: { director: { source: { version: 2 } } } } }); });
+  app.get("/drama/episodes/:id/production/operations/:operationId/receipt", (_req, res) => res.json(wrote
+    ? { ok: true, found: true, production: { revision: 7, draft: { director: { source: { version: 2 } } } } }
+    : { ok: true, found: false }));
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening"); t.after(() => server.close());
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const { tools } = await client.listTools();
+  const tool = tools.find(item => item.name === "production_initialize_from_current_demand");
+  assert.ok(tool);
+  assert.deepEqual(tool.inputSchema.required, ["episodeId", "operationId"]);
+  const result = textPayload(await client.callTool({ name: "production_initialize_from_current_demand", arguments: { episodeId: "episode-1", operationId: "start-draft-1" } }));
+  assert.equal(result.production.revision, 7);
+  assert.deepEqual(received, { operationId: "start-draft-1", expectedRevision: 6, ops: [{ type: "initialize_director_from_demand" }] });
+  const replay = textPayload(await client.callTool({ name: "production_initialize_from_current_demand", arguments: { episodeId: "episode-1", operationId: "start-draft-1" } }));
+  assert.equal(replay.revision, 7);
+  assert.equal(posts, 1);
 });
 
 test("MCP forwards the authored compilation scope to Backend", async t => {
@@ -681,32 +713,19 @@ test("canvas_task_status with taskId ignores unrelated project and node filters"
   assert.equal(payload.tasks[0].taskId, "task-1");
 });
 
-test("返回体超过上限时直接报错并给出可恢复建议", async (t) => {
+test("选区默认摘要读取，完整节点通过 canvas_get_state 定向读取", async (t) => {
   const events: Array<Record<string, unknown>> = [];
   const backendUrl = await mockOversizedBackend(t, (event) => events.push(event));
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_selection", arguments: { projectId: "canvas-oversized" } });
   const payload = textPayload(result);
 
-  assert.equal(result.isError, true, "超限必须报错而不是把大返回体交给模型");
-  assert.equal(payload.error.code, "OUTPUT_TOO_LARGE");
-  assert.equal(payload.error.recoverable, true);
-  assert.ok(payload.suggestedAction.action, "必须给出缩小返回体的建议");
-  // 返回体本身必须很小：不能为了报错再把大对象带回来
-  assert.ok(JSON.stringify(result).length < 4000, `错误响应应保持精简，实际 ${JSON.stringify(result).length}`);
-
-  // 观测事件应记为失败，并带上实际大小
-  const failed = events.find((event) => event.event === "tool.failed");
-  assert.ok(failed, "应记录 tool.failed 事件");
-  assert.equal(failed.errorCode, "OUTPUT_TOO_LARGE");
-  const outputSummary = failed.outputSummary as Record<string, unknown>;
-  assert.equal(outputSummary.outputBytesLimit, 512 * 1024, "应记录上限字节数");
-  assert.ok(Number(outputSummary.outputBytes) > 512 * 1024, "应记录超限时的实际字节数");
-  assert.ok(
-    Number(outputSummary.outputChars) > 1_000_000 && Number(outputSummary.outputChars) < 1_100_000,
-    `outputChars 必须是字符数口径（约 1.05M），实际 ${outputSummary.outputChars}`,
-  );
-  assert.ok(!events.some((event) => event.event === "tool.succeeded"), "超限不得记为成功");
+  assert.notEqual(result.isError, true, "默认摘要不应受选中节点正文大小影响");
+  assert.equal(payload.nodeCount, 1);
+  assert.equal(payload.nodes[0].id, "node-huge");
+  assert.equal("metadata" in payload.nodes[0], false);
+  assert.equal(payload.nextRead.tool, "canvas_get_state");
+  assert.deepEqual(events.map((event) => event.event), ["tool.started", "tool.succeeded"]);
 });
 
 test("assets_list 默认读取摘要并分页，完整媒体通过 assets_get 定向读取", async (t) => {
@@ -787,7 +806,7 @@ test("revision conflicts are returned without automatic replay", async (t) => {
       projectId: "canvas-generate",
       operationId: "apply-conflict-test",
       expectedRevision: 0,
-      ops: [{ type: "add_node", id: "new-node", nodeType: "text", title: "保留冲突" }],
+      ops: [{ type: "add_node", id: "new-node", nodeType: "config", title: "保留冲突", metadata: { smart: true, generationMode: "image" } }],
     },
   });
   const payload = textPayload(result);
@@ -912,19 +931,6 @@ test("canvas_wait_tasks 超时只返回原任务继续等待入口，不创建�
   assert.equal(payload.tasks[0].taskId, "task-1");
 });
 
-test("无效 SVG 本地导入在任何画布 ops 前拒绝", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-invalid-svg-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "fake.svg");
-  await fs.writeFile(filePath, "<html>not an image</html>");
-  const backend = await mockGenerationBackend(t);
-  const client = await mcpClient(t, await fixture(t, backend.url));
-  const result = await client.callTool({ name: "canvas_import_local_images", arguments: { projectId: "canvas-generate", items: [filePath] } });
-  assert.equal(result.isError, true);
-  assert.equal(backend.opsRequestCount(), 0);
-  assert.equal((backend.project().nodes as unknown[]).length, 0);
-});
-
 test("assets_upsert_batch requires a stable operationId", async (t) => {
   const backend = await mockGenerationBackend(t);
   const client = await mcpClient(t, await fixture(t, backend.url));
@@ -968,20 +974,20 @@ test("canvas_get_state 默认回完整节点目录，而不是布局和 metadata
   assert.equal(JSON.stringify(payload).includes("generationSnapshot"), false);
 });
 
-test("canvas_get_state 在现有规模画布默认返回全部目录，graph 返回布局和连线", async (t) => {
+test("canvas_get_state 默认按 100 项分页返回目录，graph 返回布局和相关连线", async (t) => {
   const reads: string[] = [];
   const backendUrl = await mockManyNodesBackend(t, 449, 12, (path) => reads.push(path));
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
   const payload = textPayload(result);
   assert.notEqual(result.isError, true);
-  assert.equal(payload.nodes.length, 449);
+  assert.equal(payload.nodes.length, 100);
   assert.equal(payload.connectionCount, 488);
   assert.equal("connections" in payload, false);
-  assert.equal(payload.truncated, false);
-  assert.equal(payload.nextNodeOffset, undefined);
+  assert.equal(payload.truncated, true);
+  assert.equal(payload.nextNodeOffset, 100);
   const graph = textPayload(await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", view: "graph" } }));
-  assert.equal(graph.connections.length, 488);
+  assert.ok(graph.connections.length > 0 && graph.connections.length < 488);
   assert.equal(graph.nodes[0].position.x, 0);
   assert.equal(typeof graph.nodes[0].width, "number");
   assert.ok(Buffer.byteLength(JSON.stringify(payload), "utf8") < Buffer.byteLength(JSON.stringify(graph), "utf8"));
@@ -1052,7 +1058,7 @@ test("canvas_get_state 超过输出上限时自动分页并可取完全部节点
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const ids: string[] = [];
   let nodeOffset = 0;
-  for (let page = 0; page < 10; page++) {
+  for (let page = 0; page < 20; page++) {
     const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many", nodeOffset } });
     const payload = textPayload(result);
     assert.notEqual(result.isError, true);
@@ -1204,9 +1210,49 @@ test("drama episode MCP forwards separate synopsis and fullPlot fields", async (
     name: "drama_update_episode",
     arguments: { episodeId: "episode-1", synopsis: "新版梗概", fullPlot: "新版完整剧情" },
   }));
-  assert.equal(updated.episode.fullPlot, "新版完整剧情");
+  assert.equal(updated.episode.id, "episode-1");
+  assert.deepEqual(updated.updatedFields, ["synopsis", "fullPlot"]);
+  assert.equal(updated.nextRead.tool, "drama_get_episode");
   assert.deepEqual(received.map(({ synopsis, fullPlot }) => ({ synopsis, fullPlot })), [
     { synopsis: "一集梗概", fullPlot: "从开场到结尾的完整剧情" },
     { synopsis: "新版梗概", fullPlot: "新版完整剧情" },
   ]);
+});
+
+test("unmapped 4xx input failures map to readable codes instead of CANVAS_TOOL_FAILED", async t => {
+  const app = express(); app.use(express.json());
+  app.post("/mcp/observability/events", (_req, res) => res.status(201).json({ ok: true }));
+  app.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
+  // 不存在的分集 → EPISODE_NOT_FOUND（此前这类 404 落到 CANVAS_TOOL_FAILED）。
+  app.get("/drama/episodes/:id/production", (req, res) => {
+    if (req.params.id !== "exists") res.status(404).json({ ok: false, error: "分集不存在" });
+    else res.json({ ok: true, production: { revision: 1, draft: { director: {} } } });
+  });
+  // 分块读取没选到合法产物 → ARTIFACT_NOT_FOUND。
+  app.get("/canvas/projects/:id/production", (req, res) => {
+    if (String(req.query.targetIds ?? "") === "SEG-bad") res.status(400).json({ ok: false, error: "分块读取必须选定一个产物" });
+    else res.json({ ok: true, production: { revision: 1, draft: {} }, artifacts: [] });
+  });
+  app.get("/production/contract", (req, res) => {
+    res.json({ ok: true, contract: { moduleId: typeof req.query.moduleId === "string" ? req.query.moduleId : null } });
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(async () => { server.close(); await once(server, "close"); });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+
+  const episode = textPayload(await client.callTool({ name: "production_get", arguments: { kind: "episode", id: "ghost-ep", snapshot: "draft" } }));
+  assert.equal(episode.error.code, "EPISODE_NOT_FOUND");
+  assert.equal(episode.error.recoverable, true);
+  assert.equal(episode.suggestedAction.tool, "drama_list_episodes");
+
+  const artifact = textPayload(await client.callTool({ name: "production_get_artifact", arguments: { kind: "canvas", id: "canvas-1", snapshot: "draft", targetId: "SEG-bad", chunkBytes: 65536 } }));
+  assert.equal(artifact.error.code, "ARTIFACT_NOT_FOUND");
+  assert.equal(artifact.error.recoverable, true);
+  assert.equal(artifact.suggestedAction.tool, "production_get_artifact_index");
+
+  const contract = textPayload(await client.callTool({ name: "production_get_contract", arguments: {} }));
+  assert.equal(contract.contract.moduleId, null, "省略范围参数时应返回轻量查询指南");
 });

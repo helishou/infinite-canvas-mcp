@@ -1,4 +1,5 @@
 import type { EpisodeProduction } from "@/services/backend-api";
+import { productionSegments, productionSegmentRuntimeMatches, segmentShotIds } from "@/lib/production-source";
 
 type CanvasNode = { id: string; metadata?: Record<string, unknown> };
 type PreviewMedia = { storageKey: string; inputOutdated: boolean };
@@ -14,13 +15,13 @@ export function productionOverviewMedia(production: Pick<EpisodeProduction, "dra
   const keyframe = production.draft.keyframes[shotId];
   const frameKey = assetId ? asset?.storageKey : keyframe?.storageKey;
   const frameNode = canvasNodes.find(node => node.id === (assetId ? asset?.nodeId : keyframe?.nodeId));
-  const group = production.draft.clipGroups.find(item => item.shotIds.includes(shotId));
-  const clipNode = group?.nodeId ? canvasNodes.find(node => node.id === group.nodeId) : undefined;
-  const segments = Array.isArray(clipNode?.metadata?.segments) ? clipNode.metadata.segments.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
-  const segment = group?.segmentId ? segments.find(item => item.id === group.segmentId) : undefined;
+  const sourceSegment = productionSegments(production).find(item => segmentShotIds(item).includes(shotId));
+  const matches = sourceSegment ? productionSegmentRuntimeMatches(canvasNodes as any, String(sourceSegment.id)) : [];
+  const runtime = matches.length === 1 ? matches[0] : undefined;
+  const segment = runtime?.segment;
   const clipKey = typeof segment?.resultStorageKey === "string" ? segment.resultStorageKey : "";
   return {
     ...(frameKey ? { frame: { storageKey: frameKey, inputOutdated: Boolean(asset?.inputOutdated || frameNode?.metadata?.inputOutdated) } } : {}),
-    ...(group && clipKey ? { clip: { id: group.id, storageKey: clipKey, inputOutdated: Boolean(group.inputOutdated || segment?.inputOutdated) } } : {}),
+    ...(sourceSegment && clipKey ? { clip: { id: String(sourceSegment.id), storageKey: clipKey, inputOutdated: Boolean(segment?.inputOutdated) } } : {}),
   };
 }

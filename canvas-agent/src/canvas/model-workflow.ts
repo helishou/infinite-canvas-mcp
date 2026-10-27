@@ -17,6 +17,7 @@ export type WorkflowBinding =
 
 type ChannelModel = {
   name?: unknown;
+  capability?: unknown;
   script?: unknown;
   workflows?: unknown;
   workflowRouting?: unknown;
@@ -111,6 +112,26 @@ export function resolveWorkflowForModel(
   const channelId =
     decoded?.channelId || (found ? String(found.channel.id || "") : undefined);
   if (found) {
+    if (String(found.model.capability || "") === "video") {
+      const bindings = asRecord(found.model.workflowBindings);
+      const routing = asRecord(found.model.workflowRouting);
+      // 与 ab713fe5 的场景语义一致：「不支持」先于绑定与路由判定；本场景显式路由优先，
+      // 其次本场景绑定，再次任一 comfyui 统一绑定，最后旧的 workflows 列表第一项。
+      const routed = String(routing[scenario] || "").trim();
+      if (routed === WORKFLOW_ROUTE_UNSUPPORTED)
+        return { ok: false, reason: "unsupported", scenario, channelId, modelName };
+      const scenarioBinding = asBinding(bindings[scenario]);
+      const unifiedBinding = (["text", "single", "multi"] as const)
+        .map((key) => asBinding(bindings[key]))
+        .find((binding) => binding?.provider === "comfyui");
+      const workflow = scenarioBinding?.provider === "comfyui" ? scenarioBinding.workflow
+        : routed || (unifiedBinding?.provider === "comfyui" ? unifiedBinding.workflow : asStringArray(found.model.workflows)[0]);
+      if (workflow) return { ok: true, workflow, scenario, channelId, params: workflowParamsFor(found.model, scenario) };
+      // RunningHub video models have no local workflow name; callers that need
+      // provider-aware execution use resolveWorkflowBindingForModel instead.
+      if (asBinding(bindings.text)?.provider === "runninghub")
+        return { ok: false, reason: "no-workflow", scenario, channelId, modelName };
+    }
     const routed = String(
       asRecord(found.model.workflowRouting)[scenario] || "",
     ).trim();
@@ -218,6 +239,22 @@ export function resolveWorkflowBindingForModel(
     decoded?.channelId || (found ? String(found.channel.id || "") : undefined);
   const params = found ? workflowParamsFor(found.model, scenario) : {};
   if (found) {
+    if (String(found.model.capability || "") === "video") {
+      // Video inputs include images and video clips, so reference count is not a
+      // reliable way to choose an implementation. Video models use one workflow.
+      const bindings = asRecord(found.model.workflowBindings);
+      const routing = asRecord(found.model.workflowRouting);
+      const unified = (["text", "single", "multi"] as const)
+        .map((key) => asBinding(bindings[key]))
+        .find((binding): binding is WorkflowBinding => Boolean(binding));
+      if (unified) return { ok: true, binding: unified, scenario, channelId, params };
+      const workflow = (["text", "single", "multi"] as const)
+        .map((key) => String(routing[key] || "").trim())
+        .find((value) => value && value !== WORKFLOW_ROUTE_UNSUPPORTED);
+      if (workflow) return { ok: true, binding: { provider: "comfyui", workflow }, scenario, channelId, params };
+      const workflows = asStringArray(found.model.workflows);
+      if (workflows.length) return { ok: true, binding: { provider: "comfyui", workflow: workflows[0] }, scenario, channelId, params };
+    }
     // 「不支持」是显式声明的场景状态，必须先于绑定判定：否则一个残留的绑定
     // 会把标记为不支持的场景重新路由到某个实现，用户改了也没有效果。
     const routed = String(

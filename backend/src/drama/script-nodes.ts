@@ -3,9 +3,7 @@ import { productionScriptGroups, type EpisodeProductionData } from "@basketikun/
 import { applyDirectorSourcePatch } from "@basketikun/canvas-agent/drama/production-validation";
 import type { BackendDatabase } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { projectDirector } from "./director.js";
-import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
-import type { ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { projectDirector, withoutDirectorProjection } from "./director.js";
 
 type Owner = { kind: "canvas" | "episode" | "scene"; id: string };
 const nodes = (project: Record<string, any>) => (project.nodes || []) as Record<string, any>[];
@@ -23,33 +21,23 @@ export function productionScriptNodes(data: EpisodeProductionData, owner: Owner)
     })));
 }
 
-/** Source-to-canvas projection; called inside the production transaction, never during GET. */
-export function scriptNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous?: EpisodeProductionData, layout?: ProductionLayoutPlan): CanvasOperation[] {
+/** Update existing script text nodes only; formal script saves never create canvas text nodes. */
+export function scriptNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous?: EpisodeProductionData): CanvasOperation[] {
     const prior = new Map(previous ? productionScriptNodes(previous, owner).map(item => [item.id, item]) : []);
-    const occupied = [...nodes(project)];
-    return productionScriptNodes(data, owner).flatMap((script, index): CanvasOperation[] => {
+    return productionScriptNodes(data, owner).flatMap((script): CanvasOperation[] => {
         const node = nodes(project).find(node => node.id === script.id);
-        if (!node) {
-            const unit = layout?.units.find(unit => unit.targets.includes(`script:${script.scriptId}`));
-            const member = unit?.members.find(member => member.nodeId === script.id);
-            const planned = member?.position;
-            const position = planned || productionNodePosition(occupied, { x: -640, y: 350 + index * 440 }, 560, 320, 1);
-            occupied.push({ id: script.id, position, width: 560, height: 320 });
-            return [{ type: "add_node", id: script.id, nodeType: "text", title: script.title, position, width: 560, height: 320,
-                metadata: { content: script.content, status: "success", productionScriptId: script.scriptId, productionScriptSceneId: script.sceneId,
-                    groupId: productionLayoutStableId("production-scene", owner.id, script.sceneId),
-                    ...(unit ? { productionLayoutUnitId: unit.id, productionLayoutBounds: unit.bounds.size } : {}) } }];
-        }
+        if (!node) return [];
         if (node.type !== "text" || node.metadata?.productionScriptId !== script.scriptId) throw new Error("剧本文本节点身份冲突，未覆盖原节点");
         const content = String(node.metadata?.content || "");
         const metadata: Record<string, unknown> = {};
-        const groupId = productionLayoutStableId("production-scene", owner.id, script.sceneId);
-        if (node.metadata?.groupId !== groupId) metadata.groupId = groupId;
+        const metadataDelete = Object.hasOwn(node.metadata || {}, "groupId") ? ["groupId"] : [];
         if (content !== script.content) {
             if (!prior.has(script.id) || prior.get(script.id)!.content !== content) throw new Error("剧本文本已被修改，请回读后再保存制作稿");
             metadata.content = script.content;
         }
-        return Object.keys(metadata).length ? [{ type: "update_node", id: node.id, metadata }] : [];
+        return Object.keys(metadata).length || metadataDelete.length
+            ? [{ type: "update_node", id: node.id, metadata, ...(metadataDelete.length ? { metadataDelete } : {}) }]
+            : [];
     });
 }
 
@@ -79,6 +67,6 @@ export function syncScriptNodeEdits(db: BackendDatabase, projectId: string, befo
     if (!changed) return [];
     projectDirector(draft);
     const revision = row.revision + 1;
-    db.db.prepare(`UPDATE ${table} SET revision=?, draft_json=?, updated_at=? WHERE ${column}=?`).run(revision, JSON.stringify(draft), new Date().toISOString(), owner.id);
+    db.db.prepare(`UPDATE ${table} SET revision=?, draft_json=?, updated_at=? WHERE ${column}=?`).run(revision, JSON.stringify(withoutDirectorProjection(draft)), new Date().toISOString(), owner.id);
     return [{ entityId: owner.id, revision }];
 }

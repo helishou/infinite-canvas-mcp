@@ -19,7 +19,8 @@ export const H3_RUNTIME_SEGMENT_FIELDS = [
     "inputOutdated", "firstPassReady", "firstPassResult", "firstPassStorageKey", "firstPassFingerprint", "cacheFingerprint", "archivedResultOrigin",
 ] as const;
 export const H3_LOCAL_VIEW_FIELDS = [
-    "playhead", "selectedSegmentId", "h3PlaybackAll", "h3PlayRequest", "h3Scrubbing", "h3FocusRequest",
+    "playhead", "selectedSegmentId", "h3PlaybackAll", "h3PlayRequest", "h3Scrubbing", "h3FocusRequest", "h3FocusHandled",
+    "h3TimelineFocusRequest", "h3TimelineFocusHandled",
     "timelineScrollLeft", "minimaxOutputFilter", "minimaxPreviewH", "minimaxPreviewW",
     "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH", "nanFengExpandedSections",
     "h3SigmaPresetName", "h3SettingsScope", "promptEnhancing", "promptEnhanceError",

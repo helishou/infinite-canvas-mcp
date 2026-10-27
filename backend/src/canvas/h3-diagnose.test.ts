@@ -35,6 +35,35 @@ function requirements(clips: Array<{ segmentId: string; promptContentHash?: stri
     };
 }
 
+test("a draft without stored clip groups derives targets from the Clips that applied an artifact", t => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    const stores = createStores(db);
+    stores.projects.create({
+        id: "p",
+        nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+            { id: "phys-a", prompt: "旧正文。", directorEngine: "acheng", directorSourceHash: "s0", productionClipProjection: { targetId: "a", artifactId: "h3-a" } },
+        ] } }],
+        connections: [],
+    });
+    const draft = {
+        director: {
+            sourceHash: "s1",
+            artifacts: [{ id: "h3-a", kind: "h3", targetId: "a", prompt: "新正文。" }],
+            source: { segments: [{ id: "a", shot_ids: [] }], shots: [] },
+            shotInputs: {},
+        },
+        settings: {},
+    };
+    db.db.prepare("INSERT INTO canvas_productions (project_id, revision, draft_json, published_version, updated_at) VALUES (?, ?, ?, ?, ?)")
+        .run("p", 3, JSON.stringify(draft), 0, new Date().toISOString());
+    const requirements = stores.projects.getH3DraftRequirements?.("p");
+    assert.equal(requirements?.clips.length, 1);
+    assert.equal(requirements?.clips[0].nodeId, "n");
+    assert.equal(requirements?.clips[0].segmentId, "phys-a");
+    assert.equal(requirements?.clips[0].promptContentHash, hash("新正文。"));
+});
+
 test("identical text is a match, including after reference renumbering", t => {
     const { stores } = fixture(t, { a: "正文<Picture 1>与<Picture 2>。", b: "正文<Picture 1>与<Picture 2>。" });
     stores.projects.getH3ProductionRequirements = () => requirements([
@@ -55,7 +84,7 @@ test("edited text is informational difference, not an execution blocker", t => {
     assert.equal(row.promptState, "different");
     assert.equal(row.code, "CLIP_TEXT_DIFFERS_FROM_PUBLISHED");
     assert.equal(row.severity, "info");
-    assert.match(row.next, /重新编译发布/);
+    assert.match(row.next, /production_compile/);
 });
 
 test("missing published artifact is unavailable with a reason, never a false mismatch", t => {
@@ -84,8 +113,35 @@ test("no production record reports unavailable instead of crashing", t => {
     const result = diagnoseH3Clips(stores, { projectId: "p" });
     assert.equal(result.publishedVersion, null);
     assert.equal(result.ownerId, null);
+    assert.equal(result.baseline, null);
     assert.equal(result.rows[0].promptState, "unavailable");
     assert.equal(result.rows[0].code, "CLIP_TEXT_NOT_COMPARABLE");
+});
+
+test("an unpublished production compares against the current draft instead of reporting nothing", t => {
+    const { stores } = fixture(t, { a: "旧编译正文。", b: "当前编译正文。" });
+    stores.projects.getH3ProductionRequirements = () => null as never;
+    stores.projects.getH3DraftRequirements = () => requirements([
+        { segmentId: "a", promptContentHash: hash("当前编译正文。") },
+        { segmentId: "b", promptContentHash: hash("当前编译正文。") },
+    ]) as never;
+    const result = diagnoseH3Clips(stores, { projectId: "p" });
+    assert.equal(result.baseline, "draft");
+    const drifted = result.rows.find(row => row.segmentId === "a")!;
+    assert.equal(drifted.baseline, "draft");
+    assert.equal(drifted.promptState, "different");
+    assert.equal(drifted.code, "CLIP_TEXT_DIFFERS_FROM_AUTHORED");
+    assert.match(drifted.next, /production_compile/);
+    assert.equal(result.rows.find(row => row.segmentId === "b")?.code, "CLIP_MATCHES_AUTHORED");
+});
+
+test("a published baseline wins over the draft once it carries compiled text", t => {
+    const { stores } = fixture(t, { a: "正文。" });
+    stores.projects.getH3ProductionRequirements = () => requirements([{ segmentId: "a", promptContentHash: hash("正文。") }]) as never;
+    stores.projects.getH3DraftRequirements = () => requirements([{ segmentId: "a", promptContentHash: hash("另一版。") }]) as never;
+    const row = diagnoseH3Clips(stores, { projectId: "p" }).rows[0];
+    assert.equal(row.baseline, "published");
+    assert.equal(row.code, "CLIP_MATCHES_PUBLISHED");
 });
 
 test("nodeIds filters and pagination separates total from the page", t => {

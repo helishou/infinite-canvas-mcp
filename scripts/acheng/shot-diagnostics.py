@@ -1,6 +1,52 @@
 """Local model-facing shot checks; never infer or rewrite narrative facts."""
 import re
 
+
+def _model_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(_model_text(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(_model_text(item) for item in value.values())
+    return ""
+
+
+def _camera_action_conflicts(camera, shot):
+    camera_text = " ".join(str(camera.get(field) or "") for field in
+                            ("description", "framing", "focus", "target", "composition"))
+    action_text = " ".join(_model_text(shot.get(field)) for field in
+                            ("visual", "action", "action_description", "performance", "combat"))
+    excludes_feet = bool(re.search(
+        r"(?:不[^，。；,;]{0,12}(?:展示|拍|入画|包含|取景)[^，。；,;]{0,8}(?:脚|双脚|鞋|腿|下肢)|"
+        r"(?:脚|双脚|鞋|腿|下肢)[^，。；,;]{0,12}(?:不展示|不入画|画外|留在画外)|"
+        r"(?:feet|legs|shoes?).{0,24}(?:out of frame|off[- ]screen|excluded|not visible)|"
+        r"(?:do not|don't|never) show (?:the )?(?:feet|legs|shoes?)|crop(?:ped)? above (?:the )?(?:knee|waist))",
+        camera_text, re.I))
+    requires_footwork = bool(re.search(
+        r"(?:右脚|左脚|脚跟|脚掌|鞋底|双脚|脚步).{0,16}(?:斜踏|刹地|踩|撑|蹬|滑|落|制动)|"
+        r"(?:斜踏|刹地|脚步踩|脚掌踩|鞋底压地|脚跟落地|蹬地)|"
+        r"(?:right|left|planting|planted|heel|sole|footwork|feet).{0,32}(?:step|plant|brake|scrape|push|stomp|slide)|"
+        r"(?:step|footwork).{0,32}(?:visible|in frame|plant|brake|scrape|push)",
+        action_text, re.I))
+    if excludes_feet and requires_footwork:
+        return ("SHOT_CAMERA_ACTION_VISIBILITY_CONFLICT", "camera.description/visual/combat",
+                "Camera framing excludes feet while authored visual/combat action requires visible footwork; keep the foot action in frame or move it to a separate Shot.")
+
+    camera_requires_path = (bool(re.search(r"(?:腰线|腰侧|腰根|waist)", camera_text, re.I))
+                            and bool(re.search(r"(?:连接)?路径.{0,12}(?:可读|可见|同框|入画|readable|visible)|"
+                                               r"(?:沿|跟随|跟拍|追踪|follow|track).{0,48}(?:身体|鳞身|腰|waist|body)",
+                                               camera_text, re.I)))
+    visual_hides_waist = bool(re.search(
+        r"(?:腰端|腰线入口|腰线起点|腰侧接点|waist(?:line)? (?:entry|end|origin)).{0,20}(?:画外|不入画|不在画面|留在画外|out of frame|off[- ]screen|outside (?:the )?frame)|"
+        r"(?:画外|不入画|不在画面|留在画外|out of frame|off[- ]screen|outside (?:the )?frame).{0,20}(?:腰端|腰线入口|腰线起点|腰侧接点|waist(?:line)? (?:entry|end|origin))",
+        _model_text(shot.get("visual")), re.I))
+    if camera_requires_path and visual_hides_waist:
+        return ("SHOT_CAMERA_PATH_VISIBILITY_CONFLICT", "camera.description/visual",
+                "Camera requires the waist-originating body path to remain readable while visual prose places the waist entry offscreen; align both fields or split the path across Shots.")
+    return None
+
+
 def diagnostics(production, segment=None):
     result = []
     selected = set(segment.get('shot_ids', [])) if segment else None
@@ -35,4 +81,15 @@ def diagnostics(production, segment=None):
             issue('SHOT_AMBIGUOUS_DISAPPEARANCE', 'visual', 'Name the object or body swelling that disappears explicitly', True)
         if re.search(r'\b(eventually|later devises|becomes .* after the transformation)\b', prose, re.I):
             issue('SHOT_FUTURE_CONTEXT', 'identity_context', 'Review future story information in model-facing local context', True)
+        camera = shot.get('camera') if isinstance(shot.get('camera'), dict) else {}
+        conflict = _camera_action_conflicts(camera, shot)
+        if conflict:
+            issue(*conflict)
+        camera_text = ' '.join(str(camera.get(field) or '') for field in ('description', 'path', 'target', 'focus', 'editorial_reason'))
+        model_prose = str(shot.get('visual') or '') + ' ' + camera_text
+        abstract_inner_state = re.search(r'(?:灵台|识海|神识|灵识|魂魄|灵魂|意识深处|精神世界)', model_prose)
+        literalized_metaphor = re.search(r'(?:如同|宛如|好像|像是|像)\s*(?:一张|一片|一块)?\s*(?:白纸|纸|空洞|深渊|房间|宫殿)', model_prose)
+        visible_manifestation = re.search(r'(?:眉心|额间|眼前|周身|皮肤|面部|画面|视野).{0,24}(?:绕开|避开|分开|断流|缺口|空缺|闪烁|扭曲|脉动|收缩|扩散|涌动|显现)', model_prose)
+        if (abstract_inner_state or literalized_metaphor) and not visible_manifestation:
+            issue('SHOT_ABSTRACT_VISUALIZATION_NEEDS_CUE', 'visual', 'Translate the abstract inner state or metaphor into an observable on-screen cue with a clear location and change; do not render the metaphor as a literal object.', True)
     return result

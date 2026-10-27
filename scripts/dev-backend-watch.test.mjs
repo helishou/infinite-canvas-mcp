@@ -22,11 +22,11 @@ process.on('message', message => {
  const accepted = gate.tryReload(() => JSON.parse(fs.readFileSync(${JSON.stringify(busyFile)}, 'utf8')));
  process.send({ type:'dev:reload-status', accepted }, undefined, undefined, () => { if(accepted) process.exit(0); });
 });
-process.send({ type:'dev:ready', pid:process.pid });
+process.send({ type:'dev:ready', pid:process.pid, listenHost:'0.0.0.0' });
 `;
     const entry = path.join(source, 'index.ts'); await fs.writeFile(entry, program);
     const messages = [];
-    const watcher = startBackendWatch({ cwd: directory, directories: [source], log: { log: text => messages.push(text), error: text => messages.push(text) } });
+    const watcher = startBackendWatch({ cwd: directory, directories: [source], publicPort: 0, backendPort: 0, env: { ...process.env, INFINITE_CANVAS_DATA_DIR: path.join(directory, 'data') }, log: { log: text => messages.push(text), error: text => messages.push(text) } });
     t.after(async () => {
         await watcher.stop();
         assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep));
@@ -37,7 +37,8 @@ process.send({ type:'dev:ready', pid:process.pid });
         while (!await condition()) { assert.ok(Date.now() < deadline, messages.join('\n')); await new Promise(resolve => setTimeout(resolve, 30)); }
     };
     const pids = async () => { try { return (await fs.readFile(pidFile, 'utf8')).trim().split('\n').filter(Boolean); } catch { return []; } };
-    await waitFor(async () => (await pids()).length === 1);
+    await waitFor(async () => (await pids()).length === 1 && watcher.proxyAddress?.address === '0.0.0.0');
+    assert.equal(watcher.proxyAddress.address, '0.0.0.0', 'LAN opt-in must expose the stable proxy on all interfaces');
     await fs.writeFile(entry, program + '\n// first edit\n');
     await fs.writeFile(entry, program + '\n// final edit\n');
     await waitFor(() => messages.some(message => message.includes('reload pending')));

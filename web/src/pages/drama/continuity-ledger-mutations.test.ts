@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { appendContinuityChange } from './continuity-event-draft';
-import { analyzeContinuityDeletion as analyze, applyContinuityDeletion as apply, continuityLedgerEntryId as key, restoreContinuityDeletion as restore } from './continuity-ledger-mutations';
+import { analyzeContinuityDeletion as analyze, applyContinuityDeletion as apply, continuityLedgerEntryId as key, restoreContinuityDeletion as restore, continuityFactStateValue, continuityLedgerFactDescriptions } from './continuity-ledger-mutations';
 const shots = [{ id: 'S', timeline_id: 'T', story_order: 0, duration_frames: 72 }];
 const source = { shots, subject_registry: [] };
 const fixture = (): Record<string, any> => ({ contract_version: 2, facts: [{ id: 'F', allowed_values: ['a', 'b'] }], timelines: [{ id: 'T' }], initial: [{ timeline_id: 'T', fact_id: 'F', value: 'a' }], events: [], requirements: [], coverage: [] });
@@ -40,18 +40,20 @@ test('initial composite identity has no delimiter collision and rejects duplicat
  assert.deepEqual(apply(source, ledger, 'initial', ledger.initial[0]).initial, [ledger.initial[1]]);
  ledger.initial.push({ ...ledger.initial[0] }); assert.equal(analyze(source, ledger, 'initial', ledger.initial[0]).code, 'ambiguous');
 });
-test('fact/timeline references include ledger and source without cascading edits', () => {
- const ledger = change(); assert.equal(analyze(source, ledger, 'facts', 'F').code, 'referenced');
+test('fact deletion drops ledger-owned assertions while timeline references block deletion', () => {
+ const ledger = change(); const factAnalysis = analyze(source, ledger, 'facts', 'F');
+ assert.equal(factAnalysis.code, 'allowed'); assert.deepEqual(factAnalysis.affectedShotIds, ['S']);
  const analysis = analyze(source, ledger, 'timelines', 'T'); assert.equal(analysis.code, 'referenced'); assert.ok(analysis.references.some(row => row.collection === 'shots' && row.shotId === 'S'));
- assert.throws(() => apply(source, ledger, 'facts', 'F'), /referenced/);
+ assert.deepEqual(apply(source, ledger, 'facts', 'F').facts, []);
+ assert.throws(() => apply(source, ledger, 'timelines', 'T'), /referenced/);
 });
-test('all source fact consumers prevent deleting an otherwise unused fact', () => {
+test('source fact consumers are reported as affected shots instead of blocking deletion', () => {
  const ledger = { ...fixture(), initial: [] };
  for (const shot of [{ ...shots[0], continuity_facts: ['F'] }, { ...shots[0], subject_usages: [{ subjectId: 'P', continuityFactIds: ['F'] }] }, { ...shots[0], subject_usages: [{ subjectId: 'P', stateRequirements: [{ factId: 'F', value: 'a' }] }] }]) {
-  const analysis = analyze({ shots: [shot] }, ledger, 'facts', 'F'); assert.equal(analysis.code, 'referenced'); assert.deepEqual(analysis.affectedShotIds, ['S']);
+  const analysis = analyze({ shots: [shot] }, ledger, 'facts', 'F'); assert.equal(analysis.code, 'allowed'); assert.deepEqual(analysis.affectedShotIds, ['S']);
  }
- assert.equal(analyze({ subject_registry: [{ id: 'P', pictureBindings: [{ id: 'PB', applicableState: { F: 'a' } }] }] }, ledger, 'facts', 'F').code, 'referenced');
- assert.equal(analyze(undefined, ledger, 'facts', 'F').code, 'referenced');
+ assert.equal(analyze({ subject_registry: [{ id: 'P', pictureBindings: [{ id: 'PB', applicableState: { F: 'a' } }] }] }, ledger, 'facts', 'F').code, 'allowed');
+ assert.equal(analyze(undefined, ledger, 'facts', 'F').code, 'allowed');
  assert.deepEqual(apply({}, ledger, 'facts', 'F').facts, []); assert.deepEqual(apply({}, { ...fixture(), initial: [] }, 'timelines', 'T').timelines, []);
 });
 test('sole supporting hold is protected while redundant holds remain editable', () => {
@@ -130,4 +132,31 @@ test('restoring hold evidence requires its supporting hold, including one restor
  assert.throws(() => restore(ledger, removed, source), /missing/);
  const requirement = { id: 'H', timeline_id: 'T', fact_id: 'F', shot_id: 'S', kind: 'hold', value: 'a' };
  assert.equal(restore(ledger, [...removed, { collection: 'requirements', row: requirement }], source).coverage.length, 1);
+});
+
+test('a new state value joins the fact enum with the description the save contract requires', () => {
+ const fact = { id: 'F', allowed_values: ['a', 'b'], value_descriptions: { a: 'State A' } };
+ const state = continuityFactStateValue(fact, ' c ');
+ assert.deepEqual(state.allowed_values, ['a', 'b', 'c']);
+ // A described value keeps its text; missing and new ones default to the value itself.
+ assert.deepEqual(state.value_descriptions, { a: 'State A', b: 'b', c: 'c' });
+ assert.equal(fact.allowed_values.length, 2, 'the fact is not mutated');
+});
+
+test('a new state value never duplicates an existing one or reintroduces the unknown sentinel', () => {
+ const fact = { id: 'F', allowed_values: ['a'], value_descriptions: { a: 'State A' } };
+ assert.deepEqual(continuityFactStateValue(fact, 'a').allowed_values, ['a']);
+ assert.deepEqual(continuityFactStateValue(fact, 'unknown').allowed_values, ['a']);
+ assert.deepEqual(continuityFactStateValue({ id: 'F' }, ' x '), { allowed_values: ['x'], value_descriptions: { x: 'x' } });
+});
+
+test('completing descriptions at save leaves a valid ledger untouched and repairs only what is missing', () => {
+ const complete = { facts: [{ id: 'F', allowed_values: ['a'], value_descriptions: { a: 'State A' } }] };
+ assert.equal(continuityLedgerFactDescriptions(complete), complete, 'a valid ledger keeps its identity');
+ const broken: Record<string, any> = { facts: [{ id: 'F', allowed_values: ['a', 'b'], value_descriptions: { a: '   ' } }, { id: 'G', allowed_values: ['x'], value_descriptions: { x: 'State X' } }, 'ignored'] };
+ const result = continuityLedgerFactDescriptions(broken);
+ assert.deepEqual(result.facts[0].value_descriptions, { a: 'a', b: 'b' });
+ assert.equal(result.facts[1], broken.facts[1], 'a described fact keeps its identity');
+ assert.equal(result.facts[2], 'ignored', 'invalid rows survive the pass');
+ assert.deepEqual(broken.facts[0].value_descriptions, { a: '   ' }, 'the input ledger is not mutated');
 });

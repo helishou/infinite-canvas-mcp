@@ -1,7 +1,7 @@
 /**
  * 视觉风格模板：H3 设置里可选择的固定英文风格词。
  *
- * 模板正文仅在运行时插到对应描述段落的最前面；旧版保存的模板前缀可识别并剥离。
+ * 模板正文仅在运行时注入 summary；旧版保存在描述段落中的模板前缀可识别并迁移。
  */
 
 export type H3StyleTemplate = {
@@ -11,6 +11,25 @@ export type H3StyleTemplate = {
     /** 注入提示词的英文风格词。 */
     text: string;
 };
+
+export type H3CustomStyleTemplate = H3StyleTemplate;
+
+export function normalizeH3CustomStyleTemplates(value: unknown): H3StyleTemplate[] {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const result: H3StyleTemplate[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== "object") continue;
+        const template = item as Record<string, unknown>;
+        const id = typeof template.id === "string" ? template.id.trim() : "";
+        const label = typeof template.label === "string" ? template.label.trim() : "";
+        const text = typeof template.text === "string" ? template.text.trim() : "";
+        if (!/^[a-z0-9][a-z0-9-]{0,47}$/i.test(id) || seen.has(id) || !label || !text) continue;
+        seen.add(id);
+        result.push({ id, label: label.slice(0, 80), text: text.slice(0, 12000) });
+    }
+    return result;
+}
 
 // 保留旧正文用于识别历史提示词；修订后的模板运行时替换旧前缀，不改写已保存内容。
 const ORIGINAL_H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = [
@@ -86,32 +105,59 @@ const SCENE_PRESERVING_STYLES: Readonly<Record<string, string>> = {
     ].join(" "),
 };
 
+const SCENE_PRESERVING_INSTRUCTION = "Apply this style consistently as color grading and image texture to the specified scene. Preserve the described location, background, time of day, lighting direction, framing, character appearance and actions throughout every shot; scene and shot instructions take priority over the style treatment.";
+
+function withScenePreservingInstruction(text: string): string {
+    const style = text.trim();
+    if (!style || style.includes(SCENE_PRESERVING_INSTRUCTION)) return style;
+    return `${style} ${SCENE_PRESERVING_INSTRUCTION}`;
+}
+
 export const H3_STYLE_TEMPLATES: readonly H3StyleTemplate[] = ORIGINAL_H3_STYLE_TEMPLATES.map((template) => ({
     ...template,
-    text: SCENE_PRESERVING_STYLES[template.id] ?? template.text,
+    text: withScenePreservingInstruction(SCENE_PRESERVING_STYLES[template.id] ?? template.text),
 }));
+
+export function resolveH3StyleTemplates(custom: unknown): H3StyleTemplate[] {
+    const overrides = normalizeH3CustomStyleTemplates(custom).map((template) => ({
+        ...template,
+        text: withScenePreservingInstruction(template.text),
+    }));
+    const byId = new Map(overrides.map((item) => [item.id, item]));
+    return [
+        ...H3_STYLE_TEMPLATES.map((item) => byId.get(item.id) || item),
+        ...overrides.filter((item) => !H3_STYLE_TEMPLATES.some((base) => base.id === item.id)),
+    ];
+}
 
 /** 空串 = 不加模板（null 选项）。 */
 export type H3StyleTemplateId = string;
 
-export function styleTemplateText(id: H3StyleTemplateId | null | undefined): string {
+export function styleTemplateText(id: H3StyleTemplateId | null | undefined, custom: unknown = []): string {
     if (!id) return "";
-    return H3_STYLE_TEMPLATES.find((template) => template.id === id)?.text || "";
+    const text = resolveH3StyleTemplates(custom).find((template) => template.id === id)?.text || "";
+    return withScenePreservingInstruction(text);
 }
 
-export function isH3StyleTemplateId(id: unknown): id is H3StyleTemplateId {
-    return typeof id === "string" && H3_STYLE_TEMPLATES.some((template) => template.id === id);
+export function isH3StyleTemplateId(id: unknown, custom: unknown = []): id is H3StyleTemplateId {
+    return typeof id === "string" && resolveH3StyleTemplates(custom).some((template) => template.id === id);
 }
 
 /**
  * 识别旧提示词开头区域中的模板。兼容旧版分镜编辑的直接前缀，
  * 以及 MCP 在分镜指导语之后写入的模板。
  */
-export function matchStyleTemplatePrefix(text: string): { id: H3StyleTemplateId; rest: string } | null {
+export function matchStyleTemplatePrefix(text: string, custom: unknown = []): { id: H3StyleTemplateId; rest: string } | null {
     const body = text.trim();
     if (!body) return null;
     // 模板之间有共享句，先按文本长度降序匹配最长的完整段落。
-    const candidates = [...H3_STYLE_TEMPLATES, ...ORIGINAL_H3_STYLE_TEMPLATES]
+    const candidates = [
+        ...resolveH3StyleTemplates(custom).flatMap((template) => [
+            { ...template, text: withScenePreservingInstruction(template.text) },
+            template,
+        ]),
+        ...ORIGINAL_H3_STYLE_TEMPLATES,
+    ]
         .sort((left, right) => right.text.length - left.text.length);
     for (const template of candidates) {
         const index = body.indexOf(template.text);
@@ -127,17 +173,16 @@ export function matchStyleTemplatePrefix(text: string): { id: H3StyleTemplateId;
  * 载入分镜编辑时，把旧版已保存的风格词从开头总体描述里剥掉，
  * 否则用户会看到（并编辑）一段不可编辑的重复前缀。未知前缀原样保留。
  */
-export function stripStyleTemplatePrefix(text: string): string {
-    return matchStyleTemplatePrefix(text)?.rest ?? text.trim();
+export function stripStyleTemplatePrefix(text: string, custom: unknown = []): string {
+    return matchStyleTemplatePrefix(text, custom)?.rest ?? text.trim();
 }
 
 /** 旧版保存提示词所用的组合方式；运行时注入使用 applyH3StyleTemplate。 */
-export function composeStoryboardOpening(styleTemplateId: H3StyleTemplateId | null | undefined, openingDescription: string): string {
-    return [styleTemplateText(styleTemplateId), openingDescription.trim()].filter(Boolean).join("\n\n");
+export function composeStoryboardOpening(styleTemplateId: H3StyleTemplateId | null | undefined, openingDescription: string, custom: unknown = []): string {
+    return [styleTemplateText(styleTemplateId, custom), openingDescription.trim()].filter(Boolean).join("\n\n");
 }
 
-function descriptionSection(prompt: string, mode: string) {
-    const name = mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
+function promptSection(prompt: string, name: string) {
     const header = new RegExp(`^${name}\\s*[:：][ \\t]*(?:\\r?\\n)?`, "mi").exec(prompt);
     if (!header) return null;
     const start = header.index + header[0].length;
@@ -146,28 +191,63 @@ function descriptionSection(prompt: string, mode: string) {
     return { start, end: start + (next?.index ?? remainder.length) };
 }
 
-export function styleTemplateFromPrompt(prompt: string, mode: string): H3StyleTemplateId | null {
+function descriptionSection(prompt: string, mode: string) {
+    return promptSection(prompt, mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description");
+}
+
+function summaryTemplate(summary: string, custom: unknown = []) {
+    const marker = /^(\s*\[[^\]]+\]\s*)([\s\S]*)$/u.exec(summary);
+    const prefix = marker?.[1] || "";
+    const body = marker ? marker[2] : summary;
+    const match = matchStyleTemplatePrefix(body, custom);
+    return match ? { id: match.id, prefix, rest: match.rest } : null;
+}
+
+function summaryWithTemplate(summary: string, style: string, custom: unknown = []) {
+    const existing = summaryTemplate(summary, custom);
+    const marker = /^(\s*\[[^\]]+\]\s*)([\s\S]*)$/u.exec(summary);
+    const prefix = existing?.prefix || marker?.[1] || "";
+    const body = existing?.rest ?? (marker ? marker[2].trim() : summary.trim());
+    return [prefix.trim(), style, body].filter(Boolean).join("\n\n");
+}
+
+export function styleTemplateFromPrompt(prompt: string, mode: string, custom: unknown = []): H3StyleTemplateId | null {
     const section = descriptionSection(prompt, mode);
+    const summary = promptSection(prompt, "summary");
+    const summaryMatch = summary && summaryTemplate(prompt.slice(summary.start, summary.end), custom)?.id;
+    if (summaryMatch) return summaryMatch;
     if (!section) return null;
     const body = prompt.slice(section.start, section.end);
     const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
-    return matchStyleTemplatePrefix(body.slice(0, firstShot?.index ?? body.length))?.id ?? null;
+    return matchStyleTemplatePrefix(body.slice(0, firstShot?.index ?? body.length), custom)?.id ?? null;
 }
 
 /** Apply a Clip setting to this submission only. A recognized saved legacy prefix is replaced, never stacked. */
-export function applyH3StyleTemplate(prompt: string, mode: string, selectedId: H3StyleTemplateId | null | undefined): string {
+export function applyH3StyleTemplate(prompt: string, mode: string, selectedId: H3StyleTemplateId | null | undefined, custom: unknown = []): string {
     const section = descriptionSection(prompt, mode);
-    const legacyId = styleTemplateFromPrompt(prompt, mode);
+    const legacyId = styleTemplateFromPrompt(prompt, mode, custom);
     const effectiveId = selectedId === undefined ? legacyId : selectedId;
-    const style = styleTemplateText(effectiveId);
-    if (!section) return style ? `${style}\n\n${prompt}` : prompt;
+    const style = styleTemplateText(effectiveId, custom);
     if (!style && !legacyId) return prompt;
-    const body = prompt.slice(section.start, section.end);
-    const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
-    const opening = body.slice(0, firstShot?.index ?? body.length);
-    const rest = body.slice(firstShot?.index ?? body.length).trim();
-    const cleanOpening = matchStyleTemplatePrefix(opening)?.rest ?? opening.trim();
-    const nextBody = [style, cleanOpening, rest].filter(Boolean).join("\n\n");
-    const suffix = prompt.slice(section.end).trimStart();
-    return `${prompt.slice(0, section.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    let result = prompt;
+    if (section) {
+        const body = result.slice(section.start, section.end);
+        const firstShot = /^[ \t]*\[Shot[ \t]+\d+\]/mi.exec(body);
+        const opening = body.slice(0, firstShot?.index ?? body.length);
+        const rest = body.slice(firstShot?.index ?? body.length).trim();
+        const cleanOpening = matchStyleTemplatePrefix(opening, custom)?.rest ?? opening.trim();
+        const nextBody = [cleanOpening, rest].filter(Boolean).join("\n\n");
+        const suffix = result.slice(section.end).trimStart();
+        result = `${result.slice(0, section.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    }
+    const summary = promptSection(result, "summary");
+    if (summary) {
+        const body = result.slice(summary.start, summary.end);
+        const nextBody = summaryWithTemplate(body, style, custom);
+        const suffix = result.slice(summary.end).trimStart();
+        result = `${result.slice(0, summary.start)}${nextBody}${suffix ? `\n\n${suffix}` : ""}`;
+    } else if (style) {
+        result = `summary:\n${style}\n\n${result.trimStart()}`;
+    }
+    return result;
 }

@@ -10,6 +10,7 @@ import type { VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
 
 export function CanvasNodeContextMenu({
     menu,
+    canDelete = true,
     canCaptureVideoFrame,
     canGroup,
     canCopyContent,
@@ -26,6 +27,7 @@ export function CanvasNodeContextMenu({
     onDelete,
 }: {
     menu: ContextMenuState;
+    canDelete?: boolean;
     canCaptureVideoFrame: boolean;
     canGroup: boolean;
     canCopyContent: boolean;
@@ -57,7 +59,7 @@ export function CanvasNodeContextMenu({
         menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
         window.addEventListener("resize", place);
         return () => window.removeEventListener("resize", place);
-    }, [menu.x, menu.y, menu.type, canCaptureVideoFrame, canCopyContent, canTranslate, canGroup, isExtractingKeyframes, t]);
+    }, [menu.x, menu.y, menu.type, canDelete, canCaptureVideoFrame, canCopyContent, canTranslate, canGroup, isExtractingKeyframes, t]);
 
     useEffect(() => {
         const close = (event: PointerEvent) => {
@@ -108,9 +110,9 @@ export function CanvasNodeContextMenu({
                 {canGroup ? <MenuButton icon={<Group className="size-4" />} label={t("canvas.controls.group")} onClick={onGroup} /> : null}
                 {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label={t("canvas.controls.duplicate")} onClick={onDuplicate} /> : null}
             </MenuSection> : null}
-            <MenuSection label={t("canvas.nodeActions.groups.danger")}>
+            {canDelete ? <MenuSection label={t("canvas.nodeActions.groups.danger")}>
                 <MenuButton icon={<Trash2 className="size-4" />} label={t("canvas.controls.delete")} onClick={onDelete} danger />
-            </MenuSection>
+            </MenuSection> : null}
         </div>
     );
 }

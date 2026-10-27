@@ -143,6 +143,48 @@ test("并发强制刷新同一工作空间时只扫描一次 Skill", async () =>
     await next;
 });
 
+test("只读列表请求做短 TTL 缓存与在途合并", async () => {
+    const writes: Array<Record<string, unknown>> = [];
+    const child = { stdin: { write: (line: string) => (writes.push(JSON.parse(line)), true) } };
+    const client = Reflect.construct(CodexAppClient, [child, () => undefined, emptyEventHistory]) as CodexAppClient;
+    const testClient = client as unknown as TestClient;
+
+    // 在途合并：同一次请求未完成时，重复调用复用同一次结果。
+    const firstModels = client.listModels();
+    const secondModels = client.listModels();
+    assert.equal(writes.filter((item) => item.method === "model/list").length, 1, "未完成时重复调用不应新增 model/list 请求");
+    testClient.handle({ id: writes[0].id, result: { data: [{ id: "gpt-1", name: "GPT-1" }] } });
+    assert.deepEqual(await Promise.all([firstModels, secondModels]), [{ data: [{ id: "gpt-1", name: "GPT-1" }] }, { data: [{ id: "gpt-1", name: "GPT-1" }] }]);
+
+    // TTL 内命中：已解析后、TTL 内重复调用复用缓存，不新增请求。
+    const thirdModels = client.listModels();
+    assert.equal(writes.filter((item) => item.method === "model/list").length, 1, "TTL 内重复调用不应新增 model/list 请求");
+    assert.deepEqual(await thirdModels, { data: [{ id: "gpt-1", name: "GPT-1" }] });
+
+    // 线程列表也在途合并。
+    const firstThreads = client.listThreads({ limit: 5 });
+    client.listThreads({ limit: 5 });
+    assert.equal(writes.filter((item) => item.method === "thread/list").length, 1, "未完成时重复调用不应新增 thread/list 请求");
+    testClient.handle({ id: writes.find((item) => item.method === "thread/list")!.id, result: { data: [] } });
+    await firstThreads;
+
+    // 技能列表（非强制）也在途合并。
+    client.listSkills("D:\\site");
+    client.listSkills("D:\\site");
+    assert.equal(writes.filter((item) => item.method === "skills/list").length, 1, "未完成时重复调用不应新增 skills/list 请求");
+    testClient.handle({ id: writes.find((item) => item.method === "skills/list")!.id, result: { data: [] } });
+
+    // TTL 过期后重新请求：把该键的缓存项标记为过期，再调用应替换为一次新请求。
+    const listReadCache = (client as unknown as { listReadCache: Map<string, { promise: Promise<unknown>, pending: boolean, expiresAt: number }> }).listReadCache;
+    const modelEntry = [...listReadCache.keys()].find((key) => key === "model/list");
+    assert.ok(modelEntry, "model/list 缓存键必须存在");
+    listReadCache.get(modelEntry)!.expiresAt = 0;
+    const fourthModels = client.listModels();
+    assert.equal(writes.filter((item) => item.method === "model/list").length, 2, "TTL 过期后应重新请求而不是复用旧缓存");
+    testClient.handle({ id: writes.find((item) => item.method === "model/list" && item.id !== writes[0].id)!.id, result: { data: [] } });
+    assert.deepEqual(await fourthModels, { data: [] });
+});
+
 test("显式 Skill 同时使用文本标记和结构化输入传给 turn/start", async () => {
     const writes: Array<Record<string, unknown>> = [];
     const child = { stdin: { write: (line: string) => (writes.push(JSON.parse(line)), true) } };

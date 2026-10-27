@@ -29,6 +29,7 @@ export class BackendClientError extends Error {
   readonly path: string;
   readonly status?: number;
   readonly code?: string;
+  readonly taskId?: string;
   readonly expectedRevision?: number;
   readonly actualRevision?: number;
   readonly revision?: number;
@@ -46,6 +47,7 @@ export class BackendClientError extends Error {
       path: string;
       status?: number;
       code?: string;
+      taskId?: string;
       expectedRevision?: number;
       actualRevision?: number;
       revision?: number;
@@ -64,6 +66,7 @@ export class BackendClientError extends Error {
     this.path = details.path;
     this.status = details.status;
     this.code = details.code;
+    this.taskId = details.taskId;
     this.expectedRevision = details.expectedRevision;
     this.actualRevision = details.actualRevision;
     this.revision = details.revision;
@@ -97,6 +100,7 @@ function errorPayload(value: unknown) {
   return {
     message,
     code,
+    taskId: typeof body.taskId === "string" ? body.taskId : undefined,
     expectedRevision: typeof body.expectedRevision === "number" ? body.expectedRevision : undefined,
     actualRevision: typeof body.actualRevision === "number" ? body.actualRevision : typeof body.revision === "number" ? body.revision : undefined,
     revision: typeof body.revision === "number" ? body.revision : undefined,
@@ -172,6 +176,7 @@ export class BackendClient {
           path,
           status: res.status,
           code: details.code,
+          taskId: details.taskId,
           expectedRevision: details.expectedRevision,
           actualRevision: details.actualRevision,
           revision: details.revision,
@@ -281,8 +286,8 @@ export class BackendClient {
     return data.project;
   }
 
-  async getDramaProject(dramaId: string) {
-    const data = await this.get<{ ok: boolean; drama: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}`);
+  async getDramaProject(dramaId: string, view: "summary" | "full" = "full") {
+    const data = await this.get<{ ok: boolean; drama: Record<string, unknown> }>(`/drama/projects/${encodeURIComponent(dramaId)}?view=${view}`);
     return data.drama;
   }
 
@@ -295,12 +300,24 @@ export class BackendClient {
     return Array.isArray(data.episodes) ? data.episodes : [];
   }
 
-  async getDramaEpisode(episodeId: string) {
+  async listDramaEpisodeSummaries(dramaId: string, page: number, pageSize: number) {
+    return this.get<{
+      ok: boolean; dramaId: string; total: number; page: number; pageSize: number;
+      episodes?: Array<Record<string, unknown>>;
+    }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes?view=summary&page=${page}&pageSize=${pageSize}`);
+  }
+
+  async getDramaEpisode(episodeId: string, view?: "summary" | "full", canvasView?: "ref" | "full") {
+    const params = new URLSearchParams();
+    if (view) params.set("view", view);
+    if (view === "full" && canvasView) params.set("canvasView", canvasView);
+    const query = params.size ? `?${params}` : "";
     return this.get<{
       ok: boolean;
       episode?: Record<string, unknown>;
       canvas?: Record<string, unknown> | null;
-    }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
+      nextAction?: Record<string, unknown>;
+    }>(`/drama/episodes/${encodeURIComponent(episodeId)}${query}`);
   }
 
   async createDramaEpisode(dramaId: string, input: Record<string, unknown>) {
@@ -870,13 +887,14 @@ export class BackendClient {
   async comfyGetTask(
     id: string,
     after = 0,
+    view: "summary" | "full" = "full",
   ): Promise<{ task: RuntimeTask; events: RuntimeTaskEvent[] }> {
     const data = await this.get<{
       ok: boolean;
       task?: RuntimeTask;
       events?: RuntimeTaskEvent[];
     }>(
-      `/comfy/tasks/${encodeURIComponent(id)}${after ? `?after=${after}` : ""}`,
+      `/comfy/tasks/${encodeURIComponent(id)}?${new URLSearchParams({ ...(after ? { after: String(after) } : {}), view })}`,
     );
     if (!data.task)
       throw new BackendClientError(

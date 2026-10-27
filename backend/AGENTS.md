@@ -8,6 +8,7 @@
 - 路由负责入参、鉴权和响应，业务复用既有 service/store。MCP、网页与后台任务共享逻辑，不各造一套任务、节点位置或结果回填。
 - Backend 消费 `@basketikun/canvas-agent` 的导出契约。修改共享 schema/operation/reference 逻辑时检查生产者、校验、持久化、广播与读取端，不只改一个类型声明。
 - 查询在存储层做项目过滤和分页，不先截断固定数量再在内存中过滤并宣称结果完整。
+- 任务 `input_json` 与画布历史 `operations_json/results_json` 支持旧 TEXT 和 gzip BLOB，读写统一使用 `json-storage.ts`。任务输入的 SQL JSON 查询经 `stored_json_text` 解码；历史回放、维护指纹及脱敏不能把 BLOB 直接转字符串。格式变化更新 schema 版本，历史行不在启动时批量重写。
 
 ## 数据、媒体与执行
 
@@ -36,7 +37,7 @@
 - 模型或工作流新增优先扩展已有执行器注册和输入契约；不要为每个模型再开专用 MCP/API。
 - H3/ComfyUI 排障方法按需读[工程 Skill](../.agents/skills/canvas-h3-implementation/SKILL.md)。
 
-## Production 编译素材池
+## Production 编译素材
 
-- 编译素材（asset/references 的冻结字节）一律物化到 compilation root 下内容寻址全局池 `inputs/<sha256><ext>`（`writePool`），复用前按 digest 校验完整性、损坏即 tmp+rename 重写；禁止把 per-preparedId 物化路径写进 source——resolver 返回的路径会进 `approved_file`/`asset_plan.file`/`segments[].references[].file` 并参与 sourceHash，路径随目录漂移会让连续性回执（严格 hash+runtimeId 匹配）永远 stale，结构性死循环。
-- prepare 与 enqueue 两个入口必须共用同一素材池（`collectMaterial` + `writePool`），否则两边产物 hash 互相打回对方。
+- 编译只解析已登记在 Backend `media_files` 的正式媒体路径；SQLite 的 `storageKey` 与 SHA-256 是持久身份，媒体字节只保留在 MediaStore。缺少索引或摘要不匹配时阻塞编译，不在 `production-compilations/inputs` 建第二份内容池。
+- prepare 与 enqueue 共用 `collectMaterial` / `resolveArchivedMaterial` 校验入口；编译器只在单次作业工作目录写临时产物，完成、失败或取消后清理。绝对路径仅允许在执行期间交给编译器，禁止写入持久源稿、作业摘要或回执。

@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
+import { orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 const REFERENCE_ROLE_LABELS: Record<string, string> = {
     character_identity: "人物形象",
@@ -20,13 +21,19 @@ const REFERENCE_ROLE_LABELS: Record<string, string> = {
     prop: "道具",
     other: "未分类",
 };
+const PICTURE_PURPOSE_LABELS: Record<string, string> = {
+    identity: "身份",
+    wardrobe: "服装",
+    environment: "环境",
+    prop: "道具",
+};
 import { defaultPrompt } from "../constants";
 import { compactSegmentStarts } from "../hooks/useH3Segments";
 import { applyH3GlobalSettings } from "../services/h3-global-settings";
-import { inferReferenceRole, refsForSegment, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { displayReferenceName, inferReferenceRole, refsForSegment, refsForSubmission, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { addStoryboardShot, assignStoryboardShotRef, H3_STORYBOARD_MIN_DURATION, insertStoryboardShotAfter, isStoryboardModeEnabled, moveStoryboardShotBetweenSegments, reorderStoryboardShots, removeStoryboardShot, setStoryboardBoundary, setStoryboardMode, storyboardRefsForSegment, storyboardTrackItems, supportsStoryboardTrack, swapStoryboardReferences, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { sameRef } from "../services/h3-compatibility";
-import { H3_RUNTIME_REF_LIMITS, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
+import { H3_RUNTIME_REF_LIMITS, isH3OutputVideoDrop, normalizeDroppedH3Ref, readCharacterGroupFromDrop } from "../services/h3-refs";
 import { H3Icon } from "./H3Icon";
 import { H3ClipCard } from "./H3ClipCard";
 import { h3ThemeVars } from "../h3-theme";
@@ -36,6 +43,26 @@ import { useDefaultParams } from "../services/h3-defaults";
 function newClipId() {
     const randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
     return `segment-${randomUUID ? randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+}
+
+function reorderStoryboardShotsWithReferences(segment: H3Segment, refs: H3Ref[]) {
+    const existingShotBindings = new Set(storyboardTrackItems(segment).flatMap((item) => item.referenceBindingId ? [item.referenceBindingId] : []));
+    const storyboardRefs = refs.filter((ref) => ref.type === "image" && ref.bindingId
+        && (existingShotBindings.has(ref.bindingId) || inferReferenceRole(ref) === "storyboard"));
+    if (storyboardRefs.length < 2) return segment;
+    const items = storyboardTrackItems(segment);
+    const itemByBindingId = new Map(items.flatMap((item) => item.referenceBindingId ? [[item.referenceBindingId, item] as const] : []));
+    const orderedItems = storyboardRefs.flatMap((ref) => {
+        const item = itemByBindingId.get(ref.bindingId!);
+        return item ? [item] : [];
+    });
+    if (orderedItems.length < 2) return segment;
+    let index = 0;
+    const storyboardShots = items.map((item) => {
+        const next = item.referenceBindingId ? orderedItems[index++] || item : item;
+        return { id: next.id, duration: next.duration, ...(next.referenceBindingId ? { referenceBindingId: next.referenceBindingId } : {}) };
+    });
+    return { ...segment, storyboardShots };
 }
 
 function TimelineReferenceMedia({ ctx, refItem, compactMedia }: { ctx: CanvasNodeContext; refItem: H3Ref; compactMedia: boolean }) {
@@ -88,6 +115,17 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const locale = useH3Locale();
     const defaults = useDefaultParams();
     const metadata = ctx.node.metadata || {};
+    const productionClipMembershipOwned = Boolean(metadata.productionSceneId)
+        || segments.some((segment) => Boolean(segment.productionClipProjection?.targetId));
+    const productionClipMembershipTitle = "制作绑定的 Clip 列表由制作台维护";
+    // 正式制作 Clip 的新增操作直通制作台命令日志；制作台未连接时保持禁用。
+    const productionMembershipSync = ctx.production?.addClipAtBoundary
+        ? (segmentId: string, position: "before" | "after") => {
+            void ctx.production!.addClipAtBoundary!({ nodeId: ctx.node.id, segmentId, position })
+                .then(result => { if (!result.sourceSaved) throw new Error("制作台未保存 Clip 变更"); })
+                .catch(error => window.dispatchEvent(new CustomEvent("minimax-h3:production-edit-error", { detail: { message: error instanceof Error ? error.message : String(error) } })));
+        }
+        : undefined;
     const comfyParams = metadata.comfyParams && typeof metadata.comfyParams === "object" ? metadata.comfyParams as Record<string, unknown> : {};
     const motionGroups = useMemo(() => {
         const outgoing = segments.map((segment) => resolveH3Runtime(segment as unknown as Record<string, unknown>, {}, metadata, defaults).params.motionContextEnabled === true);
@@ -108,8 +146,6 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
     const restoredRef = useRef(false);
-    const scrollPersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const pendingScrollLeftRef = useRef(0);
     const [storyboardResize, setStoryboardResize] = useState<{ segmentId: string; index: number; leftDuration: number } | null>(null);
     const storyboardResizeRef = useRef<{ segmentId: string; index: number; leftDuration: number; startX: number; startDuration: number; pairDuration: number } | null>(null);
     // 时间轴右键菜单（两种 kind）：
@@ -357,42 +393,60 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         tickPositions.push(Math.round(containerSeconds * 10) / 10);
     }
     const majorTicks = tickPositions.map((t) => ({ time: t, left: t * 100 }));
-    // DOM 滚动实时发生；只在停下后保存个人视图，避免逐帧重渲染整个工作台。
+    // H3LocalView 忽略 timelineScrollLeft 的订阅重渲染；同步记录滚动位置，确保刷新前立刻进入本地视图快照。
     const persistScroll = useCallback((left: number) => {
-        pendingScrollLeftRef.current = left;
-        if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
-        scrollPersistTimerRef.current = setTimeout(() => {
-            scrollPersistTimerRef.current = null;
-            ctx.updateMetadata({ timelineScrollLeft: Math.round(pendingScrollLeftRef.current) });
-        }, 180);
+        ctx.updateMetadata({ timelineScrollLeft: Math.round(left) });
     }, [ctx]);
-    // 把时间轴滚动到指定 clip：使其右边缘与可见区最右侧对齐（右侧对齐该 clip 最右侧）
-    // 整个时间线（Ruler+Video+Refs）共用单一滚动容器，无需跨容器同步
+    // 把指定 Clip 保持在时间轴可视区内。使用卡片真实 DOM 尺寸，避免
+    // refs 区域点击时按时长重算宽度而滚到相邻 Clip；目标已可见时不移动时间轴。
     const scrollTimelineToSegment = useCallback((segment: H3Segment) => {
         const track = trackScrollRef.current;
         if (!track) return;
-        const rightPx = (Number(segment.start || 0) + Math.max(0.5, Number(segment.duration || 1))) * 100;
-        const target = Math.max(0, rightPx - track.clientWidth);
+        const clip = Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]"))
+            .find((element) => element.dataset.segmentId === segment.id);
+        if (!clip) return;
+        const left = clip.offsetLeft;
+        const right = left + clip.offsetWidth;
+        const target = left < track.scrollLeft
+            ? left
+            : right > track.scrollLeft + track.clientWidth
+                ? Math.max(0, right - track.clientWidth)
+                : track.scrollLeft;
         track.scrollLeft = target;
-        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${target}px)`;
-        persistScroll(target);
+        const actual = track.scrollLeft;
+        if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;
+        persistScroll(actual);
     }, [persistScroll]);
     const selectTimelineClip = (segment: H3Segment) => {
         window.dispatchEvent(new CustomEvent("minimax-h3-select-clip", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: segment.id } }));
         ctx.updateMetadata({ selectedSegmentId: segment.id, playhead: Number(segment.start || 0) });
+        scrollTimelineToSegment(segment);
     };
     const focusRequest = Number(ctx.node.metadata?.h3FocusRequest || 0);
+    const timelineFocusRequest = Number(ctx.node.metadata?.h3TimelineFocusRequest || 0);
     useLayoutEffect(() => {
-        if (!focusRequest || !selected) return;
+        // Focus requests are one-shot. Keep the acknowledgment in this window's local view
+        // so scrolling the canvas away and remounting the H3 node does not replay an old target.
+        const handledRequest = Number(ctx.node.metadata?.h3FocusHandled || 0);
+        if (!focusRequest || focusRequest <= handledRequest || !selected) return;
         const track = trackScrollRef.current;
         const clip = track && Array.from(track.querySelectorAll<HTMLElement>(".minimax-tl-clip[data-segment-id]")).find(element => element.dataset.segmentId === selected.id);
         if (!track || !clip) return;
+        ctx.updateMetadata({ h3FocusHandled: focusRequest });
         const left = clip.offsetLeft, right = left + clip.offsetWidth;
         const target = left < track.scrollLeft ? left : right > track.scrollLeft + track.clientWidth ? right - track.clientWidth : track.scrollLeft;
         track.scrollLeft = Math.max(0, target);
         if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${track.scrollLeft}px)`;
         persistScroll(track.scrollLeft);
-    }, [focusRequest, selected?.id, persistScroll]);
+    }, [ctx, focusRequest, selected?.id, persistScroll]);
+    useLayoutEffect(() => {
+        const handledRequest = Number(ctx.node.metadata?.h3TimelineFocusHandled || 0);
+        if (!timelineFocusRequest || timelineFocusRequest <= handledRequest || !selected) return;
+        const segment = segments.find(item => item.id === selected.id);
+        if (!segment || !trackScrollRef.current) return;
+        ctx.updateMetadata({ h3TimelineFocusHandled: timelineFocusRequest });
+        scrollTimelineToSegment(segment);
+    }, [ctx, segments, timelineFocusRequest, selected?.id, scrollTimelineToSegment]);
     // 新增 Clip 后，在 DOM 提交（内容宽度已更新）后确定性地把时间轴滚到该 Clip 最右侧
     useLayoutEffect(() => {
         const id = pendingScrollIdRef.current;
@@ -406,19 +460,15 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     useLayoutEffect(() => {
         if (restoredRef.current) return;
         restoredRef.current = true;
-        if (Number(ctx.node.metadata?.h3FocusRequest || 0) > 0) return;
+        if (Number(ctx.node.metadata?.h3FocusRequest || 0) > 0
+            || timelineFocusRequest > Number(ctx.node.metadata?.h3TimelineFocusHandled || 0)) return;
         const left = Number(ctx.node.metadata?.timelineScrollLeft || 0);
         if (left > 0 && trackScrollRef.current) {
             trackScrollRef.current.scrollLeft = left;
-            if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`;
+            const actual = trackScrollRef.current.scrollLeft;
+            if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${actual}px)`;
         }
     });
-    // 卸载时清理 rAF，避免内存泄漏或已卸载组件的状态更新
-    useEffect(() => {
-        return () => {
-            if (scrollPersistTimerRef.current) clearTimeout(scrollPersistTimerRef.current);
-        };
-    }, []);
     const startRefDrag = (event: React.DragEvent<HTMLDivElement>) => {
         const clip = (event.target as HTMLElement).closest<HTMLElement>(".minimax-ref-clip");
         const grid = clip?.parentElement;
@@ -458,6 +508,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const clearDropTarget = useCallback(() => setDropTargetKey(null), []);
     // 拖动过程中实时高亮目标槽；用 data-* 找 cell，避免依赖 children 索引
     const onRefRowDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+        if (isH3OutputVideoDrop(event)) { clearDropTarget(); event.stopPropagation(); return; }
         if (!event.dataTransfer.types.includes("application/x-infinite-canvas-ref")) return;
         event.preventDefault();
         event.stopPropagation();
@@ -511,7 +562,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             if (target && (clipEl || gridEl)) return;
         }
         if (!target) return;
-        const mode = String(target.mode || target.taskMode || "ref2va");
+        const mode = String(target.taskMode || target.mode || "ref2va");
         if (mode === "t2v") return;
         const characterPayload = event.dataTransfer.getData("application/x-infinite-canvas-ref");
         if (sourceSegment && sourceSegment.id !== target.id) {
@@ -536,26 +587,34 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             : normalizeDroppedH3Ref(event);
         if (!ref) return;
         if (mode !== "ref2va" && ref.type !== "image") return;
-        const targetRefs = [...refsForSegment(target)];
+        // Resolve source/target by binding, then move in the order the user sees.
+        // The stored order can differ because submission groups storyboard/subject images.
+        const storedTargetRefs = refsForSegment(target);
+        const targetSlotRef = storedTargetRefs[targetIndex];
+        const targetRefs = [...refsForSubmission(target)];
+        targetIndex = targetSlotRef ? targetRefs.findIndex((item) => item.bindingId === targetSlotRef.bindingId) : targetIndex >= 0 ? targetRefs.length : -1;
         // ref2va 的槽位不设数量上限（图片可无限增加）；i2v / fl2v 的图片槽位是固定语义（首帧 / 首尾帧）才受限。
         const maxImages = mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Number.POSITIVE_INFINITY;
         // 同 Clip 的普通素材仍按 move 处理；两张分镜图落到彼此槽位时交换图片、分镜记录和时长。
         if (sourceSegment && sourceSegment.id === target.id && sourceIndex >= 0 && sourceIndex < targetRefs.length) {
-            const sourceRef = targetRefs[sourceIndex];
+            const sourceRef = storedTargetRefs[sourceIndex];
+            const orderedSourceIndex = targetRefs.findIndex((item) => item.bindingId === sourceRef.bindingId);
             const targetRef = targetIndex >= 0 ? targetRefs[targetIndex] : undefined;
-            if (sourceIndex !== targetIndex && sourceRef?.type === "image" && targetRef?.type === "image"
+            if (orderedSourceIndex !== targetIndex && sourceRef?.type === "image" && targetRef?.type === "image"
                 && inferReferenceRole(sourceRef) === "storyboard" && inferReferenceRole(targetRef) === "storyboard"
                 && sourceRef.bindingId && targetRef.bindingId) {
                 const swapped = [...targetRefs];
-                [swapped[sourceIndex], swapped[targetIndex]] = [swapped[targetIndex], swapped[sourceIndex]];
+                [swapped[orderedSourceIndex], swapped[targetIndex]] = [swapped[targetIndex], swapped[orderedSourceIndex]];
                 const updated = swapStoryboardReferences(target, sourceRef.bindingId, targetRef.bindingId);
                 onSegmentChange(withSegmentRefs(updated, swapped));
                 return;
             }
-            const [moved] = targetRefs.splice(sourceIndex, 1);
+            const [moved] = targetRefs.splice(orderedSourceIndex, 1);
             const insertAt = targetIndex >= 0 && targetIndex <= targetRefs.length ? targetIndex : targetRefs.length;
             targetRefs.splice(insertAt, 0, moved);
-            onSegmentChange(withSegmentRefs(target, targetRefs));
+            const updated = reorderStoryboardShotsWithReferences(withSegmentRefs(target, targetRefs), targetRefs);
+            updated.referenceOrder = targetRefs.flatMap((item) => item.bindingId ? [item.bindingId] : []);
+            onSegmentChange(updated);
             return;
         }
         // 跨 clip / 外部拖入：copy 语义。
@@ -579,7 +638,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             ...settings,
             // New content starts a fresh boundary; cloning sampling settings must not clone a chain.
             motionContextEnabled: false,
-            tailFrameContinuation: false,
+            tailFrameContinuation: true,
             id: newClipId(),
             prompt: defaultPrompt,
             duration: Number(basis?.duration || 5),
@@ -600,35 +659,50 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         ctx.updateMetadata({ segments: next, selectedSegmentId: clip.id, playhead: Number(next.find((item) => item.id === clip.id)?.start || 0), h3PlaybackAll: false });
     };
     const addSegment = () => {
+        if (productionClipMembershipOwned) {
+            if (productionMembershipSync) {
+                const target = selected || segments[segments.length - 1];
+                if (target) productionMembershipSync(String(target.id), "after");
+            }
+            return;
+        }
         const previousIndex = selected ? segments.findIndex((segment) => segment.id === selected.id) : -1;
         const basis = previousIndex >= 0 ? segments[previousIndex] : segments[segments.length - 1];
         insertClipAt(previousIndex >= 0 ? previousIndex + 1 : segments.length, buildClipAfter(basis));
     };
     // Clip 右键菜单用：在 index 的左边/右边插入新 Clip（继承该 Clip 设置）。
     const addClipNear = (index: number, side: -1 | 1) => {
+        if (productionClipMembershipOwned) {
+            if (productionMembershipSync && segments[index]) productionMembershipSync(String(segments[index].id), side === 1 ? "after" : "before");
+            return;
+        }
         const basis = segments[index];
         if (!basis) return;
         insertClipAt(side === 1 ? index + 1 : index, buildClipAfter(basis));
     };
     // 删除 Clip（至少保留一个）；删除后选中相邻的前一个 Clip。
     const removeClip = (index: number) => {
-        if (segments.length <= 1) return;
+        if (productionClipMembershipOwned || segments.length <= 1) return;
         const next = segments.filter((_, i) => i !== index);
         ctx.updateMetadata({ segments: compactSegmentStarts(next), selectedSegmentId: next[Math.max(0, index - 1)]?.id || "" });
     };
     const renderRefGrid = (segment: H3Segment) => {
         const allRefs = refsForSegment(segment);
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
         const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardTrackItems(segment).length);
-        const refs = allRefs.map((ref, index) => ({ ref, index })).filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
+        const orderedEntries = orderReferencesForSubmission(allRefs.map((ref, index) => ({ ref, index })),
+            (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
+            (entry) => entry.ref.bindingId,
+            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) === "storyboard",
+            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) !== "storyboard" && Boolean(entry.ref.subjectId || entry.ref.groupId), segment.referenceOrder);
+        const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
+        const indexedRefs = orderedEntries.map((entry) => ({ ...entry, ordinal: ++typeCounts[entry.ref.type] }));
+        const refs = indexedRefs.filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");
         // 多参考模式（ref2va）槽位不设上限：至少铺 9 格，之后每多一个参考就多一格，
         // 最后一格永远是空槽（点击可在画布上选节点，也仍可拖素材进），用来继续加参考。
         const slotCount = mode === "t2v" ? 0 : mode === "i2v" ? 1 : mode === "fl2v" ? 2 : Math.max(9, refs.length + 1);
         // 同一类型内的序号（图片 1..N / 视频 1..N / 音频 1..N），用于判断是否超出 H3 的运行上限
-        const ordinals = new Array<number>(allRefs.length);
-        const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
-        for (let position = 0; position < allRefs.length; position++) ordinals[position] = ++typeCounts[allRefs[position].type];
         // 用 px 定位让 ref grid 跟随实际像素宽度（容器被拉宽时 clip 不会按比例缩成一条线）
         const left = Number(segment.start || 0) * 100;
         const width = Math.max(100, Number(segment.duration || 1) * 100);
@@ -638,10 +712,11 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             const entry = refs[index];
             const ref = entry?.ref;
             const refIndex = entry?.index ?? allRefs.length;
+            const picturePurpose = ref?.picturePurpose?.map(value => PICTURE_PURPOSE_LABELS[value]).filter(Boolean).join(" · ");
             const label = mode === "i2v" ? "首帧" : mode === "fl2v" ? index === 0 ? "首帧" : "尾帧" : `Ref ${index + 1}`;
             const isGrouped = ref?.groupId;
             const limit = ref ? H3_RUNTIME_REF_LIMITS[ref.type] : 0;
-            const overLimit = Boolean(ref) && ordinals[refIndex] > limit;
+            const overLimit = Boolean(ref) && (entry?.ordinal || 0) > limit;
             // 末尾空槽 = 「继续加参考」入口，点击后在画布上选节点
             const isAddSlot = !ref && index >= refs.length;
             return <div
@@ -666,7 +741,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title="参考职责">{REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{ref.name || label}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title={picturePurpose ? `正式图片用途：${picturePurpose}` : "参考职责"}>{picturePurpose || REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {
@@ -810,20 +885,22 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item"
-                    title="在这个 Clip 左边插入一个新 Clip（继承本 Clip 的模式等设置）"
+                    disabled={productionClipMembershipOwned && !productionMembershipSync}
+                    title={productionClipMembershipOwned ? (productionMembershipSync ? "在这个 Clip 左边插入一个新 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "在这个 Clip 左边插入一个新 Clip（继承本 Clip 的模式等设置）"}
                     onClick={(event) => { event.stopPropagation(); addClipNear(timelineMenuClipIndex, -1); setTimelineMenu(null); }}
                 >在左边添加 Clip</button>
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item"
-                    title="在这个 Clip 右边插入一个新 Clip（继承本 Clip 的模式等设置）"
+                    disabled={productionClipMembershipOwned && !productionMembershipSync}
+                    title={productionClipMembershipOwned ? (productionMembershipSync ? "在这个 Clip 右边插入一个新 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "在这个 Clip 右边插入一个新 Clip（继承本 Clip 的模式等设置）"}
                     onClick={(event) => { event.stopPropagation(); addClipNear(timelineMenuClipIndex, 1); setTimelineMenu(null); }}
                 >在右边添加 Clip</button>
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item is-danger"
-                    disabled={segments.length <= 1}
-                    title={segments.length <= 1 ? "至少保留一个 Clip" : "删除这个 Clip"}
+                    disabled={productionClipMembershipOwned || segments.length <= 1}
+                    title={productionClipMembershipOwned ? "正式制作 Clip 的删除请在制作台通过拆分/合并边界维护" : segments.length <= 1 ? "至少保留一个 Clip" : "删除这个 Clip"}
                     onClick={(event) => { event.stopPropagation(); removeClip(timelineMenuClipIndex); setTimelineMenu(null); }}
                 >删除 Clip</button>
             </> : timelineMenu.kind === "reference" ? <>
@@ -887,7 +964,11 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         </div>
         <div ref={trackScrollRef} className="minimax-tracks-scroll" style={{ overflowX: hasHorizontalOverflow ? "auto" : "hidden" }} onScroll={(event) => { const left = event.currentTarget.scrollLeft; persistScroll(left); if (rulerInnerRef.current) rulerInnerRef.current.style.transform = `translateX(-${left}px)`; updateThumb(); }}>
             <div className="minimax-track-body" style={{ minWidth: timelineMinWidth, width: "100%" }}>
-                <div className="minimax-video-row" onContextMenu={onVideoRowContextMenu}>
+                <div className="minimax-video-row" onClick={(event) => {
+                    const clipElement = (event.target as Element | null)?.closest<HTMLElement>(".minimax-tl-clip[data-segment-id]");
+                    const segment = segments.find(item => item.id === clipElement?.dataset.segmentId);
+                    if (segment) scrollTimelineToSegment(segment);
+                }} onContextMenu={onVideoRowContextMenu}>
                     <div className="minimax-track-content" style={{ minWidth: timelineMinWidth, width: "100%" }}>
                         {/* 视频行底部波形装饰条：只占总时长宽度（按 px），
                             避免 video-row 拉满后 ::after 跟着拉满铺满整行。 */}
@@ -921,7 +1002,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
             />
         </div>
         <div className="minimax-track-gutter">
-            <button type="button" className="minimax-video-add" onClick={addSegment}><H3Icon name="plus" /></button>
+            <button type="button" className="minimax-video-add" disabled={productionClipMembershipOwned && !productionMembershipSync} title={productionClipMembershipOwned ? (productionMembershipSync ? "添加 Clip（写入制作台并与制作稿同步）" : productionClipMembershipTitle) : "添加 Clip"} onClick={addSegment}><H3Icon name="plus" /></button>
         </div>
         {timelineMenuNode}
     </div>

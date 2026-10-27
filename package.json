@@ -2,36 +2,36 @@
     "name": "infinite-canvas-mcp",
     "version": "0.1.0",
     "private": true,
-    "workspaces": [
-        "backend",
-        "canvas-agent",
-        "web"
-    ],
+    "packageManager": "pnpm@12.12.1",
+    "engines": { "node": ">=22.13.0" },
     "scripts": {
-        "test": "npm run test --workspaces --if-present",
+        "test": "corepack pnpm --filter @helishou/infinite-canvas-backend run test && corepack pnpm --filter @basketikun/canvas-agent run test && corepack pnpm --filter infinite-canvas run test",
         "postinstall": "node scripts/patch-rc-portal.mjs",
-        "predev": "npm run build:plugins && npm run build --workspace canvas-agent",
-        "dev": "concurrently -n backend,web \"npm run dev --workspace backend\" \"npm run dev --workspace web\"",
-        "predev:backend": "npm run build --workspace canvas-agent",
-        "dev:backend": "npm run dev --workspace backend",
+        "predev": "corepack pnpm run build:plugins && corepack pnpm --filter @basketikun/canvas-agent run build",
+        "dev": "corepack pnpm run predev && concurrently -n backend,web \"corepack pnpm --filter @helishou/infinite-canvas-backend run dev\" \"corepack pnpm --filter infinite-canvas run dev\"",
+        "predev:backend": "corepack pnpm --filter @basketikun/canvas-agent run build",
+        "dev:backend": "corepack pnpm run predev:backend && corepack pnpm --filter @helishou/infinite-canvas-backend run dev",
         "dev:agent": "node scripts/dev-agent.mjs",
-        "predev:web": "npm run build:plugins && npm run build --workspace canvas-agent",
-        "dev:web": "npm run dev --workspace web",
+        "predev:web": "corepack pnpm run build:plugins && corepack pnpm --filter @basketikun/canvas-agent run build",
+        "dev:web": "corepack pnpm run predev:web && corepack pnpm --filter infinite-canvas run dev",
         "predev:services": "node scripts/prepare-dev-services.mjs",
-        "dev:services": "concurrently -n backend,agent,web \"npm run dev --workspace backend\" \"npm run dev:agent\" \"npm run dev --workspace web\"",
+        "dev:services": "corepack pnpm run predev:services && concurrently -n backend,agent,web \"corepack pnpm --filter @helishou/infinite-canvas-backend run dev\" \"corepack pnpm run dev:agent\" \"corepack pnpm --filter infinite-canvas run dev\"",
         "dev:local": "scripts\\dev-local.bat",
         "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",
-        "build": "npm run build --workspaces --if-present",
+        "build": "corepack pnpm run build:plugins && corepack pnpm --filter @basketikun/canvas-agent run build && corepack pnpm --filter @helishou/infinite-canvas-backend run build && corepack pnpm --filter infinite-canvas run build",
         "build:plugins": "node scripts/build-official-plugins.mjs",
-        "typecheck": "npm run typecheck --workspaces --if-present",
+        "typecheck": "corepack pnpm --filter @basketikun/canvas-agent run build && corepack pnpm --filter infinite-canvas run typecheck",
+        "check:all": "node scripts/check-all.mjs",
         "acheng:status": "node scripts/acheng-engine.mjs status",
         "acheng:update": "node scripts/acheng-engine.mjs update",
         "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
-        "acheng:vendor": "node scripts/acheng-engine.mjs vendor"
+        "acheng:vendor": "node scripts/acheng-engine.mjs vendor",
+        "rh": "node tools/rh-flow/rh-flow.mjs"
     },
     "devDependencies": {
-        "@infinite-canvas/plugin-sdk": "file:plugins/canvas/sdk",
+        "@infinite-canvas/plugin-sdk": "workspace:*",
         "concurrently": "^9.1.0",
+        "esbuild": "^0.25.0",
         "playwright": "1.63.0"
     }
 }

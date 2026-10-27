@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
+import { markProductionEntry, productionPresentationPath, productionTarget, productionLocationKey } from "@/lib/production-navigation";
 import { fetchProductionReadiness } from "@/services/backend-api";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -48,7 +48,12 @@ export function ProductionFollowController() {
                 latest.setPendingPresentation(presentation);
                 return;
             }
-            const path = productionPresentationPath(presentation);
+            const canvas = document.querySelector<HTMLElement>('[data-canvas-project-id][data-canvas-active="true"]');
+            const path = productionPresentationPath(presentation, canvas ? {
+                id: canvas.dataset.canvasProjectId || "",
+                path: productionLocationKey(location.pathname, location.search),
+            } : undefined);
+            if (path.startsWith("/director/")) markProductionEntry();
             if (path !== productionLocationKey(location.pathname, location.search)) {
                 latest.expectPath(path);
                 navigate(path, { replace: true });

@@ -20,6 +20,10 @@ const outputs: H3Ref[] = [
 ];
 const segments = [{ id: "clip-a", prompt: "keep this prompt", duration: 4, status: "success", result: "old-a", results: [outputs[0]] }, { id: "clip-b", prompt: "keep B", duration: 4, status: "success", result: "old-b" }] as H3Segment[];
 const logs = { list: async () => [] };
+function ErrorToastButton() {
+    const { message } = App.useApp();
+    return <Button onClick={() => message.error("restore error fixture")}>Show error toast</Button>;
+}
 function Harness() {
     const [preview, setPreview] = useState<CanvasMediaPreview | null>(null);
     const [writes, setWrites] = useState<Record<string, unknown>[]>([]);
@@ -36,6 +40,7 @@ function Harness() {
             <style>{".h3-output-fixture > .minimax-library { height: 220px; }"}</style>
             <Button onClick={() => setPreview({ url: `${fixture}?output=single`, type: "video", name: "Single preview" })}>Single preview</Button>
             <Button onClick={() => { setDark((value) => !value); void i18n.changeLanguage("en-US"); }}>English dark</Button>
+            <ErrorToastButton />
             <div className="minimax-canvas-workbench h3-output-fixture" style={{ display: "block", width: 1100, height: 300, marginTop: 20 }}>
                 <H3MaterialLibrary ctx={ctx} outputs={outputs} segments={segments} selected={segments[0]} patchSelected={() => { throw new Error("Preview must not edit Clips"); }} />
             </div>

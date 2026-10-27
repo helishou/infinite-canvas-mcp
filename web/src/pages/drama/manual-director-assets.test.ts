@@ -32,7 +32,7 @@ test("manual prop creation adds plan, prompt card and a v2 asset-backed subject 
         id: "AST_NEW_PROP", kind: "prop", asset_name: "铜铃", version: "v1", description: "旧铜铃", purpose: "持有物", depends_on: [], status: "planned", canvas_scope: "episode",
     });
     assert.deepEqual(result.assetCard, {
-        id: "AST_NEW_PROP", asset_id: "AST_NEW_PROP", asset_kind: "prop", asset_version: "v1", prompt: "A worn brass bell", references: [],
+        id: "AST_NEW_PROP", asset_id: "AST_NEW_PROP", asset_kind: "prop", asset_version: "v1", prompt: "A worn brass bell", references: [], reference_policy: "none",
     });
     assert.deepEqual(result.subject, {
         id: "SUB_NEW_PROP", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "EP_1", kind: "asset", id: "AST_NEW_PROP" }, pictureBindings: [],
@@ -59,6 +59,25 @@ test("manual character and scene creation register stable entities for the asset
     assert.equal(scene.assetPlan.entity_id, "SCENE_1");
     assert.ok(scene.subject);
     assert.deepEqual(scene.subject.entityRef, { ownerKind: "episode", ownerId: "EP_1", kind: "scene", id: "SCENE_1" });
+});
+
+test("manual character creation stores its voice description in the compiler source registry", () => {
+    const result = createManualDirectorAsset(base, {
+        id: "AST_VOICE_CHAR", entityId: "CHAR_VOICE", kind: "character", name: "阿青", description: "短发角色",
+        voiceDescription: "明亮清脆，少年感，语速利落。", prompt: "", purpose: "主角", registerSubject: false, ownerKind: "episode", ownerId: "EP_1",
+    });
+    assert.equal(result.source.character_registry.at(-1).voice_description, "明亮清脆，少年感，语速利落。");
+});
+
+test("shared references retain a stable source identity in the episode plan and Subject", () => {
+    const sharedSource = { dramaId: "DRAMA", assetId: "SHARED_canvas_node", sourceProjectId: "shared-canvas", sourceNodeId: "node" };
+    const created = createManualDirectorAsset(base, {
+        id: sharedSource.assetId, entityId: "CHAR_SHARED", subjectId: "SUBJECT_SHARED", kind: "character", name: "共享角色", description: "说明", prompt: "", purpose: "共享",
+        canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: "EP_1", sharedSource,
+    });
+    assert.deepEqual(created.assetPlan.sharedSource, sharedSource);
+    assert.deepEqual(created.subject?.entityRef, { ownerKind: "episode", ownerId: "EP_1", kind: "character", id: "CHAR_SHARED" });
+    assert.deepEqual(base.asset_plan, [{ id: "EXISTING", kind: "prop" }], "construction does not mutate the source draft");
 });
 
 test("legacy source adds assets without manufacturing a Subject, and duplicate IDs are rejected", () => {

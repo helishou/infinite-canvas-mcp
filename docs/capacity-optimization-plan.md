@@ -164,11 +164,11 @@ CREATE TABLE task_history_tombstones (
 ```powershell
 # 在 backend 目录；数据目录由调用方显式设为独立副本。
 # 下面是候选政策示例，不是获准写入产品的默认值。
-npm run prune-runtime-history -- --task-succeeded-days=30 --task-failed-days=90 --task-cancelled-days=30 --log-success-days=60 --log-failed-days=180 --log-cancelled-days=60 --write-plan=runtime-history-plan.json
+pnpm --filter @helishou/infinite-canvas-backend run prune-runtime-history -- --task-succeeded-days=30 --task-failed-days=90 --task-cancelled-days=30 --log-success-days=60 --log-failed-days=180 --log-cancelled-days=60 --write-plan=runtime-history-plan.json
 
 # 可在同一次预览显式加 --log-count-policy=existing-500
 # 审阅计划后在同一副本执行，不重新隐式生成候选。
-npm run prune-runtime-history -- --apply-plan=runtime-history-plan.json
+pnpm --filter @helishou/infinite-canvas-backend run prune-runtime-history -- --apply-plan=runtime-history-plan.json
 ```
 
 不注册三个彼此独立的 task/events/logs 删除脚本，不承诺自动生效。

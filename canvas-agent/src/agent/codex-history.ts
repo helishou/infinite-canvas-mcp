@@ -35,7 +35,7 @@ export function settledTurnIds(thread: unknown, supplementalHistory: CodexSupple
 }
 
 /** 将 Codex turn items 转换为网页聊天历史。 */
-export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] = [], supplementalHistory: CodexSupplementalHistory = emptySupplementalHistory): AgentHistoryMessage[] {
+export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] = [], supplementalHistory: CodexSupplementalHistory = emptySupplementalHistory, userInterruptedTurnIds: ReadonlySet<string> = new Set()): AgentHistoryMessage[] {
     const threadId = String(field(thread, "id") || "");
     if (!threadId) return [];
     const turns = mergeHistoryTurns(thread, supplementalHistory);
@@ -153,7 +153,12 @@ export function threadMessages(thread: unknown, planUpdates: CodexPlanUpdate[] =
             const error = userFacingCodexError(turnError || itemError);
             push({ id: "synthetic:error", role: "error", title: error.title, text: error.text });
         } else if (String(field(turn, "status")) === "interrupted") {
-            push({ id: "synthetic:interrupted", role: "error", title: "本轮已中断", text: "本轮任务已中断，已保存的内容和对话保留；这不是仍在运行的任务。继续前请核对当前制作记录。" });
+            if (userInterruptedTurnIds.has(turnId)) {
+                push({ id: "synthetic:interrupted", role: "error", title: "已停止", text: "本轮任务已手动停止，已保存的内容和对话保留。可直接继续下一轮，无需重跑。" });
+            } else {
+                // 非人为中断（断线、进程重启等）：不是失败，给出可恢复的提示而非红色报错。
+                push({ id: "synthetic:interrupted", role: "tool", title: "本轮暂时离线", text: "制作会话暂时失去连接，本轮未完成；已保存的内容和对话保留，不会自动重跑。发送「继续」即可从上次进度接着做。" });
+            }
         }
     });
     return latestCompleteTurns(messages.filter((item) => item.text || item.role === "tool"), 120);
@@ -697,7 +702,7 @@ function routeName(path: string) {
 
 /** 将 MCP 工具名称转换为聊天记录中的中文标题。 */
 function toolName(name: string) {
-    const productionLabels: Record<string, string> = {"production_preflight": "检查制作请求", "production_get": "读取制作摘要", "production_get_source": "读取制作源稿", "production_get_version_source": "读取历史源稿", "production_get_artifact_index": "读取产物目录", "production_get_version_artifact_index": "读取历史产物目录", "production_get_artifact": "读取单个提示词", "production_get_version_artifact": "读取历史提示词", "production_get_workbench": "读取单目标工作台", "production_get_readiness": "检查制作就绪", "production_start_run": "启动制作运行", "production_get_batch": "读取制作批次", "production_pause_run": "暂停制作运行", "production_resume_run": "继续制作运行", "production_list_versions": "列出制作版本", "production_get_version": "读取版本摘要", "production_list_legacy": "读取旧制作资料", "production_preview_impact": "预览制作影响", "production_edit": "编辑制作稿", "production_publish": "发布制作稿", "production_restore": "恢复制作版本", "production_sync_clips": "同步制作片段", "production_get_run": "读取制作运行", "production_export_markdown": "导出制作文档"};
+    const productionLabels: Record<string, string> = {"production_preflight": "检查制作请求", "production_get": "读取制作摘要", "production_get_source": "读取制作源稿", "production_get_version_source": "读取历史源稿", "production_get_artifact_index": "读取产物目录", "production_get_version_artifact_index": "读取历史产物目录", "production_get_artifact": "读取单个提示词", "production_get_version_artifact": "读取历史提示词", "production_get_workbench": "读取单目标工作台", "production_get_readiness": "检查制作就绪", "production_start_run": "启动制作运行", "production_get_batch": "读取制作批次", "production_pause_run": "暂停制作运行", "production_resume_run": "继续制作运行", "production_list_versions": "列出制作版本", "production_get_version": "读取版本摘要", "production_preview_impact": "预览制作影响", "production_edit": "编辑制作稿", "production_publish": "发布制作稿", "production_restore": "恢复制作版本", "production_sync_clips": "同步制作片段", "production_get_run": "读取制作运行", "production_export_markdown": "导出制作文档"};
     if (productionLabels[name]) return productionLabels[name];
     if (name === "imagegen" || name.endsWith("__imagegen")) return "生成图片";
     if (name === "view_image" || name.endsWith("__view_image")) return "查看图片";

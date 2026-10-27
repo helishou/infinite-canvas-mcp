@@ -11,7 +11,7 @@ import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
 
 export function supportsStoryboardTrack(segment: H3Segment) {
-    const mode = String(segment.mode || segment.taskMode || "ref2va");
+    const mode = String(segment.taskMode || segment.mode || "ref2va");
     return mode !== "t2v" && mode !== "i2v" && mode !== "fl2v";
 }
 
@@ -149,14 +149,16 @@ export function removeStoryboardImageReference(segment: H3Segment, reference: H3
     const refs = refsForSegment(segment);
     const target = refs.find((ref) => reference.bindingId ? ref.bindingId === reference.bindingId : sameRef(ref, reference));
     if (!target) return segment;
-    const items = storyboardTrackItems(segment);
-    if (!items.some((item) => item.ref && sameRef(item.ref, target))) return segment;
-    const storyboardShots = items.map(({ id, ref, duration }) => ({
-        id,
-        duration,
-        ...(ref?.bindingId && !sameRef(ref, target) ? { referenceBindingId: ref.bindingId } : {}),
-    }));
-    const updated = withSegmentRefs(segment, refs.filter((ref) => !sameRef(ref, target)));
+    const storyboardShots = segment.storyboardShots
+        ? segment.storyboardShots.map((shot) => shot.referenceBindingId === target.bindingId
+            ? { id: shot.id, duration: shot.duration }
+            : { ...shot })
+        : storyboardTrackItems(segment).filter((item) => !item.ref || !sameRef(item.ref, target)).map(({ id, ref, duration }) => ({
+            id, duration, ...(ref?.bindingId ? { referenceBindingId: ref.bindingId } : {}),
+        }));
+    const storyboardDurations = { ...(segment.storyboardDurations || {}) };
+    if (target.bindingId) delete storyboardDurations[target.bindingId];
+    const updated = withSegmentRefs({ ...segment, storyboardDurations }, refs.filter((ref) => !sameRef(ref, target)));
     return { ...updated, storyboardModeEnabled: true, storyboardShots };
 }
 
@@ -484,7 +486,7 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
             ? remapPictureTags(snapshot.text, refsForSegment(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
             : snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const section = (mode === "ref2va" ? "detailed_description" : "integrated_multimodal_description") as H3PromptSection;
         const sectionText = readH3PromptSection(prompt, section);
         const refs = currentRefs;

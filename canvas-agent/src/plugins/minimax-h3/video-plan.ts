@@ -10,6 +10,7 @@ export type PlannedReference = {
     assetId?: string;
     nodeId: string;
     role: H3ReferenceRole;
+    picturePurpose?: string[];
     subjectId?: string;
     order: number;
     storageKey: string;
@@ -115,7 +116,7 @@ export function normalizePlannedSegment(segment: H3PlannedSegment) {
     const audios = refs.filter((ref) => ref.type === "audio");
     const referenceBindings = refs.map((ref, index) => {
         const identity = ref.storageKey || ref.url || ref.nodeId || `${ref.name}-${index}`;
-        return { id: ref.id || stableReferenceId("binding", identity, index), assetId: ref.assetId || stableReferenceId("asset", identity), label: ref.name, role: ref.role, tags: [], enabled: true, usage: "reference", subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId };
+        return { id: ref.id || stableReferenceId("binding", identity, index), assetId: ref.assetId || stableReferenceId("asset", identity), label: ref.name, role: ref.role, tags: [], enabled: true, usage: "reference", picturePurpose: ref.picturePurpose, subjectId: ref.subjectId, mediaType: ref.type, url: ref.url, storageKey: ref.storageKey, mimeType: ref.mimeType, sourceNodeId: ref.nodeId };
     });
     return {
         ...normalizeH3GenerationSettings(segment.settings || {}),

@@ -45,6 +45,19 @@ test("node-managed selection is independent of browsing and keeps explicit bindi
     const metadata = { images, primaryImageId: "latest", smartImageReferenceSelection: { mode: "selected_result", resultId: "old" }, prompt: "current prompt", model: "current model" };
     assert.equal(selectSmartImageResult(metadata, { mode: "node_selection" }).image?.id, "old");
     assert.equal(selectSmartImageResult({ ...metadata, primaryImageId: "old" }, { mode: "latest_success" }).image?.id, "latest");
-    assert.equal(selectSmartImageResult({ images, primaryImageId: "old" }, { mode: "node_selection" }).image?.id, "latest");
+    assert.equal(selectSmartImageResult({ images, primaryImageId: "old" }, { mode: "node_selection" }).image?.id, "old");
     assert.match(selectSmartImageResult({ ...metadata, smartImageReferenceSelection: { mode: "selected_result", resultId: "working" } }, { mode: "node_selection" }).error || "", /未成功|未归档/u);
+});
+
+test("node_selection follows the primary image and falls back to the first valid image when it is unavailable", () => {
+    assert.equal(selectSmartImageResult({ images, primaryImageId: "old" }, { mode: "node_selection" }).image?.id, "old");
+    assert.equal(selectSmartImageResult({ images, primaryImageId: "missing" }, { mode: "node_selection" }).image?.id, "old");
+    assert.equal(selectSmartImageResult({ images, smartImageReferenceSelection: { mode: "latest_success" } }, { mode: "node_selection" }).image?.id, "latest");
+    const after = [...images, { id: "newer", status: "success", storageKey: "image:newer" }];
+    assert.equal(selectSmartImageResult({ images: after, primaryImageId: "newer" }, { mode: "node_selection" }).image?.id, "newer");
+});
+
+test("an invalid node_selection policy refuses to fall back to a browsed snapshot", () => {
+    const result = selectSmartImageResult({ images, smartImageReferenceSelection: { mode: "bogus" } }, { mode: "node_selection" });
+    assert.match(result.error || "", /策略无效/u);
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { H3Segment } from "../types";
-import { applyH3GlobalSettings, patchAllH3Clips } from "./h3-global-settings";
+import { applyH3GlobalSettings, formalContinuationBoundaryUpdates, patchAllH3Clips } from "./h3-global-settings";
 import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 
 test("global H3 edits update every Clip and remain available to new Clips", () => {
@@ -35,7 +35,7 @@ test("new Clips keep explicitly chosen global fields while following defaults fo
     assert.equal(params.megapixels, 0.9);
     assert.equal(params.steps, 12);
     assert.equal(params.motionContextEnabled, false);
-    assert.equal(params.tailFrameContinuation, false);
+    assert.equal(params.tailFrameContinuation, true);
 });
 
 test("new Clips do not inherit bulk continuation decisions; existing explicitly edited Clips keep them", () => {
@@ -43,7 +43,7 @@ test("new Clips do not inherit bulk continuation decisions; existing explicitly 
     assert.equal(update.segments[0].motionContextEnabled, true);
     const fresh = applyH3GlobalSettings({ id: "B" }, update);
     assert.equal(fresh.motionContextEnabled, false);
-    assert.equal(fresh.tailFrameContinuation, false);
+    assert.equal(fresh.tailFrameContinuation, true);
 });
 
 test("global imports cannot restore the conflicting raw patch over atomic continuation edits", () => {
@@ -53,4 +53,22 @@ test("global imports cannot restore the conflicting raw patch over atomic contin
         assert.equal(clip.tailFrameContinuation, true);
         assert.equal(clip.motionContextEnabled, false);
     }
+});
+
+test("global continuation edits target every formal outgoing boundary and keep the terminal Clip closed", () => {
+    const segments: H3Segment[] = [
+        { id: "a", tailFrameContinuation: false, motionContextEnabled: false, productionClipProjection: { targetId: "source-a" } },
+        { id: "b", tailFrameContinuation: false, motionContextEnabled: true, productionClipProjection: { targetId: "source-b" } },
+        { id: "c", tailFrameContinuation: false, motionContextEnabled: false, productionClipProjection: { targetId: "source-c" } },
+        { id: "manual", tailFrameContinuation: false, motionContextEnabled: false },
+    ];
+    const result = formalContinuationBoundaryUpdates(segments, { tailFrameContinuation: true });
+    assert.deepEqual(result.boundaries, [
+        { segmentId: "a", tailFrameContinuation: true, motionContextEnabled: false },
+        { segmentId: "b", tailFrameContinuation: true, motionContextEnabled: false },
+    ]);
+    assert.deepEqual(result.projectedValues, [
+        ...result.boundaries,
+        { segmentId: "c", tailFrameContinuation: false, motionContextEnabled: false },
+    ]);
 });

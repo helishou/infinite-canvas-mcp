@@ -70,6 +70,19 @@ function harness() {
         fetchProductionContinuity: async (_target: unknown, options: object) => ({ continuity: { status: "stale", ...options } }),
         fetchProductionReadiness: async () => ({ readiness: {} }),
         setContinuityReport: (value: unknown) => { context.continuityReport = value; }, setReadiness: () => undefined,
+        receiptRecoveryInFlight: { current: false }, setReceiptRecovering: () => undefined,
+        setEpisode: () => undefined, setProductionContext: () => undefined, setTitle: () => undefined,
+        setCanvasId: () => undefined, setCanvasRead: () => undefined, setSharedCanvasNodes: () => undefined,
+        setVersions: () => undefined, setBatches: () => undefined, setBatchesLoadedFor: () => undefined,
+        setRuntimeTasks: () => undefined, setBriefDraft: () => undefined, setLoadError: () => undefined,
+        productionOwner: { kind: "episode", id: "fixture" }, backendReadFailed: { current: false }, supplementalReads: { current: new Map() }, remoteSequence: { current: 0 }, observedProductionRevision: { current: null }, refreshInFlight: { current: null },
+        // 旧 Backend 没有回执读端点：recoverPending 应走 404 分支的精确幂等重放。
+        fetchProductionOperationReceipt: async () => { throw new TestBackendApiError("Receipt endpoint unavailable", 404); },
+        watchSlowBrowserOperation: () => () => undefined,
+        setCompileError: () => undefined, setCompileNotice: () => undefined,
+        productionSegments: (production: any) => Array.isArray(production?.draft?.director?.source?.segments) ? production.draft.director.source.segments : [],
+        productionSegmentRuntimeMatches: () => [],
+        seriesOnly: false,
     };
     for (const name of ["beginContinuityRead", "finishContinuityRead", "pending", "sendCommand", "edit", "saveContinuity", "recoverPending", "checkContinuity", "changeContinuitySnapshot"]) context[name] = handler(name, context);
     return { context, ledger, calls, writes, failures, checks };
@@ -96,9 +109,8 @@ test("real save emits granular subject ledger changes and treats unchanged input
     ] }]);
     assert.deepEqual(next.requirements, ledger.requirements);
     assert.deepEqual(next.coverage, ledger.coverage);
-    assert.deepEqual(writes[0].pendingCommand.ops, ops);
-    assert.equal(writes[0].pendingCommand.expectedRevision, 17);
-    assert.equal(writes.at(-1).pendingCommand, null);
+    // 制作工作台不再有本地草稿存储：成功保存后零写入，回执以内存 commandNotice 记录。
+    assert.equal(writes.length, 0);
 });
 
 test("requirements and coverage changes survive the real save adapter", async () => {
@@ -118,9 +130,10 @@ test("validation rejection retains ledger input and permits a corrected submissi
     context.sourceDrafts.v2ledger = raw;
     context.backendError = new TestBackendApiError("Invalid state", 400);
     assert.equal(await context.saveContinuity(next), false);
-    assert.equal(writes.at(-1).sourceDrafts.v2ledger, raw);
-    assert.equal(readContinuityLedgerDraft(writes.at(-1).sourceDrafts.v2ledger, ledger).value.initial[0].value, "invalid");
-    assert.equal(writes.at(-1).pendingCommand.status, "rejected");
+    assert.equal(readContinuityLedgerDraft(context.sourceDrafts.v2ledger, ledger).value.initial[0].value, "invalid");
+    // 校验失败：输入留在内存 sourceDrafts、回执留在 commandNotice；不再落任何本机草稿。
+    assert.equal(context.commandNoticeRef.current.status, "rejected");
+    assert.equal(writes.length, 0);
     assert.equal(context.pendingCommandRef.current, null);
     delete context.backendError;
     next.initial[0].value = "inside";
@@ -136,7 +149,9 @@ test("unknown outcome recovers the original operation/revision; version conflict
     context.sourceDrafts.v2ledger = JSON.stringify({ version: 1, base: ledger, value: next });
     context.backendError = new Error("Connection interrupted");
     assert.equal(await context.saveContinuity(next), false);
-    assert.equal(writes.at(-1).pendingCommand.status, "unknown");
+    // 结果未知：回执留在内存 pendingCommand，可恢复重放；不再落本机草稿。
+    assert.equal(context.pendingCommandRef.current.status, "unknown");
+    assert.equal(writes.length, 0);
     next.initial[0].value = "newer unsaved edit";
     context.production.revision = 22;
     delete context.backendError;
@@ -167,6 +182,53 @@ test("check targets the saved snapshot without silently saving or discarding loc
         assert.equal(context.sourceDrafts.v2ledger, raw);
         assert.deepEqual(context.continuityReport, { status: "stale", snapshot });
     }
+});
+
+test("compilation confirms the draft lease instead of rejecting a page-load race", async () => {
+    let leaseChecks = 0, compileCalls = 0, compileError = "", compiling = false;
+    const context: Record<string, any> = {
+        compiling: false,
+        production: { episodeId: "fixture", revision: 17, draft: { director: { source: {}, engine: {} } } },
+        target: { kind: "episode", id: "fixture" },
+        // The production snapshot may render before the page's draftKey state update.
+        draftKey: null,
+        pendingCompilationRef: { current: { operationId: "compile-original", expectedRevision: 17 } },
+        ensureCanvasDraftLease: async () => { leaseChecks++; },
+        setCompiling: (value: boolean) => { compiling = value; },
+        setCompileError: (value: string) => { compileError = value; },
+        setCompileNotice: () => undefined,
+        persistPendingCompilation: async (value: unknown) => { context.pendingCompilationRef.current = value; },
+        compileProduction: async () => { compileCalls++; throw new Error("compile path reached"); },
+        BackendApiError: TestBackendApiError,
+    };
+    await handler("runProductionCompile", context)();
+    assert.equal(leaseChecks, 1);
+    assert.equal(compileCalls, 1, "the compile request is reached after the actual lease check");
+    assert.equal(compileError, "compile path reached");
+    assert.equal(compiling, false);
+});
+
+test("a lease failure before compile submission preserves the original pending receipt", async () => {
+    const original = { operationId: "compile-original", expectedRevision: 17 };
+    let compileCalls = 0, compileError = "";
+    const context: Record<string, any> = {
+        compiling: false,
+        production: { episodeId: "fixture", revision: 17, draft: { director: { source: {}, engine: {} } } },
+        target: { kind: "episode", id: "fixture" },
+        draftKey: null,
+        pendingCompilationRef: { current: original },
+        ensureCanvasDraftLease: async () => { throw new Error("lease unavailable"); },
+        setCompiling: () => undefined,
+        setCompileError: (value: string) => { compileError = value; },
+        setCompileNotice: () => undefined,
+        persistPendingCompilation: async (value: unknown) => { context.pendingCompilationRef.current = value; },
+        compileProduction: async () => { compileCalls++; throw new Error("must not submit"); },
+        BackendApiError: TestBackendApiError,
+    };
+    await handler("runProductionCompile", context)();
+    assert.equal(compileCalls, 0);
+    assert.equal(compileError, "lease unavailable");
+    assert.equal(context.pendingCompilationRef.current, original);
 });
 
 test("real DirectorPanel routes formal data and disables published draft writes", () => {
@@ -274,7 +336,7 @@ test("shared report guard rejects delayed load/refresh responses and invalidated
     assert.equal(unmounting.isCurrent(), false);
 });
 
-test("initial load and refresh both use the shared report guard", () => {
+test("initial load, refresh and the continuity effect route through the shared report guard", () => {
     for (const name of ["load", "refreshRemote"]) {
         let declaration = "";
         const visit = (node: ts.Node) => {
@@ -282,10 +344,13 @@ test("initial load and refresh both use the shared report guard", () => {
             ts.forEachChild(node, visit);
         };
         visit(ast);
-        assert.match(declaration, /const continuityRead = beginContinuityRead\(\)/);
-        assert.match(declaration, /fetchProductionContinuity\(target, \{ snapshot: continuityRead.snapshot \}\)/);
-        assert.match(declaration, /finishContinuityRead\(continuityRead, continuity.continuity\)/);
+        assert.match(declaration, /const continuityRead = [^\n]*beginContinuityRead\(\)/);
+        assert.match(declaration, /finishContinuityRead\(continuityRead/);
     }
+    // 连续性报告由专用 effect 获取：beginContinuityRead 捕获当前快照，迟到响应不能覆盖更新的选择。
+    assert.match(source, /const read = beginContinuityRead\(continuitySnapshot\)/);
+    assert.match(source, /fetchProductionContinuity\(target, \{ snapshot: continuitySnapshot \}\)/);
+    assert.match(source, /finishContinuityRead\(read, value\.continuity\)/);
 });
 
 test("a background refresh cannot suppress the result of a check still on the same snapshot", async () => {
@@ -327,12 +392,11 @@ test("actual initial load and refresh cannot replace a newer selected snapshot",
             refreshInFlight: { current: null }, refreshQueued: { current: false },
             fetchBackendDramaEpisode: async () => ({ episode: { id: "fixture", dramaId: "drama", title: "Fixture", canvasId: "" } }),
             fetchEpisodeProduction: async () => ({ production: context.production }),
-            fetchEpisodeProductionLegacy: async () => ({ sources: [] }),
             fetchEpisodeProductionVersions: async () => ({ versions: [] }),
             fetchProductionBatches: async () => ({ runs: [] }),
             fetchBackendProject: async () => ({ project: null }),
             setEpisode() {}, setProductionContext() {}, setTitle() {}, setCanvasId() {}, setCanvasRead() {},
-            setProduction() {}, setLegacy() {}, setVersions() {}, setBatches() {}, setRuntimeTasks() {}, setBriefDraft() {}, setLoadError() {},
+            setProduction() {}, setVersions() {}, setBatches() {}, setRuntimeTasks() {}, setBriefDraft() {}, setLoadError() {},
             fetchProductionContinuity: (_target: unknown, { snapshot }: { snapshot: string }) => snapshot === "draft" ? oldReport.promise : Promise.resolve({ continuity: { snapshot: "published", status: "passed" } }),
         });
         context[operation] = handler(operation, context);
@@ -426,7 +490,7 @@ test("actual panel status cannot borrow a saved pass for dirty inputs, while pub
     const pending = expressionFrom("./continuity-panel.tsx", "pendingLedgerEdits");
     const label = expressionFrom("./continuity-panel.tsx", "stateLabel");
     const status = new Function("context", `with (context) { const ledgerDirty = ${dirty}; const pendingLedgerEdits = ${pending}; return ${label}; }`);
-    const context = { continuityPreviewStatus, editable: true, legacy: false, changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, stable: (value: string) => value, formalLedger: "saved", ledgerKey: "new draft", sourceHash: "draft-hash", report: { status: "passed", sourceHash: "draft-hash" } };
+    const context = { continuityPreviewStatus, editable: true, ledgerUnsupported: false, changeDraft: undefined, sourceConflict: false, invalidLedgerDraft: false, stable: (value: string) => value, formalLedger: "saved", ledgerKey: "new draft", sourceHash: "draft-hash", report: { status: "passed", sourceHash: "draft-hash" } };
     assert.equal(status(context), "unsaved");
     assert.equal(status({ ...context, ledgerKey: "saved" }), "passed");
     assert.equal(status({ ...context, ledgerKey: "saved", sourceHash: "new-hash" }), "stale");
@@ -485,6 +549,6 @@ test("blocked workspace navigation preserves the mounted continuity form; approv
     }; visit(ast); assert.ok(effect);
     blocked = false; navigate("shots"); assert.equal(workspace, "continuity"); assert.equal(routeWorkspace, "shots");
     const js = ts.transpileModule(`const sync = ${effect};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
-    const sync = new Function("context", `with(context) { ${js}; return sync; }`)({ ...context, routeWorkspace, workspace, productionWorkspaces: ["continuity", "shots"], series: undefined });
+    const sync = new Function("context", `with(context) { ${js}; return sync; }`)({ ...context, routeWorkspace, workspace, productionWorkspaces: ["continuity", "shots"], series: undefined, seriesOnly: false });
     sync(); assert.equal(workspace, "shots"); assert.deepEqual(updates, ["shots"]);
 });

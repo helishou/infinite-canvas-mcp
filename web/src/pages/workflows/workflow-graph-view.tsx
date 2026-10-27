@@ -7,6 +7,11 @@ export type WorkflowGraphJson = Record<string, { class_type?: string; inputs?: R
 /** 节点图上标「已暴露字段数」用的最小形状，调用方传任何含 node 的字段数组即可。 */
 export type GraphFieldRef = { node: string };
 
+/** A workflow field may target one node or a comma-separated set of nodes. */
+export function graphFieldTargetsNode(field: GraphFieldRef, nodeId: string): boolean {
+    return field.node.split(",").some((id) => id.trim() === nodeId);
+}
+
 type GraphNode = {
     id: string;
     classType: string;
@@ -77,7 +82,11 @@ function topologicalLayers(workflow: WorkflowGraphJson): Map<string, number> {
 export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFieldRef[]): GraphLayout {
     const layers = topologicalLayers(workflow);
     const exposedCounts = new Map<string, number>();
-    for (const f of fields) exposedCounts.set(f.node, (exposedCounts.get(f.node) || 0) + 1);
+    for (const f of fields) {
+        for (const id of f.node.split(",").map((value) => value.trim()).filter(Boolean)) {
+            exposedCounts.set(id, (exposedCounts.get(id) || 0) + 1);
+        }
+    }
 
     const buckets = new Map<number, string[]>();
     for (const [id, layer] of layers) {
@@ -139,10 +148,15 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
     const [popupNodeId, setPopupNodeId] = useState<string | null>(null);
     const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
+    // 布局跟随节点图结构重算；字段变化只影响角标数，重算布局但不动视图。
     useEffect(() => {
         if (!workflow || Object.keys(workflow).length === 0) { setLayout(null); return; }
-        try { setLayout(computeGraphLayout(workflow, fields)); setView({ k: 1, x: 0, y: 0 }); } catch { setLayout(null); }
+        try { setLayout(computeGraphLayout(workflow, fields)); } catch { setLayout(null); }
     }, [workflow, fields]);
+    // 视图重置只在节点图结构变化时执行；否则编辑字段（打字）会把缩放和平移打回原点。
+    useEffect(() => {
+        setView({ k: 1, x: 0, y: 0 });
+    }, [workflow]);
 
     const fitToView = useCallback(() => {
         if (!layout || !wrapRef.current) return;
@@ -180,7 +194,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
     }, []);
 
     if (!layout || layout.nodes.length === 0) {
-        return <div className="flex h-64 items-center justify-center text-sm text-stone-400">无可视化节点</div>;
+        return <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">无可视化节点</div>;
     }
 
     return (
@@ -194,7 +208,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
 
             <div
                 ref={wrapRef}
-                className="graph-svg-wrap h-full w-full overflow-hidden rounded border border-stone-200 bg-stone-50 dark:border-stone-700 dark:bg-stone-900"
+                className="graph-svg-wrap h-full w-full overflow-hidden rounded border border-border bg-muted dark:bg-muted"
                 onWheel={handleWheel}
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}

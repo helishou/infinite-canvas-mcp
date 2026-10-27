@@ -1,5 +1,5 @@
 import type { CanvasProject } from "../db.js";
-import { resolveCharacterImageKeys } from "@basketikun/canvas-agent/reference-contract";
+import { characterImageKey, resolveCharacterImageKeys, selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
 export type ResolvedCanvasImageReference = {
     id: string;
@@ -45,6 +45,19 @@ export function resolveCanvasImageReferenceNode(
         addSceneImageReferences(node, references, added);
     }
     return references;
+}
+
+/** Resolve every character image by stable key for explicit bindings and source verification. */
+export function resolveCanvasCharacterImageReferences(node: Record<string, unknown>) {
+    if (String(node.type || "") !== "character") return resolveCanvasImageReferenceNode(node);
+    const id = String(node.id || "");
+    if (!id) return [];
+    const metadata = recordOf(node.metadata);
+    const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object" && !Array.isArray(image)) : [];
+    const existing = recordOf(metadata.characterReferences);
+    const selection = recordOf(existing[id]);
+    const referenceTarget = { ...node, metadata: { ...metadata, characterReferences: { ...existing, [id]: { ...selection, imageKeys: images.map((image, index) => characterImageKey(image, index)) } } } };
+    return resolveCanvasImageReferenceNode(node, referenceTarget);
 }
 
 /** 按调用方明确给出的节点 ID 展开参考图，保留用户选择顺序。 */
@@ -170,15 +183,18 @@ function addSmartImageReferences(node: Record<string, unknown>, references: Reso
     if (!id) return;
     const metadata = recordOf(node.metadata);
     const images = Array.isArray(metadata.images) ? metadata.images.filter((image): image is Record<string, unknown> => Boolean(image) && typeof image === "object" && !Array.isArray(image)) : [];
-    const completedImages = images.filter((image) => Boolean(image.content || image.storageKey));
-    if (!completedImages.length) {
+    // 引用语义：缺省跟随最新成功归档结果，显式历史选择锁定那张，失效选择回落最新。
+    // 前端 canvasNodeImage 走同一个解析器，保证预览与真正提交的图片一致。
+    // 策略非法/选择失效时不静默引用运行中或占位图片：回落到 latest_success 再取一次。
+    const resolved = images.length ? selectSmartImageResult(metadata, { mode: "node_selection" }) : null;
+    const fallback = resolved && resolved.error && images.length ? selectSmartImageResult(metadata, { mode: "latest_success" }) : resolved;
+    const image = fallback && !fallback.error ? fallback.image as Record<string, unknown> | undefined : undefined;
+    if (!image || (!image.content && !image.storageKey)) {
         addImageReference(node, references, added);
         return;
     }
-    const primaryImageId = String(metadata.primaryImageId || "");
-    const image = completedImages.find((item) => String(item.id || "") === primaryImageId) || completedImages[0];
     const imageIndex = images.indexOf(image);
-    const imageId = String(image.id || imageIndex);
+    const imageId = String(image.id || (imageIndex >= 0 ? imageIndex : "current"));
     const referenceId = `${id}:image:${imageId}`;
     if (added.has(referenceId)) return;
     const content = String(image.content || "");
@@ -186,7 +202,7 @@ function addSmartImageReferences(node: Record<string, unknown>, references: Reso
     added.add(referenceId);
     references.push({
         id: referenceId,
-        name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}-${imageIndex + 1}.png`,
+        name: `${String(node.title || id).replace(/[^\w\u4e00-\u9fff-]+/g, "-")}-${(imageIndex >= 0 ? imageIndex : 0) + 1}.png`,
         ...(storageKey ? { storageKey } : {}),
         ...(content.startsWith("data:") ? { dataUrl: content } : {}),
         ...(content && !content.startsWith("data:") ? { url: content } : {}),

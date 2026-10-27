@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Modal, Select, Tooltip } from "antd";
-import { Columns2, Loader2, Pause, Play } from "lucide-react";
+import { Columns2, Loader2, Maximize2, Minimize2, Pause, Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { saveAs } from "file-saver";
 import { resolveBackendAgentEndpoint, runVideoConcatTask, type LocalReference } from "@/services/api/comfyui";
@@ -8,9 +8,7 @@ import { resolveBackendAgentEndpoint, runVideoConcatTask, type LocalReference } 
 export type CanvasVideoCompareItem = { id: string; title: string; url: string; durationMs?: number; storageKey?: string };
 export type CanvasVideoComparison = { source: CanvasVideoCompareItem; candidates: CanvasVideoCompareItem[]; initialSelectedIds?: string[] };
 
-/** 横向拼接时每格的目标高度（像素）。720 = 两路 16:9 拼成 2560x720，够看清又不至于太大。 */
-const HSTACK_CELL_HEIGHT = 720;
-const HSTACK_MESSAGE_KEY = "video-compare-hstack";
+const VIDEO_COMPARE_MESSAGE_KEY = "video-compare-adaptive";
 
 function formatTime(seconds: number) {
     const value = Math.max(0, Math.floor(seconds));
@@ -26,15 +24,25 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     const { message } = App.useApp();
     const [selectedIds, setSelectedIds] = useState<string[]>(comparison.initialSelectedIds || []);
     const [durations, setDurations] = useState<Record<string, number>>({});
+    const [dimensions, setDimensions] = useState<Record<string, { width: number; height: number }>>({});
     const [errors, setErrors] = useState<Record<string, boolean>>({});
     const [playing, setPlaying] = useState(false);
+    const [expanded, setExpanded] = useState(false);
     const [time, setTime] = useState(0);
     const timeRef = useRef(0);
     const videosRef = useRef(new Map<string, HTMLVideoElement>());
     const refCallbacks = useRef(new Map<string, (video: HTMLVideoElement | null) => void>());
     const items = useMemo(() => [comparison.source, ...comparison.candidates.filter((item) => selectedIds.includes(item.id))], [comparison, selectedIds]);
+    const mediaSignature = items.map((item) => `${item.id}:${item.url}`).join("\n");
+    const sourceDimensions = dimensions[comparison.source.id];
+    const stackLayout = sourceDimensions && sourceDimensions.width > sourceDimensions.height ? "vstack" : "hstack";
+    const displayLayout = expanded ? "hstack" : stackLayout;
+    const previewRows = displayLayout === "vstack" ? items.length : Math.ceil(items.length / 2);
+    const previewOverhead = displayLayout === "vstack" ? 260 : 320;
+    const previewFrameHeight = `max(120px, calc((${expanded ? "94vh" : "82vh"} - ${previewOverhead}px) / ${Math.max(1, previewRows)}))`;
     const candidateOptions = useMemo(() => comparison.candidates.map((item) => ({ value: item.id, label: item.title })), [comparison.candidates]);
     const totalDuration = Math.max(0, ...items.map((item) => durations[item.id] || (item.durationMs || 0) / 1000));
+    useEffect(() => { setErrors({}); setDimensions({}); }, [mediaSignature]);
     const videoRefFor = (id: string) => {
         let callback = refCallbacks.current.get(id);
         if (!callback) {
@@ -98,9 +106,14 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
     }, [playing, syncAll, totalDuration]);
     useEffect(() => {
         const onHidden = () => { if (document.hidden) setPlaying(false); };
+        const onFullscreenChange = () => {
+            if (!document.fullscreenElement) setExpanded(false);
+        };
         document.addEventListener("visibilitychange", onHidden);
+        document.addEventListener("fullscreenchange", onFullscreenChange);
         return () => {
             document.removeEventListener("visibilitychange", onHidden);
+            document.removeEventListener("fullscreenchange", onFullscreenChange);
             for (const video of videosRef.current.values()) video.pause();
         };
     }, []);
@@ -117,39 +130,52 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
         syncAll(timeRef.current, true, true);
         setPlaying(true);
     };
+    const toggleFullscreen = () => {
+        if (document.fullscreenElement) {
+            void document.exitFullscreen();
+            setExpanded(false);
+            return;
+        }
+        const modal = document.querySelector<HTMLElement>(".canvas-video-compare-modal");
+        if (!modal) return;
+        setExpanded(true);
+        void modal.requestFullscreen().catch(() => setExpanded(false));
+    };
 
-    // 横向拼接下载：把当前选中的所有视频交给后端 ffmpeg 排成一行，音轨取第一路（源视频）。
+    // 按首路视频方向自动选择并排方向；音轨取第一路（源视频）。
     const [exporting, setExporting] = useState(false);
-    const downloadHstack = useCallback(async () => {
+    const downloadAdaptive = useCallback(async () => {
         if (exporting) return;
-        if (items.length < 2) { message.warning(t("canvas.videoCompare.hstackNeedTwo")); return; }
+        if (items.length < 2) { message.warning(t("canvas.videoCompare.adaptiveNeedTwo")); return; }
         const controller = new AbortController();
         setExporting(true);
-        message.open({ key: HSTACK_MESSAGE_KEY, type: "loading", content: t("canvas.videoCompare.hstackRunning", { count: items.length }), duration: 0 });
+        message.open({ key: VIDEO_COMPARE_MESSAGE_KEY, type: "loading", content: t("canvas.videoCompare.adaptiveRunning", { count: items.length }), duration: 0 });
         try {
             const { endpoint, token } = resolveBackendAgentEndpoint();
             const references: LocalReference[] = items.map((item, index) => ({ name: `${index + 1}-${item.title || "video"}`, storageKey: item.storageKey, url: item.storageKey ? undefined : item.url }));
-            const result = await runVideoConcatTask(endpoint, token, references, controller.signal, { layout: "hstack", longEdge: HSTACK_CELL_HEIGHT });
-            const fileName = `video-compare-hstack-${items.length}-${Date.now()}.mp4`;
+            const result = await runVideoConcatTask(endpoint, token, references, controller.signal, { layout: "adaptive", longEdge: "auto" });
+            const fileName = `video-compare-${result.layout || stackLayout}-${items.length}-${Date.now()}.mp4`;
             saveAs(result.url, fileName);
-            message.success({ key: HSTACK_MESSAGE_KEY, content: t("canvas.videoCompare.hstackDone", { name: fileName }), duration: 4 });
+            message.success({ key: VIDEO_COMPARE_MESSAGE_KEY, content: t("canvas.videoCompare.adaptiveDone", { name: fileName }), duration: 4 });
         } catch (error) {
             if ((error as Error)?.name === "AbortError") return;
-            message.error({ key: HSTACK_MESSAGE_KEY, content: t("canvas.videoCompare.hstackFailed", { error: error instanceof Error ? error.message : String(error) }), duration: 6 });
+            message.error({ key: VIDEO_COMPARE_MESSAGE_KEY, content: t("canvas.videoCompare.adaptiveFailed", { error: error instanceof Error ? error.message : String(error) }), duration: 6 });
         } finally {
             setExporting(false);
         }
     }, [exporting, items, message, t]);
 
     return <Modal
-        title={t("canvas.videoCompare.title")}
+        title={<div className="flex items-center justify-between gap-4"><span>{t("canvas.videoCompare.title")}</span><Button type="text" icon={expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />} onClick={toggleFullscreen} aria-label={t(expanded ? "canvas.videoCompare.exitFullscreen" : "canvas.videoCompare.fullscreen")}>{t(expanded ? "canvas.videoCompare.exitFullscreen" : "canvas.videoCompare.fullscreen")}</Button></div>}
         open
+        className="canvas-video-compare-modal"
         centered
-        width="min(92vw, 1500px)"
+        width={expanded ? "100vw" : "min(92vw, 1500px)"}
+        style={expanded ? { top: 0, maxWidth: "none", paddingBottom: 0, margin: 0 } : undefined}
         footer={null}
         onCancel={onClose}
         destroyOnHidden
-        styles={{ body: { maxHeight: "82vh", overflowY: "auto" } }}
+        styles={{ body: { height: expanded ? "calc(100vh - 64px)" : undefined, maxHeight: expanded ? "none" : "82vh", overflowY: "auto" }, content: expanded ? { height: "100vh", display: "flex", flexDirection: "column", borderRadius: 0 } : undefined }}
     >
         <div className="flex flex-col gap-4" data-canvas-shortcuts-ignore>
             <label className="flex flex-col gap-2 text-sm">
@@ -167,25 +193,31 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
                     className="w-full"
                 />
             </label>
-            <div className="grid gap-3" style={{ gridTemplateColumns: items.length > 1 ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
-                {items.map((item, index) => <div key={item.id} className="min-w-0 overflow-hidden rounded-lg border border-black/10 dark:border-white/10">
-                    <div className="flex items-center gap-2 px-3 py-2 text-sm">
+            <div className={`grid ${displayLayout === "vstack" ? "gap-0" : "gap-3"} ${expanded ? "flex-1 min-h-0" : ""}`} style={{ gridTemplateColumns: items.length > 1 && displayLayout === "hstack" ? "repeat(2, minmax(0, 1fr))" : "minmax(0, 1fr)" }}>
+                {items.map((item, index) => <div key={item.id} className={`min-w-0 overflow-hidden ${displayLayout === "vstack" ? "" : "rounded-lg border border-black/10 dark:border-white/10"}`}>
+                    {displayLayout === "hstack" ? <div className="flex items-center gap-2 px-3 py-2 text-sm">
                         <span className="min-w-0 flex-1 truncate" title={item.title}>{item.title}</span>
                         {index === 0 ? <span className="shrink-0 text-xs opacity-60">{t("canvas.videoCompare.source")}</span> : null}
-                    </div>
-                    <div className="relative bg-black">
+                    </div> : null}
+                    <div className="relative flex items-center justify-center bg-black" style={{ height: previewFrameHeight }}>
+                        {displayLayout === "vstack" ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-2 p-2 text-xs text-white">
+                            <span className="max-w-[75%] truncate rounded bg-black/55 px-2 py-1" title={item.title}>{item.title}</span>
+                            {index === 0 ? <span className="shrink-0 rounded bg-black/55 px-2 py-1">{t("canvas.videoCompare.source")}</span> : null}
+                        </div> : null}
                         <video
                             ref={videoRefFor(item.id)}
                             src={item.url}
                             preload="metadata"
                             playsInline
                             muted={index > 0}
-                            className="aspect-video w-full object-contain"
+                            className="block max-h-full max-w-full object-contain"
+                            style={dimensions[item.id] ? { aspectRatio: `${dimensions[item.id].width} / ${dimensions[item.id].height}` } : undefined}
                             data-video-compare-id={item.id}
                             onLoadedMetadata={(event) => {
                                 const video = event.currentTarget;
                                 const duration = videoDuration(video, item.durationMs);
                                 if (duration > 0) setDurations((current) => current[item.id] === duration ? current : { ...current, [item.id]: duration });
+                                if (video.videoWidth > 0 && video.videoHeight > 0) setDimensions((current) => current[item.id]?.width === video.videoWidth && current[item.id]?.height === video.videoHeight ? current : { ...current, [item.id]: { width: video.videoWidth, height: video.videoHeight } });
                                 syncVideo(video, item, timeRef.current, playing, true);
                             }}
                             onError={() => setErrors((current) => ({ ...current, [item.id]: true }))}
@@ -198,9 +230,9 @@ export function CanvasVideoCompareModal({ comparison, onClose }: { comparison: C
                 <Button type="primary" icon={playing ? <Pause className="size-4" /> : <Play className="size-4" />} onClick={togglePlayback} disabled={!totalDuration} aria-label={t(playing ? "canvas.videoCompare.pause" : "canvas.videoCompare.play")} />
                 <input type="range" className="min-w-0 flex-1 cursor-pointer accent-blue-500 disabled:cursor-not-allowed" min={0} max={totalDuration || 1} step={0.01} value={time} onChange={(event) => seek(Number(event.target.value))} disabled={!totalDuration} aria-label={t("canvas.videoCompare.seek")} />
                 <span className="shrink-0 text-xs tabular-nums">{formatTime(time)} / {formatTime(totalDuration)}</span>
-                <Tooltip title={items.length < 2 ? t("canvas.videoCompare.hstackNeedTwo") : t("canvas.videoCompare.hstackHint")}>
-                    <Button icon={exporting ? <Loader2 className="size-4 animate-spin" /> : <Columns2 className="size-4" />} onClick={() => void downloadHstack()} loading={exporting} disabled={items.length < 2} data-testid="video-compare-hstack-download" aria-label={t("canvas.videoCompare.hstackDownload")}>
-                        {t("canvas.videoCompare.hstackDownload")}
+                <Tooltip title={items.length < 2 ? t("canvas.videoCompare.adaptiveNeedTwo") : t("canvas.videoCompare.adaptiveHint")}>
+                    <Button icon={exporting ? <Loader2 className="size-4 animate-spin" /> : <Columns2 className="size-4" />} onClick={() => void downloadAdaptive()} loading={exporting} disabled={items.length < 2} data-testid="video-compare-adaptive-download" aria-label={t("canvas.videoCompare.adaptiveDownload")}>
+                        {t("canvas.videoCompare.adaptiveDownload")}
                     </Button>
                 </Tooltip>
             </div>

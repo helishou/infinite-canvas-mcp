@@ -46,7 +46,7 @@
 
 ## 5. 构建与验证（Windows/bun 环境）
 
-- `npm i` → `npm run typecheck`（tsc --noEmit）→ `node build.mjs`（esbuild，产物同步 `web/public/plugins/`）。
+- 根目录 `corepack pnpm install --frozen-lockfile` → `corepack pnpm --filter canvas-plugin-minimax-h3 run typecheck`（tsc --noEmit）→ `corepack pnpm --filter canvas-plugin-minimax-h3 run build`（esbuild，只产出 `dist/`，不同步 `web/public/plugins/`；宿主 Web 直接 import 源码）。
 - 产物验证用 `grep -F "目标串" dist/minimax-h3.js`，**不要 `require()` 插件产物**（是 ES module）。
 - 新增依赖必须写进 `package.json`（dependencies 会打进 bundle；devDependencies 只在本地解析）。
 - 浏览器验证太烧 token：代码层 typecheck + 产物 grep 优先，最后让用户刷新画布人工点一遍。

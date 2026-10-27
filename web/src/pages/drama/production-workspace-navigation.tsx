@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Button, Drawer, Dropdown } from "antd";
-import { Activity, ChevronDown, Clapperboard, FileText, Images, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
+import { Button, Drawer } from "antd";
+import { Activity, Clapperboard, FileText, Images, Layers3, ListChecks, ListVideo, Menu, PackageOpen, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProductionNavigationGroup, ProductionNavigationItem } from "./production-workspace";
 
-const icons = { series: Clapperboard, overview: ListChecks, story: FileText, assets: PackageOpen, shots: Clapperboard, continuity: Activity, production: Images, advanced: Settings2 };
+const icons = { series: Clapperboard, overview: ListChecks, story: FileText, assets: PackageOpen, shots: Clapperboard, continuity: Activity, clips: Layers3, production: Images, advanced: Settings2 };
 
 export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, compact = false, horizontal = false }: {
     groups: ProductionNavigationGroup[];
@@ -21,7 +21,7 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
             <h2 className="mb-2 px-3 text-xs font-medium text-muted-foreground">{t(group.labelKey)}</h2>
             <ul className="space-y-1">
                 {group.items.map(item => {
-                    const Icon = item.seriesView === "shared" ? Images : item.seriesView === "episodes" ? ListVideo : icons[item.workspace];
+                    const Icon = item.seriesView === "episodes" ? ListVideo : item.seriesView === "planning" ? Images : icons[item.workspace];
                     return <li key={item.id}><button type="button" aria-current={selectedId === item.id ? "page" : undefined}
                         onClick={() => { setOpen(false); if (selectedId !== item.id) onSelect(item); }}
                         className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${selectedId === item.id ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"}`}
@@ -31,8 +31,9 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
         </section>)}
     </nav>;
     if (horizontal) return <><nav data-production-horizontal-navigation aria-label={t("director.workspace.navigation")}>
-        {groups.filter(group => group.id === "owner").flatMap(group => group.items).map(item => {
-            const Icon = icons[item.workspace];
+        {/* 剧目页显示剧目子 Tab；制作页显示工作区，并在末尾保留设置与历史入口。 */}
+        {groups.filter(group => selectedId.startsWith("series:") ? group.id === "series" : group.id === "owner" || group.id === "settings").flatMap(group => group.items).map(item => {
+            const Icon = item.seriesView === "shared" ? Images : item.seriesView === "episodes" ? ListVideo : item.seriesView === "planning" ? Images : icons[item.workspace];
             return <button key={item.id} type="button" aria-current={selectedId === item.id ? "page" : undefined} onClick={() => { if (selectedId !== item.id) onSelect(item); }}><Icon className="size-4 shrink-0" /><span>{t(item.labelKey)}</span></button>;
         })}
     </nav>
@@ -50,25 +51,6 @@ export function ProductionWorkspaceNavigation({ groups, selectedId, onSelect, co
             {navigation}
         </Drawer>
     </>;
-}
-
-/** Production destinations only; AppTopNav owns app preferences on desktop and mobile. */
-export function ProductionWorkspaceMenus({ groups, selectedId, onSelect }: { groups: ProductionNavigationGroup[]; selectedId: string; onSelect: (item: ProductionNavigationItem) => void }) {
-    const { t } = useTranslation();
-    return <div data-production-workspace-menus className="flex shrink-0 items-center gap-1">
-        {groups.filter(group => group.id !== "owner").map(group => {
-            const active = group.items.some(item => item.id === selectedId);
-            const className = active ? "!bg-accent !text-accent-foreground" : "";
-            const label = t(group.id === "series" ? "director.workspaceHierarchy.seriesAndEpisodes" : group.labelKey);
-            if (group.items.length === 1) {
-                const item = group.items[0];
-                return <Button key={group.id} type="text" className={className} aria-current={active ? "page" : undefined} onClick={() => onSelect(item)}>{label}</Button>;
-            }
-            return <Dropdown key={group.id} trigger={["click"]} menu={{ selectedKeys: [selectedId], items: group.items.map(item => ({ key: item.id, label: t(item.labelKey) })), onClick: ({ key }) => { const item = group.items.find(item => item.id === key); if (item) onSelect(item); } }}>
-                <Button type="text" className={className} aria-current={active ? "page" : undefined}>{label}<ChevronDown className="size-3.5" /></Button>
-            </Dropdown>;
-        })}
-    </div>;
 }
 
 export function ProductionWorkspaceBreadcrumb({ items }: { items: Array<{ id: string; label: string; onSelect?: () => void }> }) {

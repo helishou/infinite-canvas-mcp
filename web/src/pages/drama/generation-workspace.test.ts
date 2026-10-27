@@ -1,44 +1,27 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-const source = readFileSync(new URL("./director-panel.tsx", import.meta.url), "utf8");
-const production = source.slice(source.indexOf("  const renderProduction ="), source.indexOf("  const renderAdvanced ="));
 
-test("generation starts with target selection and keeps preparation secondary", () => {
-  assert.ok(production.indexOf('data-generation-target-workbench') < production.indexOf('data-production-section="checks"'));
-  assert.match(production, /<details[^>]+data-production-section="checks"/);
-  assert.match(production, /<details[^>]+data-production-section="compiler"/);
-  assert.doesNotMatch(production, /type="primary"[^>]+onClick=\{onPublish\}/);
-  assert.match(production, /data-generation-blockers><h4/);
+const panel = readFileSync(new URL("./director-panel.tsx", import.meta.url), "utf8");
+const production = panel.slice(panel.indexOf("  const renderProduction ="), panel.indexOf("  const renderAdvanced ="));
+const exporter = readFileSync(new URL("../../lib/acheng-delivery-export.ts", import.meta.url), "utf8");
+
+test("production page omits the generation-target chooser and keeps batch status with input preparation", () => {
+  assert.doesNotMatch(production, /data-production-section="tasks"|data-generation-target-workbench|director\.generation\.chooseTarget/);
+  assert.match(production, /\{ id: "checks", label: t\("director\.generation\.prepareInputs"\) \},\s*\{ id: "delivery", label: t\("director\.micro\.resultsDelivery"\) \}/);
+  assert.match(production, /data-production-active-run/);
+  assert.match(production, /data-production-section="checks"/);
 });
 
-test("single target submission keeps precise scope and excludes prompt-only mode", () => {
-  assert.match(production, /selected\.status === "ready" && !active && mode === "per_item"/);
-  assert.match(production, /onStart\(\[selected\.id\]\)/);
-  assert.match(production, /mode === "automatic"[\s\S]+"all_ready"/);
-  assert.match(production, /onResume\(activeRun\.runId\)/);
+test("delivery lists only locked Clips and uses each Clip's current video", () => {
+  assert.match(panel, /records\(d\?\.source\?\.segments\)\.filter\(group => group\.locked === true\)/);
+  assert.match(panel, /const storageKey = String\(segment\?\.resultStorageKey \|\| ""\)/);
+  assert.match(production, /data-locked-clip-results/);
+  assert.match(exporter, /segment\.locked === true/);
+  assert.match(exporter, /const storageKey = String\(runtime\?\.resultStorageKey \|\| ""\)/);
 });
 
-test("an existing result never promotes a blocked target to complete", () => {
-  assert.doesNotMatch(production, /result \? "results"/);
-  assert.match(production, /targetStatus\.\$\{selected\.status\}/);
-  assert.match(production, /selected\.status === "complete" \? "director.generation.currentResult" : "director.generation.previousResult"/);
-  assert.ok(production.indexOf('data-generation-blockers') < production.indexOf('data-generation-existing-result'));
-});
-
-test("unknown clip blockers navigate to its actual source shot, not the same production page", () => {
-  assert.match(production, /const firstShotId = segment\?\.shot_ids\?\.\[0\]/);
-  assert.match(production, /id: firstShotId \? String\(firstShotId\) : selected\.targetId/);
-  assert.match(production, /downloadAllDeliveredClips/);
-  assert.match(production, /onExport\(includeGeneratedMedia\)/);
-  assert.match(production, /inputDiff\(selected\)/);
-});
-
-
-test("target chooser does not repeat a visible heading or show an invalid clip duration", () => {
-  assert.match(production, /<h3 className="sr-only">\{t\("director.generation.chooseTarget"\)\}/);
-  assert.match(production, /segmentShots.every/);
-  assert.match(production, /Number.isFinite\(value\) && value > 0/);
-  assert.match(production, /duration !== undefined &&/);
-  assert.doesNotMatch(production, /formatSeconds\(segment.generation_clip_duration/);
+test("focused Clip generation remains available outside the removed chooser", () => {
+  assert.match(panel, /const canGenerate = target\?\.status === "ready" && mode !== "prompt_only"/);
+  assert.match(panel, /onStart\(\[target!\.id\]\)/);
 });

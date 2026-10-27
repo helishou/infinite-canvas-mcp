@@ -72,7 +72,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import { DB_FILE } from "../config.js";
 
-// Manual only. Default is read-only: npm run prune-observability -- [days=7] [--apply]
+// Manual only. Default is read-only: pnpm --filter @helishou/infinite-canvas-backend run prune-observability -- [days=7] [--apply]
 const args = process.argv.slice(2);
 const positional = args.filter((arg) => !arg.startsWith("--"));
 if (args.some((arg) => arg.startsWith("--") && arg !== "--apply") || positional.length > 1)
@@ -366,13 +366,13 @@ Usage 报错文案同步更新。
 实施后，在 `backend` 目录运行以下定向命令（新测试文件创建后再执行）：
 
 ```powershell
-npm run build
+pnpm run build
 node --import tsx --test src/maintenance/prune-observability.test.ts
 node --import tsx --test src/canvas/collaboration.test.ts src/canvas/operation-authority.test.ts
 node --import tsx --test src/canvas/history-maintenance.test.ts
 ```
 
-选择各项受影响套件，已有相关检查通过后不无理由扩大测试。`npm run test` 的 `scripts/test.mjs` 会发现整个 workspace 的测试，且不转发筛选参数，不能当作定向测试命令。Backend 编译会产生 dist；按实际消费路径判断是否需要加载，测试通过不代表运行服务已加载。新增迁移独立测试文件时同步补充定向命令。
+选择各项受影响套件，已有相关检查通过后不无理由扩大测试。`pnpm test` 的 `scripts/test.mjs` 会发现各 workspace 的测试，且不转发筛选参数，不能当作定向测试命令。Backend 编译会产生 dist；按实际消费路径判断是否需要加载，测试通过不代表运行服务已加载。新增迁移独立测试文件时同步补充定向命令。
 
 业务实现完成时，按 `docs/AGENTS.md` 更新中英文 pending-test 及 CHANGELOG 的实际可测试行为；本设计修订不改变功能完成状态。
 

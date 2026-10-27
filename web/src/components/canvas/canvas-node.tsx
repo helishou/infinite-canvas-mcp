@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
-import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Move, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -25,6 +25,8 @@ import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
 import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 import { SmartImageHistoryActions } from "./smart-image-history-actions";
+import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
+import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
@@ -207,27 +209,32 @@ function OverviewImagePreview({ image, label, theme }: { image: OverviewImage; l
     const subscribe = useCallback((listener: () => void) => subscribeImagePreview(image.storageKey, listener), [image.storageKey]);
     const getRevision = useCallback(() => getImagePreviewRevisionFor(image.storageKey), [image.storageKey]);
     useSyncExternalStore(subscribe, getRevision, () => 0);
-    const [source, setSource] = useState(image.content || "");
+    const [source, setSource] = useState(image.storageKey ? "" : image.content || "");
 
     useEffect(() => {
         let cancelled = false;
-        void ensureImagePreview(image.storageKey);
-        void resolveImageUrl(image.storageKey, image.content)
-            .then((url) => {
-                if (!cancelled) setSource(url || image.content || "");
-            })
-            .catch(() => {
-                if (!cancelled) setSource(image.content || "");
-            });
+        if (image.storageKey) {
+            // Keep full-resolution archive media out of overview <img> elements.
+            // A large canvas can mount hundreds of nodes at once; decode only the cached WebP thumbnail.
+            void ensureImagePreview(image.storageKey);
+        } else {
+            void resolveImageUrl(undefined, image.content || "")
+                .then((url) => {
+                    if (!cancelled) setSource(url || image.content || "");
+                })
+                .catch(() => {
+                    if (!cancelled) setSource(image.content || "");
+                });
+        }
         return () => {
             cancelled = true;
         };
     }, [backendConnected, backendToken, image.content, image.storageKey]);
 
-    // 优先使用本地 WebP；缓存尚未生成或读取失败时回退到节点已有图片源，避免缩小后只剩占位图。
-    const src = previewUrlFor(image.storageKey) || source;
+    // Archived images wait for the small local preview instead of decoding the original at overview scale.
+    const src = image.storageKey ? previewUrlFor(image.storageKey) : source;
     return src ? (
-        <img src={src} alt={label} draggable={false} className="pointer-events-none h-full w-full select-none object-cover" />
+        <img src={src} alt={label} draggable={false} loading="lazy" decoding="async" fetchPriority="low" className="pointer-events-none h-full w-full select-none object-cover" />
     ) : (
         <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
             <ImageIcon className="size-5 opacity-35" />
@@ -330,7 +337,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl cursor-grab active:cursor-grabbing ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
@@ -349,6 +356,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             }}
             onMouseEnter={() => onHoverStart(data.id)}
             onMouseLeave={() => onHoverEnd(data.id)}
+            onDoubleClick={(event) => event.stopPropagation()}
             onMouseDownCapture={(event) => {
                 if (event.button === 0) onSelectCapture?.(event, data.id);
             }}
@@ -476,6 +484,7 @@ type NodeContentRendererProps = {
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     scale: number;
+    onEditEntity?: (node: CanvasNodeData) => void;
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLDivElement | null>;
     isBatchRoot: boolean;
@@ -783,11 +792,40 @@ export const CanvasNode = React.memo(function CanvasNode({
     const panelContent = showPanel && !isGroup && renderPanel ? renderPanel(data) : null;
     useCanvasTransientEscape(Boolean(panelContent && panelContainer), () => onClosePanel?.(), true);
     const compact = scale < 0.24 && !isSelected && !hovered && !showPanel && !referenceSelectionState;
+    // Drag/resize previews update the shell every frame. Reuse unchanged content so
+    // Markdown and plugin editors do not rerender just because the shell moved.
+    const nodeContent = useMemo(() => (
+        <NodeContent
+            node={data}
+            theme={theme}
+            scale={scale}
+            onEditEntity={data.type === CanvasNodeType.Character ? onEditCharacter : data.type === CanvasNodeType.Scene ? onEditScene : data.type === CanvasNodeType.Prop ? onEditProp : undefined}
+            isEditingContent={isEditingContent}
+            textareaRef={textareaRef}
+            isBatchRoot={isBatchRoot}
+            batchCount={batchCount}
+            batchExpanded={batchExpanded}
+            renderNodeContent={renderNodeContent}
+            pluginContext={pluginContext}
+            mentionReferences={mentionReferences}
+            onStopEditing={() => setIsEditingContent(false)}
+            onRetry={onRetry}
+            onToggleBatch={() => onToggleBatch?.(data.id)}
+            onSetBatchPrimary={(itemId) => onSetBatchPrimary?.(data.id, itemId)}
+            onDuplicateBatchImage={(imageId) => onDuplicateBatchImage?.(data, imageId)}
+            onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
+            onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
+            onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
+            onViewBatchImage={(imageId) => onViewImage?.(data, imageId)}
+            groupChildCount={groupChildCount}
+            compact={compact}
+        />
+    ), [data, theme, scale, onEditCharacter, onEditScene, onEditProp, isEditingContent, isBatchRoot, batchCount, batchExpanded, renderNodeContent, pluginContext, mentionReferences, onRetry, onToggleBatch, onSetBatchPrimary, onDuplicateBatchImage, onDownloadBatchImage, onRetryBatchImage, onDeleteBatchImage, onViewImage, groupChildCount, compact]);
 
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
+            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : "cursor-grab active:cursor-grabbing"}`}
             style={{
                 transform: `translate(${(previewBounds?.position || previewPosition || data.position).x}px, ${(previewBounds?.position || previewPosition || data.position).y}px)`,
                 width: previewBounds?.width || data.width,
@@ -804,6 +842,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 setHovered(false);
                 onHoverEnd(data.id);
             }}
+            onDoubleClick={(event) => event.stopPropagation()}
             onMouseDownCapture={(event) => {
                 if (referenceSelectionState) {
                     event.stopPropagation();
@@ -814,31 +853,42 @@ export const CanvasNode = React.memo(function CanvasNode({
                     }
                     return;
                 }
+                const target = event.target as HTMLElement;
+                const isH3 = data.type === "minimax-h3:video";
+                // Alt-drag selects and moves the node directly underneath this one. This recovers
+                // nodes accidentally created inside an H3 node's footprint without making its
+                // timeline, inputs, or other interactive controls draggable.
+                const overInteractiveControl = target.closest("button, input, textarea, select, video, [contenteditable='true'], [data-canvas-node-panel], [data-resize-handle], [data-connection-handle], [data-canvas-shortcuts-ignore]");
+                if (event.button === 0 && event.altKey && !overInteractiveControl) {
+                    const underlying = document.elementsFromPoint(event.clientX, event.clientY)
+                        .map((element) => element.closest<HTMLElement>(".node-element[data-node-id]"))
+                        .find((element) => element && element !== event.currentTarget);
+                    const underlyingNodeId = underlying?.dataset.nodeId;
+                    if (underlyingNodeId) {
+                        event.stopPropagation();
+                        onSelectCapture?.(event, underlyingNodeId);
+                        if (event.defaultPrevented) return;
+                        event.preventDefault();
+                        onMouseDown(event, underlyingNodeId);
+                        return;
+                    }
+                }
                 onSelectCapture?.(event, data.id);
                 if (event.defaultPrevented) return;
-                // H3 节点内容几乎全是交互控件，且其根 div 在冒泡阶段 stopPropagation 挡掉了普通的
-                // body 拖拽路径，只能走这里。若沿用全量黑名单（button/input/textarea/select/video），
-                // 节点上几乎任何可见区域都命中被排除，导致“拖不动”。故对 H3 仅屏蔽纯文本编辑控件，
-                // H3 只允许从自己的标题栏拖动，其他区域全部保留给控件和内容交互。
+                // H3 根节点会在冒泡阶段 stopPropagation，拖动只能从这里启动。
+                // 只允许显式拖动区，拖动区中的按钮/输入仍由控件处理；外标题单独标记为可交互拖动句柄。
                 // contenteditable（CodeMirror 文本编辑器）与 data-canvas-shortcuts-ignore（编辑器容器）
                 // 必须排除：capture 先于编辑器自身的 stopPropagation 执行，命中拖拽会掐断 mousedown，
                 // 导致文本节点双击进入编辑后光标放不进去、拖动变成移动节点。
-                const target = event.target as HTMLElement;
-                const isH3 = data.type === "minimax-h3:video";
-                const interactive = target.closest("button, input, textarea, select, video, .ant-select-dropdown, [contenteditable='true'], [data-canvas-shortcuts-ignore]");
-                const isExplicitDragHandle = target.closest("[data-canvas-node-drag-handle]");
                 // 四角缩放手柄是纯 div，会命中上面的拖拽分支；但若在此处触发拖拽，
                 // handleNodeMouseDown 的 event.stopPropagation() 会掐断事件，使 ResizeHandle 自己的
                 // onMouseDown（冒泡阶段）无法执行，缩放被拖拽彻底劫持。故需显式排除缩放手柄。
-                const onResizeHandle = target.closest("[data-resize-handle]");
                 // 连线手柄（ConnectionHandleDot）与缩放手柄同理：纯 div 会命中拖拽分支，
                 // capture 阶段触发 handleNodeMouseDown 的 stopPropagation 会掐断其自身
                 // onMouseDown（onConnectStart，冒泡阶段），导致无法连线、反而变成拖拽。需显式排除。
-                const onConnectionHandle = target.closest("[data-connection-handle]");
                 // 节点下方的面板（提示词/参考内容等）是纯交互区：面板已在冒泡阶段 stopPropagation，
                 // 但 capture 先于冒泡执行，会先在这里触发拖拽。命中面板时跳过拖拽，把交互留给面板自身。
-                const onNodePanel = target.closest("[data-canvas-node-panel]");
-                if ((!interactive || isExplicitDragHandle) && !onResizeHandle && !onConnectionHandle && !onNodePanel && (!isH3 || isExplicitDragHandle)) onMouseDown(event, data.id);
+                if (shouldStartCanvasNodeDrag(target, isH3, event)) onMouseDown(event, data.id);
             }}
             onClickCapture={(event) => {
                 if (!referenceSelectionState && !pickedReferenceOnMouseDown.current) return;
@@ -855,7 +905,13 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
         >
             {!referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
-                <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                <div
+                    data-canvas-node-drag-handle={!isEditingTitle ? "true" : undefined}
+                    data-canvas-node-drag-interactive-handle={!isEditingTitle ? "true" : undefined}
+                    className="absolute left-3 right-3 top-[-28px] z-[65] flex h-7 items-center"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
                     {isEditingTitle ? (
                         <input
                             ref={titleInputRef}
@@ -876,8 +932,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     ) : (
                         <button
                             type="button"
-                            data-canvas-node-drag-handle={hasVideoContent ? "true" : undefined}
-                            className="block max-w-full truncate border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100"
+                            className="block max-w-full truncate cursor-grab border-b border-dashed border-transparent px-0 py-0.5 text-left text-xs font-medium opacity-75 transition hover:border-current hover:opacity-100 active:cursor-grabbing"
                             style={{ color: theme.node.text }}
                             title={t("canvas.node.renameHint")}
                             onDoubleClick={(event) => {
@@ -913,15 +968,14 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onMouseDown={(event) => {
                     const target = event.target as HTMLElement;
                     const isH3 = data.type === "minimax-h3:video";
-                    if (!referenceSelectionState && (!isH3 || target.closest("[data-canvas-node-drag-handle]"))) onMouseDown(event, data.id);
+                    if (!referenceSelectionState && shouldStartCanvasNodeDrag(target, isH3, event)) onMouseDown(event, data.id);
                 }}
                 onDoubleClick={(event) => {
                     if (referenceSelectionState) {
                         event.stopPropagation();
                         return;
                     }
-                    // 节点内的按钮/输入控件自己消费双击：click 上的 stopPropagation 拦不住独立的 dblclick 事件，
-                    // 不判断落点会让「下载 / 创建副本 / 张数」这类工具条按钮的双击冒泡到节点，误触发预览或编辑。
+                    // 节点内的按钮/输入控件双击只由控件处理；外层节点边界会在它到达画布前拦住事件。
                     if (event.target instanceof Element && event.target.closest("button, [role='button'], input, textarea, select")) return;
                     if (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) {
                         event.stopPropagation();
@@ -998,30 +1052,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 >
                     {data.metadata?.sharedAssetReference && <SharedReferenceSource origin={data.metadata.sharedAssetReference} theme={theme} localChanges={Boolean(Object.keys(data.metadata.sharedAssetReference.edits || {}).length)} />}
                     {data.metadata?.sharedAssetOrigin && <SharedReferenceSource origin={data.metadata.sharedAssetOrigin as { sourceProjectId: string; sourceNodeId: string }} theme={theme} />}
-                    <NodeContent
-                        node={data}
-                        theme={theme}
-                        scale={scale}
-                        isEditingContent={isEditingContent}
-                        textareaRef={textareaRef}
-                        isBatchRoot={isBatchRoot}
-                        batchCount={batchCount}
-                        batchExpanded={batchExpanded}
-                        renderNodeContent={renderNodeContent}
-                        pluginContext={pluginContext}
-                        mentionReferences={mentionReferences}
-                        onStopEditing={() => setIsEditingContent(false)}
-                        onRetry={onRetry}
-                        onToggleBatch={() => onToggleBatch?.(data.id)}
-                        onSetBatchPrimary={(itemId) => onSetBatchPrimary?.(data.id, itemId)}
-                        onDuplicateBatchImage={(imageId) => onDuplicateBatchImage?.(data, imageId)}
-                        onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
-                        onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
-                        onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
-                        onViewBatchImage={(imageId) => onViewImage?.(data, imageId)}
-                        groupChildCount={groupChildCount}
-                        compact={compact}
-                    />
+                    {nodeContent}
                 </div>
 
                 {showImageInfo && hasImageContent ? <ImageInfoBar node={data} /> : null}
@@ -1061,9 +1092,9 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-popover px-3 py-2"><span className="truncate text-sm font-medium" title={data.title}>{data.title}</span><button type="button" className="grid size-9 shrink-0 place-items-center rounded hover:bg-muted" aria-label={t("canvasChrome.closeEditor")} onClick={onClosePanel}><X className="size-4" /></button></header>
                 <div className="min-h-0 overflow-y-auto overscroll-contain">{panelContent}</div>
             </section>, panelContainer) : (
-                <div data-canvas-node-panel className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">
+                <CanvasNodePanelFrame isSmartGenerationNode={isSmartGenerationNode} screenSized={!definition?.Panel}>
                     {panelContent}
-                </div>
+                </CanvasNodePanelFrame>
             ) : null}
         </div>
     );
@@ -1434,7 +1465,28 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
     );
 }
 
-function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
+function ProductionEntityPlaceholder({ icon, name, description, theme, node, onEditEntity }: { icon: ReactNode; name: string; description: string; theme: CanvasTheme; node: CanvasNodeData; onEditEntity?: (node: CanvasNodeData) => void }) {
+    const { t } = useTranslation();
+    return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2.5 p-6 text-center" style={{ color: theme.node.text }}>
+            <div className="flex size-14 shrink-0 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg, color: theme.node.placeholder }}>
+                {icon}
+            </div>
+            <span className="max-w-full truncate text-sm font-medium">{name}</span>
+            {description ? <p className="line-clamp-6 max-w-[min(100%,32rem)] text-xs leading-5" style={{ color: theme.node.muted }}>{description}</p> : null}
+            {onEditEntity ? <button type="button" className="rounded-lg border px-3 py-1.5 text-xs font-medium transition hover:bg-black/5 dark:hover:bg-white/10" style={{ borderColor: theme.node.stroke, background: theme.toolbar.panel, color: theme.node.text }} onClick={(event) => { event.stopPropagation(); onEditEntity(node); }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>{t("canvas.entity.addReferenceImage")}</button> : null}
+        </div>
+    );
+}
+
+function entityDescriptionText(value: unknown) {
+    if (typeof value === "string") return value.trim();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const record = value as Record<string, unknown>;
+    return String(record.description || record.text || "").trim();
+}
+
+function SceneNodeContent({ node, theme, scale, onEditEntity }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const image = node.metadata?.sceneImage;
     const colorCard = node.metadata?.sceneColorCard;
@@ -1483,6 +1535,8 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
         };
     }, [backendConnected, backendToken, colorCard?.storageKey, colorCard?.url]);
 
+    if (!image?.url && !image?.storageKey && node.metadata?.productionEntity)
+        return <ProductionEntityPlaceholder icon={<MapPinned className="size-6 opacity-50" />} node={node} name={String(node.metadata.sceneName || node.title || "")} description={entityDescriptionText(node.metadata.sceneDescription)} theme={theme} onEditEntity={onEditEntity} />;
     if (!image)
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
@@ -1515,7 +1569,7 @@ function SceneNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     );
 }
 
-function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
+function PropNodeContent({ node, theme, scale, onEditEntity }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const image = node.metadata?.propImage;
     const [imageUrl, setImageUrl] = useState("");
@@ -1531,6 +1585,7 @@ function PropNodeContent({ node, theme, scale }: NodeContentRendererProps) {
         return () => { cancelled = true; };
     }, [backendConnected, backendToken, image?.storageKey, image?.url]);
 
+    if (!image?.url && !image?.storageKey && node.metadata?.productionEntity) return <ProductionEntityPlaceholder icon={<Package className="size-6 opacity-50" />} node={node} name={String(node.metadata.propName || node.title || "")} description={entityDescriptionText(node.metadata.propDescription)} theme={theme} onEditEntity={onEditEntity} />;
     if (!image?.url && !image?.storageKey) return <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}><Package className="size-9 opacity-30" /><span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.prop.noImage")}</span></div>;
     const source = imageUrl ? pickImageSource({ previewUrl: previewUrlFor(image.storageKey), originalUrl: imageUrl, naturalWidth: image.width, naturalHeight: image.height, renderedWidth: node.width, renderedHeight: node.height, scale }) : "";
     return <div className="relative h-full w-full overflow-hidden rounded-[inherit]" style={{ background: theme.node.panel }}>
@@ -1624,6 +1679,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
     );
 
     if (!images.length) {
+        if (node.metadata?.productionEntity) return <ProductionEntityPlaceholder icon={<User className="size-6 opacity-50" />} node={node} name={String(node.metadata.characterName || node.title || "")} description={entityDescriptionText(node.metadata.characterDescription)} theme={theme} onEditEntity={props.onEditEntity} />;
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-4" style={{ color: theme.node.placeholder }}>
                 <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
@@ -1851,6 +1907,16 @@ function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
     const source = selectedIndex >= 0 ? history[selectedIndex]?.content || node.metadata?.content : node.metadata?.content;
     return (
         <div className="relative h-full w-full">
+            <div
+                data-canvas-node-drag-handle="true"
+                data-canvas-node-drag-interactive-handle="true"
+                role="button"
+                aria-label={t("canvas.node.dragVideo")}
+                title={t("canvas.node.dragVideo")}
+                className="pointer-events-none absolute left-2 top-2 z-10 grid size-7 cursor-grab place-items-center rounded-md bg-black/45 text-white opacity-0 transition-opacity group-hover/node:pointer-events-auto group-hover/node:opacity-100 active:cursor-grabbing"
+            >
+                <Move className="size-4" />
+            </div>
             <video src={source} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />
             {history.length ? (
                 <select
@@ -2158,11 +2224,11 @@ function ExpandedImageCard({
                         type="button"
                         className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]"
                         style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }}
-                        title={t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}
+                        title={t("canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
                         <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        {node.width >= 200 ? <span className="truncate">{t(node.type === CanvasNodeType.Config && node.metadata?.smart ? "director.atomic.browseImage" : "canvas.node.setPrimary")}</span> : null}
+                        {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>
             ) : null}

@@ -160,6 +160,22 @@
 }
 
 @layer utilities {
+    :not(.thin-scrollbar):not(.hover-scrollbar):not(.hide-scrollbar)::-webkit-scrollbar-button:single-button:vertical:decrement,
+    :not(.thin-scrollbar):not(.hover-scrollbar):not(.hide-scrollbar)::-webkit-scrollbar-button:single-button:vertical:increment {
+        display: block;
+        height: 15px;
+        border: 1px solid var(--border);
+        background-color: var(--background);
+        color: var(--muted-foreground);
+        -webkit-appearance: auto;
+        appearance: auto;
+    }
+
+    :not(.thin-scrollbar):not(.hover-scrollbar):not(.hide-scrollbar)::-webkit-scrollbar-button:single-button:vertical:hover {
+        background-color: var(--muted);
+        color: var(--foreground);
+    }
+
     .ai-title-aurora {
         background: linear-gradient(90deg, #111827 0%, #111827 36%, #6b7280 54%, #111827 72%, #111827 100%);
         background-size: 220% 100%;

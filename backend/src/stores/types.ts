@@ -13,7 +13,7 @@ import type { CanvasCommandContext } from "../canvas/collaboration.js";
 export type AssetFilter = { kind?: string; folderId?: string; dramaId?: string };
 export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
-export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null };
+export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string };
 export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;
 export type MediaStats = { width?: number | null; height?: number | null; durationMs?: number | null };
 export type MediaCategory = "input" | "output" | "library";
@@ -38,9 +38,11 @@ export type H3NodeMaterial = {
     createdAt: string;
 };
 export type CanvasProjectFilter = { episodeId?: string; id?: string };
-export type H3ProductionRequirements = { ownerId: string; revision: number; version: number; videoAspectRatio?: string; clips: Array<{ nodeId: string; segmentId: string; storyboardRequired: boolean; sharedAssetsCurrent?: boolean; promptContentHash?: string; sourceHash?: string; literalDialogues?: Array<{ blockId: string; speaker: string; text: string }>; shots: Array<{ id: string; duration: number }> }> };
+export type H3ProductionRequirements = { ownerId: string; revision: number; version: number; videoAspectRatio?: string; clips: Array<{ nodeId: string; segmentId: string; targetId?: string; storyboardRequired: boolean; promptContentHash?: string; sourceHash?: string; literalDialogues?: Array<{ blockId: string; speaker: string; text: string }>; shots: Array<{ id: string; duration: number }> }> };
 export type CanvasProjectStore = {
     getH3ProductionRequirements?(projectId: string): H3ProductionRequirements | null;
+    /** Current draft requirements; used as the diagnosis baseline before a version is published. */
+    getH3DraftRequirements?(projectId: string): H3ProductionRequirements | null;
     list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;
@@ -122,6 +124,9 @@ export type TaskStore = {
     /** 查询已清理任务 ID 的凭据；不存在返回 null。入口在副作用前调用。 */
     getTombstone(id: string): { taskId: string; terminalStatus: string; prunedAt: string } | null;
     list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
+    modelUsage(): Array<{ model: string; channelId: string; count: number }>;
+    /** 摘要列表：同一过滤条件，但只回传卡片渲染所需的标量 + 输出媒体引用（裁掉多 MB 提示词大列）。返回结构与 RuntimeTask 兼容。 */
+    listSummaries(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
     update(id: string, patch: TaskPatch): RuntimeTask;
     transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;
     cancel(id: string): RuntimeTask;

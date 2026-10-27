@@ -9,10 +9,18 @@ import { CodexEventHistory } from "./codex-event-history.js";
 import { settledTurnIds, summarizeCodexThread, threadMessages } from "./codex-history.js";
 
 test("重启后恢复的中断回合保留已完成工具并明确显示中断", () => {
-    const messages = threadMessages({ id: "thread", turns: [{ id: "turn", status: "interrupted", items: [{ id: "intro", type: "agentMessage", text: "我会继续写第二场。", phase: "commentary" }, { id: "read", type: "mcpToolCall", tool: "production_get", status: "completed", arguments: {}, result: {} }] }] });
+    const interruptedThread = { id: "thread", turns: [{ id: "turn", status: "interrupted", items: [{ id: "intro", type: "agentMessage", text: "我会继续写第二场。", phase: "commentary" }, { id: "read", type: "mcpToolCall", tool: "production_get", status: "completed", arguments: {}, result: {} }] }] };
+    const messages = threadMessages(interruptedThread);
     assert.equal(messages.find(item => item.itemId === "read")?.role, "tool");
     assert.equal(messages.find(item => item.itemId === "intro")?.text, "我会继续写第二场。");
-    assert.equal(messages.at(-1)?.title, "本轮已中断");
+    // 非人为中断（无手动停止标记）：可恢复通知样式，不再是红色 error 卡。
+    assert.equal(messages.at(-1)?.role, "tool");
+    assert.equal(messages.at(-1)?.title, "本轮暂时离线");
+    assert.match(String(messages.at(-1)?.text), /不会自动重跑/);
+    // 手动停止的回合仍明确标注「已停止」。
+    const stoppedMessages = threadMessages(interruptedThread, [], { items: [], turns: [] }, new Set(["turn"]));
+    assert.equal(stoppedMessages.at(-1)?.role, "error");
+    assert.equal(stoppedMessages.at(-1)?.title, "已停止");
     assert.equal(messages.at(-1)?.turnId, "turn");
     assert.equal(threadMessages({ id: "thread", turns: [{ id: "turn", status: "inProgress", items: [] }] }).length, 0);
 });

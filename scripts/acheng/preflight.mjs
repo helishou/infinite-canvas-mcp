@@ -8,7 +8,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [file, stage = 'edit'] = process.argv.slice(2);
   if (!file || !['edit', 'publish', 'generate'].includes(stage)) throw new Error('Usage: node scripts/acheng/preflight.mjs director.json [edit|publish|generate]');
   const input = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
-  const result = Object.hasOwn(input, 'action') ? preflightProductionRequest(input, input.production) : preflightDirector(input, stage);
+  const result = await (Object.hasOwn(input, 'action') ? preflightProductionRequest(input, input.production) : preflightDirector(input, stage));
   console.log(JSON.stringify(result, null, 2));
   if (!result.valid) process.exitCode = 1;
 }

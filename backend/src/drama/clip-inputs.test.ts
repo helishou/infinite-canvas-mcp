@@ -1,0 +1,171 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { clipInputOperations, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
+
+const OWNER = { kind: "episode" as const, id: "EP" };
+
+function layoutFor(...groups: Array<{ id: string; nodeId: string; sceneId: string }>) {
+    return {
+        schemaVersion: 1, algorithmVersion: "test", canvasId: "CANVAS", owner: OWNER,
+        structureHash: "0".repeat(64), geometryHash: "0".repeat(64), planHash: "0".repeat(64),
+        regions: [], diagnostics: [],
+        units: groups.map(group => ({
+            id: `unit-${group.id}`, area: "video" as const, targets: [`segment:${group.id}`], sceneId: group.sceneId,
+            bounds: { position: { x: 0, y: 0 }, size: { width: 320, height: 240 } }, status: "materialized" as const,
+            members: [{ role: "video" as const, nodeId: group.nodeId, nodeType: "minimax-h3:video", position: { x: 0, y: 0 }, size: { width: 320, height: 240 } }],
+        })),
+    } as any;
+}
+
+const h3Node = (id: string, sceneId: string, segments: Array<Record<string, any>>) => ({
+    id, type: "minimax-h3:video",
+    metadata: { productionOwnerKind: "episode", productionOwnerId: OWNER.id, productionSceneId: sceneId, segments },
+});
+
+/** A projected Clip row without a manual-edit baseline, so only the orphan sweep can decide its fate. */
+const projectedClip = (id: string, targetId: string) => ({ id, duration: 4, prompt: "compiled", status: "success", productionClipProjection: { targetId, sourceHash: "h" } });
+
+const twoSceneProduction = {
+    director: {
+        assets: {}, shotInputs: {}, artifacts: [],
+        source: {
+            fps_num: 24, fps_den: 1,
+            script_scenes: [{ id: "SC-A", scene_id: "ROOM-A", scene_name: "A", text: "" }, { id: "SC-B", scene_id: "ROOM-B", scene_name: "B", text: "" }],
+            shots: [{ id: "SH-A", scene_id: "ROOM-A", duration_frames: 96 }, { id: "SH-B", scene_id: "ROOM-B", duration_frames: 96 }],
+            segments: [{ id: "CLIP_A", shot_ids: ["SH-A"] }, { id: "CLIP_B", shot_ids: ["SH-B"] }],
+        },
+    },
+    clipGroups: [
+        { id: "CLIP_A", shotIds: ["SH-A"], nodeId: "H3-A", segmentId: "clip-a" },
+        { id: "CLIP_B", shotIds: ["SH-B"], nodeId: "H3-B", segmentId: "clip-b" },
+    ],
+    settings: {},
+} as any;
+
+const layout = layoutFor({ id: "CLIP_A", nodeId: "H3-A", sceneId: "SC-A" }, { id: "CLIP_B", nodeId: "H3-B", sceneId: "SC-B" });
+const onlyClipA = { ...twoSceneProduction, clipGroups: [twoSceneProduction.clipGroups[0]] };
+const project = (...nodes: Array<Record<string, any>>) => ({ id: "CANVAS", revision: 10, nodes, connections: [] });
+const kinds = (operations: Array<Record<string, any>>, type: string) => operations.filter(operation => operation.type === type);
+const deletes = (operations: Array<Record<string, any>>) => kinds(operations, "delete_h3_segment").map(operation => String(operation.segmentId));
+const adds = (operations: Array<Record<string, any>>) => kinds(operations, "add_h3_segment").map(operation => `${operation.nodeId}:${operation.segment.id}`);
+
+test("formal prompt Picture ordinals rebase by binding identity and reject changed reference sets", () => {
+    const binding = (id: string, sourceNodeId: string, storageKey: string) => ({
+        id, sourceNodeId, storageKey, mediaType: "image", enabled: true,
+    });
+    const compiled = [binding("scene", "scene-node", "image:room"), binding("shenyan", "shenyan-node", "image:shenyan")];
+    const reordered = [...compiled].reverse();
+    const prompt = "<Subject 1> Shenyan <Picture 2>; <Subject 3> room <Picture 1>.";
+    assert.equal(remapPromptPicturesByBinding(prompt, compiled, reordered),
+        "<Subject 1> Shenyan <Picture 1>; <Subject 3> room <Picture 2>.");
+    assert.equal(remapPromptPicturesByBinding(prompt, compiled, compiled.slice(1)), undefined,
+        "a deleted reference must not produce a partially rebound Prompt");
+    const formalOrder = [binding("shenyan-source", "shenyan-node", "image:shenyan"), binding("hongxiao-source", "hongxiao-node", "image:hongxiao"), binding("scene-source", "scene-node", "image:room")];
+    const effectiveH3Order = [
+        binding("scene-binding", "scene-node", "image:room"),
+        binding("shenyan-group-binding", "shenyan-node", "image:shenyan"),
+        binding("hongxiao-group-binding", "hongxiao-node", "image:hongxiao"),
+    ];
+    assert.equal(remapPromptPicturesByBinding("Shenyan <Picture 1>; Hongxiao <Picture 2>; scene <Picture 3>.", formalOrder, effectiveH3Order),
+        "Shenyan <Picture 2>; Hongxiao <Picture 3>; scene <Picture 1>.",
+        "the final H3 input order includes standalone references before derived character-group images");
+});
+
+test("legacy bindings only match by source node plus media identity when unique", () => {
+    const legacy = [{ sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" }];
+    const current = [{ id: "new-id", sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" }];
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, current), "<Picture 1>");
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, [
+        ...current, { id: "duplicate", sourceNodeId: "person", storageKey: "image:portrait", mediaType: "image" },
+    ]), undefined);
+    assert.equal(remapPromptPicturesByBinding("<Picture 1>", legacy, [{ ...current[0], sourceNodeId: "other" }]), undefined);
+});
+
+test("formal Subject picture selection disables every unselected derived character outfit", () => {
+    const groups = {
+        red: { id: "red", characterNodeId: "red-node", subjectId: "SUB-RED", outfitEnabled: true, outfits: [
+            { id: "white", name: "white", storageKey: "image:white", enabled: true },
+            { id: "nude", name: "nude", storageKey: "image:nude", enabled: true },
+        ] },
+    };
+    const bindings = [{ id: "white-binding", assetId: "white-asset", groupId: "red", outfitId: "white", sourceNodeId: "red-node", storageKey: "image:white", mediaType: "image", enabled: true }];
+    const projected = reconcileCharacterGroupOutfitSelection(groups, bindings) as typeof groups;
+    assert.deepEqual(projected.red.outfits.map(outfit => [outfit.id, outfit.enabled]), [["white", true], ["nude", false]]);
+    assert.equal(projected.red.outfitEnabled, true);
+});
+
+test("a full projection inserts every current Clip, including rows lost earlier", () => {
+    const missing = project(h3Node("H3-A", "SC-A", []), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    assert.deepEqual(adds(clipInputOperations(missing, twoSceneProduction, layout, {}, new Set()).operations), ["H3-A:clip-a"]);
+
+    // An already present row is updated in place rather than duplicated.
+    const complete = project(h3Node("H3-A", "SC-A", [projectedClip("clip-a", "CLIP_A")]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    assert.deepEqual(adds(clipInputOperations(complete, twoSceneProduction, layout, {}, new Set()).operations), []);
+
+    // A Clip that left the production timeline is still cleaned up.
+    const drifted = project(h3Node("H3-A", "SC-A", [projectedClip("clip-a", "CLIP_A"), projectedClip("clip-gone", "CLIP_GONE")]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    assert.deepEqual(deletes(clipInputOperations(drifted, twoSceneProduction, layout, {}, new Set()).operations), ["clip-gone"]);
+});
+
+test("a Shot-local projection neither adds outside its targets nor sweeps other nodes", () => {
+    const missing = project(h3Node("H3-A", "SC-A", []), h3Node("H3-B", "SC-B", []));
+    const scoped = clipInputOperations(missing, twoSceneProduction, layout, {}, new Set(), new Set(["CLIP_B"]));
+    assert.deepEqual(adds(scoped.operations), [], "only the groups this operation created may be added");
+
+    const intact = project(h3Node("H3-A", "SC-A", [projectedClip("clip-a", "CLIP_A")]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    assert.deepEqual(deletes(clipInputOperations(intact, twoSceneProduction, layout, {}, new Set(), new Set(["CLIP_B"])).operations), [], "untouched scene must not lose its Clips");
+});
+
+test("pending Clip compilation preserves existing inputs and does not report a missing artifact", () => {
+    const existing = { ...projectedClip("clip-a", "CLIP_A"), resultStorageKey: "video:previous", prompt: "previous compiled prompt" };
+    const current = project(h3Node("H3-A", "SC-A", [existing]));
+    const result = clipInputOperations(current, onlyClipA, layout, {}, new Set(), new Set(["CLIP_A"]), undefined, undefined, new Set(["CLIP_A"]));
+    assert.deepEqual(result.referenceSync, []);
+    assert.deepEqual(result.operations, []);
+    assert.equal(existing.prompt, "previous compiled prompt");
+    assert.equal(existing.resultStorageKey, "video:previous");
+});
+
+test("Clip diagnostics distinguish a missing artifact from a changed compiler", () => {
+    const current = project(h3Node("H3-A", "SC-A", [projectedClip("clip-a", "CLIP_A")]));
+    const production = { ...onlyClipA, shots: [{ id: "SH-A", duration: 4 }] };
+    const missing = clipInputOperations(current, production, layout).referenceSync[0];
+    assert.equal(missing.diagnostics[0].code, "COMPILATION_ARTIFACT_MISSING");
+    const data = structuredClone(production);
+    data.director.engine = { compilerHashes: { h3: "current" } };
+    data.director.artifacts = [{ kind: "h3", targetId: "CLIP_A", status: "ready", prompt: "old prompt", sha256: "old",
+        receipt: { engine: { compilerHashes: { h3: "old" } } } }];
+    const stale = clipInputOperations(current, data, layout).referenceSync[0];
+    assert.equal(stale.diagnostics[0].code, "COMPILATION_ARTIFACT_STALE");
+    assert.equal(stale.diagnostics[0].staleReason, "compiler_changed");
+    assert.match(stale.diagnostics[0].message, /编译器已更新/);
+});
+
+const characterGroup = (outfitId: string) => ({
+    "character-group-asset-1": {
+        id: "character-group-asset-1", characterName: "红绡", characterNodeId: "character-1", subjectId: "character-1",
+        outfits: [{ id: outfitId, url: "/media/image%3Aa", storageKey: "image:a", name: "形象", role: "character_turnaround", enabled: true }],
+        voiceEnabled: false, outfitEnabled: true,
+    },
+});
+
+const authoredFields = { sourceShotId: "SH-A", title: "推门入雨", duration: 4, taskMode: "ref2va", prompt: "compiled", referenceBindings: [],
+    tailFrameContinuation: false, motionContextEnabled: false, directorEngine: { runtimeId: "runtime" }, directorSourceHash: "h",
+    styleTemplateId: null, storyboardShots: [], aspectRatio: "16:9", modelName: "model" };
+
+/** The Clip's character groups were re-derived after the source character node was replaced. */
+const regeneratedGroupClip = (overrides: Record<string, any> = {}) => ({
+    id: "clip-stale", ...authoredFields, status: "success",
+    h3CharacterGroups: characterGroup("outfit-binding-regenerated"),
+    productionClipProjection: { targetId: "CLIP_GONE", sourceHash: "h",
+        nextValues: { ...authoredFields, h3CharacterGroups: characterGroup("outfit-binding-original") } },
+    ...overrides,
+});
+
+test("regenerated character-group identity does not freeze an obsolete Clip as manually edited", () => {
+    const clip = (overrides: Record<string, any> = {}) => project(h3Node("H3-A", "SC-A", [regeneratedGroupClip(overrides)]));
+
+    assert.deepEqual(deletes(clipInputOperations(clip(), onlyClipA, layout, {}, new Set()).operations), ["clip-stale"]);
+    assert.deepEqual(deletes(clipInputOperations(clip({ title: "人工改过的标题" }), onlyClipA, layout, {}, new Set()).operations), [], "a real edit must keep the Clip");
+    assert.deepEqual(deletes(clipInputOperations(clip({ h3CharacterGroups: { "character-group-asset-1": { ...characterGroup("outfit-binding-regenerated")["character-group-asset-1"], outfitEnabled: false } } }), onlyClipA, layout, {}, new Set()).operations), [], "disabling outfits is an authored edit");
+});

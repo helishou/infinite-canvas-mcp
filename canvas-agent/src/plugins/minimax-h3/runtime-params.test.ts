@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { h3StoryboardIssues, normalizeH3Params, resolveH3Runtime, withH3ParameterEdits, type H3ParameterSource } from "./runtime-params.js";
 
+test("关闭自选模型时原生 H3 固定本地，忽略各层残留 RH 与自动分流设置", () => {
+    for (const minimaxEngine of ["runninghub", "auto"]) {
+        const clip = { selectedVideoModelEnabled: false, minimaxEngine };
+        const native = resolveH3Runtime(clip, { minimaxEngine }, { minimaxEngine }, { minimaxEngine });
+        assert.equal(native.params.minimaxEngine, "local");
+        assert.equal(clip.minimaxEngine, minimaxEngine, "解析不改写保存稿");
+        const custom = resolveH3Runtime({ ...clip, selectedVideoModelEnabled: true }, {}, {}, {});
+        assert.equal(custom.params.minimaxEngine, minimaxEngine, "自选模型保留明确的运行位置");
+    }
+});
+
 const seedLayers: Array<{ source: H3ParameterSource; args: (value: Record<string, unknown>) => Parameters<typeof resolveH3Runtime> }> = [
     { source: "request", args: (value) => [{}, value, {}, {}] },
     { source: "clip", args: (value) => [value, {}, {}, {}] },
@@ -95,6 +106,13 @@ test("conflicting saved switches stay visible and are diagnosed instead of hidde
     assert.ok(parameterIssues.some(issue => issue.includes('保存值同时开启')));
     assert.deepEqual(clip, { tailFrameContinuation: true, motionContextEnabled: true });
     assert.equal(normalizeH3Params(clip).motionContextEnabled, true);
+});
+
+test("自选视频模型不执行潜空间续写，保存的尾帧与续写开关不互相阻塞", () => {
+    const resolved = resolveH3Runtime({ selectedVideoModelEnabled: true, selectedVideoModel: 'YZ', tailFrameContinuation: true, motionContextEnabled: true }, {}, {}, {});
+    assert.deepEqual(resolved.parameterIssues, []);
+    // 只影响诊断，不改写 Clip 的保存值。
+    assert.equal(resolved.params.motionContextEnabled, true);
 });
 
 test("saved companion false prevents inherited defaults from reopening motion", () => {

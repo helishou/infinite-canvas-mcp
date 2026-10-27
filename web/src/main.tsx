@@ -1,4 +1,5 @@
 import { initializeCanvasDraftSession } from "@/lib/canvas/canvas-draft-session";
+import "@/lib/slow-operation-monitor";
 
 void initializeCanvasDraftSession().then(() => import("./bootstrap")).catch((error) => {
     const root = document.getElementById("root");

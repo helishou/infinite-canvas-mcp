@@ -5,14 +5,14 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
-import { CharacterGroupParseError, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
+import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, refsForSubmission, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { patchAllH3Clips } from "../services/h3-global-settings";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { h3ThemeVars } from "../h3-theme";
-import { alignStoryboardReferenceOrder, assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { alignStoryboardReferenceOrder, assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, isStoryboardModeEnabled, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -22,6 +22,7 @@ import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
 import { H3ReferenceModal } from "./H3ReferenceModal";
+import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
@@ -71,7 +72,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             }
             const url = resultUrl(segment.result);
             if (url) {
-                rawOutputs.push({ url, type: "video", name: `Clip ${segmentIndex + 1}`, storageKey: segment.resultStorageKey, segmentId: segment.id });
+                rawOutputs.push({ url, type: "video", name: h3OutputName(ctx.node, segmentIndex + 1), storageKey: segment.resultStorageKey, segmentId: segment.id });
                 if (!segmentByUrl.has(url)) segmentByUrl.set(url, segment.id);
             }
         }
@@ -94,8 +95,21 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 params: value.params && typeof value.params === "object" ? value.params as Record<string, unknown> : undefined,
             } as H3Ref);
         }
-        return result.reverse();
-    }, [segments]);
+        const videoCounts = new Map<string, number>();
+        for (const item of result) {
+            if (item.type === "video" && item.segmentId) videoCounts.set(item.segmentId, (videoCounts.get(item.segmentId) || 0) + 1);
+        }
+        const videoOrdinals = new Map<string, number>();
+        const named = result.map((item) => {
+            if (item.type !== "video" || !item.segmentId) return item;
+            const clipNumber = segments.findIndex((segment) => segment.id === item.segmentId) + 1;
+            if (clipNumber < 1) return item;
+            const ordinal = (videoOrdinals.get(item.segmentId) || 0) + 1;
+            videoOrdinals.set(item.segmentId, ordinal);
+            return { ...item, name: h3OutputName(ctx.node, clipNumber, (videoCounts.get(item.segmentId) || 0) > 1 ? ordinal : undefined) };
+        });
+        return named.reverse();
+    }, [ctx.node.id, ctx.node.title, segments]);
     const total = Math.max(1, segments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
     const playhead = Math.max(0, Math.min(total, Number(metadata.playhead || 0)));
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
@@ -213,9 +227,18 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         return () => window.removeEventListener("minimax-h3:submit-pending", onSubmitPending);
     }, [ctx.node.id]);
     useEffect(() => {
+        const onProductionEditError = (event: Event) => {
+            const detail = (event as CustomEvent<{ message?: string }>).detail;
+            message.error(detail?.message || "正式制作分镜保存失败，草稿仍保留。");
+        };
+        window.addEventListener("minimax-h3:production-edit-error", onProductionEditError);
+        return () => window.removeEventListener("minimax-h3:production-edit-error", onProductionEditError);
+    }, [message]);
+    useEffect(() => {
         const syncReferences = (changedNodeIds?: Set<string>) => {
             const ctx = ctxRef.current;
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+            const productionOwnedNode = Boolean(liveMetadata.productionOwnerKind && liveMetadata.productionOwnerId || liveMetadata.productionSceneId);
             const currentSegments = segmentsFor(liveMetadata);
             let changed = false;
             const nextSegments = currentSegments.map((segment) => {
@@ -241,6 +264,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 const refs = refsForSegment(nextSegment);
                 const nextRefs = refs.map((ref) => {
                     if (!ref.nodeId || (changedNodeIds && !changedNodeIds.has(ref.nodeId))) return ref;
+                    if (productionOwnedNode && inferReferenceRole(ref) === "storyboard") return ref;
                     return refreshSmartImageReference(ref, ctx.getNode(ref.nodeId));
                 });
                 if (!nextRefs.every((ref, index) => ref === refs[index])) nextSegment = withSegmentRefs(nextSegment, nextRefs);
@@ -259,9 +283,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [sharedContext.node.id, sharedContext.projectId]);
     useEffect(() => {
         const ctx = ctxRef.current;
+        const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || {};
+        const productionOwnedNode = Boolean(liveMetadata.productionOwnerKind && liveMetadata.productionOwnerId || liveMetadata.productionSceneId);
         let changed = false;
         const next = segments.map((segment) => {
-            if (segment.productionClipProjection) return segment;
+            if (segment.productionClipProjection || productionOwnedNode) return segment;
             // 先清掉指向已不存在引用的分镜绑定（旧版本遗留的孤儿卡），再做常规归一化。
             const healed = dropUnboundStoryboardReferences(segment);
             const hasStoryboards = storyboardRefsForSegment(healed).length > 0;
@@ -280,12 +306,17 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         });
         if (changed) ctx.updateMetadata({ segments: next });
     }, [segments, sharedContext.node.id]);
-    const commitSegmentChange = useCallback((updated: H3Segment, select = false) => {
+    const commitSegmentChange = useCallback(async (updated: H3Segment, select = false) => {
         updated = alignStoryboardReferenceOrder(updated);
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
         if (!previous) return false;
+        const previousPictures = refsForSubmission(previous).filter((ref) => ref.type === "image");
+        const updatedPictures = refsForSubmission(updated).filter((ref) => ref.type === "image");
+        const updatedPictureIds = new Set(updatedPictures.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));
+        const addsPicturesWithoutRemovingExisting = updatedPictures.length > previousPictures.length
+            && previousPictures.every((ref) => Boolean(ref.bindingId && updatedPictureIds.has(ref.bindingId)));
         const previousItems = storyboardTrackItems(previous);
         const previousIds = new Set(previousItems.map((item) => item.id));
         const addedStoryboards = storyboardTrackItems(updated).filter((item) => !previousIds.has(item.id));
@@ -293,12 +324,48 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             message.warning("末张分镜时长不足 1 秒，无法再平分新增分镜。");
             return false;
         }
-        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId);
+        const isFormalClip = Boolean((previous.productionClipProjection as Record<string, unknown> | undefined)?.targetId)
+            || Boolean((updated.productionClipProjection as Record<string, unknown> | undefined)?.targetId)
+            || Boolean(metadata.productionOwnerKind && metadata.productionOwnerId || metadata.productionSceneId);
         const storyboardState = (segment: H3Segment) => JSON.stringify({ shots: segment.storyboardShots || [], refs: storyboardRefsForSegment(segment) });
-        if (isFormalClip && storyboardState(previous) !== storyboardState(updated)) {
+        const formalStoryboardChanged = isFormalClip && storyboardState(previous) !== storyboardState(updated);
+        if (formalStoryboardChanged) {
+            // 已开分镜轨的正式 Clip：分镜图的落点是分镜轨格子（写制作稿关键帧），不是参考槽。
+            // 未绑定到任何格子的分镜图进回写会被后端忽略（参考不在编译引用里），静默丢失；这里明确拦下。
+            const boundIds = new Set((updated.storyboardShots || []).map((shot) => shot.referenceBindingId).filter(Boolean));
+            const knownIds = new Set(storyboardRefsForSegment(previous).map((ref) => ref.bindingId));
+            const unboundAdded = storyboardRefsForSegment(updated).some((ref) => ref.bindingId && !knownIds.has(ref.bindingId) && !boundIds.has(ref.bindingId));
+            if (unboundAdded && isStoryboardModeEnabled(updated)) {
+                message.warning("该 Clip 已开启分镜轨：分镜图请点击分镜轨上的空格子绑定（会写入制作稿关键帧）；普通参考请选用非分镜命名的素材。");
+                return false;
+            }
             if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
+        }
+        if (addsPicturesWithoutRemovingExisting) {
+            try {
+                const textTarget = { nodeId: ctx.node.id, segmentId: updated.id, field: "prompt" as const };
+                const document = ctx.textDocument(textTarget);
+                await document.flush();
+                const snapshot = document.getSnapshot();
+                if (!snapshot.ready || snapshot.blocked) {
+                    message.error(snapshot.error || "提示词尚未同步，无法保持 Picture 引用对应关系。");
+                    return false;
+                }
+                const remappedPrompt = remapPictureTags(snapshot.text, previousPictures, updatedPictures,
+                    (ref) => ref.bindingId, (ref) => ref.type === "image");
+                if (remappedPrompt !== snapshot.text && !await ctx.replaceText(textTarget, document.getDocumentId(), snapshot.text, remappedPrompt)) {
+                    message.error("参考图顺序更新时提示词发生并发修改，请重试。");
+                    return false;
+                }
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "同步 Picture 引用编号失败，参考未保存。");
+                return false;
+            }
+        }
+        if (formalStoryboardChanged) {
+            if (!ctx.production) return false;
             void ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> })
-                .then(result => { if (!result.sourceSaved) message.error("制作台未保存分镜更改"); })
+                .then(result => { if (result.sourceSaved) message.success("分镜图已写入制作稿"); else message.error("制作台未保存分镜更改"); })
                 .catch(error => message.error(error instanceof Error ? error.message : String(error)));
             return true;
         }
@@ -308,6 +375,14 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     }, [ctx, metadata, message]);
     const patchSelected = useCallback((patch: Partial<H3Segment>) => {
         if (!selected) return;
+        if (patch.referenceBindings !== undefined || patch.storyboardShots !== undefined || patch.storyboardDurations !== undefined) {
+            const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
+            const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;
+            const patched = { ...latest, ...patch };
+            const updated = withSegmentRefs(patched, refsForSegment(patched));
+            commitSegmentChange(updated);
+            return;
+        }
         if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(selected).length) {
             const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
             const latest = segmentsFor(liveMetadata).find((item) => item.id === selected.id) || selected;
@@ -317,19 +392,33 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch);
     }, [commitSegmentChange, ctx, metadata, selected]);
-    const patchAllSettings = useCallback((patch: Partial<H3Segment>) => {
+    const patchAllSettings = useCallback((patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
+        const rememberedModel = String(liveMetadata.h3LastSelectedVideoModel || "").trim();
+        const effectivePatch = patch.selectedVideoModelEnabled === true && !String(patch.selectedVideoModel || "").trim() && rememberedModel
+            ? { ...patch, selectedVideoModel: rememberedModel }
+            : patch;
         const next = current.map((segment) => {
-            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment;
-            if ((patch.duration !== undefined || patch.mode !== undefined || patch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
+            const updated = { ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, effectivePatch) } as H3Segment;
+            if ((effectivePatch.duration !== undefined || effectivePatch.mode !== undefined || effectivePatch.taskMode !== undefined) && storyboardTrackItems(segment).length) {
                 const withRefs = withSegmentRefs(updated, refsForSegment(segment));
                 void syncStoryboardPrompt(ctx, withRefs, segment);
                 return withRefs;
             }
             return updated;
         });
-        ctx.updateMetadata(patchAllH3Clips(liveMetadata, next, patch));
+        const update = patchAllH3Clips(liveMetadata, next, effectivePatch);
+        const selectedVideoModel = String(effectivePatch.selectedVideoModel || "").trim();
+        if (selectedVideoModel) update.h3LastSelectedVideoModel = selectedVideoModel;
+        if (formalBoundaryValues?.length) {
+            const bySegmentId = new Map(formalBoundaryValues.map(value => [value.segmentId, value]));
+            update.segments = update.segments.map(segment => {
+                const boundary = bySegmentId.get(segment.id);
+                return boundary ? { ...segment, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled } : segment;
+            });
+        }
+        ctx.updateMetadata(update);
     }, [ctx, metadata]);
     const removeTimelineRef = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
@@ -366,23 +455,23 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     // 点空 ref 槽 → 请画布进入「选节点作参考」模式（高亮可点节点 + 顶部提示 + Esc 退出），不自建选节点面板。
     const requestCanvasRefPick = (segmentId: string, slotIndex: number) => {
         const segment = segments.find((item) => item.id === segmentId);
-        if (!segment) return;
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
-        if (mode === "t2v") return;
+        if (!segment) { console.warn("[H3] 点空槽加引用：找不到对应 Clip", segmentId); return; }
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
+        if (mode === "t2v") { console.warn("[H3] 点空槽加引用：该 Clip 为 t2v（不接收参考）", segmentId); return; }
         setPickingRef({ segmentId, slotIndex, types: mode === "ref2va" ? ["image", "video", "audio"] : ["image"] });
-        window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
+        window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id } }));
     };
     // 空分镜双击 → 请画布进入「选节点作参考」模式，选中后把图片绑到该分镜（见 applyCanvasPickedNode 的 shotId 分支）。
     const requestStoryboardShotPick = (segmentId: string, shotId: string) => {
         const segment = segments.find((item) => item.id === segmentId);
         if (!segment) return;
         setPickingRef({ segmentId, slotIndex: -1, shotId, types: ["image"] });
-        window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } }));
+        window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id } }));
     };
     const beginCanvasRefReplace = (segmentId: string, ref: H3Ref) => {
         const segment = segments.find((item) => item.id === segmentId);
         if (!segment) return;
-        const mode = String(segment.mode || segment.taskMode || "ref2va");
+        const mode = String(segment.taskMode || segment.mode || "ref2va");
         const allowedTypes: H3Ref["type"][] = mode === "ref2va" ? ["image", "video", "audio"] : ["image"];
         if (!allowedTypes.includes(ref.type)) return;
         const refs = refsForSegment(segment);
@@ -391,7 +480,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         setPickingRef({ segmentId, slotIndex, types: [ref.type], replaceRef: ref });
         // 先卸载职责 Modal，等遮罩消失后再进入画布选点模式；否则 Modal 会拦截画布节点点击。
         setEditingRef(null);
-        window.setTimeout(() => window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { nodeId: ctx.node.id } })), 0);
+        window.setTimeout(() => window.dispatchEvent(new CustomEvent("canvas-reference-pick-request", { detail: { projectId: ctx.projectId, nodeId: ctx.node.id } })), 0);
     };
     const requestCanvasRefReplace = () => {
         if (editingRef) beginCanvasRefReplace(editingRef.segmentId, editingRef.ref);
@@ -400,9 +489,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     // outfit 拆 image ref、声线拆 audio ref；其余节点按内容展开（场景图 / H3 成品 / 通用媒体）。
     const applyCanvasPickedNode = (pick: { segmentId: string; slotIndex: number; types: H3Ref["type"][]; replaceRef?: H3Ref; shotId?: string }, sourceNodeId: string) => {
         const node = ctx.getNode(sourceNodeId);
-        if (!node || node.id === ctx.node.id) return;
+        if (!node || node.id === ctx.node.id) { message.warning(`所选节点无效或就是当前 H3 节点（sourceNodeId="${sourceNodeId}"），未加入引用`); return; }
         const segment = segments.find((item) => item.id === pick.segmentId);
-        if (!segment) return;
+        if (!segment) { message.warning(`目标 Clip 未找到（segmentId="${pick.segmentId}"），可能已删除或 ID 变更，未加入引用`); return; }
         const groupImages = node.type === "group" ? orderedGroupStoryboardRefs(node, ctx.getNodes(), ctx.node.id, ctx.getConnections()) : [];
         if (node.type === "group" && !node.metadata?.orderedGroup) {
             message.warning("请选择有序组以按槽位顺序导入分镜图");
@@ -481,7 +570,11 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             addNodeRefs(pick.segmentId, pick.slotIndex, groupImages);
             return;
         }
-        addNodeRefs(pick.segmentId, pick.slotIndex, h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type)));
+        const pickedCandidates = h3RefCandidates([node], ctx.node.id, ctx.getNodes(), ctx.getConnections()).map((item) => item.ref).filter((ref) => pick.types.includes(ref.type));
+        if (!pickedCandidates.length) { message.warning(`所选节点没有可用作 ${pick.types.join("／")} 的参考素材，未加入引用`); return; }
+        const currentRefs = refsForSegment(segment);
+        if (!pickedCandidates.some((ref) => !currentRefs.some((item) => sameRef(item, ref)))) { message.info("该素材已在当前 Clip 中，未重复加入"); return; }
+        addNodeRefs(pick.segmentId, pick.slotIndex, pickedCandidates);
     };
     const applyReferenceEdit = (nextRef: H3Ref, characterPatch?: H3CharacterGroupEditPatch) => {
         if (!editingRef) return;
@@ -491,23 +584,24 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         if (editingRef.ref.groupId && characterPatch) updated = applyCharacterGroupEdits(updated, editingRef.ref.groupId, characterPatch);
         commitSegmentChange(updated);
     };
-    const deleteReferenceGroup = () => {
+    const deleteReferenceGroup = async () => {
         if (!editingRef?.ref.groupId || !editingRefSegment) return;
-        if (commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId))) setEditingRef(null);
+        if (await commitSegmentChange(removeCharacterGroup(editingRefSegment, editingRef.ref.groupId))) setEditingRef(null);
     };
     const removeEditingReference = () => {
         if (!editingRef) return;
         if (removeTimelineRef(editingRef.segmentId, editingRef.ref)) setEditingRef(null);
     };
-    const removeEditingStoryboardImage = () => {
+    const removeEditingStoryboardImage = async () => {
         if (!editingRef) return;
         const segment = segments.find((item) => item.id === editingRef.segmentId);
         if (!segment) return;
         const updated = removeStoryboardImageReference(segment, editingRef.ref);
-        if (updated !== segment && commitSegmentChange(updated)) setEditingRef(null);
+        if (updated !== segment && await commitSegmentChange(updated)) setEditingRef(null);
     };
     const addDroppedReference = (event: React.DragEvent<HTMLElement>) => {
         if ((event.target as HTMLElement).closest(".minimax-ref-track")) return;
+        if (isH3OutputVideoDrop(event)) { event.preventDefault(); event.stopPropagation(); return; }
         event.preventDefault();
         event.stopPropagation();
         if (!selected) return;
@@ -521,7 +615,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 }
             } catch { /* 普通 URL 交给后续解析 */ }
         }
-        const mode = String(selected.mode || selected.taskMode || "ref2va");
+        const mode = String(selected.taskMode || selected.mode || "ref2va");
         // 角色资产 / 角色节点：建/复用角色组，outfit 拆为 image refs、voice 拆为 audio ref（占 audio 槽，受 3 上限约束）
         let characterGroupInput: ReturnType<typeof readCharacterGroupFromDrop>;
         try {
@@ -566,7 +660,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         target = target || selected;
         if (!target) return;
-        const targetMode = String(target.mode || target.taskMode || "ref2va");
+        const targetMode = String(target.taskMode || target.mode || "ref2va");
         if (targetMode === "t2v") return;
         // 角色节点派发：建/复用角色组
         const kind = String(detail.type || detail.kind || "").toLowerCase();
@@ -619,9 +713,9 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const onDrop = (event: Event) => { const detail = (event as CustomEvent<Record<string, unknown>>).detail || {}; if (detail.targetNodeId !== ctx.node.id) return; setCanvasReferenceDragOver(false); addCanvasReference(detail); };
         const onEnd = (event: Event) => { const detail = (event as CustomEvent<Record<string, unknown>>).detail || {}; if (detail.targetNodeId === ctx.node.id) setCanvasReferenceDragOver(false); };
         // 画布「选节点作参考」模式选中的节点：落到点空槽时记下的位置
-        const onPick = (event: Event) => { const detail = (event as CustomEvent<{ targetNodeId?: string; sourceNodeId?: string }>).detail || {}; if (detail.targetNodeId !== ctx.node.id || !pickingRef) return; const pick = pickingRef; setPickingRef(null); applyCanvasPickedNode(pick, String(detail.sourceNodeId || "")); };
+        const onPick = (event: Event) => { const detail = (event as CustomEvent<{ projectId?: string; targetNodeId?: string; sourceNodeId?: string; handled?: boolean }>).detail || {}; if (detail.projectId !== ctx.projectId || detail.targetNodeId !== ctx.node.id) return; detail.handled = true; if (!pickingRef) { console.warn("[H3] pick 事件到达但没有待填的引用槽位（可能已进入其它选择态或被提前清空）", detail); return; } const pick = pickingRef; setPickingRef(null); applyCanvasPickedNode(pick, String(detail.sourceNodeId || "")); };
         // 画布侧退出选择模式（Esc / 点顶部提示条）：清掉待填槽位
-        const onPickEnd = (event: Event) => { const detail = (event as CustomEvent<{ targetNodeId?: string }>).detail || {}; if (detail.targetNodeId !== ctx.node.id) return; setPickingRef(null); };
+        const onPickEnd = (event: Event) => { const detail = (event as CustomEvent<{ projectId?: string; targetNodeId?: string }>).detail || {}; if (detail.projectId !== ctx.projectId || detail.targetNodeId !== ctx.node.id) return; setPickingRef(null); };
         window.addEventListener("canvas-reference-drag-start", onStart);
         window.addEventListener("canvas-reference-drag-over", onOver);
         window.addEventListener("canvas-reference-drop", onDrop);
@@ -629,7 +723,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         window.addEventListener("canvas-reference-pick", onPick);
         window.addEventListener("canvas-reference-pick-end", onPickEnd);
         return () => { window.removeEventListener("canvas-reference-drag-start", onStart); window.removeEventListener("canvas-reference-drag-over", onOver); window.removeEventListener("canvas-reference-drop", onDrop); window.removeEventListener("canvas-reference-drag-end", onEnd); window.removeEventListener("canvas-reference-pick", onPick); window.removeEventListener("canvas-reference-pick-end", onPickEnd); };
-    }, [ctx.node.id, selected, segments, total, pickingRef]);
+    }, [ctx.projectId, ctx.node.id, selected, segments, total, pickingRef]);
     // 找到 playhead 所在的 segment，从该位置开始播全部
     const startSegment = segments.find((seg) => {
         const segStart = Number(seg.start || 0);
@@ -671,13 +765,13 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     if (metadata.productionSceneId && segments.length === 0) return <div className="minimax-canvas-workbench" data-canvas-no-zoom style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
         <div className="minimax-wb-status">本场暂无 Clip。请先在制作台添加镜头并分配 Clip。</div>
     </div>;
-    return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
+    return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { if (isH3OutputVideoDrop(event)) { event.stopPropagation(); return; } event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
         <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
-        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} />
+        <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} patchSelected={patchSelected} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
-        {editingRef && currentEditingRef ? <H3ReferenceModal key="reference-modal" ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
+        {editingRef && currentEditingRef ? <H3ReferenceModal key={`reference-modal:${editingRef.segmentId}:${currentEditingRef.bindingId || currentEditingRef.assetId || currentEditingRef.url}`} ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} preloadNext={preloadNext} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} submitting={submittingSegments.has(String(selected?.id || ""))} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
@@ -690,7 +784,6 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
                 {typeof (selected?.productionClipProjection?.nextValues as any)?.prompt === "string" && selected?.prompt !== (selected.productionClipProjection?.nextValues as any).prompt && <details>
                     <summary>已手动修改 · 查看导演提示词差异</summary>
                     <pre style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>{String((selected.productionClipProjection?.nextValues as any).prompt)}</pre>
-                    <button type="button" onClick={() => patchSelected({ prompt: String((selected.productionClipProjection?.nextValues as any).prompt) })}>采用导演提示词</button>
                 </details>}
             </div>
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />

@@ -67,7 +67,9 @@ export function characterReferenceUpdates(previous: Node, current: Node, nodes: 
         const selection = record(references[characterId]) as CharacterImageSelection;
         if (!Array.isArray(selection.imageKeys) || !selection.imageKeys.length) return [];
         const keys = [...new Set(selection.imageKeys.map(String).map((key) => {
-            if (nextPrimary && (key === oldPrimary || !available.has(key))) return nextPrimary;
+            // An explicit media-key selection is independent from the character cover.
+            // Recover only keys that disappeared from the source catalog.
+            if (nextPrimary && !available.has(key)) return nextPrimary;
             return key;
         }))];
         if (JSON.stringify(keys) === JSON.stringify(selection.imageKeys)) return [];

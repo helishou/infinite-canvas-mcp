@@ -3,10 +3,13 @@ import type { H3Ref, H3Segment } from "../types";
 import { message } from "antd";
 import { H3Icon } from "./H3Icon";
 import { H3PromptSection } from "./H3PromptSection";
+import { QuickStoryboardPanel } from "./QuickStoryboardPanel";
+import { refsForSubmission } from "../services/h3-data";
 
 export function H3CurrentClipPanel({ ctx, selected, selectedIndex, imageRefs, videoRefs, audioRefs, patchSelected, fmt, onOpenStoryboard }: { ctx: CanvasNodeContext; selected?: H3Segment; selectedIndex: number; imageRefs: H3Ref[]; videoRefs: H3Ref[]; audioRefs: H3Ref[]; patchSelected: (patch: Partial<H3Segment>) => void; fmt: (value: number) => string; onOpenStoryboard: () => void }) {
-    const mode = String(selected?.mode || selected?.taskMode || "ref2va");
-    const visibleImages = mode === "t2v" ? [] : mode === "i2v" ? imageRefs.slice(0, 1) : mode === "fl2v" ? imageRefs.slice(0, 2) : imageRefs;
+    const mode = String(selected?.taskMode || selected?.mode || "ref2va");
+    const promptOrderedImages = selected ? refsForSubmission(selected).filter((ref) => ref.type === "image") : imageRefs;
+    const visibleImages = mode === "t2v" ? [] : mode === "i2v" ? promptOrderedImages.slice(0, 1) : mode === "fl2v" ? promptOrderedImages.slice(0, 2) : promptOrderedImages;
     const visibleVideos = mode === "ref2va" ? videoRefs : [];
     const visibleAudios = mode === "ref2va" ? audioRefs : [];
     const copyClipId = async () => {
@@ -27,6 +30,7 @@ export function H3CurrentClipPanel({ ctx, selected, selectedIndex, imageRefs, vi
         </div>
         <div className="minimax-current-main">
             <H3PromptSection ctx={ctx} selected={selected} imageRefs={visibleImages} videoRefs={visibleVideos} audioRefs={visibleAudios} patchSelected={patchSelected} onOpenStoryboard={onOpenStoryboard} />
+            <QuickStoryboardPanel key={`quick-storyboard-${selected?.id || "none"}`} ctx={ctx} selected={selected} patchSelected={patchSelected} />
         </div>
     </section>;
 }

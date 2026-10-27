@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { ResolvedConfig } from "../config.js";
+import { effectiveClientAddress, isLanAuthBypassed } from "../server/lan-access-policy.js";
 import { textTargetSchema } from "@basketikun/canvas-agent/schemas";
 
 const point = z.object({ x: z.number().finite(), y: z.number().finite() });
@@ -35,7 +36,12 @@ export class CanvasRealtimeHub {
     private flushTimer?: ReturnType<typeof setTimeout>;
     private focusSequence = 0;
 
-    constructor(private readonly config: ResolvedConfig, private readonly db: BackendDatabase, events: BackendEventBus) {
+    constructor(
+        private readonly config: ResolvedConfig,
+        private readonly db: BackendDatabase,
+        events: BackendEventBus,
+        private readonly trustLocalProxy = process.env.INFINITE_CANVAS_DEV_WATCH === "1",
+    ) {
         this.unsubscribe = events.subscribe((event) => {
             if (event.type !== "canvas.updated") return;
             const serialized = JSON.stringify({ type: "canvas.event", event });
@@ -85,7 +91,9 @@ export class CanvasRealtimeHub {
         const projectId = url.searchParams.get("projectId") || "";
         const clientId = url.searchParams.get("clientId") || "";
         const denied = request.headers.origin && !this.config.origins.includes(request.headers.origin);
-        const status = denied ? 403 : url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : this.db.getCanvasProjectRevision(projectId) === null ? 404 : 0;
+        const clientAddress = effectiveClientAddress(socket.remoteAddress, request.headers["x-forwarded-for"], this.trustLocalProxy);
+        const tokenRequired = !isLanAuthBypassed(clientAddress, this.config.listenHost);
+        const status = denied ? 403 : tokenRequired && url.searchParams.get("token") !== this.config.token ? 401 : !projectId || !clientId ? 400 : this.db.getCanvasProjectRevision(projectId) === null ? 404 : 0;
         if (status) {
             socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\n\r\n`);
             return;

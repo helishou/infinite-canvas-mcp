@@ -1,0 +1,269 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "H3\\minimax_h3_fl2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_fp8.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "3": {
+    "inputs": {
+      "vae_name": "H3\\minimax_h3_video_vae_fp16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Video VAE"
+    }
+  },
+  "5": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "[VAR]PositivePrompt"
+    }
+  },
+  "6": {
+    "inputs": {
+      "value": 864
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "[VAR]Width"
+    }
+  },
+  "7": {
+    "inputs": {
+      "value": 1152
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "[VAR]Height"
+    }
+  },
+  "8": {
+    "inputs": {
+      "value": 0.9
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "[VAR]DurationSeconds"
+    }
+  },
+  "9": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "ComfyMathExpression",
+    "_meta": {
+      "title": "Duration -> 17k+5 frame grid @24fps"
+    }
+  },
+  "10": {
+    "inputs": {
+      "value": 21
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "[VAR]Seed"
+    }
+  },
+  "11": {
+    "inputs": {
+      "value": 20
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "[VAR]Steps"
+    }
+  },
+  "12": {
+    "inputs": {
+      "noise_seed": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "13": {
+    "inputs": {
+      "sampler_name": "res_multistep"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "14": {
+    "inputs": {
+      "scheduler": [
+        "62",
+        0
+      ],
+      "steps": [
+        "11",
+        0
+      ],
+      "denoise": 1,
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "BasicScheduler",
+    "_meta": {
+      "title": "BasicScheduler"
+    }
+  },
+  "15": {
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "conditioning": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "BasicGuider",
+    "_meta": {
+      "title": "Basic Guider"
+    }
+  },
+  "16": {
+    "inputs": {
+      "noise": [
+        "12",
+        0
+      ],
+      "guider": [
+        "15",
+        0
+      ],
+      "sampler": [
+        "13",
+        0
+      ],
+      "sigmas": [
+        "14",
+        0
+      ],
+      "latent_image": [
+        "20",
+        1
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "17": {
+    "inputs": {
+      "samples": [
+        "16",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "62": {
+    "inputs": {
+      "any_1": "beta"
+    },
+    "class_type": "Any Switch (rgthree)",
+    "_meta": {
+      "title": "[VAR]Scheduler"
+    }
+  },
+  "71": {
+    "inputs": {
+      "image": [
+        "17",
+        0
+      ],
+      "batch_index": 0,
+      "length": 1
+    },
+    "class_type": "ImageFromBatch",
+    "_meta": {
+      "title": "Select First Frame"
+    }
+  },
+  "70": {
+    "inputs": {
+      "images": [
+        "71",
+        0
+      ],
+      "filename_prefix": "H3_T2I/first_frame"
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "[OUTPUT:image] H3 T2I First Frame"
+    }
+  },
+  "20": {
+    "class_type": "MiniMaxH3ImageToVideo",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "prompt": [
+        "5",
+        0
+      ],
+      "width": [
+        "6",
+        0
+      ],
+      "height": [
+        "7",
+        0
+      ],
+      "length": [
+        "9",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "MiniMax H3 Text to Image (FL2VA)"
+    }
+  }
+}

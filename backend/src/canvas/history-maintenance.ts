@@ -1,11 +1,11 @@
-import crypto from "node:crypto";
-import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
+import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "../database-snapshots.js";
 import { collaborationError } from "./collaboration.js";
 import { stripCanvasLocalViewState } from "./operation-authority.js";
 import { applyCanvasProjectOperations } from "./project-ops.js";
+import { decodeStoredJson, type StoredJson } from "../json-storage.js";
 
 /** Caller owns the migration transaction. Missing legacy hashes are reserved, never guessed. */
 export function migrateCanvasReceipts(db: DatabaseSync) {
@@ -32,12 +32,12 @@ export function reconstructCanvasHistory(db: DatabaseSync, id: string, revision:
     const checkpoint = db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id) as { revision: number; data_json: string } | undefined;
     if (!checkpoint || checkpoint.revision > revision) throw collaborationError("RECEIPT_UNAVAILABLE", "旧请求没有可恢复的历史快照");
     const project = stripCanvasLocalViewState(JSON.parse(checkpoint.data_json) as Record<string, unknown>);
-    const rows = db.prepare("SELECT base_revision, revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, checkpoint.revision, revision) as Array<{ base_revision: number; revision: number; operations_json: string; created_at: string }>;
+    const rows = db.prepare("SELECT base_revision, revision, operations_json, created_at FROM canvas_operation_batches WHERE project_id = ? AND revision > ? AND revision <= ? ORDER BY revision").all(id, checkpoint.revision, revision) as Array<{ base_revision: number; revision: number; operations_json: StoredJson; created_at: string }>;
     if (rows.length !== revision - checkpoint.revision || rows.some((row, index) => row.base_revision !== checkpoint.revision + index || row.revision !== checkpoint.revision + index + 1)) {
         throw collaborationError("RECEIPT_UNAVAILABLE", "操作历史不连续，不能还原旧请求回执");
     }
     for (const row of rows) {
-        applyCanvasProjectOperations(project, JSON.parse(row.operations_json), { committedReplay: true });
+        applyCanvasProjectOperations(project, decodeStoredJson(row.operations_json), { committedReplay: true });
         project.revision = row.revision;
         project.updatedAt = row.created_at;
     }
@@ -89,13 +89,12 @@ export function applyCanvasHistoryPrune(db: DatabaseSync, file: string, cutoff: 
     const preview = previewCanvasHistoryPrune(db, cutoff);
     if (preview.some((plan) => plan.blockedReason)) throw new Error("History validation failed; no batches were deleted");
     if (!preview.some((plan) => plan.batchCount)) return { plans: preview, removed: 0, backupFile: null };
-    const backupFile = `${file}.before-batch-prune-${crypto.randomUUID()}.sqlite`;
-    db.exec(`VACUUM INTO '${backupFile.replaceAll("'", "''")}'`);
-    fs.chmodSync(backupFile, 0o600);
+    const backupFile = createDatabaseSnapshot(db, file, "before-batch-prune");
     const copy = new DatabaseSync(backupFile, { readOnly: true });
     try {
         if (copy.prepare("PRAGMA integrity_check").get()?.integrity_check !== "ok" || copy.prepare("PRAGMA foreign_key_check").all().length) throw new Error("History backup failed validation");
     } finally { copy.close(); }
+    pruneDatabaseSnapshots(file, "before-batch-prune");
     db.exec("BEGIN IMMEDIATE");
     try {
         const plans = previewCanvasHistoryPrune(db, cutoff);

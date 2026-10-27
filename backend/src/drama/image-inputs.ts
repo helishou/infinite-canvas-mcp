@@ -17,11 +17,12 @@ type ImageArtifact = DirectorProduction["artifacts"][number];
 export function compiledImageInput(director: DirectorProduction, artifact: ImageArtifact, sourceNodeId: string): ProductionImageInput {
     const card = rows(director.source.asset_cards).find(card => card.id === artifact.targetId);
     const references = artifact.references.map((ref, index) => {
+        if (!ref.nodeId) throw new Error(`图像产物参考 ${ref.label} 缺少图片节点归属`);
         const match = Object.entries(director.assets).find(([id, asset]) => (!ref.assetId || id === ref.assetId) && asset.nodeId === ref.nodeId && asset.storageKey === ref.storageKey && asset.sha256 === ref.sha256);
         if (!match) throw new Error(`参考 ${ref.label} 缺少正式资产版本`);
         if (ref.assetId && ref.assetId !== match[0] || ref.assetVersion && ref.assetVersion !== match[1].version) throw new Error(`参考 ${ref.label} 的批准版本已变化`);
         const authored = rows(card?.references)[index];
-        return { ...ref, assetId: match[0], assetVersion: match[1].version,
+        return { ...ref, nodeId: ref.nodeId, assetId: match[0], assetVersion: match[1].version,
             ...(ref.preserve !== undefined || authored?.preserve !== undefined ? { preserve: ref.preserve ?? authored?.preserve } : {}),
             ...(ref.exclude !== undefined || authored?.exclude !== undefined ? { exclude: ref.exclude ?? authored?.exclude } : {}) };
     });
@@ -85,7 +86,14 @@ export function imageInputOperations(project: Record<string, any>, data: Episode
             const baseline = projection?.fieldHashes || (oldArtifact && node.metadata?.prompt !== undefined ? { prompt: hash(oldArtifact.prompt) } : undefined);
             const smart = node.type === "config" && node.metadata?.smart === true;
             const currentPrompt = smart && typeof node.metadata?.composerContent === "string" ? node.metadata.composerContent : node.metadata?.prompt;
-            const merged = mergeDirectorInput({ ...(node.metadata || {}), prompt: currentPrompt, referenceNodeIds: currentIncoming }, nextValues, baseline, [["prompt"], ["referenceNodeIds"]]);
+            // Prepared image nodes begin with an empty prompt until their first
+            // compiled artifact is applied. Treat that blank placeholder as an
+            // untouched baseline; otherwise the changed source hash is mistaken
+            // for a manual edit and the official prompt never reaches the node.
+            const mergeBaseline = typeof currentPrompt === "string" && !currentPrompt.trim()
+                ? { ...(baseline || {}), prompt: hash(currentPrompt) }
+                : baseline;
+            const merged = mergeDirectorInput({ ...(node.metadata || {}), prompt: currentPrompt, referenceNodeIds: currentIncoming }, nextValues, mergeBaseline, [["prompt"], ["referenceNodeIds"]]);
             operations.push({ type: "update_node", id: node.id, metadata: { productionImageInput: input, prompt: merged.merged.prompt, ...(smart ? { composerContent: merged.merged.prompt } : {}), canvasReferenceNodeIds: keepReferences ? currentIncoming : nextValues.referenceNodeIds,
                 productionImageProjection: { targetId: artifact.targetId, sourceNodeId: sourceId, fieldHashes: { prompt: hash(artifact.prompt), referenceNodeIds: hash(nextValues.referenceNodeIds) }, nextValues, fieldGroups: [["prompt"], ["referenceNodeIds"]], conflicts: merged.conflicts, manualFields: merged.manualFields, referenceChanged: keepReferences } } });
         }

@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
+import express from "express";
+import express from "express";
 import { BackendDatabase } from "../db.js";
 import { startServer } from "../server.js";
 import { EpisodeProductionService } from "../drama/production.js";
@@ -11,6 +13,22 @@ import { registerDramaProductionRoutes } from "./drama-production-routes.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+
+test("HTTP production compilation rejects requests without a stable operationId", async t => {
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "compile-operation-id-"));
+    const db = new BackendDatabase(path.join(temporary, "fixture.sqlite"));
+    const app = express(); app.use(express.json());
+    registerDramaProductionRoutes(app, new EpisodeProductionService(db, undefined, temporary));
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    t.after(async () => {
+        server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+        db.close(); await fs.rm(temporary, { recursive: true, force: true });
+    });
+    const response = await fetch(`http://127.0.0.1:${(server.address() as any).port}/drama/episodes/missing/production/compile`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ expectedRevision: 0 }),
+    });
+    assert.equal(response.status, 400);
+});
 
 test("unified MCP keeps same-ID owners isolated across sessions and completes edit/check/publish/read/recover without generation", async t => {
     const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "unified-production-"));
@@ -63,4 +81,44 @@ test("unified MCP keeps same-ID owners isolated across sessions and completes ed
     assert.equal(episode.get("same").draft.scenes[0].blocks[0].text, "episode 中文\n正文😀");
     assert.equal(canvas.get("same").draft.scenes[0].blocks[0].text, "canvas 中文\n正文😀");
     assert.equal(stores.tasks.list().length, 2, "only the explicitly seeded completed tasks may exist");
+});
+
+test("unsupported production format returns the same upgrade hint over HTTP and MCP without rewriting the source", async t => {
+    const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "unsupported-production-format-"));
+    const priorToken = process.env.INFINITE_CANVAS_BACKEND_TOKEN; process.env.INFINITE_CANVAS_BACKEND_TOKEN = "fixture";
+    const db = new BackendDatabase(path.join(temporary, "fixture.sqlite"));
+    db.upsertCanvasFolder({ id: "drama", name: "fixture", isDrama: true, createdAt: new Date().toISOString() });
+    db.upsertDramaEpisode({ id: "ep", dramaId: "drama", episodeNumber: 1, title: "fixture", synopsis: "", canvasId: null });
+    const service = new EpisodeProductionService(db, undefined, temporary);
+    service.edit("ep", { operationId: "seed", expectedRevision: 0, ops: [{ type: "upsert_scene", scene: { id: "scene", heading: "内景", location: "房间", timeOfDay: "日", blocks: [] } }] });
+    const row = db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get("ep") as { draft_json: string };
+    const stored = JSON.parse(row.draft_json);
+    stored.director = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" }, source: { prompt_assembly: { version: 1 }, ledger: { contract_version: 1 } }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [], workflow: {} };
+    db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id=?").run(JSON.stringify(stored), "ep");
+    const config = { url: "http://127.0.0.1", token: "fixture", port: 0, origins: [] };
+    const { app } = startServer(db, config);
+    registerDramaProductionRoutes(app, service);
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    config.url = `http://127.0.0.1:${(server.address() as any).port}`;
+    const routes = registerBackendMcpHttpRoutes(app, config);
+    const client = new Client({ name: "unsupported-format", version: "1" });
+    t.after(async () => {
+        await client.close(); await routes.closeAll(); server.closeAllConnections();
+        await new Promise<void>(resolve => server.close(() => resolve())); db.close(); await fs.rm(temporary, { recursive: true, force: true });
+        if (priorToken === undefined) delete process.env.INFINITE_CANVAS_BACKEND_TOKEN; else process.env.INFINITE_CANVAS_BACKEND_TOKEN = priorToken;
+    });
+    await client.connect(new StreamableHTTPClientTransport(new URL(config.url + "/mcp")));
+    const http = await fetch(`${config.url}/drama/episodes/ep/production?token=fixture`);
+    assert.equal(http.status, 422);
+    const body = await http.json() as { code: string; error: string };
+    assert.equal(body.code, "UNSUPPORTED_PRODUCTION_FORMAT");
+    assert.match(body.error, /请使用当前版 Acheng Director 升级后重新提交/);
+    const mcp: any = await client.callTool({ name: "production_get", arguments: { kind: "episode", id: "ep" } });
+    assert.equal(mcp.isError, true);
+    const detail = mcp.content.map((item: any) => item.text || "").join("\n");
+    assert.match(detail, /UNSUPPORTED_PRODUCTION_FORMAT/);
+    assert.match(detail, /请使用当前版 Acheng Director 升级后重新提交/);
+    const unchanged = JSON.parse((db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get("ep") as { draft_json: string }).draft_json);
+    assert.equal(unchanged.director.source.prompt_assembly.version, 1);
+    assert.equal(unchanged.director.source.ledger.contract_version, 1);
 });

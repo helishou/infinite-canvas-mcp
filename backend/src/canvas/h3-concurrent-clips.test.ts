@@ -7,6 +7,67 @@ import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
 const localProvider = () => ({ ready: () => false, queue: { select: () => "local", unreserve() {} } });
 
+test("连续运行在子任务创建前失败时，仅当前 Clip 显示错误并保留旧输出", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "routing-failure", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "before", prompt: "Before", mode: "t2v", status: "success", result: "/media/before.mp4" },
+        { id: "current", prompt: "Current", mode: "t2v", minimaxEngine: "runninghub", status: "success", result: "/media/current.mp4" },
+        { id: "after", prompt: "After", mode: "t2v", status: "success", result: "/media/after.mp4" },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    let submissions = 0;
+    const comfy = { async run() { submissions++; throw new Error("本地 ComfyUI 输入准备失败"); } };
+    const provider = { ready: () => false, queue: {
+        select() { throw new Error("RunningHub 未配置 API Key、工作流 ID 或输入映射"); },
+        unreserve() {},
+    } };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, provider as never);
+    const task = runner.start({ projectId: "routing-failure", nodeId: "n", segmentId: "current", runFromCurrent: true, forceRegenerate: true });
+    for (let i = 0; i < 100 && db.getTask(task.id)?.status !== "failed"; i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(db.getTask(task.id)?.status, "failed");
+    const clips = (db.getCanvasProject("routing-failure")!.nodes[0] as any).metadata.segments;
+    assert.equal(clips[1].status, "error");
+    assert.match(clips[1].errorDetails, /本地 ComfyUI 输入准备失败/);
+    assert.equal(clips[1].result, "/media/current.mp4");
+    assert.equal(clips[1].parentTaskId, "");
+    assert.equal(clips[1].runtimeTaskId, "");
+    assert.equal(clips[0].status, "success");
+    assert.equal(clips[2].status, "success");
+    assert.equal(clips[2].result, "/media/after.mp4");
+    assert.equal(submissions, 1);
+});
+
+test("原生 H3 从当前及后续连续执行本地子任务，不读取残留的 RH 配置", async (t: TestContext) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "native-local", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
+        { id: "before", prompt: "Before", mode: "t2v" },
+        { id: "current", prompt: "Current", mode: "t2v", selectedVideoModelEnabled: false, minimaxEngine: "runninghub" },
+        { id: "after", prompt: "After", mode: "t2v", selectedVideoModelEnabled: false, minimaxEngine: "auto" },
+    ] } }], connections: [] });
+    const stores = createStores(db);
+    const submitted: string[] = [];
+    const comfy = {
+        async run(_preset: string, input: Record<string, unknown>, params: Record<string, unknown>, _url?: string, id?: string, onCreated?: (task: ReturnType<typeof stores.tasks.create>) => void) {
+            assert.equal(params.resolvedEngine, "local");
+            const child = stores.tasks.create(id!, "comfyui:minimax-h3", input, params);
+            onCreated?.(child);
+            submitted.push(String((params.canvasBinding as Record<string, unknown>).segmentId));
+            const media = stores.media.store(Buffer.from("fake-video"), { name: `${child.id}.mp4`, mimeType: "video/mp4", category: "output" });
+            return stores.tasks.update(child.id, { status: "succeeded", progress: 1, result: { media: [{ url: media.url, storageKey: media.storageKey, mimeType: "video/mp4" }] } });
+        },
+    };
+    const remote = { ready() { throw new Error("Native H3 must not read RH config"); }, queue: {
+        select() { throw new Error("Native H3 must not select RH"); }, unreserve() {},
+    } };
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, remote as never);
+    const parent = runner.start({ projectId: "native-local", nodeId: "n", segmentId: "current", runFromCurrent: true });
+    for (let i = 0; i < 100 && !["failed", "succeeded"].includes(db.getTask(parent.id)?.status || ""); i++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(db.getTask(parent.id)?.status, "succeeded", db.getTask(parent.id)?.error || "");
+    assert.deepEqual(submitted, ["current", "after"]);
+});
+
 test("同一 H3 节点的两个 Clip 可同时运行，并各自保存父任务与子任务绑定", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

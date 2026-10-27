@@ -1,30 +1,34 @@
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionShots, shotTitle } from "@/lib/production-source";
 import type { EpisodeProduction } from "@/services/backend-api";
 import type { DirectorWorkspace } from "./director-panel";
 
 export type SeriesWorkspaceView = "planning" | "episodes" | "shared";
+/** Episode selector sentinel: the first option routes back to the series planning view. */
+export const seriesPlanningOption = "series:planning";
 export type ProductionWorkspaceScope = "episode" | "canvas" | "shared-assets";
 export type ProductionNavigationItem = { id: string; workspace: DirectorWorkspace; labelKey: string; seriesView?: SeriesWorkspaceView };
 export type ProductionNavigationGroup = { id: string; labelKey: string; items: ProductionNavigationItem[] };
 
-export const productionWorkspaces: readonly DirectorWorkspace[] = ["series", "overview", "story", "assets", "shots", "continuity", "production", "advanced"];
+export const productionWorkspaces: readonly DirectorWorkspace[] = ["series", "overview", "story", "assets", "shots", "continuity", "clips", "production", "advanced"];
 
 export function seriesWorkspaceView(value: string | null): SeriesWorkspaceView | undefined {
     return value === "planning" || value === "episodes" || value === "shared" ? value : undefined;
 }
 
-export function productionNavigationGroups({ hasSeries, scope, setup = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean }): ProductionNavigationGroup[] {
+export function productionNavigationGroups({ hasSeries, scope, setup = false, seriesSubviews = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean; seriesSubviews?: boolean }): ProductionNavigationGroup[] {
     const groups: ProductionNavigationGroup[] = [];
+    // 顶部下拉用「规划与资产」代表剧目规划与其内部共享资产画布；seriesSubviews 再单列各剧目视图。
     if (hasSeries) groups.push({ id: "series", labelKey: "director.workspaceHierarchy.fullSeries", items: [
-        { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: "director.workspaceHierarchy.planning" },
+        { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: seriesSubviews ? "director.workspaceHierarchy.planning" : "director.workspaceHierarchy.planningAssets" },
+        ...(seriesSubviews ? [{ id: "series:shared", workspace: "series" as const, seriesView: "shared" as const, labelKey: "director.workspaceHierarchy.sharedCanvas" }] : []),
         { id: "series:episodes", workspace: "series", seriesView: "episodes", labelKey: "director.workspaceHierarchy.episodes" },
-        { id: "series:shared", workspace: "series", seriesView: "shared", labelKey: "director.workspaceHierarchy.sharedCanvas" },
     ] });
     if (setup) return groups;
     groups.push({ id: "owner", labelKey: `director.workspaceHierarchy.${scope === "episode" ? "currentEpisode" : scope === "shared-assets" ? "sharedProduction" : "currentProject"}`, items:
-        (["overview", "story", "assets", "shots", "continuity", "production"] as const).map(workspace => ({
+        (["overview", "story", "assets", "shots", "continuity", "clips", "production"] as const).map(workspace => ({
             id: workspace, workspace,
-            labelKey: workspace === "assets" ? `director.workspaceHierarchy.${scope === "episode" ? "episodeAssets" : scope === "shared-assets" ? "sharedAssets" : "projectAssets"}` : `director.workspace.tab.${workspace}`,
+            labelKey: workspace === "assets" ? `director.workspaceHierarchy.${scope === "episode" ? "episodeAssets" : scope === "shared-assets" ? "sharedAssets" : "projectAssets"}` : workspace === "clips" ? "director.atomic.view.clips" : `director.workspace.tab.${workspace}`,
         })),
     });
     groups.push({ id: "settings", labelKey: "director.workspaceHierarchy.settings", items: [{ id: "advanced", workspace: "advanced", labelKey: "director.workspace.tab.advanced" }] });
@@ -32,13 +36,15 @@ export function productionNavigationGroups({ hasSeries, scope, setup = false }: 
 }
 
 /** Preserve owner and unrelated URL state; only the previous object's focus is cleared. */
-export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView } = {}) {
+export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView; seriesTab?: "settings" } = {}) {
     const next = new URLSearchParams(search);
     next.set("workspace", workspace);
     next.delete("target"); next.delete("nodeId"); next.delete("segmentId");
     if (!options.embedded) { next.delete("runId"); next.delete("workId"); }
     if (workspace === "series" && options.seriesView) next.set("seriesView", options.seriesView);
     else next.delete("seriesView");
+    if (workspace === "series" && options.seriesView === "planning" && options.seriesTab) next.set("seriesTab", options.seriesTab);
+    else next.delete("seriesTab");
     if (options.target?.id) next.set("target", `${options.target.kind === "keyframe" ? "frame" : options.target.kind}:${options.target.id}`);
     return next;
 }
@@ -61,7 +67,7 @@ export function productionTargetTitle(production: EpisodeProduction, target: str
     }
     if (kind === "shot" || kind === "frame" || kind === "keyframe") {
         const shot = rows("shots").find(item => String(item.id) === id);
-        return String(shot?.title || production.draft.shots.find(item => item.id === id)?.title || id);
+        return shotTitle(shot || productionShots(production).find(item => String(item.id) === id), id);
     }
     if (kind === "segment") {
         const segment = rows("segments").find(item => String(item.id) === id);

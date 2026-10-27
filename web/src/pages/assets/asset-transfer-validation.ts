@@ -16,12 +16,13 @@ export function validateAssetPackage(data: unknown, files: Map<string, Blob>): a
     }
     const assetIds = new Set<string>();
     for (const asset of value.assets) {
-        if (!asset || typeof asset !== "object" || typeof asset.id !== "string" || !["text", "image", "video", "audio", "character", "scene"].includes(asset.kind) || !asset.data || typeof asset.data !== "object") throw new Error("ASSET_PACKAGE_INVALID");
+        if (!asset || typeof asset !== "object" || typeof asset.id !== "string" || !["text", "image", "video", "audio", "character", "scene", "prop"].includes(asset.kind) || !asset.data || typeof asset.data !== "object") throw new Error("ASSET_PACKAGE_INVALID");
         if (!asset.id || assetIds.has(asset.id)) throw new Error("ASSET_PACKAGE_INVALID");
         assetIds.add(asset.id);
         if (asset.kind === "character" && !Array.isArray(asset.data.images)) throw new Error("ASSET_PACKAGE_INVALID");
         if (asset.kind === "scene" && !asset.data.image) throw new Error("ASSET_PACKAGE_INVALID");
-        const refs = asset.kind === "character" ? [...asset.data.images, { storageKey: asset.data.voiceStorageKey }] : asset.kind === "scene" ? [asset.data.image, asset.data.colorCard] : asset.kind === "text" ? [] : [asset.data];
+        if (asset.kind === "prop" && !asset.data.image) throw new Error("ASSET_PACKAGE_INVALID");
+        const refs = asset.kind === "character" ? [...asset.data.images, { storageKey: asset.data.voiceStorageKey }] : asset.kind === "scene" ? [asset.data.image, asset.data.colorCard] : asset.kind === "prop" ? [asset.data.image] : asset.kind === "text" ? [] : [asset.data];
         for (const ref of refs) if (ref?.storageKey && !keys.has(ref.storageKey)) throw new Error("ASSET_MEDIA_INCOMPLETE");
     }
 }

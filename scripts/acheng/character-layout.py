@@ -2,9 +2,16 @@
 # with the current headless-front 1:2 layout instead of reverting it to the old
 # equal-height full-body board.
 _canvas_original_prepare_asset_card = prepare_asset_card
-_canvas_headless_character_layout = copy.deepcopy(DEFAULT_CHARACTER_VIEW_LAYOUT)
+_canvas_identity_character_layout = copy.deepcopy(DEFAULT_CHARACTER_VIEW_LAYOUT)
+_canvas_headless_character_layout = {
+    "type": "four_view_character_turnaround",
+    "views": ["front_face_above_clavicle", "right_profile_above_clavicle", "headless_front_costume_full_body", "back_full_body"],
+    "order": "grid_2x2", "row_height_ratio": [1, 2], "same_subject": True,
+    "purpose": "identity, proportions, costume, hairstyle and face reference"
+}
 _canvas_legacy_character_layout = {
     **copy.deepcopy(DEFAULT_CHARACTER_VIEW_LAYOUT),
+    "type": "four_view_character_turnaround",
     "views": ["front_face_above_clavicle", "front_full_body", "side_full_body", "back_full_body"],
     "row_height_ratio": [1, 1],
 }
@@ -20,6 +27,10 @@ def character_layout_profile(card, payload):
         return "historical"
     selection = layout.get("selection")
     need(selection in (None, "user_explicit"), "unsupported character layout selection")
+    if layout.get("type") == "single_character_identity_image":
+        need(layout.get("views", ["single_full_body_front"]) == ["single_full_body_front"] and layout.get("order", "single") == "single",
+             "single identity image must use one front full-body frame")
+        return "identity"
     if selection == "user_explicit":
         need(prose(layout.get("selection_reason")), "explicit character layout selection_reason required")
         need(layout.get("order") == "grid_2x2" and layout.get("same_subject") is True and prose(layout.get("purpose")),
@@ -46,6 +57,12 @@ def check_character_view_layout(card, payload):
     text = card.get("prompt", "").lower()
     if profile == "historical":
         return
+    if profile == "identity":
+        need("single-frame neutral full-body identity image" in text and "not a contact sheet" in text,
+             "single identity prompt must forbid multi-panel layouts")
+        need(not any(marker in text for marker in ("top left:", "top right:", "bottom left:", "bottom right:")),
+             "single identity image cannot include panel instructions")
+        return
     need(all(marker in text for marker in ("top left:", "top right:", "bottom left:", "bottom right:")),
          "character prompt missing fixed panel contract")
     if profile == "headless":
@@ -70,6 +87,8 @@ def prepare_asset_card(card, payload):
     profile = character_layout_profile(card, payload)
     if profile == "historical":
         return copy.deepcopy(card)
+    if profile == "identity":
+        return _canvas_original_prepare_asset_card(card, payload)
     if profile == "headless":
         return _canvas_original_prepare_asset_card(card, payload)
     need(not card.get("asset_kind") or not node.get("kind") or card["asset_kind"] == node["kind"], "asset card/plan kind conflict")

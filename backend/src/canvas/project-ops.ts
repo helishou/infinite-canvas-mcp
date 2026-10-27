@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import { compactH3SegmentStarts } from "@basketikun/canvas-agent/runtime-fields";
 import { characterReferenceUpdates, h3CharacterSourceFromNode, referenceBindingsOf, syncH3CharacterGroupSource } from "@basketikun/canvas-agent/reference-contract";
+import { normalizeEntityPrimaryMedia } from "@basketikun/canvas-agent/shared-asset-reference";
+import { canvasNodeDefaultSize } from "@basketikun/canvas-agent/canvas/node-sizes";
+import { canonicalH3TaskMode } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 
 export type CanvasOperation = Record<string, unknown> & { type: string };
 
@@ -91,13 +94,22 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const id = String(operation.id || `${String(operation.nodeType || "node")}-${crypto.randomUUID()}`);
             operation.id = id;
             if (nodes.some((node) => String(node.id) === id)) throw new Error(`节点已存在：${id}`);
-            const width = Number(operation.width || 320);
-            const height = Number(operation.height || 240);
+            const entityType = String(operation.nodeType || "text");
+            if (["character", "scene", "prop"].includes(entityType)) {
+                const metadata = recordOf(operation.metadata);
+                const hasCanonicalImage = entityType === "character"
+                    ? Array.isArray(metadata.characterImages) && metadata.characterImages.length > 0
+                    : Boolean(metadata[entityType === "scene" ? "sceneImage" : "propImage"]);
+                operation.metadata = normalizeEntityPrimaryMedia(entityType, metadata, hasCanonicalImage ? entityType === "character" ? "gallery" : "nested" : "legacy");
+            }
+            const defaultSize = canvasNodeDefaultSize(entityType);
+            const width = Number(operation.width || defaultSize.width);
+            const height = Number(operation.height || defaultSize.height);
             const hasExplicitPosition = operation.position !== undefined || operation.x !== undefined || operation.y !== undefined;
             const position = hasExplicitPosition
                 ? operation.position || { x: Number(operation.x || 0), y: Number(operation.y || 0) }
                 : nextUntakenNodePosition(nodes);
-            nodes.push({
+            const created: Record<string, unknown> = {
                 id,
                 type: String(operation.nodeType || "text"),
                 title: String(operation.title || ""),
@@ -105,7 +117,11 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 width,
                 height,
                 metadata: operation.metadata || {},
-            });
+            };
+            // 节点数组顺序就是渲染层级（后者在上）。组需要垫在成员下面，所以允许显式插入位置。
+            const requestedIndex = Number(operation.index);
+            if (Number.isInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < nodes.length) nodes.splice(requestedIndex, 0, created);
+            else nodes.push(created);
             syncOrderedGroupMembership(nodes, id);
             const createdNode = nodes.find((node) => String(node.id) === id);
             if (createdNode?.metadata && orderedGroupForMember(nodes, createdNode)) {
@@ -145,6 +161,34 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                     assertFullSegmentsReplacement(node, incomingSegments);
                     metadataPatch = { ...metadataPatch, segments: incomingSegments };
                 }
+                if (["character", "scene", "prop"].includes(String(node.type))) {
+                    const deleted = new Set((Array.isArray(operation.metadataDelete) ? operation.metadataDelete : []).map(String));
+                    const imageField = node.type === "character" ? "characterImages" : node.type === "scene" ? "sceneImage" : "propImage";
+                    const galleryTouched = Object.hasOwn(metadataPatch, imageField)
+                        || node.type === "character" && Object.hasOwn(metadataPatch, "characterPrimaryIndex")
+                        || deleted.has(imageField) || node.type === "character" && deleted.has("characterPrimaryIndex");
+                    const previewTouched = ["content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"]
+                        .some(field => Object.hasOwn(metadataPatch, field) || deleted.has(field));
+                    const source = galleryTouched ? node.type === "character" ? "gallery" : "nested" : previewTouched ? "preview" : "legacy";
+                    const candidate = { ...metadata, ...metadataPatch };
+                    for (const field of deleted) delete candidate[field];
+                    const normalized = normalizeEntityPrimaryMedia(String(node.type), candidate, source);
+                    metadataPatch = { ...metadataPatch };
+                    const syncedFields = node.type === "character"
+                        ? ["characterImages", "characterPrimaryIndex", "content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"]
+                        : [imageField, "content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"];
+                    for (const field of syncedFields) {
+                        if (Object.hasOwn(normalized, field)) {
+                            metadataPatch[field] = normalized[field];
+                            deleted.delete(field);
+                        } else {
+                            delete metadataPatch[field];
+                            if (Object.hasOwn(metadata, field)) deleted.add(field);
+                        }
+                    }
+                    operation.metadataDelete = [...deleted];
+                    operation.metadata = metadataPatch;
+                }
                 node.metadata = { ...metadata, ...metadataPatch };
             }
             if (Array.isArray(operation.metadataDelete)) {
@@ -157,6 +201,11 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 syncOrderedGroupMembership(nodes, id, previousGroupId || undefined, Boolean((operation.patch as Record<string, unknown> | undefined)?.position));
             }
             if (!options.committedReplay) {
+                for (const update of linkedCharacterPrimaryUpdate(previousNode, node, nodes)) {
+                    const target = nodes.find((item) => String(item.id) === String(update.id || ""))!;
+                    target.metadata = { ...recordOf(target.metadata), ...recordOf(update.metadata) };
+                    derived.push(update);
+                }
                 for (const update of characterReferenceUpdates(previousNode, node, nodes)) {
                     const target = nodes.find((item) => String(item.id) === update.id)!;
                     target.metadata = { ...recordOf(target.metadata), ...update.metadata };
@@ -192,7 +241,7 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
         } else if (operation.type === "update_h3_segment") {
             const nodeId = String(operation.nodeId || "");
             const segmentId = String(operation.segmentId || "");
-            const patch = recordOf(operation.patch);
+            const patch = { ...recordOf(operation.patch) };
             if (!nodeId) throw new Error("update_h3_segment 缺少 nodeId");
             if (!segmentId) throw new Error("update_h3_segment 缺少 segmentId");
             const node = nodes.find((item) => String(item.id) === nodeId);
@@ -201,6 +250,15 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const segments = segmentsOf(node);
             const index = findSegmentIndex(segments, segmentId);
             if (index < 0) throw new Error(`节点 ${nodeId} 上找不到 segment ${segmentId}`);
+            if (Object.hasOwn(patch, "taskMode") || Object.hasOwn(patch, "mode")) {
+                const mode = canonicalH3TaskMode(Object.hasOwn(patch, "taskMode") ? patch.taskMode : patch.mode);
+                if (!["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(mode)) throw new Error(`H3 Clip 模式无效：${mode}`);
+                // taskMode is the execution contract. Keep the legacy alias in lockstep
+                // so older readers cannot resurrect a different prompt format.
+                patch.taskMode = mode;
+                patch.mode = mode;
+                operation.patch = patch;
+            }
             // CAS：expectedFields 中的每一个字段都必须与当前值匹配，否则抛错（用于任务回写防止被新任务接管后被覆盖）。
             if (operation.expectedFields && typeof operation.expectedFields === "object") {
                 for (const [field, expected] of Object.entries(operation.expectedFields as Record<string, unknown>)) {
@@ -248,7 +306,15 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             }
             // A newly inserted Clip has no authored outgoing continuity decision yet.
             // Preserve explicit choices; do not inherit a legacy node-wide chain switch.
-            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: false, ...incoming });
+            const firstShotId = Array.isArray(incoming.storyboardShots) ? String((incoming.storyboardShots[0] as Record<string, unknown> | undefined)?.referenceBindingId || "") : "";
+            const firstFrameRef = (Array.isArray(incoming.referenceBindings) ? incoming.referenceBindings as Array<Record<string, unknown>> : [])
+                .find(reference => String(reference.bindingId || reference.id || "") === firstShotId);
+            const imageRefs = (Array.isArray(incoming.referenceBindings) ? incoming.referenceBindings as Array<Record<string, unknown>> : [])
+                .filter(reference => reference.enabled !== false && !["video", "audio"].includes(String(reference.mediaType || "image")));
+            const mode = String(incoming.taskMode || incoming.mode || "").toLowerCase();
+            const explicitFirstFrame = firstFrameRef?.enabled !== false && !["video", "audio"].includes(String(firstFrameRef?.mediaType || "image")) && firstFrameRef?.role === "storyboard"
+                || ["i2v", "i2va", "fl2v", "fl2va"].includes(mode) && imageRefs.length > 0;
+            segments.splice(insertIndex, 0, { motionContextEnabled: false, tailFrameContinuation: !explicitFirstFrame && incoming.motionContextEnabled !== true, ...incoming });
             const metadata = recordOf(node.metadata);
             metadata.segments = segments;
             node.metadata = metadata;
@@ -574,6 +640,39 @@ function nodesOf(project: Record<string, unknown>) {
     return project.nodes as Array<Record<string, unknown>>;
 }
 
+function smartImagePrimary(node: Record<string, unknown>) {
+    const metadata = recordOf(node.metadata);
+    if (node.type !== "config" || metadata.smart !== true || (metadata.generationMode || "image") !== "image") return null;
+    const images = Array.isArray(metadata.images) ? metadata.images as Array<Record<string, unknown>> : [];
+    const primaryId = String(metadata.primaryImageId || "");
+    const image = images.find((item) => String(item.id || "") === primaryId) || images[0];
+    if (!image || (!image.content && !image.url && !image.storageKey)) return null;
+    return { id: String(image.id || ""), image };
+}
+
+function linkedCharacterPrimaryUpdate(previous: Record<string, unknown>, current: Record<string, unknown>, nodes: Array<Record<string, unknown>>) {
+    const before = smartImagePrimary(previous);
+    const after = smartImagePrimary(current);
+    if (!before || !after || !after.id || before.id === after.id) return [] as CanvasOperation[];
+    const media = after.image;
+    return nodes.flatMap((node): CanvasOperation[] => {
+        const metadata = recordOf(node.metadata);
+        if (node.type !== "character" || !Array.isArray(metadata.characterImages)) return [];
+        const images = metadata.characterImages as Array<Record<string, unknown>>;
+        const index = images.findIndex((image) => String(image.sourceNodeId || "") === String(current.id || ""));
+        if (index < 0) return [];
+        const url = media.content || media.url || "";
+        const storageKey = media.storageKey || "";
+        const characterImages = images.map((image) => String(image.sourceNodeId || "") === String(current.id || "")
+            ? { ...image, url, storageKey, width: media.naturalWidth || media.width || image.width,
+                height: media.naturalHeight || media.height || image.height, bytes: media.bytes || 0, mimeType: media.mimeType || "image/png" }
+            : image);
+        const primary = characterImages[index];
+        return [{ type: "update_node", id: String(node.id), metadata: { characterImages, characterPrimaryIndex: index, content: url, storageKey,
+            naturalWidth: primary.width, naturalHeight: primary.height, bytes: primary.bytes, mimeType: primary.mimeType } }];
+    });
+}
+
 function connectionsOf(project: Record<string, unknown>) {
     if (!Array.isArray(project.connections)) project.connections = [];
     return project.connections as Array<Record<string, unknown>>;
@@ -661,7 +760,7 @@ function nextUntakenNodePosition(nodes: Array<Record<string, unknown>>) {
     if (!validNodes.length) return { x: 0, y: 0 };
     const right = Math.max(...validNodes.map((node) => {
         const position = recordOf(node.position);
-        return Number(position.x || 0) + Number(node.width || 320);
+        return Number(position.x || 0) + Number(node.width || canvasNodeDefaultSize(node.type).width);
     }));
     return { x: right + gap, y: 0 };
 }

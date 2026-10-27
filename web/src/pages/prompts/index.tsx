@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 
 import { PromptCard } from "@/components/prompts/prompt-card";
+import { PageHeader } from "@/components/layout/page-header";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
 import { usePromptList } from "@/components/prompts/use-prompt-list";
 import { PromptDetailDialog } from "./components/prompt-detail-dialog";
@@ -32,6 +33,7 @@ export default function PromptsPage() {
     const removeCustomPrompt = useCustomPromptsStore((state) => state.removePrompt);
     const { query, items: promptItems, tags: promptTags, categories: promptCategoryOptions, total: totalPrompts } = usePromptList({ keyword: titleKeyword, tags: selectedTags, category: selectedCategory });
     const initialLoading = query.isPending && !query.data;
+    const hasFilters = Boolean(titleKeyword || selectedTags.length || selectedCategory !== ALL_PROMPTS_OPTION);
 
     useEffect(() => {
         if (query.isError) message.error(query.error instanceof Error ? query.error.message : t("prompts.loadFailed"));
@@ -82,20 +84,20 @@ export default function PromptsPage() {
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
-            <main className="min-h-0 flex-1 overflow-y-auto bg-background px-4 py-6 sm:px-6 lg:px-8 lg:py-8" onScroll={handleListScroll}>
+            <main className="min-h-0 flex-1 overflow-y-auto bg-background px-4 py-6 sm:px-6 lg:px-8" onScroll={handleListScroll}>
                 <div className="mx-auto max-w-[1440px]">
-                    <header className="flex flex-wrap items-center justify-between gap-5 border-b border-border pb-6">
-                        <div>
-                            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">{t("prompts.library")}</p>
-                            <h1 className="mt-2 text-2xl font-medium tracking-tight sm:text-3xl">{t("prompts.title")}</h1>
-                            <p className="mt-2 text-xs text-muted-foreground">{t("prompts.total", { count: totalPrompts })}</p>
+                    <PageHeader
+                        className="border-b border-border pb-6"
+                        width="gallery"
+                        title={t("prompts.title")}
+                        meta={t("prompts.total", { count: totalPrompts })}
+                        actions={<Button type="primary" icon={<Plus className="size-4" />} onClick={() => setDialog({ mode: "add" })}>{t("prompts.custom.addTitle")}</Button>}
+                    >
+                        <div className="max-w-3xl">
+                            <label className="mb-2 block text-xs font-medium text-muted-foreground" htmlFor="prompt-library-search">{t("prompts.workspace.findPrompts")}</label>
+                            <Input id="prompt-library-search" size="large" allowClear aria-label={t("prompts.search")} prefix={<Search className="mr-1 size-4 text-muted-foreground" />} value={titleKeyword} placeholder={t("prompts.search")} onChange={(event) => setTitleKeyword(event.target.value)} />
                         </div>
-                        <Button type="primary" icon={<Plus className="size-4" />} onClick={() => setDialog({ mode: "add" })}>{t("prompts.custom.addTitle")}</Button>
-                    </header>
-                    <div className="mt-6 max-w-2xl">
-                        <label className="mb-2 block text-xs font-medium text-muted-foreground" htmlFor="prompt-library-search">{t("prompts.workspace.findPrompts")}</label>
-                        <Input id="prompt-library-search" size="large" allowClear aria-label={t("prompts.search")} prefix={<Search className="mr-1 size-4 text-muted-foreground" />} value={titleKeyword} placeholder={t("prompts.search")} onChange={(event) => setTitleKeyword(event.target.value)} />
-                    </div>
+                    </PageHeader>
                     <div className="mt-5 grid items-start gap-6 lg:grid-cols-[208px_minmax(0,1fr)] lg:gap-8">
                         <aside className="border-b border-border pb-4 lg:sticky lg:top-0 lg:border-b-0 lg:border-r lg:pb-8 lg:pr-5" data-resource-group="prompt-filters">
                             <button type="button" className="flex w-full items-center justify-between gap-3 text-left text-sm lg:hidden" aria-expanded={filtersExpanded} aria-controls="prompt-library-filters" onClick={() => setFiltersExpanded((value) => !value)}>
@@ -119,9 +121,10 @@ export default function PromptsPage() {
                                 <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                                     <span>{t("prompts.workspace.source")}:</span><Tag className="!m-0 max-w-full !whitespace-normal">{selectedCategory === ALL_PROMPTS_OPTION ? t("common.all") : selectedCategory}</Tag>
                                     {selectedTags.map((tag) => <Tag key={tag} closable onClose={() => toggleTag(tag)} className="!m-0 max-w-full !whitespace-normal">{tag}</Tag>)}
-                                    <span>{t("prompts.total", { count: totalPrompts })}</span>
+                                    {/* 总数已在页头 meta 里，这里只在筛选后补充"当前筛出多少"的上下文。 */}
+                                    {hasFilters ? <span>{t("prompts.total", { count: totalPrompts })}</span> : null}
                                 </div>
-                                {titleKeyword || selectedTags.length || selectedCategory !== ALL_PROMPTS_OPTION ? <Button size="small" type="text" onClick={() => { setTitleKeyword(""); setSelectedTags([]); setSelectedCategory(ALL_PROMPTS_OPTION); }}>{t("prompts.workspace.clearFilters")}</Button> : null}
+                                {hasFilters ? <Button size="small" type="text" onClick={() => { setTitleKeyword(""); setSelectedTags([]); setSelectedCategory(ALL_PROMPTS_OPTION); }}>{t("prompts.workspace.clearFilters")}</Button> : null}
                             </div>
                             {initialLoading ? <div role="status" className="mt-5 flex min-h-80 flex-col items-center justify-center rounded-xl border border-border bg-card/50 text-muted-foreground"><Spin size="large" /><div className="mt-4 text-sm">{t("prompts.loading")}</div></div> : null}
                             {!initialLoading ? <div className="mt-5">
@@ -152,5 +155,5 @@ function PromptFilter({ label, options, selected, onChange }: { label: string; o
 
 function PromptGrid({ items, onOpen, onCopy, renderActions, renderManagement, emptyText }: { items: Prompt[]; onOpen: (item: Prompt) => void; onCopy: (item: Prompt) => void; renderActions: (item: Prompt) => ReactNode; renderManagement: (item: Prompt) => ReactNode; emptyText: string }) {
     const { t } = useTranslation();
-    return <div><div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">{items.map((item) => <PromptCard key={`${item.sourceId}:${item.id}`} item={item} onOpen={() => onOpen(item)} onCopy={() => onCopy(item)} actionLabel={t("prompts.workspace.copyText")} extraAction={renderActions(item)} managementAction={renderManagement(item)} />)}</div>{items.length === 0 ? <div className="rounded-xl border border-border bg-card/50"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} className="py-16" /></div> : null}</div>;
+    return <div><div data-card-grid className="grid gap-5 [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]">{items.map((item) => <PromptCard key={`${item.sourceId}:${item.id}`} item={item} onOpen={() => onOpen(item)} onCopy={() => onCopy(item)} actionLabel={t("prompts.workspace.copyText")} extraAction={renderActions(item)} managementAction={renderManagement(item)} />)}</div>{items.length === 0 ? <div className="rounded-xl border border-border bg-card/50"><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} className="py-16" /></div> : null}</div>;
 }

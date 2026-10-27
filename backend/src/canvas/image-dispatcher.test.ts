@@ -136,7 +136,7 @@ test("同一源节点的不同提示词不能复用运行中任务", () => {
     assert.equal(created, 1);
 });
 
-test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 choice", async () => {
+test("canvas workflow maps 16:9 into the submitted graph and auto-corrects a mismatched saved 1:1 choice", async () => {
     const aspect = { id: "f_1790686390394_nzk9", node: "11", input: "aspect_ratio", name: "Aspect ratio", type: "dropdown", default: "9:16 (Portrait Widescreen)", options: ["1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)"] };
     const prompt = { id: "prompt", node: "11", input: "prompt", name: "Prompt", type: "text", isPrompt: true };
     const values: Array<Record<string, unknown>> = [];
@@ -157,10 +157,11 @@ test("canvas workflow maps 16:9 into the submitted graph and blocks a saved 1:1 
     );
     await run();
     await run({ [aspect.id]: "16:9" });
-    await assert.rejects(run({ [aspect.id]: "1:1 (Square)" }), /工作流画幅与目标冲突/);
+    await run({ [aspect.id]: "1:1 (Square)" });
     assert.equal(values[0][aspect.id], "16:9 (Widescreen)");
     assert.equal(values[1][aspect.id], "16:9 (Widescreen)");
-    assert.equal(values.length, 2);
+    assert.equal(values[2][aspect.id], "16:9 (Widescreen)");
+    assert.equal(values.length, 3);
     const submitted = injectParams(workflow, { "11": { aspect_ratio: values[0][aspect.id] } });
     assert.equal((submitted["11"] as { inputs: { aspect_ratio: string } }).inputs.aspect_ratio, "16:9 (Widescreen)");
 });

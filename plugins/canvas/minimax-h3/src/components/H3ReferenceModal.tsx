@@ -56,20 +56,15 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
     const [analysisSummary, setAnalysisSummary] = useState(typeof refItem.analysis?.summary === "string" ? refItem.analysis.summary : "");
     const [analysisMetadata, setAnalysisMetadata] = useState<Record<string, unknown>>(refItem.analysis || {});
     const persistedAnalysis = useRef<Record<string, unknown>>(refItem.analysis || {});
+    // The parent keys this editor by Clip/binding. Parent refreshes recreate refs and
+    // services, but must not reset the user's unsubmitted fields in this session.
+    const initialAnalysisSource = useRef({ references: ctx.references, assetId: refItem.assetId, analysis: refItem.analysis });
 
     useEffect(() => {
-        setRole(characterReference ? sourceRole : editableReferenceRole(refItem));
-        setUsage(characterReference ? "reference" : refItem.usage || "reference");
-        setDescription(refItem.description || "");
-        setStoryboardSubjectIds(refItem.storyboardSubjectIds || []);
-        setOutfitEnabled(group?.outfitEnabled ?? Boolean(group?.outfits.some((outfit) => outfit.enabled)));
-        setOutfitEnabledById(Object.fromEntries(group?.outfits.map((outfit) => [outfit.id, outfit.enabled]) || []));
-        setVoiceEnabled(group?.voiceEnabled ?? false);
-        setAnalysis("");
-        setSaveError("");
+        const source = initialAnalysisSource.current;
         let cancelled = false;
-        void ctx.references.list().then((assets) => {
-            const metadata = assets.find((asset) => asset.id === refItem.assetId)?.analysis || refItem.analysis || {};
+        void source.references.list().then((assets) => {
+            const metadata = assets.find((asset) => asset.id === source.assetId)?.analysis || source.analysis || {};
             if (!cancelled) {
                 persistedAnalysis.current = metadata;
                 setAnalysisMetadata(metadata);
@@ -78,7 +73,7 @@ export function H3ReferenceModal({ ctx, refItem, characters, group, onApply, onR
             }
         }).catch(() => undefined);
         return () => { cancelled = true; };
-    }, [characterReference, ctx.references, group, refItem, sourceRole]);
+    }, []);
 
     const isStoryboardImage = role === "storyboard" && refItem.type === "image";
     const canRemoveStoryboardImage = refItem.type === "image" && inferReferenceRole(refItem) === "storyboard";

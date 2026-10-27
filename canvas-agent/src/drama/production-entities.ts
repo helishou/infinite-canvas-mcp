@@ -19,6 +19,10 @@ export function productionEntityText(value: unknown): string {
 /** Identity comes from registry IDs and explicit entity_id, never display names. */
 export function productionEntities(source: Record<string, any>, owner: { kind: string; id: string }) {
     const plans = rows(source.asset_plan), subjects = rows(source.subject_registry);
+    const scriptSceneIds = new Set(rows(source.script_scenes).flatMap(scene => {
+        const occurrenceId = String(scene.id || ""), sceneId = String(scene.scene_id || scene.sceneId || "");
+        return sceneId && occurrenceId && occurrenceId !== sceneId ? [sceneId] : [];
+    }));
     const result: Array<{ kind: ProductionEntityKind; entityId: string; name: string; description: string; descriptionField: string; assetIds: string[] }> = [];
     const add = (kind: ProductionEntityKind, row: Record<string, any>, assetIds: string[]) => {
         const entityId = String(row.id || row.asset_id || "");
@@ -29,7 +33,16 @@ export function productionEntities(source: Record<string, any>, owner: { kind: s
         result.push({ kind, entityId, name: String(row.name || row.asset_name || row.scene_name || row.title || entityId), description: productionEntityText(row[descriptionField]), descriptionField, assetIds });
     };
     for (const row of rows(source.character_registry)) add("character", row, plans.filter(plan => String(plan.entity_id || "") === String(row.id)).map(plan => String(plan.id || plan.asset_id)));
-    for (const row of rows(source.scene_registry)) add("scene", row, plans.filter(plan => String(plan.entity_id || "") === String(row.id)).map(plan => String(plan.id || plan.asset_id)));
+    for (const row of rows(source.scene_registry)) {
+        const id = String(row.id || row.asset_id || "");
+        const hasStableAssetReference = plans.some(plan => String(plan.entity_id || "") === id)
+            || subjects.some(subject => subject.entityRef?.kind === "scene" && String(subject.entityRef.id || "") === id);
+        // A script's scene_id is a scene occurrence, not proof of a reusable scene asset.
+        // Preserve that registry row, but don't project it as an asset node unless a stable
+        // asset plan or subject registration explicitly identifies it as one.
+        if (scriptSceneIds.has(id) && !hasStableAssetReference) continue;
+        add("scene", row, plans.filter(plan => String(plan.entity_id || "") === id).map(plan => String(plan.id || plan.asset_id)));
+    }
     for (const row of plans) if (["prop", "道具"].includes(String(row.kind || row.asset_kind || "").toLowerCase()) || subjects.some(subject => subject.kind === "prop" && subject.entityRef?.kind === "asset" && subject.entityRef.id === String(row.id || row.asset_id))) add("prop", row, [String(row.id || row.asset_id)]);
     return result;
 }

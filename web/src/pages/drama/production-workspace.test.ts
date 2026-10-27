@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { EpisodeProduction } from "@/services/backend-api";
 import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQuery, productionWorkspaces, seriesWorkspaceView } from "./production-workspace";
@@ -6,7 +7,13 @@ import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQ
 test("series navigation separates real shared canvas management from current-episode assets", () => {
     const groups = productionNavigationGroups({ hasSeries: true, scope: "episode" });
     assert.deepEqual(groups.map(group => group.id), ["series", "owner", "settings"]);
-    assert.deepEqual(groups[0].items.map(item => item.seriesView), ["planning", "episodes", "shared"]);
+    // 下拉里剧目规划与共享资产画布合并为一项，导航只剩两项。
+    assert.deepEqual(groups[0].items.map(item => item.seriesView), ["planning", "episodes"]);
+    assert.equal(groups[0].items[0].labelKey, "director.workspaceHierarchy.planningAssets");
+    // 子 Tab 栏展开共享资产画布，规划项回到「剧目规划」。
+    const subtabs = productionNavigationGroups({ hasSeries: true, scope: "episode", seriesSubviews: true });
+    assert.deepEqual(subtabs[0].items.map(item => item.seriesView), ["planning", "shared", "episodes"]);
+    assert.equal(subtabs[0].items[0].labelKey, "director.workspaceHierarchy.planning");
     assert.equal(groups[0].items.some(item => item.workspace === "assets"), false);
     assert.equal(groups[1].items.find(item => item.workspace === "assets")?.labelKey, "director.workspaceHierarchy.episodeAssets");
     assert.deepEqual([...new Set(groups.flatMap(group => group.items.map(item => item.workspace)))], productionWorkspaces);
@@ -46,6 +53,26 @@ test("new series subviews retain workspace=series and safely clear when leaving 
     assert.equal(productionWorkspaceQuery(next, "overview").has("seriesView"), false);
     assert.equal(seriesWorkspaceView(null), undefined);
     assert.equal(seriesWorkspaceView("assets"), undefined);
+});
+
+test("production and canvas selectors share targets while preserving the switcher's open state", () => {
+    const source = readFileSync(new URL("./production.tsx", import.meta.url), "utf8");
+    // 「规划与资产」是唯一共享画布目标；工作台切换后浮层收起。
+    assert.doesNotMatch(source, /ProductionWorkspaceMenus/);
+    assert.match(source, /value=\{workspace === "series" \? \(\(seriesView \|\| "planning"\) === "episodes" \? undefined : seriesPlanningOption\) : episodeId\}/);
+    assert.match(source, /options=\{\[\{ value: seriesPlanningOption, label: t\("director\.workspaceHierarchy\.planningAssets"\) \}, \.\.\./);
+    assert.match(source, /if \(id === seriesPlanningOption\)/);
+    assert.match(source, /canvasHost\.switchProductionCanvas\(\{ projectId, dramaId: series\.id, keepCanvasOpen: false \}\)/);
+    // 选分集必须离开剧目工作区并进入分集导演稿（与「编辑导演稿」同一默认落点）。
+    assert.match(source, /if \(workspace === "series"\) \{ navigate\(dramaWorkbenchPath\(series\.id, id\)\); return; \}/);
+    assert.match(source, /if \(!routeWorkspace && workspace === "series"\) setWorkspace\("overview"\)/);
+    const canvasToolbar = readFileSync(new URL("../../components/production/canvas-production-workspace.tsx", import.meta.url), "utf8");
+    assert.doesNotMatch(canvasToolbar, /key: "history", label: t\("productionCanvas\.advanced"\)/);
+    assert.match(canvasToolbar, /overlayHost\.switchProductionCanvas\(\{ projectId: canvasId, dramaId: context\.dramaId!, episodeId: id, keepCanvasOpen: true \}\)/);
+    const canvasHost = readFileSync(new URL("../../lib/canvas/canvas-host.tsx", import.meta.url), "utf8");
+    assert.match(canvasHost, /switchProductionCanvas: \(target: ProductionCanvasTarget\) => void/);
+    const overlay = readFileSync(new URL("./workbench-canvas.tsx", import.meta.url), "utf8");
+    assert.match(overlay, /visible: destination\.keepCanvasOpen/);
 });
 
 test("object breadcrumb uses current production source names and retains IDs only when no name is known", () => {

@@ -5,13 +5,21 @@ import path from "node:path";
 
 export type H3ContinuationIdentity = { workflow: string; group: string; run: string };
 
+/**
+ * 续写任务描述符里承载身份的主节点 id。南风 V15 用它校验 unique_id，
+ * backend 侧的目录算法与任务构造器也必须用同一个值，否则两条路径会各自找不到上下文。
+ */
+export const H3_CONTINUATION_NODE_ID = "nf_v15";
+
 /** Match NanFeng V15's json.dumps([...], ensure_ascii=False) namespace exactly. */
 export function h3ContinuationFolder(identity: H3ContinuationIdentity) {
     for (const value of [identity.workflow, identity.group, identity.run]) {
         if (!value || value.length > 256) throw new Error("无效的 H3 潜空间续写身份");
     }
-    const encoded = `[${[identity.workflow, "nf_v15", identity.group, identity.run].map((value) => JSON.stringify(value)).join(", ")}]`;
-    return path.join("nanfeng_v15_context", createHash("sha256").update(encoded).digest("hex"));
+    const encoded = `[${[identity.workflow, H3_CONTINUATION_NODE_ID, identity.group, identity.run].map((value) => JSON.stringify(value)).join(", ")}]`;
+    // 保持正斜杠：这个字符串同时要交给 ComfyUI 节点当 latent_path，必须与原生
+    // latent_continuation.py 拼出来的一模一样（Windows 下 path.join 会写成反斜杠）。
+    return `nanfeng_v15_context/${createHash("sha256").update(encoded).digest("hex")}`;
 }
 
 /** Seed a NEW run with the completed predecessor's AV latent; never write to the source run. */

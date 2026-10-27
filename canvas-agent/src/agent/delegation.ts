@@ -18,7 +18,7 @@ export const directorSubagentSchema = z.object({
     artifactHash: z.string().optional().describe("get 定向读取历史不可变产物"),
     contentDeliveryMode: z.enum(["auto_file_batch", "interactive_segment"]).optional().describe("仅 unbound spawn 可指定；正式稿使用已保存模式"),
     continuationIntent: z.enum(["automatic", "explicit"]).optional().describe("continue 默认 automatic；交互模式必须 explicit，表示本轮用户明确要求继续；不扩大原授权"),
-    model: z.string().min(1).optional().describe("省略时沿用当前导演渠道；不随意更换模型"),
+    model: z.string().min(1).optional().describe("模型工具调用不要设置：子代理必须沿用前端本轮选中的导演模型；由上层运行时绑定"),
     effort: z.enum(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]).optional(),
     taskId: z.string().min(1).optional().describe("get 必填；spawn 回执中的 taskId"),
     view: z.enum(["summary", "result"]).default("summary"),
@@ -39,7 +39,7 @@ export type DirectorSubagentSummary = {
     recoverable?: boolean;
 };
 export type DirectorSubagentResult = { status: "complete" | "partial" | "needs_human"; summary: string; content: string; unresolved: string[]; cursor?: string };
-export const directorSubagentDescription = "导演委派统一入口。spawn 给 operationId/title/role/prompt；已有正式稿带 production.kind/id/expectedRevision/scope，由 Backend 冻结 draft 和专业合同，context 仅补充。子代理只返回建议，不写业务数据、不生成。收到 taskId 用 canvas_wait_tasks 等待，get/view=result 按 artifactHash/chunkBytes/cursor 读取完整产物；complete 且无未决项经主导演核对后用 production_edit.ops+adoptions 原子采纳。partial 用 continue/taskId/operationId 沿原线程续写，遵循原交付模式与授权；recover 只读原已完成回合，不重跑。unbound/partial/stale 不登记正式采纳。默认摘要不包含正文。";
+export const directorSubagentDescription = "导演委派统一入口。多专业并行审阅、整集／多镜头检查或用户明确要求并行时使用 spawn；单点修改和连续依赖步骤由主导演直接完成。模型工具调用不得指定子代理模型，必须沿用前端本轮选中的导演模型与推理强度。spawn 给 operationId/title/role/prompt；已有正式稿带 production.kind/id/expectedRevision/scope，由 Backend 冻结 draft 和专业合同，context 仅补充。子代理只返回建议，不写业务数据、不生成。收到 taskId 用 canvas_wait_tasks 等待，get/view=result 按 artifactHash/chunkBytes/cursor 读取完整产物；bound complete 产物在原授权范围内直接整理为 production_edit.ops+adoptions 原子采纳，无需用户审核/确认。任务 validity=stale 仅表示建议基于旧快照，不阻止采纳。expectedRevision 是基线游标；源稿仅有 revision 增长时，不为刷新游标重读全部分区，scoped patch 会由 Backend 应用到事务读取的最新稿，同字段后提交的写入生效。若提交整稿 set_director_production，必须先基于当前稿重建 source，不能用旧工作包快照覆盖后来编辑。unresolved 作为说明保留，不作为质量审批门；partial 通过 continue/taskId/operationId 沿原线程续写，遵循原交付模式与授权；recover 只读原已完成回合，不重跑。unbound 与未完成产物不能登记正式采纳。默认摘要不包含正文。";
 export function executeDirectorSubagentTool(backend: { post: (path: string, body: unknown) => Promise<unknown> }, raw: unknown) {
     return backend.post("/director/subagents", directorSubagentSchema.parse(raw));
 }

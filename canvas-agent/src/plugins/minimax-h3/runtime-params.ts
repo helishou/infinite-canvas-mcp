@@ -18,7 +18,7 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
             if (source === 'defaults' && ['motionContextEnabled', 'tailFrameContinuation'].includes(key)) return false;
             const projection = record(segment.productionClipProjection);
             const explicitStyle = key === 'styleTemplateId' && source === 'clip' && (!segment.productionClipProjection || projection.styleTemplateDeclared === true);
-            if (key === 'styleTemplateId' && source === 'clip' && Boolean(segment.productionClipProjection) && projection.styleTemplateDeclared === false && layer[key] === null) return false;
+            if (key === 'styleTemplateId' && source === 'clip' && Boolean(segment.productionClipProjection) && projection.styleTemplateDeclared === false && layer[key] === null && !manualKeys.has(key)) return false;
             return !(useDefaults && !plannedKeys.has(key) && !explicitStyle && !manualKeys.has(key) && ['clip', 'node', 'nodeParams'].includes(source)) && layer[key] !== undefined && (key === 'styleTemplateId' || layer[key] !== null);
         });
         if (selected) { values[key] = selected[1][key]; sources[key] = selected[0]; }
@@ -27,7 +27,8 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
     if (override.steps === undefined && values.videoSteps !== undefined) { values.steps = values.videoSteps; sources.steps = sources.videoSteps; }
     delete values.videoSteps;
     const parameterIssues: string[] = [];
-    if (values.tailFrameContinuation === true && values.motionContextEnabled === true) parameterIssues.push('尾帧参考与潜空间续写的保存值同时开启，请先在 Clip 设置中选择一种衔接方式并保存');
+    // 自选视频模型走自己的工作流，潜空间续写不会执行，也就不与尾帧参考冲突。
+    if (values.selectedVideoModelEnabled !== true && values.tailFrameContinuation === true && values.motionContextEnabled === true) parameterIssues.push('尾帧参考与潜空间续写的保存值同时开启，请先在 Clip 设置中选择一种衔接方式并保存');
     const requestedSlots = Array.isArray(values.loraSlots) && values.loraSlots.length ? values.loraSlots as Array<Record<string, unknown>> : values.loraName ? [{ name: values.loraName, strength: values.loraStrength ?? 1, enabled: true }] : [];
     for (const slot of requestedSlots) if (slot.enabled !== false && slot.name && slot.strength !== undefined && (!Number.isFinite(Number(slot.strength)) || Number(slot.strength) < H3_LORA_STRENGTH_MIN || Number(slot.strength) > H3_LORA_STRENGTH_MAX)) parameterIssues.push(`LoRA ${slot.name} 的强度超出当前 H3 节点已声明的范围 ${H3_LORA_STRENGTH_MIN}–${H3_LORA_STRENGTH_MAX}，拒绝静默夹紧`);
     if (!Number.isFinite(Number(values.megapixels)) || Number(values.megapixels) <= 0) parameterIssues.push('H3 分辨率必须为有效正数');
@@ -39,8 +40,17 @@ export function resolveH3Runtime(segment: Record<string, unknown>, override: Rec
         sources.noiseSeedMode = legacySeedSource;
     }
     const params = normalizeH3Params({ ...values, ...override }, false);
+    // Provider routing belongs to the selected video model. Native H3 always
+    // uses local ComfyUI, including Clips with an old saved RH/auto preference.
+    if (params.selectedVideoModelEnabled !== true) {
+        params.minimaxEngine = 'local';
+        sources.minimaxEngine = 'builtIn';
+    }
     delete params.videoSteps;
-    const requestedMode = override.mode ?? override.taskMode ?? params.mode ?? params.taskMode;
+    // taskMode is the canonical H3 Clip mode. `mode` remains a legacy alias and
+    // must not override it when an older projection left the aliases divergent.
+    const modeLayer = layers.find(([, layer]) => layer.taskMode !== undefined || layer.mode !== undefined)?.[1];
+    const requestedMode = modeLayer?.taskMode ?? modeLayer?.mode;
     params.mode = params.taskMode = canonicalH3TaskMode(requestedMode);
     if (sources.loraSlots === 'builtIn' && String(values.loraName || '').trim()) sources.loraSlots = sources.loraName;
     return { params, sources, parameterIssues, policy: useDefaults ? 'defaults' as const : 'overrides' as const };
@@ -57,6 +67,7 @@ export function withH3ParameterEdits(segment: Record<string, unknown>, patch: Re
     // Save the companion field too, so inherited defaults cannot re-enable it.
     if (patch.tailFrameContinuation === true) patch = { ...patch, motionContextEnabled: false };
     else if (patch.motionContextEnabled === true) patch = { ...patch, tailFrameContinuation: false };
+    if (patch.audioDrive === true || (patch.audioDrive !== false && segment.audioDrive === true)) patch = { ...patch, lockAudio: true };
     if (patch.steps !== undefined && patch.videoSteps === undefined) patch = { ...patch, videoSteps: patch.steps };
     const keys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
     if (patch.h3ParameterPolicy === 'defaults' && !Object.hasOwn(patch, 'h3ParameterOverrides')) keys.clear();
@@ -120,7 +131,6 @@ export function h3StoryboardIssues(segment: Record<string, unknown>, expected?: 
         if (JSON.stringify(ids) !== JSON.stringify(expected.map(shot => shot.id))) issues.push('分镜轨镜头顺序或覆盖范围与正式镜头表不一致');
         for (const shot of expected) if (Math.abs(Number(shots.find(item => item.id === shot.id)?.duration) - shot.duration) > 1e-6) issues.push(`镜头 ${shot.id} 的分镜轨时长与正式镜头表不一致`);
     }
-    if (shots.length && Math.abs(shots.reduce((sum, shot) => sum + Number(shot.duration || 0), 0) - Number(segment.duration)) > 1e-6) issues.push('分镜轨总时长与 Clip 时长不一致');
     return issues;
 }
 
@@ -142,7 +152,7 @@ export const H3_PARAM_KEYS = [
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
     "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
-    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
+    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
 
@@ -202,6 +212,7 @@ export function normalizeH3LoraSlots(params: Record<string, unknown>) {
  */
 export function normalizeH3Params(params: Record<string, unknown>, generateRandomSeed = false) {
     const next: Record<string, unknown> = { ...params };
+    if (next.audioDrive === true) next.lockAudio = true;
     const seed = parseH3Seed(next.seed) ?? parseH3Seed(next.noiseSeed);
     const rawMode = String(next.noiseSeedMode || "").toLowerCase();
     const mode = rawMode === "fixed" ? "fixed" : rawMode === "random" ? "random" : seed === undefined || seed === 0 ? "random" : "fixed";

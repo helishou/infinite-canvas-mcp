@@ -33,7 +33,7 @@ test("versioned text and title replacement commits together and rolls back on co
     assert.deepEqual(db.getCanvasProject("canvas"), changed);
 });
 
-test("角色主图变更原子更新下游引用，回执/广播/历史重放一致，失败不留下半次更新", (t) => {
+test("Character cover changes preserve explicit image keys across commits, broadcasts and history replay", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [
         { type: "add_node", id: "char", nodeType: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } },
@@ -47,9 +47,9 @@ test("角色主图变更原子更新下游引用，回执/广播/历史重放一
     let broadcast: CanvasCommit | undefined;
     db.onCanvasCommit((commit) => { broadcast = commit; });
     const changed = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
-    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"], ["update_node", "target"]]);
+    assert.deepEqual(changed.operations.map((op: { type: string; id?: unknown }) => [op.type, op.id]), [["update_node", "char"]]);
     const target = (changed.project.nodes as Array<Record<string, any>>).find((node) => node.id === "target")!;
-    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:b"], voiceEnabled: false });
+    assert.deepEqual(target.metadata.characterReferences.char, { imageKeys: ["image:a"], voiceEnabled: false });
     assert.equal(target.metadata.images[0].generationSnapshot.references[0].storageKey, "image:a");
     assert.deepEqual(broadcast?.operations, changed.operations);
     const repeated = db.applyCanvasProjectOperations("canvas", undefined, operations, { operationId: "primary-change" });
@@ -213,19 +213,46 @@ test("批处理失败同时回滚文档、Yjs 状态、journal 和回执，且�
     assert.equal(db.applyCanvasProjectOperations("canvas", undefined, [{ type: "text_update", target, documentId: original.documentId, update }], { operationId: "rollback" }).revision, 2);
 });
 
-test("旧基线修改不同字段可合并，同字段拒绝；布局最后提交生效", (t) => {
+test("旧基线修改不同字段自动合并，同字段以后提交者获胜", (t) => {
     const db = fixture(t);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "远端正文" } }], { baseRevision: 1 });
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", patch: { title: "本地标题" } }], { baseRevision: 1 });
-    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "旧正文" } }], { baseRevision: 1 }), { code: "FIELD_CONFLICT" });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "后提交正文" } }], { baseRevision: 1 });
+    assert.equal(db.getCanvasProject("canvas")?.nodes.find(node => node.id === "text")?.metadata?.content, "后提交正文");
     const move = (x: number) => [{ type: "update_node", id: "text", patch: { position: { x, y: 0 } } }];
     db.applyCanvasProjectOperations("canvas", undefined, move(10), { baseRevision: 1 });
     db.applyCanvasProjectOperations("canvas", undefined, move(20), { baseRevision: 1 });
-    assert.equal(db.getCanvasProject("canvas")?.revision, 5);
+    assert.equal(db.getCanvasProject("canvas")?.revision, 6);
     const history = db.readCanvasChanges("canvas", 1);
     assert.equal(history.reset, false);
-    assert.deepEqual(history.commits.map((item) => item.revision), [2, 3, 4, 5]);
+    assert.deepEqual(history.commits.map((item) => item.revision), [2, 3, 4, 5, 6]);
     assert.equal(db.readCanvasChanges("canvas", 99).reset, true);
+});
+
+test("deleted node edits restore its request-base image, while an old delete cannot remove a recreated node", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "delete-v1", baseRevision: 1 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "update_node", id: "text", metadata: { content: "restored edit" } }], { operationId: "edit-v1", baseRevision: 1 });
+    let node = db.getCanvasProject("canvas")?.nodes.find(item => item.id === "text");
+    assert.equal(node?.metadata?.content, "restored edit");
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "delete-restored", baseRevision: 3 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "text", nodeType: "text", title: "新一代", metadata: { content: "new lifecycle" } }], { operationId: "recreate", baseRevision: 4 });
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { operationId: "old-delete", baseRevision: 3 });
+    node = db.getCanvasProject("canvas")?.nodes.find(item => item.id === "text");
+    assert.equal(node?.title, "新一代");
+    assert.equal(node?.metadata?.content, "new lifecycle");
+});
+
+test("node resurrection refuses to guess when the base snapshot has been pruned", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [{ type: "delete_node", id: "text" }], { baseRevision: 1 });
+    const current = db.getCanvasProject("canvas")!;
+    db.db.prepare("UPDATE canvas_collaboration_checkpoints SET revision=?, data_json=? WHERE project_id=?").run(current.revision, JSON.stringify(current), "canvas");
+    db.db.prepare("DELETE FROM canvas_operation_batches WHERE project_id=? AND revision<=?").run("canvas", current.revision);
+    assert.throws(() => db.applyCanvasProjectOperations("canvas", undefined,
+        [{ type: "update_node", id: "text", metadata: { content: "keep this draft" } }], { baseRevision: 1 }),
+        { code: "BASE_HISTORY_UNAVAILABLE" });
+    assert.equal(db.getCanvasProject("canvas")?.nodes.some(node => node.id === "text"), false);
 });
 
 test("两名编辑者从相同基线插入中文，两个 Yjs 增量都保留", (t) => {
@@ -346,4 +373,28 @@ test("SVG 扩展节点源码使用协作文本，图片节点仍拒绝正文编�
     assert.equal((db.getCanvasProject("canvas")!.nodes as Array<{ id: string; metadata: { content: string } }>).find((node) => node.id === "vector")?.metadata.content, updated);
     db.applyCanvasProjectOperations("canvas", undefined, [{ type: "add_node", id: "bitmap", nodeType: "image", metadata: { content: "/media/image" } }]);
     assert.throws(() => db.getCanvasText("canvas", { nodeId: "bitmap", field: "content" }), /不是可协作文本/);
+});
+
+test("add_node 的 index 决定节点数组层级：组垫在成员下面，越界 index 退回追加", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "member", nodeType: "image", position: { x: 0, y: 0 }, width: 100, height: 100 },
+        { type: "add_node", id: "group", nodeType: "group", position: { x: -24, y: -44 }, width: 148, height: 168, index: 0 },
+        { type: "add_node", id: "later", nodeType: "text", index: 99 },
+    ]);
+    const project = db.getCanvasProject("canvas")!;
+    const ids = project.nodes.map((node) => String(node.id));
+    assert.deepEqual(ids.slice(0, 2), ["group", "text"], "组应插到数组最前，成员保持原有相对顺序");
+    assert.equal(ids.at(-1), "later", "越界 index 不能把节点插丢，退回追加");
+});
+
+test("add_node 未给尺寸时按类型默认规格落地，未知类型用兜底尺寸", (t) => {
+    const db = fixture(t);
+    db.applyCanvasProjectOperations("canvas", undefined, [
+        { type: "add_node", id: "conf", nodeType: "config", position: { x: 0, y: 0 } },
+        { type: "add_node", id: "custom", nodeType: "demo:panel", position: { x: 600, y: 0 } },
+    ]);
+    const byId = new Map(db.getCanvasProject("canvas")!.nodes.map((node) => [String(node.id), node]));
+    assert.deepEqual([byId.get("conf")!.width, byId.get("conf")!.height], [420, 540], "配置节点应与界面默认尺寸一致");
+    assert.deepEqual([byId.get("custom")!.width, byId.get("custom")!.height], [340, 240], "未知类型用共享兜底尺寸");
 });

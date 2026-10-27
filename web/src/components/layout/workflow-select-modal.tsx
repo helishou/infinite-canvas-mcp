@@ -75,7 +75,7 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
             onCancel={onClose}
             title={
                 <span>
-                    {t("config.modelSelect.title")} <span className="ml-2 text-xs font-normal text-stone-500">{t("config.modelSelect.selected", { selected: selected.size, total: new Set([...existing, ...fetched]).size })}</span>
+                    {t("config.modelSelect.title")} <span className="ml-2 text-xs font-normal text-muted-foreground">{t("config.modelSelect.selected", { selected: selected.size, total: new Set([...existing, ...fetched]).size })}</span>
                 </span>
             }
             styles={{ body: { maxHeight: "62vh", overflowY: "auto" } }}
@@ -89,9 +89,9 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
             ]}
         >
             <div className="flex flex-wrap items-center gap-3">
-                <Input className="min-w-[200px] flex-1" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("config.modelSelect.search")} prefix={<Search className="size-4 text-stone-400" />} allowClear />
+                <Input className="min-w-[200px] flex-1" value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("config.modelSelect.search")} prefix={<Search className="size-4 text-muted-foreground" />} allowClear />
             </div>
-            <div className="mt-2 text-xs text-stone-500">选择模型的本地内部实现（来源：Backend 内部目录）</div>
+            <div className="mt-2 text-xs text-muted-foreground">选择模型的本地内部实现（来源：Backend 内部目录）</div>
 
             <Tabs
                 className="mt-3"
@@ -104,7 +104,7 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
             />
 
             <div className="mb-3 flex items-center justify-between gap-2">
-                <span className="text-xs text-stone-500">{t("config.modelSelect.visibleSelected", { selected: visibleSelectedCount, total: visibleList.length })}</span>
+                <span className="text-xs text-muted-foreground">{t("config.modelSelect.visibleSelected", { selected: visibleSelectedCount, total: visibleList.length })}</span>
                 <div className="flex gap-2">
                     <Button size="small" disabled={!visibleList.length} onClick={() => selectVisible(true)}>
                         {t("config.modelSelect.selectVisible")}
@@ -126,7 +126,7 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
                     ))}
                 </div>
             ) : (
-                <div className="py-8 text-center text-sm text-stone-500">{loading ? "加载中…" : "暂无工作流，请先到「工作流」页面上传"}</div>
+                <div className="py-8 text-center text-sm text-muted-foreground">{loading ? "加载中…" : "暂无工作流，请先到「工作流」页面上传"}</div>
             )}
         </Modal>
     );

@@ -7,12 +7,15 @@ export type ManualAssetDraft = {
     kind: ManualAssetKind;
     name: string;
     description: string;
+    voiceDescription?: string;
+    voice?: { url?: string; name?: string; storageKey?: string; assetId?: string };
     prompt: string;
     purpose: string;
     canvasScope?: "episode" | "shared";
     registerSubject: boolean;
     ownerKind: "episode" | "canvas";
     ownerId: string;
+    sharedSource?: { dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string };
 };
 
 const records = (value: unknown): Source[] => Array.isArray(value) ? value.filter((item): item is Source => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
@@ -35,6 +38,7 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         depends_on: [],
         status: "planned",
         ...(draft.canvasScope ? { canvas_scope: draft.canvasScope } : {}),
+        ...(draft.sharedSource ? { sharedSource: draft.sharedSource } : {}),
     };
     const assetCard = {
         id,
@@ -43,6 +47,7 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         asset_version: "v1",
         prompt: draft.prompt.trim(),
         references: [],
+        reference_policy: "none",
     };
     const nextSource: Source = {
         ...source,
@@ -53,7 +58,11 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
     let registryKind: "character" | "scene" | undefined;
     let registryEntity: Source | undefined;
     if (draft.kind === "character") {
-        const entity = { id: draft.entityId, name, description: draft.description.trim(), appearance: draft.description.trim() };
+        const voiceDescription = draft.voiceDescription?.trim();
+        const voice = draft.voice && Object.values(draft.voice).some(value => Boolean(value?.trim()))
+            ? Object.fromEntries(Object.entries(draft.voice).map(([key, value]) => [key, value?.trim() || ""]))
+            : undefined;
+        const entity = { id: draft.entityId, name, description: draft.description.trim(), appearance: draft.description.trim(), ...(voiceDescription ? { voice_description: voiceDescription } : {}), ...(voice ? { voice } : {}) };
         registryKind = "character";
         registryEntity = entity;
         nextSource.character_registry = [...records(source.character_registry), entity];

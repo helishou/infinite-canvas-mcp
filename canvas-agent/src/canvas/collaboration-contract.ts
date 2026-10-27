@@ -14,10 +14,23 @@ export type CanvasTextSuggestion = z.infer<typeof textSuggestionInputSchema> & {
 export const collaborationToolNames = ["canvas_get_collaboration_state", "canvas_read_text", "canvas_apply_commands", "canvas_edit_text", "canvas_replace_text", "canvas_list_text_suggestions", "canvas_save_text_suggestion", "canvas_resolve_text_suggestion"] as const;
 export type CollaborationToolName = typeof collaborationToolNames[number];
 export const isCollaborationTool = (name: string): name is CollaborationToolName => (collaborationToolNames as readonly string[]).includes(name);
+export function isSmartCanvasNodeType(value: string) {
+    return value === "config" || value === "loop" || /^(?:minimax-h3|smart-minimax|minimax)(?::|$)/i.test(value) || value.includes(":");
+}
+const collaborationOperationSchema = z.record(z.unknown()).superRefine((operation, context) => {
+    if (operation.type !== "add_node") return;
+    const nodeType = typeof operation.nodeType === "string" ? operation.nodeType : "config";
+    const metadata = operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)
+        ? operation.metadata as Record<string, unknown>
+        : {};
+    if (!isSmartCanvasNodeType(nodeType) || metadata.smart !== true) {
+        context.addIssue({ code: "custom", message: "MCP 仅允许通过命令创建 metadata.smart=true 的智能节点。" });
+    }
+});
 export const collaborationSchemas = {
     canvas_get_collaboration_state: z.object({ projectId: z.string().min(1) }),
     canvas_read_text: targetInput,
-    canvas_apply_commands: z.object({ projectId: z.string().min(1), operationId: z.string().min(1), baseRevision: z.number().int().nonnegative(), operations: z.array(z.record(z.unknown())).nonempty() }),
+    canvas_apply_commands: z.object({ projectId: z.string().min(1), operationId: z.string().min(1), baseRevision: z.number().int().nonnegative(), operations: z.array(collaborationOperationSchema).nonempty() }),
     canvas_edit_text: textWriteInput.extend({
         baseState: z.string().min(1).describe("canvas_read_text 返回的 state，必须保持原样"),
         edits: z.array(z.object({ index: z.number().int().nonnegative(), deleteCount: z.number().int().nonnegative(), insert: z.string() })).nonempty(),
@@ -30,7 +43,7 @@ export const collaborationSchemas = {
 export const collaborationDescriptions: Record<CollaborationToolName, string> = {
     canvas_get_collaboration_state: "读取 revision、在线协作者和协议能力；不依赖网页或 Agent 面板在线。",
     canvas_read_text: "读取完整协作文本、documentId 和 Yjs state；支持项目、节点、Clip 和批量文本项。修改前须读取对应目标。",
-    canvas_apply_commands: "统一命令事务，baseRevision 按字段检查并发。重试复用 operationId 和完整请求，不发送整图快照。",
+    canvas_apply_commands: "统一命令事务，baseRevision 是请求基线；无关字段自动合并，同字段按服务端提交顺序以后写入者为准。历史不可恢复的删除/恢复操作会保留草稿并返回冲突。add_node 仅允许新增 metadata.smart=true 的智能节点；重试复用 operationId 和完整请求，不发送整图快照。",
     canvas_edit_text: "在读取的 baseState 上按 UTF-16 索引依次局部编辑，Yjs 增量合并协作者文字；必须传原 documentId。重试复用全部参数。",
     canvas_replace_text: "安全整段替换/采用 AI 改写：事务内检查 documentId 和 expectedText。原文变化则拒绝覆盖，应将结果保留为候选供用户确认。",
     canvas_list_text_suggestions: "读取 Backend 持久化的改写候选，包括已采用/已忽略记录；可按目标筛选，不依赖网页在线。",

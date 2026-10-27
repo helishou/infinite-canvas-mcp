@@ -1,12 +1,12 @@
 import { Button } from "antd";
-import { ArrowUpToLine, ChevronDown, ChevronRight, RotateCcw, X } from "lucide-react";
+import { ArrowUpToLine, ChevronDown, ChevronRight, Pencil, RotateCcw, X } from "lucide-react";
 import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { AgentQueuedPrompt } from "@/stores/use-agent-store";
 
-export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onInsert, onRetry, onResume }: {
+export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onInsert, onRetry, onEdit, onResume }: {
     items: AgentQueuedPrompt[];
     paused: boolean;
     canInsert: boolean;
@@ -14,6 +14,7 @@ export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onIn
     onRemove: (id: string) => void;
     onInsert: (id: string) => void;
     onRetry: (id: string) => void;
+    onEdit: (id: string) => void;
     onResume: () => void;
 }) {
     const { t } = useTranslation();
@@ -47,6 +48,7 @@ export function AgentChatQueue({ items, paused, canInsert, theme, onRemove, onIn
                                     {item.payload.canvasReferences.length ? <p className="mt-1 text-[11px]" style={{ color: theme.node.muted }}>{t("agent.queue.canvasReferences", { count: item.payload.canvasReferences.length })}</p> : null}
                                 </div>
                                 <div className="flex shrink-0 items-center gap-1">
+                                    {canRemove ? <Button type="text" size="small" icon={<Pencil className="size-3.5" />} aria-label={t("agent.queue.edit")} title={t("agent.queue.edit")} onClick={() => onEdit(item.id)} /> : null}
                                     <Button type="text" size="small" disabled={!canPrioritize} icon={<ArrowUpToLine className="size-3.5" />} aria-label={t("agent.queue.insert")} title={t("agent.queue.insert")} onClick={() => onInsert(item.id)} />
                                     {item.status === "failed" ? <Button type="text" size="small" icon={<RotateCcw className="size-3.5" />} aria-label={t("agent.queue.retry")} title={t("agent.queue.retry")} onClick={() => onRetry(item.id)} /> : null}
                                     <Button type="text" size="small" disabled={!canRemove} icon={<X className="size-3.5" />} aria-label={t("agent.queue.remove")} title={t("agent.queue.remove")} onClick={() => onRemove(item.id)} />

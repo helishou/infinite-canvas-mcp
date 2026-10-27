@@ -22,13 +22,11 @@ export default defineConfig({
     // 浏览器不再直连 17370，长连接不再被代理掐断。/events、/agent 均非 SPA 路由，不会与前端冲突。
     server: {
         ...(process.env.CANVAS_TEST_VITE_CACHE ? { hmr: false, watch: null } : {}),
-        // H3 内置插件走源码 HMR；构建会覆盖 public 中的分发包，Windows 上监听该文件可能触发 EBUSY。
-        // 静态插件文件仍由 Vite 提供。
+        // H3 内置插件走源码 HMR，不产出 web/public 副本；其余静态插件文件由 Vite 提供。
         watch: {
             ignored: [
                 resolve(webDir, "_test_report.txt"),
                 resolve(webDir, "_diag.txt"),
-                resolve(webDir, "public/plugins/minimax-h3.js"),
             ],
         },
         proxy: {

@@ -13,16 +13,24 @@ export function h3ExecutionMode(value: unknown): H3ExecutionMode {
 
 /** Backend 内所有 H3 入口共享槽位；任务事件保存排队/派发边界，重启不重复提交。 */
 export class H3ExecutionQueue {
-    private readonly pending = new Map<string, Job>();
+    private pending = new Map<string, Job>();
     private readonly active = new Map<string, H3Provider>();
     private readonly reserved = new Map<string, H3Provider>();
-    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private paused = false) {}
+    /** A first-pass result awaiting a user decision keeps the local H3 slot. */
+    private readonly confirmationHolds = new Map<string, H3Provider>();
+    constructor(private readonly tasks: TaskStore, private readonly settings: SettingStore, private paused = false) {
+        for (let offset = 0; ; offset += 500) {
+            const waiting = tasks.list({ kind: "canvas-h3-run", status: "awaiting_confirmation", limit: 500, offset });
+            for (const task of waiting) this.confirmationHolds.set(task.id, "local");
+            if (waiting.length < 500) break;
+        }
+    }
 
     status() {
         const config = this.settings.get("runninghub.config") as { concurrency?: unknown } | undefined;
         const value = Number(config?.concurrency ?? 1);
         const limit = Number.isSafeInteger(value) && value > 0 ? value : 1;
-        const stats = (provider: H3Provider, capacity: number) => ({ capacity, active: [...this.active.values()].filter((item) => item === provider).length, queued: [...this.pending.values()].filter((item) => item.provider === provider).length + [...this.reserved.values()].filter((item) => item === provider).length });
+        const stats = (provider: H3Provider, capacity: number) => ({ capacity, active: [...this.active.values()].filter((item) => item === provider).length + [...this.confirmationHolds.values()].filter((item) => item === provider).length, queued: [...this.pending.values()].filter((item) => item.provider === provider).length + [...this.reserved.values()].filter((item) => item === provider).length });
         return { local: stats("local", 1), runninghub: stats("runninghub", limit) };
     }
 
@@ -33,6 +41,14 @@ export class H3ExecutionQueue {
     }
 
     unreserve(id: string) { this.reserved.delete(id); }
+
+    holdForConfirmation(id: string, provider: H3Provider = "local") {
+        this.confirmationHolds.set(id, provider);
+    }
+
+    releaseConfirmationHold(id: string) {
+        if (this.confirmationHolds.delete(id)) this.drain();
+    }
 
     private choose(mode: H3ExecutionMode, remoteReady: boolean, localOnlyReason: string, localReady: boolean): H3Provider {
         if (mode === "runninghub") {
@@ -53,7 +69,12 @@ export class H3ExecutionQueue {
         this.reserved.delete(task.id);
         if (this.pending.has(task.id) || this.active.has(task.id)) return;
         if (!this.tasks.events(task.id).some((event) => event.type === "h3_queued")) this.tasks.addEvent(task.id, "h3_queued", { provider, ...detail });
-        this.pending.set(task.id, { provider, work });
+        const parentTaskId = String(task.params?.parentTaskId || "");
+        const resumesConfirmation = parentTaskId && this.confirmationHolds.has(parentTaskId);
+        if (resumesConfirmation) this.confirmationHolds.delete(parentTaskId);
+        const job = { provider, work };
+        if (resumesConfirmation) this.pending = new Map([[task.id, job], ...this.pending]);
+        else this.pending.set(task.id, job);
         this.drain();
     }
 

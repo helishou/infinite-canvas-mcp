@@ -36,7 +36,8 @@ test("legacy image nodes without reference summaries accept independent edits an
     assert.equal(replay.duplicated, true);
     assert.equal(replay.revision, first.revision);
     assert.equal(f.db.getCanvasProject(legacy.id)!.revision, second.revision);
-    assert.throws(() => f.db.applyCanvasProjectOperations(legacy.id, undefined, [{ type: "update_node", id: input.sourceNodeId, patch: { title: "Conflicting title" } }], { baseRevision }), { code: "FIELD_CONFLICT" });
+    const lastWrite = f.db.applyCanvasProjectOperations(legacy.id, undefined, [{ type: "update_node", id: input.sourceNodeId, patch: { title: "Conflicting title" } }], { baseRevision });
+    assert.equal((lastWrite.project.nodes as any[]).find(node => node.id === input.sourceNodeId).title, "Conflicting title");
 });
 
 function fixture(t: test.TestContext) {
@@ -56,11 +57,16 @@ function fixture(t: test.TestContext) {
     assets.FRAME = { nodeId: "frame", version: "v1", status: "planned" };
     db.applyCanvasProjectOperations("canvas", undefined, [...names.map(id => ({ type: "add_node", id, nodeType: "image", metadata: { storageKey: assets[id].storageKey } })),
         { type: "add_node", id: "frame", nodeType: "image", title: "SH001", position: { x: 1000, y: 0 }, width: 340, height: 260 }]);
-    const source = { fps_num: 24, fps_den: 1, style_policy: "waived", style_policy_reason: "fixture uses an explicit style reference",
-        asset_plan: [...names.map(id => ({ id, kind: "character", version: "v1", depends_on: [] })), { id: "FRAME", kind: "keyframe", version: "v1", depends_on: names }],
-        asset_cards: [{ id: "FRAME", asset_version: "v1", references: names.map((id, index) => ({ image: index + 1, asset_id: id, asset_version: "v1", role: id === "STYLE" ? "style" : "character_identity", subject: id, preserve: "registered traits", exclude: "other identities" })) }],
-        script_scenes: [{ id: "scene", scene_id: "yard", text: "Three characters in the courtyard" }],
-        shots: [{ id: "SH001", scene_id: "yard", start_frame: 0, end_frame: 120, visual: "Neighbor in the background", camera: "static", state_in: {}, state_out: {}, required_assets: names }], segments: [] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1, style_policy: "waived", style_policy_reason: "fixture uses an explicit style reference",
+        subject_registry: [], character_registry: [], scene_registry: [{ id: "yard", name: "Courtyard" }],
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: "main", start_frame: 0 }], initial: [], events: [], requirements: [], coverage: [] },
+        asset_plan: [...names.map(id => ({ id, asset_id: id, asset_name: id, kind: id === "STYLE" ? "style" : "character", version: "v1", depends_on: [] })), { id: "FRAME", asset_id: "FRAME", asset_name: "Opening frame", kind: "keyframe", version: "v1", depends_on: names }],
+        asset_cards: [{ id: "FRAME", asset_version: "v1", references: names.map((id, index) => ({ image: index + 1, asset_id: id, asset_version: "v1", role: id === "STYLE" ? "style" : "character_identity", subject: ["young woman", "older woman", "local resident", "shared outdoor area", "visual language"][index], preserve: "registered traits", exclude: "other identities" })) }],
+        script_scenes: [{ id: "scene", scene_id: "yard", scene_name: "Courtyard", text: "Three characters in the courtyard", beat_ids: ["b1"] }],
+        shots: [{ id: "SH001", source_scene_id: "scene", scene_id: "yard", story_beat_ids: ["b1"], timeline_id: "main", story_order: 0, duration_frames: 120,
+            visual: "Neighbor in the background", camera: { framing: "MS", attention_subject_ids: [] }, subject_usages: [], utterance_refs: [],
+            keyframes: [{ id: "FRAME", assetId: "FRAME", sourceNode: { projectId: "canvas", nodeId: "frame" }, selection: { mode: "latest_success" }, anchor: "opening", subjectIds: [], retain: [], exclude: [], requiredForSubmission: true }] }],
+        segments: [{ id: "SEG_SH001", timeline_id: "main", shot_ids: ["SH001"], mode: "T2VA" }] };
     const sourceHash = directorHash(source), prompt = "Approved shot uses Picture 1 through Picture 5", sha256 = promptHash(prompt);
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), runtimeId: "fixture", patchVersion: "test", version: "1" }, source, sourceHash, assets,
         modules: { assets: { status: "committed", evidence: [], unresolved: [] } }, shotInputs: { SH001: { keyframePolicy: "new", keyframeAssetId: "FRAME", assetIds: names } },
@@ -121,7 +127,7 @@ test("reference removal edits the canvas atomically and preserves director basel
     assert.deepEqual((d.source.asset_cards as any[])[0].references.map((ref: any) => ref.asset_id), f.names);
     assert.deepEqual(current.published, before.published);
     assert.deepEqual(f.stores.tasks.get(task.id)!.input.params, { productionImageInput: frozen });
-    assert.deepEqual(receipt.operations.filter((op: any) => op.type === "update_node").map((op: any) => op.id).sort(), ["frame", input.sourceNodeId].sort());
+    assert.deepEqual(receipt.operations.filter((op: any) => op.type === "update_node").map((op: any) => op.id).sort(), [...new Set(["frame", input.sourceNodeId])].sort());
     assert.equal(f.db.applyCanvasProjectOperations("canvas", revision, request, { operationId: "remove-neighbor" }).duplicated, true);
     assert.equal(f.service.get("ep").revision, current.revision);
     const fakeReady = structuredClone(d); fakeReady.artifacts[0].references = fakeReady.artifacts[0].references.filter(ref => ref.nodeId !== "NEIGHBOR");
@@ -169,7 +175,7 @@ test("adding an approved identity back updates the formal draft and preserves it
     assert.equal(f.service.get("ep").published!.director!.artifacts[0].references.length, 5);
 });
 
-test("new approved media versions refresh only the projection and preserve frozen tasks and old publications", t => {
+test("unapproved asset-source version changes stale only the draft image projection and preserve frozen tasks and old publications", t => {
     const f = fixture(t), old = f.service.get("ep"), frozen = structuredClone(f.input());
     f.stores.tasks.create("old-task", "canvas-image", { params: { productionImageInput: frozen } }, {});
     const bytes = Buffer.from("approved identity v2"), filePath = path.join(f.directory, "CUIZI-v2.png"), storageKey = "image:CUIZI-v2";
@@ -184,7 +190,10 @@ test("new approved media versions refresh only the projection and preserve froze
     d.artifacts[0].sourceHash = d.sourceHash; d.artifacts[0].receipt.sourceHash = d.sourceHash;
     Object.assign(d.artifacts[0].references[0], { storageKey, sha256: d.assets.CUIZI.sha256, assetVersion: "v2" });
     f.service.edit("ep", { operationId: "new-media", expectedRevision: old.revision, ops: [{ type: "set_director_production", director: d }] });
-    assert.equal(f.input().references[0].assetVersion, "v2"); assert.equal(f.input().references[0].storageKey, storageKey);
+    const input = f.input();
+    assert.equal(input.stale, true);
+    assert.equal(input.references[0].assetVersion, "v1");
+    assert.equal(input.references[0].storageKey, "image:CUIZI");
     assert.deepEqual(f.stores.tasks.get("old-task")!.input.params, { productionImageInput: frozen });
     assert.deepEqual(f.service.get("ep").published, old.published);
     assert.throws(() => verifyImageInput(f.project(), old.published!.director!, old.published!.director!.artifacts[0], "frame"), /正式编译不一致/);

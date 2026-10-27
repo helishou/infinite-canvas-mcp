@@ -67,8 +67,8 @@ npx -y @basketikun/canvas-agent
 
 ```bash
 cd canvas-agent
-npm install
-npm run build
+pnpm install --frozen-lockfile
+pnpm --filter @basketikun/canvas-agent run build
 node dist/index.js
 ```
 
@@ -128,7 +128,6 @@ Codex CLI <-> canvas-agent MCP <-> 当前网页画布
 - `canvas_apply_ops`：批量执行画布操作。
 - `canvas_get_selection`：读取当前选中的节点。
 - `canvas_export_snapshot`：导出当前画布快照，用于让 Agent 理解布局。
-- `canvas_create_text_node`：快捷创建文本节点。
 - `canvas_create_generation_flow(mode=image)`：创建当前图片智能配置流程，支持显式参考与 autoRun。
 
 用户本机 Codex 配置示例：

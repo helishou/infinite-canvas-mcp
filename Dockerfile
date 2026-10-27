@@ -1,23 +1,23 @@
-# Build workspace consumers and the built-in H3 plugin from their lockfiles.
+# Build workspace consumers and the built-in H3 plugin from the pinned pnpm workspace.
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY backend/package.json backend/package.json
 COPY canvas-agent/package.json canvas-agent/package.json
 COPY web/package.json web/package.json
-COPY plugins/canvas/sdk plugins/canvas/sdk
-COPY plugins/canvas/minimax-h3/package.json plugins/canvas/minimax-h3/package-lock.json ./plugins/canvas/minimax-h3/
+COPY plugins/canvas/sdk/package.json plugins/canvas/sdk/package.json
+COPY plugins/canvas/minimax-h3/package.json plugins/canvas/minimax-h3/package.json
 COPY scripts/patch-rc-portal.mjs scripts/patch-rc-portal.mjs
-RUN --mount=type=cache,target=/root/.npm npm ci \
-    && npm ci --prefix plugins/canvas/minimax-h3
+RUN npm install --global pnpm@12.12.1 \
+    && pnpm install --frozen-lockfile
 COPY . .
 RUN node scripts/build-official-plugins.mjs \
-    && npm run build --workspace canvas-agent \
-    && npm run build --workspace backend \
-    && VITE_PLUGIN_REGISTRY_URL=/plugins/official-plugins.json npm run build --workspace web
+    && pnpm --filter @basketikun/canvas-agent run build \
+    && pnpm --filter @helishou/infinite-canvas-backend run build \
+    && VITE_PLUGIN_REGISTRY_URL=/plugins/official-plugins.json pnpm --filter infinite-canvas run build
 
 FROM build AS production-deps
-RUN npm prune --omit=dev && mkdir -p backend/node_modules canvas-agent/node_modules
+RUN pnpm --filter @helishou/infinite-canvas-backend --prod deploy /deploy/backend --legacy
 
 # Backend has no GPU/model dependency. ComfyUI is a separately configured service.
 FROM node:22-bookworm-slim AS backend
@@ -25,17 +25,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg python3 python3-pil git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=production-deps /app/node_modules ./node_modules
-COPY --from=production-deps /app/backend/node_modules ./backend/node_modules
-COPY --from=production-deps /app/canvas-agent/node_modules ./canvas-agent/node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/backend/package.json ./backend/package.json
-COPY --from=build /app/backend/dist ./backend/dist
-COPY --from=build /app/backend/workflows ./backend/workflows
-COPY --from=build /app/backend/workers ./backend/workers
-COPY --from=build /app/canvas-agent/package.json ./canvas-agent/package.json
-COPY --from=build /app/canvas-agent/dist ./canvas-agent/dist
-COPY --from=build /app/canvas-agent/agent-instructions.md ./canvas-agent/agent-instructions.md
+COPY --from=production-deps /deploy/backend ./backend
 COPY --from=build /app/scripts/acheng-engine.mjs ./scripts/acheng-engine.mjs
 COPY --from=build /app/scripts/acheng ./scripts/acheng
 ENV NODE_ENV=production \

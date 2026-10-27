@@ -10,9 +10,10 @@ data/
 .idea
 .codegraph/
 .codex-runtime/
+.canvas-runtime/
 .hermes/
 .learnings/
-web/dist
+web/dist*
 web/_test_report.txt
 web/_diag.txt
 
@@ -27,6 +28,12 @@ web/public/plugins
 **/venv/
 **/.venv/
 backend/venv
+
+# python 字节码缓存（import 自动生成，不入库）
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 artifacts
 tmp
 .codex
@@ -37,3 +44,13 @@ tmp
 
 # 第三方输入法缓存（非项目产物，曾被误提交）
 Tencent/
+.workbuddy-ai
+handoff
+# MJ 资产提示词库缩略图（42MB，由 scripts/import-mj-asset-prompts.mjs 从码图对照 HTML 重建，不入库）
+web/public/prompt-sources/mj-assets/
+.agentproblem
+node-compile-cache/
+
+# 一次性交付/实验产物，不入库（磁盘保留）
+deliveries/
+.codex-remote-attachments/

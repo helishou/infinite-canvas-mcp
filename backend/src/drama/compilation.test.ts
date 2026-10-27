@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync, gunzipSync } from "node:zlib";
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService, ProductionConflictError } from "./production.js";
 import { ProductionCompilationService } from "./compilation.js";
@@ -12,6 +13,14 @@ import type { DirectorProduction } from "@basketikun/canvas-agent/drama/producti
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 const externalBlock = { code: "PROMPT_EXTERNAL_CONTEXT", path: "director.source.shots.SH1.visual", targetId: "SEG1", shotId: "SH1", origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, message: "Prompt depends on external prose: preceding segment", severity: "error" as const };
+async function done(compilations: ProductionCompilationService, operationId: string) {
+    for (let attempt = 0; attempt < 300; attempt++) {
+        await new Promise<void>(resolve => setTimeout(resolve, 1));
+        const status = compilations.getCompilation("episode", "episode", operationId);
+        if (!["queued", "running"].includes(status.status)) return status;
+    }
+    throw new Error(`Compilation did not finish: ${operationId}`);
+}
 
 test("located hard blockers reuse across IDs and restart without recompiling or editing production", async t => {
     const { root, service, director, db } = fixture(t);
@@ -20,8 +29,7 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     const jobs = new ProductionCompilationService(service, root, compiler);
     const before = JSON.stringify(service.get("episode"));
     jobs.enqueue("episode", "episode", "blocked-original", 1);
-    await new Promise(resolve => setImmediate(resolve));
-    const first = jobs.getCompilation("episode", "episode", "blocked-original");
+    const first = await done(jobs, "blocked-original");
     assert.equal(first.status, "blocked", "targetId cannot downgrade a hard error to a draft");
     assert.equal(first.blockingDiagnostic?.path, externalBlock.path);
     assert.equal(first.blockingDiagnostic?.shotId, "SH1");
@@ -30,9 +38,11 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     assert.equal("replayed" in replay && replay.replayed, true);
     const directories = fs.readdirSync(root).sort();
     const alias = jobs.enqueue("episode", "episode", "blocked-alias", 1);
-    assert.equal(alias.reused, true);
-    assert.equal(alias.reusedFromOperationId, "blocked-original");
-    assert.equal(alias.operationId, "blocked-alias");
+    assert.ok(["queued", "running"].includes(alias.status));
+    const aliasResult = await done(jobs, "blocked-alias");
+    assert.equal(aliasResult.reused, true);
+    assert.equal(aliasResult.reusedFromOperationId, "blocked-original");
+    assert.equal(aliasResult.operationId, "blocked-alias");
     assert.deepEqual(fs.readdirSync(root).sort(), directories);
     assert.equal(calls, 1);
     const restored = new ProductionCompilationService(service, root, compiler);
@@ -40,7 +50,8 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     const page = restored.getCompilation("episode", "episode", "blocked-alias", "diagnostics", 0, 1);
     assert.ok("items" in page);
     assert.equal(page.items[0].code, externalBlock.code);
-    assert.throws(() => restored.enqueue("episode", "episode", "stale", 0), ProductionConflictError);
+    const staleBase = restored.enqueue("episode", "episode", "stale", 0);
+    assert.equal(staleBase.expectedRevision, service.get("episode").revision, "a stale global cursor compiles the current saved input");
     assert.throws(() => restored.enqueue("episode", "episode", "blocked-alias", 1, director), /IDEMPOTENCY_CONFLICT/);
     assert.throws(() => restored.getCompilation("another", "episode", "blocked-alias"), /不属于/);
     assert.equal(JSON.stringify(service.get("episode")), before);
@@ -48,9 +59,33 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     assert.ok(Buffer.byteLength(JSON.stringify(alias)) < 2500);
 });
 
+test("a compile blocker without targetId is retained as a diagnostic, not promoted to a global block", async t => {
+    const { root, service, director, db } = fixture(t);
+    const prompt = "The authored image prompt";
+    const unscopedBlocker = { code: "UNSCOPED_QUALITY_DIAGNOSTIC", path: "compile.quality", message: "Review this prompt", severity: "error" as const, blockingActions: ["compile"] };
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...input, artifacts: [{ id: "image-STYLE", targetId: "STYLE", kind: "image" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] },
+        exitCode: 0, diagnostics: [unscopedBlocker], audit: {}, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "unscoped-diagnostic"), compiler);
+    const started = compilations.enqueue("episode", "episode", "unscoped-diagnostic", 1);
+    const job = await done(compilations, started.operationId);
+    assert.equal(job.status, "succeeded");
+    assert.equal(job.verdict, "passed_with_warnings");
+    assert.equal(job.blockingDiagnostic?.code, unscopedBlocker.code, "the diagnostic stays visible without making the job globally blocked");
+    const diagnostics = compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 10);
+    assert.ok(diagnostics.items.some((item: any) => item.code === unscopedBlocker.code));
+    const applied = await compilations.apply("episode", "episode", job.preparedId!);
+    assert.equal(applied.mediaSubmitted, false);
+    assert.equal(service.get("episode").draft.director?.artifacts.some(item => item.targetId === "STYLE" && item.status === "ready"), true);
+});
+
 test("fingerprint changes for input, scope, engine and reference bytes; workflow-only updates reuse", async t => {
-    const { root, service, director } = fixture(t);
+    const { root, service, director, db } = fixture(t);
     const media = path.join(root, "ref.png"); fs.writeFileSync(media, "first");
+    const registerMedia = (bytes: Buffer) => db.upsertMediaFile({ storageKey: "image:fixture", filePath: media, mimeType: "image/png", bytes: bytes.length, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString(), sha256: promptHash(bytes) });
+    registerMedia(fs.readFileSync(media));
     service.compilationReferenceFiles = () => ({ "STYLE\0asset": media });
     director.source.asset_plan = [{ id: "STYLE", kind: "prop", depends_on: [] }];
     director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:fixture" };
@@ -60,13 +95,13 @@ test("fingerprint changes for input, scope, engine and reference bytes; workflow
     const jobs = new ProductionCompilationService(service, root, compiler);
     const run = async (id: string, candidate = director, scope?: { targetIds: string[] }) => {
         const receipt = jobs.enqueue("episode", "episode", id, 1, candidate, scope);
-        await new Promise(resolve => setImmediate(resolve));
-        return jobs.getCompilation("episode", "episode", receipt.operationId);
+        return done(jobs, receipt.operationId);
     };
     const first = await run("first");
     const workflow = structuredClone(director); workflow.workflow = { agentThreadId: "different-thread" };
     assert.equal((await run("workflow", workflow)).reused, true);
     fs.writeFileSync(media, "second");
+    registerMedia(fs.readFileSync(media));
     assert.notEqual((await run("reference")).compilerInputFingerprint, first.compilerInputFingerprint);
     const engine = structuredClone(director); engine.engine.runtimeId = "other-runtime";
     assert.equal((await run("engine", engine)).reused, undefined);
@@ -77,10 +112,10 @@ test("fingerprint changes for input, scope, engine and reference bytes; workflow
 });
 
 test("Subject picture binding asset IDs never replace stable Segment compilation targets", async t => {
-    const { service, director, compilations } = fixture(t);
+    const { root, service, director } = fixture(t);
     const candidate = structuredClone(director);
     candidate.source = {
-        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "厨房", text: "", beat_ids: ["BEAT"] }],
         scene_registry: [{ id: "ROOM", name: "厨房" }], subject_registry: [], asset_plan: [], asset_cards: [],
         shots: [{ id: "SHOT", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 96,
@@ -89,58 +124,71 @@ test("Subject picture binding asset IDs never replace stable Segment compilation
         ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
     };
     candidate.sourceHash = directorHash(candidate.source);
+    let compiledTargets: string[] = [];
+    const compilations = new ProductionCompilationService(service, root, input => {
+        compiledTargets = ((input.source.segments || []) as Array<Record<string, unknown>>).map(segment => String(segment.id || ""));
+        const prompt = "A valid compiled Clip prompt";
+        return { director: { ...input, artifacts: compiledTargets.map(targetId => ({ id: `h3-${targetId}`, targetId, kind: "h3" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } })) },
+            exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    });
     const settled = new Promise<void>(resolve => { compilations.onSettled = () => resolve(); });
     const started = compilations.enqueue("episode", "episode", "stable-segment-scope", service.get("episode").revision, candidate);
     assert.ok(["queued", "running"].includes(started.status));
     await settled;
     const completed = compilations.getCompilation("episode", "episode", "stable-segment-scope");
-    assert.equal(completed.status, "succeeded");
+    assert.equal(completed.status, "succeeded", JSON.stringify(completed));
+    assert.deepEqual(compiledTargets, ["CLIP"], "the stable Segment.id, never asset_id, is the compiler target");
 });
 
 test("unknown and compiler-origin failures, running jobs and legacy records never reuse", async t => {
-    const { root, service } = fixture(t);
+    const { root, service, db } = fixture(t);
     let calls = 0;
     let diagnostic = { ...externalBlock, origin: "compiler" as "source" | "compiler" };
     const compiler = (input: DirectorProduction) => { calls++; return { director: input, exitCode: 2, diagnostics: [diagnostic], audit: {}, sourceAdjustments: [], acceptance: {} }; };
     const jobs = new ProductionCompilationService(service, root, compiler);
-    for (const id of ["one", "two"]) { jobs.enqueue("episode", "episode", id, 1); await new Promise(resolve => setImmediate(resolve)); }
+    for (const id of ["one", "two"]) { jobs.enqueue("episode", "episode", id, 1); await done(jobs, id); }
     assert.equal(calls, 2);
     diagnostic = { ...diagnostic, code: "NETWORK_FAILED", origin: "source" };
-    for (const id of ["three", "four"]) { jobs.enqueue("episode", "episode", id, 1); await new Promise(resolve => setImmediate(resolve)); }
+    for (const id of ["three", "four"]) { jobs.enqueue("episode", "episode", id, 1); await done(jobs, id); }
     assert.equal(calls, 4);
     diagnostic = { ...externalBlock };
     jobs.enqueue("episode", "episode", "running-one", 1); jobs.enqueue("episode", "episode", "running-two", 1);
-    await new Promise(resolve => setImmediate(resolve));
+    await done(jobs, "running-one"); await done(jobs, "running-two");
     assert.equal(calls, 6);
-    for (const file of fs.readdirSync(path.join(root, "operations"))) {
-        const location = path.join(root, "operations", file), saved = JSON.parse(fs.readFileSync(location, "utf8"));
-        delete saved.compilerInputFingerprint; fs.writeFileSync(location, JSON.stringify(saved));
+    for (const row of db.db.prepare("SELECT owner,operation_id,job_gzip FROM production_compilation_jobs").all() as Array<{ owner: string; operation_id: string; job_gzip: Uint8Array }>) {
+        const saved = JSON.parse(gunzipSync(Buffer.from(row.job_gzip)).toString("utf8"));
+        delete saved.compilerInputFingerprint;
+        db.db.prepare("UPDATE production_compilation_jobs SET job_gzip=? WHERE owner=? AND operation_id=?").run(gzipSync(Buffer.from(JSON.stringify(saved))), row.owner, row.operation_id);
     }
     assert.equal(jobs.enqueue("episode", "episode", "legacy", 1).reused, undefined);
-    await new Promise(resolve => setImmediate(resolve));
+    await done(jobs, "legacy");
     assert.equal(calls, 7);
 });
 
-test("pool materialization keeps sourceHash stable across full recompiles and self-heals corrupted copies", async t => {
-    const { root, service, director } = fixture(t);
+test("compilation reads registered MediaStore files without creating a duplicate material pool", async t => {
+    const { root, service, director, db } = fixture(t);
     const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
     const style = path.join(legacy, "style-approved.png"), segRef = path.join(legacy, "seg01-ref.png");
     fs.writeFileSync(style, "style bytes");
     fs.writeFileSync(segRef, "segment reference bytes");
-    service.compilationReferenceFiles = () => ({ "STYLE\0asset": style, "SEG01\0first": segRef });
-    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: path.join(root, "old-compile", "inputs", "gone.png") }];
-    director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:fixture" };
-    director.source.segments = [{ id: "SEG01", references: [{ label: "first", image: 1, file: path.join(root, "old-compile", "inputs", "seg-ref.png") }] }];
+    for (const [storageKey, filePath] of [["image:style-fixture", style], ["image:segment-fixture", segRef]]) {
+        const bytes = fs.readFileSync(filePath);
+        db.upsertMediaFile({ storageKey, filePath, mimeType: "image/png", bytes: bytes.length, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString(), sha256: promptHash(bytes) });
+    }
+    service.compilationReferenceFiles = () => ({ "STYLE\0asset": style, "PROP\0asset": segRef });
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: "gone-style.png" }, { id: "PROP", kind: "prop", depends_on: [] }];
+    director.assets = { STYLE: { version: "v1", status: "approved", storageKey: "image:style-fixture" } as any, PROP: { version: "v1", status: "approved", storageKey: "image:segment-fixture" } as any };
     director.sourceHash = directorHash(director.source);
     service.edit("episode", { operationId: "pool-seed", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
     const resolved: string[] = [];
     // Mirrors acheng.ts: approved_file (130-133) and segments[].references[].file (154) are rewritten to the resolver path.
     const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
         const next = structuredClone(input);
-        const styleFile = resolve("STYLE", "asset"), refFile = resolve("SEG01", "first");
+        const styleFile = resolve("STYLE", "asset"), refFile = resolve("PROP", "asset");
         assert.ok(styleFile && refFile);
         (next.source.asset_plan as any[])[0].approved_file = styleFile;
-        (next.source.segments as any[])[0].references[0].file = refFile;
+        (next.source.asset_plan as any[])[1].approved_file = refFile;
         resolved.push(styleFile, refFile);
         next.sourceHash = directorHash(next.source);
         return { director: next, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} };
@@ -149,35 +197,33 @@ test("pool materialization keeps sourceHash stable across full recompiles and se
     const revision = service.get("episode").revision;
     const run = async (operationId: string) => {
         jobs.enqueue("episode", "episode", operationId, revision);
-        await new Promise(resolve => setImmediate(resolve));
-        return jobs.getCompilation("episode", "episode", operationId);
+        return done(jobs, operationId);
     };
     const first = await run("pool-1");
     const second = await run("pool-2");
     assert.equal(first.status, "succeeded");
     assert.equal(second.status, "succeeded");
     assert.ok(first.sourceHash && first.sourceHash === second.sourceHash, "identical inputs must compile to an identical sourceHash");
-    const pool = path.join(root, "inputs");
-    assert.ok(resolved.every(file => path.dirname(file) === pool), "every resolved reference lives in the shared pool");
-    assert.equal(new Set(resolved).size, 2, "identical inputs resolve to identical pool paths");
-    assert.equal(fs.readdirSync(pool).length, 2, "pool holds one content-addressed copy per input");
-    for (const prepared of [first.preparedId!, second.preparedId!]) assert.equal(fs.existsSync(path.join(root, prepared, "inputs")), false, "no per-preparedId material copies");
-    const [poolFile] = fs.readdirSync(pool);
-    const intactBytes = fs.readFileSync(path.join(pool, poolFile), "utf8");
-    fs.writeFileSync(path.join(pool, poolFile), "corrupted");
+    assert.deepEqual(resolved, [style, segRef, style, segRef], "the compiler receives the stable indexed MediaStore paths directly");
+    assert.equal(fs.existsSync(path.join(root, "inputs")), false, "compilation does not create a duplicate material pool");
+    assert.equal(fs.existsSync(path.join(root, first.preparedId!)), false, "terminal compiler working files are cleaned");
+    const intactBytes = fs.readFileSync(style, "utf8");
     const third = await run("pool-3");
     assert.equal(third.status, "succeeded");
-    assert.equal(third.sourceHash, first.sourceHash, "a corrupted pool copy is rewritten from frozen bytes");
-    assert.equal(fs.readFileSync(path.join(pool, poolFile), "utf8"), intactBytes);
+    assert.equal(third.sourceHash, first.sourceHash, "the stable media identity keeps sourceHash unchanged");
+    assert.equal(fs.readFileSync(style, "utf8"), intactBytes, "compiler reads do not mutate MediaStore bytes");
 });
 
-test("prepare and enqueue resolve references to the same pool paths and hashes", async t => {
-    const { root, service, director } = fixture(t);
+test("prepare and enqueue resolve references to the same indexed MediaStore path and hash", async t => {
+    const { root, service, director, db } = fixture(t);
     const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
     const style = path.join(legacy, "style-approved.png");
     fs.writeFileSync(style, "style bytes");
+    const styleBytes = fs.readFileSync(style);
+    db.upsertMediaFile({ storageKey: "image:style-approved", filePath: style, mimeType: "image/png", bytes: styleBytes.length, width: 1, height: 1, durationMs: null, createdAt: new Date().toISOString(), sha256: promptHash(styleBytes) });
     service.compilationReferenceFiles = () => ({ "STYLE\0asset": style });
-    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: path.join(root, "old-compile", "inputs", "gone.png") }];
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: "gone-style.png" }];
+    director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:style-approved" } as any;
     director.sourceHash = directorHash(director.source);
     service.edit("episode", { operationId: "pool-seed-t2", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
     const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
@@ -189,66 +235,30 @@ test("prepare and enqueue resolve references to the same pool paths and hashes",
     const jobs = new ProductionCompilationService(service, root, compiler);
     const revision = service.get("episode").revision;
     jobs.enqueue("episode", "episode", "pool-enqueue", revision);
-    await new Promise(resolve => setImmediate(resolve));
-    const enqueued = jobs.getCompilation("episode", "episode", "pool-enqueue");
-    const prepared = jobs.prepare("episode", "episode", revision);
+    const enqueued = await done(jobs, "pool-enqueue");
+    const prepared = await jobs.prepare("episode", "episode", revision);
     assert.equal(prepared.sourceHash, enqueued.sourceHash, "both entry points must converge on one hash");
     assert.equal(prepared.audit.status, "PASS");
+    const persisted = db.db.prepare("SELECT job_gzip,packet_gzip FROM production_compilation_jobs WHERE operation_id='pool-enqueue'").get() as any;
+    const persistedText = gunzipSync(Buffer.from(persisted.job_gzip)).toString("utf8");
+    const persistedPacket = gunzipSync(Buffer.from(persisted.packet_gzip)).toString("utf8");
+    assert.ok(!persistedText.includes(style) && !persistedPacket.includes(style), "SQLite stores media identity instead of the machine path");
+    assert.ok(persistedPacket.includes("storage-key://image:style-approved"));
 });
 
-test("legacy per-prepared inputs switch to the pool: apply, recheck and recompile keep H3 ready", async t => {
+test("unindexed compiler media is rejected without creating a duplicate source", async t => {
     const { root, service, director } = fixture(t);
     const legacy = path.join(root, "legacy"); fs.mkdirSync(legacy, { recursive: true });
     const segRef = path.join(legacy, "seg01-ref.png");
     fs.writeFileSync(segRef, "segment reference bytes");
-    service.compilationReferenceFiles = () => ({ "SEG01\0first": segRef });
-    director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01", references: [{ label: "first", image: 1, file: path.join(root, "stale-prepare", "inputs", "seg-ref.png") }] }] };
-    const legacyHash = directorHash(director.source);
-    director.sourceHash = legacyHash;
-    service.edit("episode", { operationId: "ledger-v2-legacy", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
-    const compiler = (input: DirectorProduction, _directory: string, resolve: (targetId: string, label: string) => string | undefined) => {
-        const next = structuredClone(input);
-        const refFile = resolve("SEG01", "first");
-        assert.ok(refFile);
-        (next.source.segments as any[])[0].references[0].file = refFile;
-        next.sourceHash = directorHash(next.source);
-        const prompt = "compiled H3 prompt";
-        next.artifacts = [{ id: "h3-SEG01", kind: "h3" as const, targetId: "SEG01", prompt, sha256: promptHash(prompt), sourceHash: next.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: next.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: next.engine.runtimeId, validator: "fixture" } }];
-        return { director: next, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} };
-    };
-    const jobs = new ProductionCompilationService(service, root, compiler);
-    const revision = () => service.get("episode").revision;
-    // First compile after the switch: the rewrite lands on the pool path, so the result hash necessarily differs from the legacy draft hash.
-    jobs.enqueue("episode", "episode", "switch-1", revision());
-    await new Promise(resolve => setImmediate(resolve));
-    const first = jobs.getCompilation("episode", "episode", "switch-1");
-    assert.equal(first.status, "succeeded");
-    const poolHash = first.sourceHash!;
-    assert.notEqual(poolHash, legacyHash, "switching layouts changes the hash exactly once, as expected");
-    const firstTargets: any = jobs.getCompilation("episode", "episode", "switch-1", "targets", 0, 10);
-    assert.equal(firstTargets.items[0].status, "ready", "an unverified continuity report remains a warning and does not downgrade an executable prompt");
-    // Apply stores the pool-path source in the draft.
-    jobs.apply("episode", "episode", first.preparedId!);
-    assert.equal(service.get("episode").draft.director!.sourceHash, poolHash);
-    // Bind a continuity report to the new hash (what production_check_continuity does against the applied draft).
-    const owner = { kind: "episode", id: "episode" };
-    new ProductionContinuityReports(path.join(root, "production-compilations", "continuity")).persist(owner, "check-pool", "check-request", {
-        owner, snapshot: "draft", snapshotVersion: 0, sourceHash: poolHash, runtimeId: director.engine.runtimeId, revision: revision(),
-        verdict: "passed", selectedTargets: ["SEG01"], checkedAt: new Date().toISOString(), diagnostics: [],
-    } as any);
-    // Second full compile: the pool path is stable, so the hash must not drift and the gate must pass.
-    jobs.enqueue("episode", "episode", "switch-2", revision());
-    await new Promise(resolve => setImmediate(resolve));
-    const second = jobs.getCompilation("episode", "episode", "switch-2");
-    assert.equal(second.status, "succeeded");
-    assert.equal(second.sourceHash, poolHash, "zero drift once inputs live in the content-addressed pool");
-    const secondTargets: any = jobs.getCompilation("episode", "episode", "switch-2", "targets", 0, 10);
-    assert.equal(secondTargets.items[0].status, "ready", "H3 stays ready without waiting for a continuity report");
-    jobs.apply("episode", "episode", second.preparedId!);
-    const draft = service.get("episode").draft.director!;
-    assert.equal(draft.sourceHash, poolHash);
-    assert.equal(draft.artifacts[0].status, "ready");
-    assert.equal((draft.artifacts[0].receipt.continuityDiagnostics ?? []).length, 0);
+    service.compilationReferenceFiles = () => ({ "STYLE\0asset": segRef });
+    director.source.asset_plan = [{ id: "STYLE", kind: "style", depends_on: [], approved_file: "unregistered-style.png" }];
+    director.assets.STYLE = { version: "v1", status: "approved", storageKey: "image:not-indexed" } as any;
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "unindexed-media", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const jobs = new ProductionCompilationService(service, root, input => ({ director: input, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} }));
+    assert.throws(() => jobs.enqueue("episode", "episode", "unindexed-media-compile", 2), /尚未归档到 Backend MediaStore/);
+    assert.equal(fs.existsSync(path.join(root, "inputs")), false);
 });
 
 function fixture(t: test.TestContext) {
@@ -258,7 +268,7 @@ function fixture(t: test.TestContext) {
     db.createCanvasProject({ id: "canvas", title: "Canvas", nodes: [], connections: [] });
     db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "Episode", synopsis: "", fullPlot: "", canvasId: "canvas" });
     const service = new EpisodeProductionService(db, undefined, root, false, () => {});
-    const source = { brief: "Preserve the sample", shots: [], segments: [], asset_plan: [], asset_cards: [{ id: "STYLE", prompt: "The authored image prompt" }] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "Preserve the sample", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], asset_cards: [{ id: "STYLE", prompt: "The authored image prompt" }], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "fixture", runtimeId: "fixture", version: "fixture" }, source, sourceHash: directorHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
     service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const compiler = (input: DirectorProduction) => ({ director: input, exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {} });
@@ -268,7 +278,7 @@ function fixture(t: test.TestContext) {
 }
 
 test("unchanged full compilation reuses artifacts and a scoped edit compiles only its invalid target", async t => {
-    const { root, service, director } = fixture(t);
+    const { root, service, director, db } = fixture(t);
     director.source.asset_plan = ["A", "B"].map(id => ({ id, kind: "prop", depends_on: [] }));
     director.source.asset_cards = ["A", "B"].map(id => ({ id, prompt: `authored ${id}` }));
     director.sourceHash = directorHash(director.source);
@@ -285,28 +295,23 @@ test("unchanged full compilation reuses artifacts and a scoped edit compiles onl
     const jobs = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
     const run = async (operationId: string, scope?: { targetIds: string[] }) => {
         jobs.enqueue("episode", "episode", operationId, service.get("episode").revision, undefined, scope);
-        await new Promise(resolve => setImmediate(resolve));
-        const job = jobs.getCompilation("episode", "episode", operationId);
+        const job = await done(jobs, operationId);
         assert.equal(job.status, "succeeded");
-        jobs.apply("episode", "episode", job.preparedId!);
+        await jobs.apply("episode", "episode", job.preparedId!);
         return job;
     };
     await run("initial", { targetIds: ["A", "B"] });
     await run("unchanged-full");
     assert.deepEqual(calls, [["A", "B"]], "an unscoped unchanged request must not invoke the compiler again");
-    const current = service.get("episode"), changed = structuredClone(current.draft.director!);
-    const originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
-    (changed.source.asset_cards as Array<{ id: string; prompt: string }>)[1].prompt = "revised B";
-    changed.sourceHash = directorHash(changed.source);
-    changed.artifacts.find(item => item.targetId === "B")!.status = "draft";
-    service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "set_director_production", director: changed }] });
+    const current = service.get("episode"), originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
+    await service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "asset_card", id: "B", patch: { prompt: "revised B" } }] });
     await run("partial", { targetIds: ["A", "B"] });
     assert.deepEqual(calls, [["A", "B"], ["B"]]);
     const after = service.get("episode").draft.director!;
     assert.deepEqual(after.artifacts.find(item => item.targetId === "A"), originalA, "reuse retains the actual original receipt and bytes");
     assert.equal(after.artifacts.find(item => item.targetId === "B")!.prompt, "revised B");
     assert.ok(after.artifacts.every(item => currentCompilationArtifact(after, item)));
-    const prepared = jobs.prepare("episode", "episode", service.get("episode").revision);
+    const prepared = await jobs.prepare("episode", "episode", service.get("episode").revision);
     assert.equal(prepared.audit.status, "REUSED");
     assert.equal(calls.length, 2, "synchronous preparation uses the same reuse rules");
 });
@@ -326,8 +331,8 @@ test("prompt bytes and receipt hashes must match before a ready artifact is reus
         return { director: next, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     });
     jobs.enqueue("episode", "episode", "tampered", 1, director, { targetIds: ["STYLE"] });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(jobs.getCompilation("episode", "episode", "tampered").status, "succeeded");
+    const tampered = await done(jobs, "tampered");
+    assert.equal(tampered.status, "succeeded", JSON.stringify(tampered));
     assert.equal(calls, 1);
     const targets: any = jobs.getCompilation("episode", "episode", "tampered", "targets", 0, 10);
     assert.equal(targets.items[0].sha256, promptHash(prompt));
@@ -353,7 +358,14 @@ test("repeated media bindings read bytes once per verification and still reject 
     assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed|内容已发生变化/);
     director.assets.B.sha256 = promptHash(bytes);
     director.assets.B.nodeId = "missing-node";
-    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/);
+    assert.doesNotThrow(() => service.verifyCompilationBindings("episode", director), "unreferenced cached asset metadata must not block a current compile after its source binding moves");
+    const prompt = "A current compiled prompt";
+    const digest = promptHash(prompt);
+    director.artifacts = [{ id: "h3-A", kind: "h3", targetId: "A", prompt, sha256: digest, sourceHash: director.sourceHash, status: "ready",
+        references: [{ label: "<Picture 1>", nodeId: "missing-node", storageKey, sha256: promptHash(bytes), role: "environment" }],
+        receipt: { sourceHash: director.sourceHash, promptHash: digest, engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/,
+        "a current compiled reference must still belong to its recorded canvas node");
 });
 
 test("scoped asset-only compilation applies with ledger v2 before video continuity is authored", async t => {
@@ -369,18 +381,18 @@ test("scoped asset-only compilation applies with ledger v2 before video continui
             exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     }) as any);
     jobs.enqueue("episode", "episode", "asset-only", 2, undefined, { targetIds: ["STYLE"] });
-    await new Promise(resolve => setImmediate(resolve));
-    const job = jobs.getCompilation("episode", "episode", "asset-only");
+    const job = await done(jobs, "asset-only");
     assert.equal(job.status, "succeeded");
-    jobs.apply("episode", "episode", job.preparedId!);
+    await jobs.apply("episode", "episode", job.preparedId!);
     assert.equal(service.get("episode").draft.director!.artifacts[0].status, "ready");
-    assert.equal(jobs.apply("episode", "episode", job.preparedId!).replayed, true);
+    assert.equal((await jobs.apply("episode", "episode", job.preparedId!)).replayed, true);
 });
 
 test("three scoped compiler jobs overlap and merge disjoint results without overwriting revisions", async t => {
     const { root, service, director } = fixture(t);
     director.source = { ...director.source, script_scenes: ["A", "B", "C"].map(id => ({ id, scene_id: id, text: "confirmed" })),
-        shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, visual: id, required_assets: [] })), segments: [],
+        shots: ["A", "B", "C"].map(id => ({ id: `S${id}`, source_scene_id: id, scene_id: id, timeline_id: id, story_order: 0, visual: id, duration_frames: 120, subject_usages: [] })),
+        segments: ["A", "B", "C"].map(id => ({ id: `CLIP${id}`, shot_ids: [`S${id}`] })),
         asset_plan: ["A", "B", "C"].map(id => ({ id: `K${id}`, kind: "keyframe", canvas_scope: "episode", shot_ids: [`S${id}`] })),
         asset_cards: ["A", "B", "C"].map(id => ({ id: `K${id}`, prompt: "authored image" })) };
     director.shotInputs = Object.fromEntries(["A", "B", "C"].map(id => [`S${id}`, { assetIds: [], keyframePolicy: "new", keyframeAssetId: `K${id}` }]));
@@ -391,35 +403,38 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
         concurrent++; peak = Math.max(peak, concurrent);
         await new Promise<void>(resolve => releases.push(resolve)); concurrent--;
         const targetId = String((input.source.asset_plan as any[])[0]?.id || `K${(input.source.shots as any[])[0]?.source_scene_id}`), prompt = `compiled ${targetId}`;
-        return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+        const scope = (input.source as any)._canvas_compilation_scope.scope;
+        const current = service.get("episode").draft.director!;
+        const inputHash = compilationScopeInput({ ...current, engine: input.engine }, scope).inputHash;
+        return { director: { ...input, artifacts: [{ id: `image-${targetId}`, kind: "image" as const, targetId, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash, status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, engine: input.engine, compilationScope: { scope, inputHash, engine: input.engine }, validator: "fixture" } }] }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
     };
     const jobs = new ProductionCompilationService(service, root, compiler as any);
-    for (const sceneId of ["A", "B", "C"]) jobs.enqueue("episode", "episode", `compile-${sceneId}`, 2, undefined, { sceneId });
-    await new Promise(resolve => setImmediate(resolve));
+    for (const sceneId of ["A", "B", "C"]) jobs.enqueue("episode", "episode", `compile-${sceneId}`, 2, undefined, { targetIds: [`K${sceneId}`] });
+    for (let attempt = 0; attempt < 30 && releases.length < 3; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(releases.length, 3); assert.equal(peak, 3); releases.forEach(release => release());
-    await new Promise(resolve => setImmediate(resolve));
+    for (const sceneId of ["A", "B", "C"]) await done(jobs, `compile-${sceneId}`);
     for (const sceneId of ["A", "B", "C"]) {
         const job = jobs.getCompilation("episode", "episode", `compile-${sceneId}`);
-        assert.equal(job.status, "succeeded", JSON.stringify(job)); jobs.apply("episode", "episode", job.preparedId!);
+        assert.equal(job.status, "succeeded", JSON.stringify(job)); await jobs.apply("episode", "episode", job.preparedId!);
     }
     const current = service.get("episode");
     assert.equal(current.draft.director!.artifacts.length, 3);
     assert.deepEqual(current.draft.director!.artifacts.map(item => item.targetId).sort(), ["KA", "KB", "KC"]);
     const job = jobs.getCompilation("episode", "episode", "compile-A");
-    assert.equal(jobs.apply("episode", "episode", job.preparedId!).replayed, true);
+    assert.equal((await jobs.apply("episode", "episode", job.preparedId!)).replayed, true);
     const b = current.draft.director!.artifacts.find(item => item.targetId === "KB")!;
     const originalHash = b.sourceHash;
     const next = structuredClone(current.draft.director!);
     next.engine = { commit: "b".repeat(40), patchVersion: "next", runtimeId: "next", version: "next" };
-    jobs.enqueue("episode", "episode", "compile-A-new-engine", current.revision, next, { sceneId: "A" });
-    await new Promise(resolve => setImmediate(resolve));
+    jobs.enqueue("episode", "episode", "compile-A-new-engine", current.revision, next, { targetIds: ["KA"] });
+    for (let attempt = 0; attempt < 30 && releases.length < 4; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(releases.length, 4, "same-source artifacts from an older compiler must not skip the requested new compilation");
-    releases[3](); await new Promise(resolve => setImmediate(resolve));
+    releases[3](); await done(jobs, "compile-A-new-engine");
     const newer = jobs.getCompilation("episode", "episode", "compile-A-new-engine");
-    assert.equal(newer.status, "succeeded"); jobs.apply("episode", "episode", newer.preparedId!);
+    assert.equal(newer.status, "blocked", "a candidate compiled with an engine not present in the current target manifest must not be applied");
     const mixed = service.get("episode");
-    assert.equal(mixed.draft.director!.engine.runtimeId, "next");
-    assert.equal(mixed.draft.director!.artifacts.find(item => item.targetId === "KA")!.receipt.engineRuntimeId, "next");
+    assert.equal(mixed.draft.director!.engine.runtimeId, "fixture");
+    assert.equal(mixed.draft.director!.artifacts.find(item => item.targetId === "KA")!.receipt.engineRuntimeId, "fixture");
     const preservedB = mixed.draft.director!.artifacts.find(item => item.targetId === "KB")!;
     assert.equal(preservedB.prompt, b.prompt);
     assert.equal(preservedB.receipt.engineRuntimeId, b.receipt.engineRuntimeId);
@@ -427,53 +442,59 @@ test("three scoped compiler jobs overlap and merge disjoint results without over
     service.edit("episode", { operationId: "change-A", expectedRevision: mixed.revision, ops: [{ type: "patch_director_source", entity: "shot", id: "SA", patch: { visual: "changed A" } }] });
     const changed = service.get("episode").draft.director!;
     assert.equal(currentCompilationArtifact(changed, preservedB), true); assert.equal(preservedB.sourceHash, originalHash);
-    assert.throws(() => jobs.apply("episode", "other", job.preparedId!), /different production/);
-    assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["KB"]);
+    await assert.rejects(() => jobs.apply("episode", "other", job.preparedId!), /different production/);
+    assert.deepEqual(compilationScopeInput(changed, { sceneId: "B" }).targetIds, ["CLIPB"]);
 });
 
-test("prepare is read-only; frozen apply is atomic and idempotent", t => {
+test("prepare is read-only; frozen apply is atomic and idempotent", async t => {
     const { db, service, compilations } = fixture(t);
     const before = service.get("episode");
-    const prepared = compilations.prepare("episode", "episode", 1);
+    const prepared = await compilations.prepare("episode", "episode", 1);
     assert.deepEqual(service.get("episode"), before);
+    const storedPacket = db.db.prepare("SELECT packet_gzip,packet_hash,source_hash FROM production_compilation_jobs WHERE prepared_id=?").get(prepared.preparedId) as any;
+    assert.ok(storedPacket?.packet_gzip);
+    assert.equal(storedPacket.source_hash, prepared.sourceHash);
     assert.equal(db.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='runtime_tasks'").get()?.n, 0);
-    const applied = compilations.apply("episode", "episode", prepared.preparedId);
+    const applied = await compilations.apply("episode", "episode", prepared.preparedId);
     assert.equal(applied.revision, 2);
     assert.equal(applied.mediaSubmitted, false);
-    assert.equal(compilations.apply("episode", "episode", prepared.preparedId).replayed, true);
+    assert.equal((await compilations.apply("episode", "episode", prepared.preparedId)).replayed, true);
+    assert.equal((db.db.prepare("SELECT packet_gzip FROM production_compilation_jobs WHERE prepared_id=?").get(prepared.preparedId) as any)?.packet_gzip, null,
+        "an applied packet is compacted after the production operation receipt is available");
     assert.equal(service.get("episode").revision, 2);
 });
 
-test("changed revision and owner cannot overwrite a production; old engine metadata does not lock compilation", t => {
+test("unrelated revision growth does not block compilation, but changed compile input does", async t => {
     const { service, compilations, director } = fixture(t);
-    const prepared = compilations.prepare("episode", "episode", 1);
-    assert.throws(() => compilations.prepare("episode", "episode", 0), ProductionConflictError);
-    assert.ok(compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }).preparedId);
-    assert.throws(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
+    const originalBrief = service.get("episode").draft.director?.source.brief;
+    const prepared = await compilations.prepare("episode", "episode", 1);
+    assert.ok((await compilations.prepare("episode", "episode", 0)).preparedId, "a stale global cursor can compile the current saved input");
+    await assert.rejects(() => compilations.prepare("episode", "episode", 1, { ...director, engine: { ...director.engine, runtimeId: "other" } }), ProductionConflictError,
+        "the compiler runtime is part of the frozen target manifest");
+    await assert.rejects(() => compilations.apply("episode", "canvas", prepared.preparedId), /different production/);
     service.edit("episode", { operationId: "concurrent", expectedRevision: 1, ops: [{ type: "set_director_brief", brief: "Another window's edit" }] });
-    assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);
-    assert.equal(service.get("episode").draft.director?.source.brief, "Another window's edit");
+    await assert.rejects(() => compilations.apply("episode", "episode", prepared.preparedId), ProductionConflictError);
+    assert.equal(service.get("episode").draft.director?.source.brief, "Another window's edit", "a changed target input blocks the stale prepared packet");
+    assert.notEqual(service.get("episode").draft.director?.source.brief, originalBrief);
 });
 
-test("tampered compiler packet is rejected without a revision change", t => {
-    const { root, service, compilations } = fixture(t);
-    const prepared = compilations.prepare("episode", "episode", 1);
-    const file = path.join(root, prepared.preparedId, "packet.json");
-    const packet = JSON.parse(fs.readFileSync(file, "utf8"));
-    packet.director.source.brief = "Altered after compilation";
-    fs.writeFileSync(file, JSON.stringify(packet));
-    assert.throws(() => compilations.apply("episode", "episode", prepared.preparedId), /bytes changed/);
+test("tampered compiler packet is rejected without a revision change", async t => {
+    const { service, compilations, db } = fixture(t);
+    const prepared = await compilations.prepare("episode", "episode", 1);
+    db.db.prepare("UPDATE production_compilation_jobs SET packet_gzip=? WHERE prepared_id=?").run(Buffer.from("tampered"), prepared.preparedId);
+    await assert.rejects(() => compilations.apply("episode", "episode", prepared.preparedId), /bytes changed/);
     assert.equal(service.get("episode").revision, 1);
 });
 
-test("continuity issues remain target-level warnings while H3 prompts apply and publish", t => {
-    const { root, service, director } = fixture(t);
-    director.source = { ...director.source, ledger: { contract_version: 2 }, segments: [{ id: "SEG01" }, { id: "SEG02" }] };
+test("continuity issues remain target-level warnings while H3 prompts apply and publish", async t => {
+    const { root, service, director, db } = fixture(t);
+    director.source = { ...director.source, ledger: { contract_version: 2 }, script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "Room", text: "", beat_ids: [] }], shots: [{ id: "SH1", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 120 }, { id: "SH2", scene_id: "ROOM", timeline_id: "main", story_order: 1, duration_frames: 120 }], segments: [{ id: "SEG01", shot_ids: ["SH1"], mode: "T2VA" }, { id: "SEG02", shot_ids: ["SH2"], mode: "T2VA" }] };
     director.sourceHash = directorHash(director.source);
     service.edit("episode", { operationId: "ledger-v2", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const savedSourceHash = service.get("episode").draft.director!.sourceHash;
     const owner = { kind: "episode", id: "episode" };
-    new ProductionContinuityReports(path.join(root, "production-compilations", "continuity")).persist(owner, "check-partial", "check-request", {
-        owner, snapshot: "draft", snapshotVersion: 0, sourceHash: director.sourceHash, runtimeId: director.engine.runtimeId, revision: 2,
+    new ProductionContinuityReports(db).persist(owner, "check-partial", "check-request", {
+        owner, snapshot: "draft", snapshotVersion: 0, sourceHash: savedSourceHash, runtimeId: director.engine.runtimeId, revision: 2,
         verdict: "blocked", selectedTargets: ["SEG01", "SEG02"], checkedAt: "2026-10-06T00:00:00.000Z",
         diagnostics: [{ code: "CONTINUITY_COVERAGE_MISSING", message: "SEG02 is missing coverage", severity: "error", affectedTargets: ["SEG02"] }],
     });
@@ -483,14 +504,14 @@ test("continuity issues remain target-level warnings while H3 prompts apply and 
         exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {},
     });
     const compilations = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
-    const preflight = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    const preflight = await service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
     assert.equal(preflight.valid, true);
     assert.ok(preflight.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
-    const prepared = compilations.prepare("episode", "episode", 2);
+    const prepared = await compilations.prepare("episode", "episode", 2);
     assert.deepEqual(prepared.targets.map(item => [item.targetId, item.status]), [["SEG01", "ready"], ["SEG02", "ready"]]);
     assert.ok(prepared.diagnostics.some(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED"));
     assert.ok(prepared.diagnostics.filter(item => item.targetId === "SEG02" && item.code === "CONTINUITY_BLOCKED").every(item => item.severity === "warning"));
-    const applied = compilations.apply("episode", "episode", prepared.preparedId);
+    const applied = await compilations.apply("episode", "episode", prepared.preparedId);
     assert.equal(applied.mediaSubmitted, false);
     const current = service.get("episode");
     assert.equal(current.draft.director?.artifacts.find(item => item.targetId === "SEG01")?.status, "ready");
@@ -516,7 +537,7 @@ test("binding diagnostics expose source, draft and published versions separately
     assert.equal(service.get("episode").revision, 2);
 });
 
-test("story-only compile is blocked before a compiler packet or task is created", t => {
+test("story-only compile is blocked before a compiler packet or task is created", async t => {
     const { root, service, director, db } = fixture(t);
     director.source.asset_cards = [];
     director.sourceHash = directorHash(director.source);
@@ -526,20 +547,20 @@ test("story-only compile is blocked before a compiler packet or task is created"
     const packets = path.join(root, "packets");
     const compilations = new ProductionCompilationService(service, packets, compiler);
     const before = service.get("episode");
-    const checked = service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
+    const checked = await service.preflight("episode", { action: "compile", request: { expectedRevision: 2 } });
     assert.equal(checked.valid, false); assert.equal(checked.compileReady, false);
     assert.equal(checked.diagnostics[0].code, "COMPILE_STAGE_NOT_READY");
-    assert.throws(() => compilations.prepare("episode", "episode", 2), (error: any) => error.diagnostics?.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
+    await assert.rejects(() => compilations.prepare("episode", "episode", 2), (error: any) => error.diagnostics?.some((item: any) => item.code === "COMPILE_STAGE_NOT_READY"));
     assert.equal(compilerCalls, 0);
     assert.equal(fs.existsSync(packets), false);
     assert.deepEqual(service.get("episode"), before);
     assert.equal(db.db.prepare("SELECT count(*) n FROM sqlite_master WHERE name='runtime_tasks'").get()?.n, 0);
 });
 
-test("missing identity media applies a compiled text draft while keeping generation unavailable", async t => {
+test("missing identity media leaves a draft prompt unapplied and generation unavailable", async t => {
     const { root, service, director } = fixture(t);
     director.source = {
-        prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [{ id: "P", name: "Person" }], scene_registry: [{ id: "SCENE", name: "Room" }],
         script_scenes: [{ id: "SCENE", scene_id: "SCENE", scene_name: "Room", text: "", beat_ids: [] }],
         subject_registry: [{ id: "P", kind: "character", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "character", id: "P" }, pictureBindings: [] }],
@@ -563,14 +584,72 @@ test("missing identity media applies a compiled text draft while keeping generat
     });
     const compilations = new ProductionCompilationService(service, path.join(root, "draft-packets"), compiler);
     const started = compilations.enqueue("episode", "episode", "missing-image-draft", revision);
-    await new Promise(resolve => setImmediate(resolve));
-    const job = compilations.getCompilation("episode", "episode", started.operationId);
-    assert.equal(job.status, "succeeded");
+    const job = await done(compilations, started.operationId);
+    assert.equal(job.status, "blocked", JSON.stringify(job));
     const targetPage = compilations.getCompilation("episode", "episode", started.operationId, "targets", 0, 10);
     assert.equal(targetPage.items[0]?.status, "draft");
-    const applied = compilations.apply("episode", "episode", job.preparedId!);
-    assert.equal(applied.mediaSubmitted, false);
+    assert.equal(service.get("episode").draft.director!.artifacts.some(item => item.targetId === "C1"), false, "a packet without any ready scoped output is not applicable");
     const stored = service.get("episode").draft.director!;
-    assert.equal(stored.artifacts.find(item => item.targetId === "C1")?.status, "draft");
-    assert.deepEqual(stored.artifacts.find(item => item.targetId === "C1")?.references, []);
+    assert.equal(stored.sourceHash, director.sourceHash);
+    assert.equal(stored.artifacts.find(item => item.targetId === "C1")?.status, undefined);
+});
+
+test("a compile without a valid receipt auto-runs the formal continuity check, then reuses that receipt", async t => {
+    const { root, db, service, director } = fixture(t);
+    director.source = { ...director.source, script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "Room", text: "", beat_ids: [] }],
+        shots: [{ id: "SH1", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 120 }],
+        segments: [{ id: "SEG01", shot_ids: ["SH1"], mode: "T2VA" }] };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "ledger-v2-autocheck", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const prompt = "compiled H3 prompt";
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...structuredClone(input), artifacts: [{ id: "h3-SEG01", kind: "h3" as const, targetId: "SEG01", prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] },
+        exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "packets"), compiler);
+    const revision = () => service.get("episode").revision;
+    compilations.enqueue("episode", "episode", "autocheck-1", revision());
+    const first = await done(compilations, "autocheck-1");
+    assert.equal(first.status, "succeeded");
+    assert.equal(first.continuityReceipt?.autoChecked, true, "missing receipt must trigger the formal check automatically");
+    const diagnostics: any[] = compilations.getCompilation("episode", "episode", "autocheck-1", "diagnostics", 0, 50).items;
+    assert.ok(!diagnostics.some(item => item.code === "CONTINUITY_REPORT_REQUIRED"), "the fresh receipt replaces the missing-receipt warning");
+    const readReports = () => (db.db.prepare("SELECT report_gzip FROM production_continuity_reports WHERE owner_kind='episode' AND owner_id='episode'").all() as Array<{ report_gzip: Uint8Array }>)
+        .map(row => JSON.parse(gunzipSync(Buffer.from(row.report_gzip)).toString("utf8")));
+    assert.equal(readReports().length, 1);
+    const report = readReports()[0];
+    assert.ok(String(report.operationId).startsWith("compile-auto:"));
+    assert.equal(report.sourceHash, first.sourceHash);
+    assert.deepEqual(report.selectedTargets, ["SEG01"]);
+    await compilations.apply("episode", "episode", first.preparedId!);
+    assert.equal(service.get("episode").draft.director!.sourceHash, first.sourceHash);
+    compilations.enqueue("episode", "episode", "autocheck-2", revision());
+    const second = await done(compilations, "autocheck-2");
+    assert.equal(second.status, "succeeded");
+    assert.notEqual(second.continuityReceipt?.autoChecked, true, "a valid receipt is reused without rerunning the check");
+    assert.equal(readReports().length, 1, "reusing the receipt must not spawn another audit");
+});
+
+test("a failed auto continuity check falls back to the warning-only gate instead of blocking compilation", async t => {
+    const { root, service, director } = fixture(t);
+    director.source = { ...director.source, script_scenes: [{ id: "SCENE", scene_id: "ROOM", scene_name: "Room", text: "", beat_ids: [] }],
+        shots: [{ id: "SH1", scene_id: "ROOM", timeline_id: "main", story_order: 0, duration_frames: 120 }],
+        segments: [{ id: "SEG01", shot_ids: ["SH1"], mode: "T2VA" }] };
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "ledger-v2-fallback", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    (service as any).autoRecordContinuityForDirector = () => { throw new Error("validator offline"); };
+    const prompt = "compiled H3 prompt";
+    const compiler = (input: DirectorProduction) => ({
+        director: { ...structuredClone(input), artifacts: [{ id: "h3-SEG01", kind: "h3" as const, targetId: "SEG01", prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+            status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } }] },
+        exitCode: 0, diagnostics: [], audit: { status: "PASS" }, sourceAdjustments: [], acceptance: {},
+    });
+    const compilations = new ProductionCompilationService(service, path.join(root, "fallback-packets"), compiler);
+    const started = compilations.enqueue("episode", "episode", "autocheck-fallback", service.get("episode").revision);
+    const job = await done(compilations, started.operationId);
+    assert.equal(job.status, "succeeded", "an audit failure degrades to the old behavior, never blocks the compile");
+    assert.equal(job.continuityReceipt?.autoChecked, undefined);
+    const diagnostics: any[] = compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 50).items;
+    assert.ok(diagnostics.some(item => item.code === "CONTINUITY_REPORT_REQUIRED" && item.severity === "warning"));
 });

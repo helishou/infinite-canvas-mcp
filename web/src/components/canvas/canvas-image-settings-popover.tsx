@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
-import { CanvasSettingsContext } from "./canvas-settings-context";
 import { canvasSettingsPosition } from "./canvas-settings-position";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
@@ -17,6 +16,8 @@ type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
     targetLabel?: string;
     onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
+    runTargetOverride?: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
     onMissingConfig?: () => void;
     onOpenChange?: (open: boolean) => void;
     buttonClassName?: string;
@@ -32,7 +33,7 @@ type CanvasImageSettingsPopoverProps = {
     referenceCount?: number;
 };
 
-export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange, runTargetOverride, onRunTargetChange, onOpenChange, buttonClassName, placement = "topLeft", comfyParams, onComfyParamsChange, onPromptRequiredChange, referenceCount = 0 }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const updateConfig = useConfigStore((state) => state.updateConfig);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -125,7 +126,10 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
         onPromptRequiredChange?.(workflowDetail?.name === workflowName && workflowRequiresPrompt(workflowDetail));
     }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
-    const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const activeWorkflowDetail = workflowDetail?.name === workflowName ? workflowDetail : null;
+    const customFields = (activeWorkflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, activeWorkflowDetail?.workflow) && !field.isPrompt);
+    const hasRunningHubBinding = Boolean(activeWorkflowDetail?.config?.runningHubProfileId);
+    const runTarget = runTargetOverride || activeWorkflowDetail?.config?.runTarget || "local";
     const aspectField = customFields.find((field) => field.input === "aspect_ratio" && field.type === "dropdown");
     const routedParams = aspectField ? resolveModelWorkflowParams(config, config.model, referenceCount) : {};
     const selectedAspect = aspectField ? workflowAspectOption(aspectField, comfyParams?.[aspectField.id], routedParams[aspectField.id], activeSize) : undefined;
@@ -168,7 +172,6 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
                 placement={placement}
                 theme={theme}
                 config={config}
-                targetLabel={targetLabel}
                 onConfigChange={(key, value) => {
                     onConfigChange(key, value);
                     updateConfig(key, value);
@@ -186,6 +189,9 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
                 workflowParamsMissing={workflowParamsMissing}
                 workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
                 debugScenario={`${scenario} · ${referenceCount} 张参考图`}
+                showRunTarget={hasRunningHubBinding}
+                runTarget={runTarget}
+                onRunTargetChange={onRunTargetChange}
             />
         ) : null;
 
@@ -217,7 +223,6 @@ function ImageSettingsPortal({
     panelRef,
     placement,
     theme,
-    targetLabel,
     config,
     onConfigChange,
     customFields,
@@ -227,13 +232,15 @@ function ImageSettingsPortal({
     workflowParamsMissing,
     workflowParamsBlockedByScenario,
     debugScenario,
+    showRunTarget,
+    runTarget,
+    onRunTargetChange,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
-    targetLabel?: string;
     onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
@@ -242,6 +249,9 @@ function ImageSettingsPortal({
     workflowParamsMissing: boolean;
     workflowParamsBlockedByScenario: boolean;
     debugScenario: string;
+    showRunTarget: boolean;
+    runTarget: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
 }) {
     const style = {
         position: "fixed",
@@ -249,21 +259,21 @@ function ImageSettingsPortal({
         ...canvasSettingsPosition(buttonRect, { width: window.innerWidth, height: window.innerHeight }, placement),
         boxSizing: "border-box",
         background: theme.toolbar.panel,
-        borderRadius: 18,
-        boxShadow: "0 18px 54px rgba(28, 25, 23, 0.16)",
-        padding: 18,
+        borderRadius: 14,
+        boxShadow: "0 12px 36px rgba(28, 25, 23, 0.16)",
+        padding: 8,
         overflowY: "auto",
         color: theme.node.text,
     } as const;
 
     return <CanvasPortal>
-        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-            <CanvasSettingsContext targetLabel={targetLabel} updatesImageDefaults />
+        <div ref={panelRef} data-canvas-shortcuts-ignore data-canvas-no-zoom className="canvas-image-settings-popover [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
             <ImageSettingsPanel
                 config={config}
                 onConfigChange={(key, value) => onConfigChange(key, value)}
                 theme={theme}
-                className="space-y-4"
+                className="space-y-2"
+                compact
                 customFields={customFields}
                 customFieldValues={customFieldValues}
                 onCustomFieldChange={onCustomFieldChange}
@@ -271,6 +281,9 @@ function ImageSettingsPortal({
                 workflowParamsMissing={workflowParamsMissing}
                 workflowParamsBlockedByScenario={workflowParamsBlockedByScenario}
                 debugScenario={debugScenario}
+                showRunTarget={showRunTarget}
+                runTarget={runTarget}
+                onRunTargetChange={onRunTargetChange}
             />
         </div></CanvasPortal>;
 }

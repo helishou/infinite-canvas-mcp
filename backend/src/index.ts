@@ -184,7 +184,7 @@ async function startBackendHttpServer() {
         return runtime.comfy.cancel(task.id);
       if (task.kind.startsWith("runninghub:"))
         return runningHub.cancel(task.id);
-      if (task.kind === "video-concat" || task.kind === "video-trim") return videoConcat.cancel(task.id);
+      if (task.kind === "video-concat" || task.kind === "video-trim" || task.kind === "video-audio-extract") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
       if (task.kind === "direct-audio") return directAudio.cancel(task.id);
       if (task.kind === "workflow") return workflowExecutor.cancel(task.id);
@@ -250,6 +250,7 @@ async function startBackendHttpServer() {
   const productionAgents = new ProductionAgentPool(undefined, {
     canRun: request => request.threadId ? isLlmThread(request.threadId) : Boolean(request.model?.includes("::")),
     run: request => productionLlm.structured(request),
+    retainHistory: (threadId, title) => productionLlm.retainHistory(threadId, title, process.cwd()),
   }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
   process.once("exit", () => productionAgents.stop());
   app.get("/production/worker-status", (_req, res) => res.json({ ok: true, busy: productionAgents.busy }));
@@ -264,7 +265,7 @@ async function startBackendHttpServer() {
   const nativeProductionGeneration = new NativeProductionGeneration(runtime.db, runtime.stores, episodeProduction, canvasProduction, runtime.events);
   nativeProductionGeneration.start();
   canvasGeneration.observeProduction(nativeProductionGeneration);
-  new SharedAssetCoordinator(runtime.db, episodeProduction, runtime.events, (id, runId) => { void episodeProductionRunner.runBatch(id, runId); }, undefined, id => episodeProductionRunner.syncUnsubmittedInputs(id)).start();
+  new SharedAssetCoordinator(runtime.db).start();
   registerCanvasBrowserScriptRoutes(app, canvasBrowserScriptDispatcher);
   registerCanvasReferenceRoutes(app, canvasReferences);
   registerAgentRuntimeRoutes(
@@ -443,13 +444,16 @@ async function startBackendHttpServer() {
     });
   });
   registerBackendErrorHandler(app);
+  // The dev watcher keeps the public MCP port bound while each child serves on its loopback target port.
+  const internalListenPort = Number(process.env.INFINITE_CANVAS_BACKEND_LISTEN_PORT);
+  const listenHost = internalListenPort ? "127.0.0.1" : config.listenHost || "127.0.0.1";
   const server = app.listen(
-    config.port,
-    config.listenHost || "127.0.0.1",
+    internalListenPort || config.port,
+    listenHost,
     () => {
       markStartupStage("listen");
       logger.info(`总后台已启动 ${config.url}`, {
-        listenHost: config.listenHost || "127.0.0.1",
+        listenHost,
         pid: process.pid,
         version: readVersion(),
         startupTimingsMs,
@@ -506,7 +510,7 @@ async function startBackendHttpServer() {
         || productionCompilationBusy() || Boolean(devActiveTask?.get()));
       process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
     });
-    process.send({ type: "dev:ready", pid: process.pid });
+    process.send({ type: "dev:ready", pid: process.pid, listenHost: config.listenHost });
   }
   // tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
   // 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。

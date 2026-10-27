@@ -11,6 +11,7 @@ export function CanvasVideoTrimPreview({ url, name, projectId, videoRef, onConte
     const { message } = App.useApp();
     const { token } = theme.useToken();
     const [duration, setDuration] = useState(0);
+    const [resolution, setResolution] = useState<{ width: number; height: number } | null>(null);
     const [start, setStart] = useState<number | null>(0);
     const [end, setEnd] = useState<number | null>(null);
     const [time, setTime] = useState(0);
@@ -63,9 +64,10 @@ export function CanvasVideoTrimPreview({ url, name, projectId, videoRef, onConte
             onLoadedMetadata={(event) => {
                 const value = event.currentTarget.duration;
                 const finite = Number.isFinite(value) && value > 0 ? value : 0;
-                setDuration(finite); setStart(0); setEnd(finite || null); setFailed(false);
+                const { videoWidth, videoHeight } = event.currentTarget;
+                setDuration(finite); setResolution(videoWidth > 0 && videoHeight > 0 ? { width: videoWidth, height: videoHeight } : null); setStart(0); setEnd(finite || null); setFailed(false);
             }}
-            onError={() => { setFailed(true); setDuration(0); }}
+            onError={() => { setFailed(true); setDuration(0); setResolution(null); }}
             onTimeUpdate={(event) => {
                 const video = event.currentTarget;
                 setTime(video.currentTime);
@@ -76,7 +78,10 @@ export function CanvasVideoTrimPreview({ url, name, projectId, videoRef, onConte
         {projectId ? <div className="flex flex-col gap-2 px-1 pb-1">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs" style={{ color: token.colorTextSecondary }}>
                 <span>{t("canvas.videoTrim.range")}</span>
-                <span>{t("canvas.videoTrim.current", { time: time.toFixed(3), duration: duration.toFixed(3) })}</span>
+                <span className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+                    {resolution && <span>{t("canvas.videoTrim.resolution", resolution)}</span>}
+                    <span>{t("canvas.videoTrim.current", { time: time.toFixed(3), duration: duration.toFixed(3) })}</span>
+                </span>
             </div>
             <Slider range min={0} max={duration || 1} step={0.001} value={[start ?? 0, end ?? duration]} disabled={!duration || trimming}
                 tooltip={{ formatter: (value) => `${Number(value).toFixed(3)}s` }}

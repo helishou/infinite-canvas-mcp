@@ -5,6 +5,7 @@
   "pages": [
     "local-development",
     "canvas-data-structure",
+    "production-data-flow",
     "local-codex-canvas"
   ]
 }

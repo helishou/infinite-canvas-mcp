@@ -15,12 +15,9 @@
  */
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import { BackendDatabase } from "../db.js";
+import { DB_FILE } from "../config.js";
 import { evaluateRetention, type HistoryPolicyConfig } from "./runtime-history-policy.js";
-
-const require = createRequire(import.meta.url);
-const { BACKEND_DATABASE_PATH } = require("../config.js") as { BACKEND_DATABASE_PATH: string };
 
 function parseArgs(args: string[]): { apply: boolean; config: HistoryPolicyConfig } {
     const flags = new Map<string, string>();
@@ -60,9 +57,12 @@ function fileSize(file: string): number {
 
 function main(): void {
     const { apply, config } = parseArgs(process.argv.slice(2));
+    // 数据目录优先级由 config.ts 统一解析（环境变量 > root config > 默认），这里不再自己拼路径：
+    // 曾经 require 的 `BACKEND_DATABASE_PATH` 在 config.ts 里根本不存在，require 返回 undefined 又不抛错，
+    // 于是 CLI 永远以「数据库不存在，拒绝创建: undefined」退出，整条 tasks/generation_logs 保留路径形同虚设。
     const dbPath = process.env.INFINITE_CANVAS_DATA_DIR
         ? path.join(process.env.INFINITE_CANVAS_DATA_DIR, "runtime.sqlite")
-        : BACKEND_DATABASE_PATH;
+        : DB_FILE;
     if (!fs.existsSync(dbPath)) {
         console.error(JSON.stringify({ ok: false, code: "MISSING_DATABASE", error: "数据库不存在，拒绝创建: " + dbPath }, null, 2));
         process.exitCode = 1; return;

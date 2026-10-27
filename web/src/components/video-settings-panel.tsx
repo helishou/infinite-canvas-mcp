@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { Radio } from "antd";
 
 import i18n from "@/i18n";
 import { ImageSettingsTheme, SettingsSection, SettingsDisclosure } from "@/components/image-settings-panel";
@@ -51,6 +52,9 @@ type VideoSettingsPanelProps = {
     onCustomFieldChange?: (id: string, value: unknown) => void;
     /** 选中了内部实现但没解析出字段时的说明；null 表示无需提示。 */
     implementationMissing?: string | null;
+    showRunTarget?: boolean;
+    runTarget?: "local" | "cloud" | "hybrid";
+    onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
 };
 
 export function VideoSettingsPanel({
@@ -63,6 +67,9 @@ export function VideoSettingsPanel({
     customFieldValues,
     onCustomFieldChange,
     implementationMissing,
+    showRunTarget = false,
+    runTarget = "local",
+    onRunTargetChange,
 }: VideoSettingsPanelProps) {
     const { t } = useTranslation();
     // 隐藏通用项的唯一依据是「本次真的要渲染内部实现字段」；取不到字段时仍显示通用项，
@@ -100,6 +107,24 @@ export function VideoSettingsPanel({
                 {showsImplementationFields ? (
                     <SettingsSection title={t("settingsPanels.video.workflowFields")} theme={theme}>
                         <WorkflowCustomFields fields={customFields || []} values={customFieldValues || {}} onChange={(id, value) => onCustomFieldChange?.(id, value)} />
+                    </SettingsSection>
+                ) : null}
+                {showRunTarget ? (
+                    <SettingsSection title={t("settingsPanels.video.runTarget")} theme={theme}>
+                        <Radio.Group
+                            size="small"
+                            optionType="button"
+                            value={runTarget}
+                            onChange={(event) => onRunTargetChange?.(event.target.value)}
+                            options={[
+                                { label: t("settingsPanels.video.runTargetLocal"), value: "local" },
+                                { label: t("settingsPanels.video.runTargetCloud"), value: "cloud" },
+                                { label: t("settingsPanels.video.runTargetHybrid"), value: "hybrid" },
+                            ]}
+                        />
+                        <div className="mt-2 text-xs leading-relaxed" style={{ color: theme.node.muted }}>
+                            {t(runTarget === "hybrid" ? "microTools.workflow.runTargetHintHybrid" : runTarget === "cloud" ? "microTools.workflow.runTargetHintCloud" : "microTools.workflow.runTargetHintLocal")}
+                        </div>
                     </SettingsSection>
                 ) : null}
                 {implementationMissing ? (

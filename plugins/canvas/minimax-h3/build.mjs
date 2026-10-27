@@ -1,6 +1,6 @@
 import { buildPlugin } from "@infinite-canvas/plugin-sdk/build";
 import { resolve, dirname } from "node:path";
-import { readFile, writeFile, copyFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 // 支持 Vite 风格的 `?raw` 导入(如 `import x from "./a.md?raw")`，
@@ -37,16 +37,11 @@ lock.version = version;
 lock.packages[""].version = version;
 await writeFile(lockPath, `${JSON.stringify(lock, null, 4)}\n`, "utf8");
 
+// H3 是宿主内置插件：Web 经 `@/lib/canvas/plugin-loader` 直接 import 本目录源码并打进宿主 JS，
+// 不加载 web/public 下的 bundle（loader 以 HOST_SYSTEM_PLUGIN_IDS 跳过它）。
+// 因此这里不向 web 同步任何副本，只产出 dist/minimax-h3.js 供外部宿主分发使用。
 await buildPlugin(import.meta.url, {
+    publicDir: null,
     plugins: [rawPlugin],
     ...(process.env.NODE_ENV !== "production" ? { esbuild: { minify: false } } : {}),
 });
-
-// web/dist 是 vite build 的产物（构建时把 public/ 一起拷走），之后只重建插件不会更新 dist，
-// 页面加载 dist 里的插件就会一直跑旧代码。这里顺手同步一份；dist 不存在（纯 dev 模式）时跳过。
-try {
-    const distDir = resolve(here, "../../../web/dist/plugins");
-    await mkdir(distDir, { recursive: true });
-    await copyFile(resolve(here, "../../../web/public/plugins/minimax-h3.js"), resolve(distDir, "minimax-h3.js"));
-    console.log("[minimax-h3] synced → web/dist/plugins/minimax-h3.js");
-} catch { /* 没有 dist 构建产物时不处理 */ }

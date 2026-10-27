@@ -31,6 +31,40 @@ export function orderStoryboardReferencesFirst<T extends object>(
     return [...storyboards, ...references.filter((reference) => !isStoryboardImage(reference))];
 }
 
+/** Match the H3 submission slot order in every editor and runtime consumer. */
+export function orderReferencesForSubmission<T extends object>(
+    references: T[],
+    shotBindingIds: string[],
+    bindingIdOf: (reference: T) => string | undefined,
+    isEnabledStoryboardImage: (reference: T) => boolean,
+    isEnabledSubjectImage: (reference: T) => boolean,
+    referenceOrder?: unknown,
+): T[] {
+    const storyboardFirst = orderStoryboardReferencesFirst(references, shotBindingIds, bindingIdOf, isEnabledStoryboardImage);
+    const subjects = storyboardFirst.filter(isEnabledSubjectImage);
+    const subjectIds = new Set(subjects.map(bindingIdOf));
+    return [
+        ...storyboardFirst.filter(isEnabledStoryboardImage),
+        ...applyReferenceOrder([
+            ...subjects,
+            ...storyboardFirst.filter((reference) => !subjectIds.has(bindingIdOf(reference)) && !isEnabledStoryboardImage(reference)),
+        ], referenceOrder, bindingIdOf),
+    ];
+}
+
+/** Apply the Clip's persisted slot order before semantic submission grouping. */
+export function applyReferenceOrder<T extends object>(
+    references: T[],
+    referenceOrder: unknown,
+    bindingIdOf: (reference: T) => string | undefined,
+): T[] {
+    if (!Array.isArray(referenceOrder) || !referenceOrder.length) return references;
+    const positions = new Map(referenceOrder.filter((id): id is string => typeof id === "string").map((id, index) => [id, index]));
+    return references.map((reference, index) => ({ reference, index, position: positions.get(bindingIdOf(reference) || "") ?? Number.POSITIVE_INFINITY }))
+        .sort((left, right) => left.position - right.position || left.index - right.index)
+        .map(({ reference }) => reference);
+}
+
 /** Rebase numeric Picture tags when image bindings move to different slots. */
 export function remapPictureTags<T>(
     text: string,

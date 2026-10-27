@@ -8,6 +8,7 @@ import { nanoid } from "nanoid";
 import type { CanvasGenerationCommand, CanvasGenerationStartResult, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import { CANVAS_GENERATION_PATH, CANVAS_LOOP_PREPARE_PATH, CANVAS_TASKS_PATH, canvasTaskActionPath, canvasTaskPath, h3ConfirmationPath } from "@basketikun/canvas-agent/generation-api";
 import { ensureCanvasDraftLease } from "@/lib/canvas/canvas-draft-session";
+import { browserOperationName, watchSlowBrowserOperation } from "@/lib/slow-operation-monitor";
 import type { EpisodeProductionData, ProductionOperation, DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 export type BackendMediaResult = {
@@ -22,10 +23,21 @@ export type BackendMediaResult = {
     compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number };
 };
 
-export type BackendTokenResponse = { ok: boolean; token: string };
+export type BackendTokenResponse = { ok: boolean; token: string; reloading?: boolean };
+
+/** 稳定代理在 Backend 开发重载期回 503 + code=BACKEND_RELOADING：这是短暂状态，不是配置错误。 */
+async function isBackendReloading(response: Response): Promise<boolean> {
+    if (response.status !== 503) return false;
+    try { return (await response.clone().json())?.code === "BACKEND_RELOADING"; } catch { return false; }
+}
 
 const DEFAULT_URL = "http://127.0.0.1:17370";
 const canvasClientId = `browser:${nanoid()}`;
+let backendWritesInFlight = 0;
+
+export function hasBackendWriteInFlight() {
+    return backendWritesInFlight > 0;
+}
 
 export { getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 
@@ -42,33 +54,63 @@ export class BackendApiError extends Error {
     constructor(message: string, readonly status: number, readonly details: Record<string, unknown> = {}) { super(message); this.name = "BackendApiError"; }
 }
 
+/** Read-only backend availability failures are shown by the global connection banner. */
+export function isBackendAvailabilityError(error: unknown): error is BackendApiError {
+    return error instanceof BackendApiError
+        && (error.status === 0 && String(error.details.method || "").toUpperCase() === "GET"
+            || error.status === 503 && error.details.code === "BACKEND_RELOADING");
+}
+
+function reportBackendAvailabilityError(error: BackendApiError) {
+    if (typeof window === "undefined" || !isBackendAvailabilityError(error)) return;
+    window.dispatchEvent(new CustomEvent("backend-unavailable", {
+        detail: { message: error.message, code: error.details.code || "", method: error.details.method || "", path: error.details.path || "" },
+    }));
+}
+
 export async function request<T = unknown>(method: string, path: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
-    if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
-    const token = getBackendTokenShared();
-    const backendUrl = getBackendUrl().replace(/\/$/, "");
-    const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
-    let res: Response;
+    const finishSlowOperation = watchSlowBrowserOperation(browserOperationName(method, path));
+    let outcome = "failed";
     try {
-        res = await fetch(url, {
-            method,
-            headers: body ? { "content-type": "application/json" } : {},
-            body: body !== undefined ? JSON.stringify(body) : undefined,
-            signal: options?.signal,
-        });
-    } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") throw error;
-        const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
-        throw new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+        if (method !== "GET" && (/^\/canvas\/projects(?:\/|$)/.test(path) || path === CANVAS_LOOP_PREPARE_PATH)) await ensureCanvasDraftLease();
+        const token = getBackendTokenShared();
+        const backendUrl = getBackendUrl().replace(/\/$/, "");
+        const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+        const tracksWrite = !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+        if (tracksWrite) backendWritesInFlight++;
+        let res: Response;
+        try {
+            res = await fetch(url, {
+                method,
+                headers: body ? { "content-type": "application/json" } : {},
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+                signal: options?.signal,
+            });
+        } catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") throw error;
+            const reason = error instanceof Error ? `${error.name ? `${error.name}: ` : ""}${error.message}` : String(error);
+            const apiError = new BackendApiError(`无法连接 Backend：${method} ${path} → ${backendUrl}（${reason}）。请确认 Backend 已启动且端口可访问。`, 0, { method, path, backendUrl, cause: reason });
+            reportBackendAvailabilityError(apiError);
+            throw apiError;
+        } finally {
+            if (tracksWrite) backendWritesInFlight = Math.max(0, backendWritesInFlight - 1);
+        }
+        const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
+        if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
+        if (!res.ok) {
+            // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
+            const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
+            const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
+            outcome = `http-${res.status}`;
+            const apiError = new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, { ...(data && typeof data === "object" ? data as Record<string, unknown> : {}), method, path });
+            reportBackendAvailabilityError(apiError);
+            throw apiError;
+        }
+        outcome = `http-${res.status}`;
+        return data;
+    } finally {
+        finishSlowOperation(outcome);
     }
-    const data = (await res.json().catch(() => ({}))) as T & { ok?: boolean; error?: string };
-    if (res.status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("backend-auth-failed"));
-    if (!res.ok) {
-        // 把后端返回的 error 字符串完整透传（之前 30 字符截断导致 500 错看不到）
-        const errText = (data && typeof data === "object" && "error" in data && typeof data.error === "string") ? data.error : "";
-        const extra = errText || (res.headers.get("content-type")?.includes("application/json") ? "" : (await res.text().catch(() => "")));
-        throw new BackendApiError(`Backend ${method} ${path} failed: HTTP ${res.status} ${extra}`.trim(), res.status, data && typeof data === "object" ? data as Record<string, unknown> : {});
-    }
-    return data;
 }
 
 function sharedGet<T>(path: string): Promise<T> {
@@ -169,7 +211,7 @@ export async function discoverBackendToken(): Promise<BackendTokenResponse> {
     try {
         const token = getBackendTokenShared();
         const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-        if (!res.ok) return { ok: false, token: "" };
+        if (!res.ok) return { ok: false, token: "", reloading: await isBackendReloading(res) };
         const data = await res.json();
         return { ok: Boolean(data.ok), token: data.token || "" };
     } catch {
@@ -203,8 +245,8 @@ export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
-export function deleteBackendDramaProject(id: string) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`);
+export function deleteBackendDramaProject(id: string, freeCanvasIds: string[] = []) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`, { freeCanvasIds });
 }
 
 export type DramaEpisode = {
@@ -220,15 +262,15 @@ export type DramaEpisode = {
 };
 
 export function fetchBackendDramaEpisodes(dramaId: string) {
-    return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
+    return sharedGet<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[] }>(`/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
 }
 
 export function fetchBackendDramaEpisode(episodeId: string) {
-    return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+    return sharedGet<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
 export function fetchBackendCanvasDrama(projectId: string) {
-    return request<{ ok: boolean; projectId: string; episode?: DramaEpisode | null; drama?: { id: string; name: string } | null }>("GET", `/canvas/projects/${encodeURIComponent(projectId)}/drama`);
+    return sharedGet<{ ok: boolean; projectId: string; episode?: DramaEpisode | null; drama?: { id: string; name: string } | null }>(`/canvas/projects/${encodeURIComponent(projectId)}/drama`);
 }
 
 export function createBackendDramaEpisode(dramaId: string, input: { episodeNumber: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }) {
@@ -247,41 +289,41 @@ export type ProductionClipRefreshReceipt = {
     sourceHash?: string;
     sourceSaved: true; operationId: string; status: "queued" | "checking" | "compiling" | "applying" | "succeeded" | "blocked" | "failed" | "superseded" | "interrupted";
     segmentId: string; savedRevision: number; compilationOperationId: string; selectedTargets: string[]; affectedTargets: string[];
+    createdAt?: string; updatedAt?: string;
+    translationOperationId?: string; translationError?: string;
     blockingDiagnostic?: { code: string; message: string; targetId?: string; path?: string };
     application?: { revision?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number; diagnostics?: Array<{ code: string; message: string }> }> };
     mediaSubmitted: false;
 };
-export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionData; published: EpisodeProductionData | null; publishedVersion: number; updatedAt: string; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
+export type EpisodeProductionSnapshot = Omit<EpisodeProductionData, "scenes" | "shots" | "clipGroups"> & Partial<Pick<EpisodeProductionData, "scenes" | "shots" | "clipGroups">>;
+export type EpisodeProduction = { episodeId: string; revision: number; draft: EpisodeProductionSnapshot; published: EpisodeProductionSnapshot | null; publishedVersion: number; updatedAt: string; archivedAt?: string | null; storageFormat?: "v2-single-source" | "v2-projection-migration-required"; publishedFormatStatus?: "legacy-maintenance-required"; impact?: { changedSceneIds: string[]; affectedShotIds: string[]; imageShotIds: string[]; clipGroupIds: string[]; missingAssetNodeIds: string[]; assetIds?: string[] }; clipRefreshes?: ProductionClipRefreshReceipt[]; replayed?: boolean };
 export type ProductionTarget = string | { projectId: string } | { sceneId: string };
 export type ProductionCanvasContext = { role: "ordinary" | "episode" | "scene" | "shared-assets" | "standalone"; canvasId: string; dramaId?: string; episodeId?: string; sceneId?: string; owner?: { kind: "episode" | "canvas" | "scene"; id: string }; sharedAssetCanvasId?: string | null };
-export function fetchProductionCanvasContext(id: string) { return request<{ ok: boolean; context: ProductionCanvasContext }>("GET", `/canvas/projects/${encodeURIComponent(id)}/production-context`); }
+export function fetchProductionCanvasContext(id: string) { return sharedGet<{ ok: boolean; context: ProductionCanvasContext }>(`/canvas/projects/${encodeURIComponent(id)}/production-context`); }
 export function ensureEpisodeCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/episodes/${encodeURIComponent(id)}/canvas/ensure`, {}); }
 export function ensureSharedAssetCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/projects/${encodeURIComponent(id)}/asset-canvas/ensure`, {}); }
 export function prepareProductionTargets(owner: ProductionTarget, expectedRevision: number, targets: string[], operationId: string) { return request<{ ok: boolean; production: EpisodeProduction; mediaSubmitted: false }>("POST", `${productionPath(owner)}/prepare-targets`, { expectedRevision, targets, operationId }); }
 export function arrangeProductionScene(owner: ProductionTarget, expectedRevision: number, sceneId: string, operationId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/arrange-scene`, { expectedRevision, sceneId, operationId }); }
 export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number; storageKey: string; sha256: string; snapshot: { title: string }; evidence: string; reviewStatus: "unreviewed" | "approved"; createdAt: string };
-export type SharedAssetUpdate = { id: string; assetId: string; approvedId: string; status: string; error?: string };
-export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[]; updates: SharedAssetUpdate[] }>("GET", `${productionPath(owner)}/shared-assets`); }
-export function adoptProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; approvedId: string; expectedRevision: number; operationId: string }) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/shared-assets/adopt`, input); }
+export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[] }>("GET", `${productionPath(owner)}/shared-assets`); }
 export type SharedAssetPromotionPreview = { episodeId: string; episodeRevision: number; publishedVersion: number; sourceHash: string; sourceCanvasId: string; sourceCanvasRevision: number; sourceNodeId: string; assetId: string; assetName: string; storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; sourceGenerationTaskId: string; dramaId: string; sharedCanvasId: string | null; sharedCanvasRevision: number | null; targetNodeId: string; approvedId: string | null; eligible: true };
 export function previewProductionSharedAssetPromotion(owner: ProductionTarget, assetId: string, expectedRevision: number) { return request<{ ok: boolean; preview: SharedAssetPromotionPreview; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions/preview`, { assetId, expectedRevision }); }
 export function promoteExistingProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) { return request<{ ok: boolean; promotion: { approvedId: string; canvasId: string; nodeId: string; replayed: boolean }; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions`, input); }
-export function retryProductionSharedUpdate(owner: ProductionTarget, id: string, expectedRevision: number) { return request("POST", `${productionPath(owner)}/shared-assets/updates/${encodeURIComponent(id)}/retry`, { expectedRevision }); }
 const productionPath = (target: ProductionTarget) => typeof target === "string"
     ? `/drama/episodes/${encodeURIComponent(target)}/production`
     : "sceneId" in target
         ? `/drama/scenes/${encodeURIComponent(target.sceneId)}/production`
         : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
-export function fetchEpisodeProduction(episodeId: ProductionTarget) { return request<{ ok: boolean; production: EpisodeProduction }>("GET", productionPath(episodeId)); }
+export function fetchEpisodeProduction(episodeId: ProductionTarget) { return sharedGet<{ ok: boolean; production: EpisodeProduction }>(productionPath(episodeId)); }
+export function fetchProductionOperationReceipt(owner: ProductionTarget, operationId: string) { return request<{ ok: boolean; found: boolean; production?: EpisodeProduction }>("GET", `${productionPath(owner)}/operations/${encodeURIComponent(operationId)}/receipt`); }
 export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
     const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
     return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
 }
-export function fetchEpisodeProductionLegacy(episodeId: ProductionTarget) { return request<{ ok: boolean; sources: Array<{ source: "fullPlot" | "script.md" | "storyboard.md"; sha256: string; text: string }> }>("GET", `${productionPath(episodeId)}/legacy`); }
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
 export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
-export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return request<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>("GET", `${productionPath(episodeId)}/versions`); }
+export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return sharedGet<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>(`${productionPath(episodeId)}/versions`); }
 export type ProductionSceneArchive = { archiveId: string; sceneId: string; sceneTitle: string; deletedAt: string; expiresAt: string; shotCount: number; clipCount: number };
 export function fetchProductionSceneArchives(target: ProductionTarget) { return request<{ ok: boolean; archives: ProductionSceneArchive[] }>("GET", `${productionPath(target)}/scene-archives`); }
 export function restoreEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, version: number, operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/restore`, { operationId, expectedRevision, version }); }
@@ -289,26 +331,42 @@ export function syncEpisodeProductionClips(episodeId: ProductionTarget) { return
 // 编译：提交后返回 operationId，沿同一 operationId 轮询状态；成功后用 preparedId 应用回执写回正式源稿。
 export type ProductionCompilationStatus = {
     operationId: string; status: "queued" | "running" | "succeeded" | "blocked" | "interrupted" | "failed"; verdict: "passed" | "passed_with_warnings" | "blocked";
-    expectedRevision: number; sourceHash: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
+    expectedRevision: number; sourceHash: string; engineRuntimeId?: string; compilerHash?: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
     blockingDiagnostic?: { code: string; path?: string; targetId?: string; shotId?: string; message: string };
     application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
     mediaSubmitted: false;
 };
-export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
-export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string) {
-    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId });
+export type ProductionCompilationDiagnostic = { code?: string; severity?: string; path?: string; targetId?: string; shotId?: string; affectedTargets?: string[]; message?: string; blockingActions?: string[]; blocksCompilation?: boolean; nextAction?: unknown };
+export function compileProduction(target: ProductionTarget, expectedRevision: number, operationId: string, scope?: { sceneId?: string; targetIds?: string[] }) {
+    return request<{ ok: boolean; compilation: ProductionCompilationStatus }>("POST", `${productionPath(target)}/compile`, { expectedRevision, operationId, ...(scope ? { scope } : {}) });
 }
 export function fetchProductionCompilation(target: ProductionTarget, operationId: string, view: "status" | "targets" | "diagnostics" = "status", extra?: { offset?: number; pageSize?: number }) {
     const query = new URLSearchParams({ view, ...(extra?.offset === undefined ? {} : { offset: String(extra.offset) }), ...(extra?.pageSize === undefined ? {} : { pageSize: String(extra.pageSize) }) });
     return request<{ ok: boolean; compilation: ProductionCompilationStatus & { items?: ProductionCompilationDiagnostic[]; total?: number; nextOffset?: number | null } }>("GET", `${productionPath(target)}/compilations/${encodeURIComponent(operationId)}?${query.toString()}`);
 }
 export function applyProductionCompilation(target: ProductionTarget, preparedId: string) {
-    return request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", `${productionPath(target)}/apply-compilation`, { preparedId });
+    const path = `${productionPath(target)}/apply-compilation`;
+    const apply = () => request<{ ok: boolean; receipt: { revision: number; sourceHash?: string; operationId: string; replayed?: boolean; publishedVersion?: number; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }>; mediaSubmitted: false } }>("POST", path, { preparedId });
+    return (async () => {
+        // A stable dev proxy's BACKEND_RELOADING response is issued before the
+        // write reaches Backend. Keep the same preparedId and retry briefly so
+        // a watch reload between compile completion and apply does not surface
+        // as a failed compilation. Other 503s (including unknown outcomes) are
+        // never retried here.
+        for (let retry = 0; ; retry++) {
+            try { return await apply(); }
+            catch (error) {
+                if (!(error instanceof BackendApiError) || error.status !== 503
+                    || error.details.code !== "BACKEND_RELOADING" || retry >= 3) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+    })();
 }
 export function fetchEpisodeProductionRun(episodeId: ProductionTarget, version: number) { return request<{ ok: boolean; run: { status: string; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string }>; error: string | null } | null }>("GET", `${productionPath(episodeId)}/runs/${version}`); }
 export type ProductionReadinessTarget = { id: string; targetId: string; kind: "asset" | "keyframe" | "segment"; title: string; status: "ready" | "blocked" | "needs_review" | "complete"; blockers: string[]; warnings?: string[]; artifactId?: string; executionTargets?: string[]; notice?: string };
 export type ProductionPresentation = { key: string; workId: string; owner: { kind: "canvas" | "episode" | "scene"; id: string }; aliases?: string[]; workspace: "overview" | "story" | "assets" | "shots" | "continuity" | "production" | "advanced"; action: "author" | "compile" | "produce" | "review" | "deliver" | "blocked"; targetKind?: string; targetId?: string; canvasId?: string; nodeId?: string; segmentId?: string; runId?: string; taskId?: string; status: "ready" | "working" | "needs_review" | "blocked" | "complete"; reason?: string };
-export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; presentation?: ProductionPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
+export type ProductionReadiness = { revision: number; publishedVersion: number; source: "draft" | "published"; canvasId?: string; canvasRevision?: number; targets: ProductionReadinessTarget[]; modules: Record<string, unknown>; unresolved: string[]; nextAction: string; stage?: { draftInitialized: boolean; scriptBlocks: number; explicitShotCues: number; structuredShots: number; assetCards: number; segments: number; compileGate: "not_started" | "blocked" | "preflight_required"; compileBlockers: string[]; authoringGaps: string[]; nextAction: string }; presentation?: ProductionPresentation; sceneWorks?: DirectorProduction["workflow"]["sceneWorks"] };
 export type SceneWorkInspection = { revision: number; works: Array<NonNullable<DirectorProduction["workflow"]["sceneWorks"]>[string] & { reviewInputHash?: string; inputChanged?: boolean; reviewAssetIds?: string[]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> }>; shared: { continuation?: DirectorProduction["workflow"]["sharedReviewContinuation"]; inputHash?: string; reviewCurrent?: boolean; reviewAssetIds?: string[]; reviewWorks?: Array<NonNullable<DirectorProduction["workflow"]["sharedReviewWorks"]>[string]>; reviews?: NonNullable<DirectorProduction["workflow"]["sharedAssetReviews"]>; error?: string; review?: DirectorProduction["workflow"]["sharedReview"]; source?: Record<string, unknown>; media?: Array<{ targetId: string; storageKey: string; sha256: string }> } | null };
 export function fetchProductionSceneWork(target: ProductionTarget) { return request<{ ok: boolean; state: SceneWorkInspection }>("GET", `${productionPath(target)}/scene-work`); }
 export type ProductionSceneAction = { action: "shared-review"; model?: string; effort?: string } | { action: "start"; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string } | { action: "pause" | "resume"; workId: string } | { action: "review"; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string };
@@ -324,19 +382,17 @@ export function fetchProductionReadiness(target: ProductionTarget, options?: { r
 export type ProductionContinuity = { owner: { kind: "canvas" | "episode" | "scene"; id: string }; snapshot: "draft" | "published"; revision: number; publishedVersion: number; sourceHash?: string | null; runtime?: Record<string, unknown> | null; status: "missing" | "unchecked" | "diagnosticOnly" | "stale" | "blocked" | "unresolved" | "passed" | "partial"; coverageStatus: string; semanticDiscovery: "not_performed"; checkedAt: string | null; diagnostics: { total: number; blocked: number; unresolved: number }; items: unknown[]; total: number; nextCursor: string | null; report?: Record<string, any> };
 export function fetchProductionContinuity(target: ProductionTarget, options?: { snapshot?: "draft" | "published"; view?: "summary" | "issues" | "timeline" | "shot"; targetId?: string; objectId?: string; pageSize?: number; cursor?: string }) {
     const query = new URLSearchParams(Object.fromEntries(Object.entries(options || {}).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])));
-    return request<{ ok: boolean; continuity: ProductionContinuity }>("GET", `${productionPath(target)}/continuity?${query}`);
+    return sharedGet<{ ok: boolean; continuity: ProductionContinuity }>(`${productionPath(target)}/continuity?${query}`);
 }
 export function checkProductionContinuity(target: ProductionTarget, input: { expectedRevision: number; operationId: string; snapshot?: "draft" | "published"; targetIds?: string[] }) {
     return request<{ ok: boolean; check: { status: "succeeded"; verdict: string; report: Record<string, any>; revision: number; replayed?: boolean; mediaSubmitted: false } }>("POST", `${productionPath(target)}/continuity/check`, input);
-}
-export function previewProductionContinuityUpgrade(target: ProductionTarget, input: { expectedRevision: number; operationId: string; fromSourceHash: string; ledger: Record<string, unknown> }) {
-    return request<{ ok: boolean; preview: { owner: { kind: string; id: string }; revision: number; fromSourceHash: string; targetRuntime: Record<string, string>; previewHash: string; candidateSourceHash: string; migrationClass: string; changeClassification: { equivalentConversions: string[]; historicalProjection: string[]; semanticGaps: Array<Record<string, any>>; speculativeSuggestions: string[] }; report: Record<string, any>; affectedTargets: string[]; activeRuns: Array<{ runId: string; status: string; targets: unknown[] }> } }>("POST", `${productionPath(target)}/continuity/upgrade-preview`, input);
 }
 export function fetchProductionBatches(target: ProductionTarget) { return sharedGet<{ ok: boolean; runs: ProductionBatch[] }>(`${productionPath(target)}/batches`); }
 export function startProductionRun(target: ProductionTarget, input: { inputBasis?: "canvas" | "published"; expectedCanvasRevision?: number; expectedPlanHash?: string; runId: string; idempotencyKey: string; workId?: string; expectedRevision: number; version: number; targets: string[]; scope?: "selected" | "all_ready" }) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/runs`, input); }
 export function fetchProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch | null }>("GET", `${productionPath(target)}/batches/${encodeURIComponent(runId)}`); }
 export function pauseProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/pause`, {}); }
 export function resumeProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/resume`, {}); }
+export function retireProductionBatch(target: ProductionTarget, runId: string, reason: string) { return request<{ ok: boolean; run: ProductionBatch; mediaSubmitted: false }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/retire`, { reason }); }
 export function exportEpisodeProductionMarkdown(episodeId: ProductionTarget, stage: "script" | "shots" | "director", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
 
 export type DramaCustomAsset = {
@@ -437,7 +493,7 @@ export function fetchBackendAssets(options: { kind?: string; folderId?: string; 
     if (options.folderId) params.set("folderId", options.folderId);
     if (options.dramaId) params.set("dramaId", options.dramaId);
     const qs = params.toString();
-    return request<{ ok: boolean; assets?: unknown[]; folders?: unknown[] }>("GET", `/canvas/assets${qs ? `?${qs}` : ""}`);
+    return sharedGet<{ ok: boolean; assets?: unknown[]; folders?: unknown[] }>(`/canvas/assets${qs ? `?${qs}` : ""}`);
 }
 
 export function saveBackendAssets(assets: unknown[], folders: unknown[]) {
@@ -616,7 +672,7 @@ export type BackendGenerationLog = {
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
@@ -629,6 +685,8 @@ export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId
     if (options.to) params.set("to", options.to);
     if (options.limit) params.set("limit", String(options.limit));
     if (typeof options.offset === "number" && options.offset > 0) params.set("offset", String(options.offset));
+    // summary：纯展示列表裁掉 params/references/inputCounts 大列（类型上它们仍是必填，后端以空值填充）。
+    if (options.summary) params.set("summary", "true");
     const qs = params.toString();
     return request<{ ok: boolean; logs?: BackendGenerationLog[] }>("GET", `/generation-logs${qs ? `?${qs}` : ""}`);
 }
@@ -669,7 +727,7 @@ export function resolveBackendH3Confirmation(id: string, input: { action: "confi
     return request<{ ok: boolean; task: BackendRuntimeTask }>("POST", h3ConfirmationPath(id), input);
 }
 
-export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number } = {}) {
+export function fetchBackendTasks(options: { projectId?: string; nodeIds?: string[]; segmentIds?: string[]; scope?: "all" | "canvas" | "image" | "video"; status?: string; kind?: string; model?: string; taskId?: string; limit?: number; offset?: number; summary?: boolean } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeIds?.length) params.set("nodeIds", options.nodeIds.join(","));
@@ -681,9 +739,15 @@ export function fetchBackendTasks(options: { projectId?: string; nodeIds?: strin
     if (options.taskId) params.set("taskId", options.taskId);
     if (options.limit) params.set("limit", String(options.limit));
     if (options.offset) params.set("offset", String(options.offset));
+    // summary：纯展示列表只回标量 + 输出媒体引用，裁掉多 MB 的提示词大列。
+    if (options.summary) params.set("summary", "true");
     const qs = params.toString();
     const path = `${CANVAS_TASKS_PATH}${qs ? `?${qs}` : ""}`;
     return sharedGet<{ ok: boolean; tasks?: BackendRuntimeTask[] }>(path);
+}
+
+export function fetchCanvasModelUsage() {
+    return sharedGet<{ ok: boolean; modelUsage?: Array<{ model: string; channelId: string; count: number }> }>(`${CANVAS_TASKS_PATH}?modelUsage=true`).then((result) => result.modelUsage || []);
 }
 
 export function createBackendTask(kind: string, input: Record<string, unknown> = {}, params: Record<string, unknown> = {}, clientTaskId?: string) {

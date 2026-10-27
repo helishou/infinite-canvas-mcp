@@ -30,8 +30,8 @@ const read = (taskId: string) => ({ action: "get", projectId: "canvas", parentTh
 function formalFixture(t: test.TestContext) {
     const fixtureValue = fixture(t), { db, events, root, stores, calls, settles } = fixtureValue;
     const production = new EpisodeProductionService(db, events, root, true, () => {});
-    const source = { brief: "confirmed", script_scenes: [{ id: "A", scene_id: "ROOM" }, { id: "B", scene_id: "ROOM" }],
-        shots: [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", title: "A", start_frame: 0, end_frame: 120 }, { id: "SB", source_scene_id: "B", scene_id: "ROOM", title: "B", start_frame: 120, end_frame: 240 }], segments: [], asset_plan: [], asset_cards: [] };
+    const source = { version: 2, prompt_assembly: { version: 2 }, brief: "confirmed", fps_num: 24, fps_den: 1, subject_registry: [], character_registry: [], scene_registry: [], script_scenes: [{ id: "A", scene_id: "ROOM" }, { id: "B", scene_id: "ROOM" }],
+        shots: [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", title: "A", story_order: 0, duration_frames: 120 }, { id: "SB", source_scene_id: "B", scene_id: "ROOM", title: "B", story_order: 1, duration_frames: 120 }], segments: [{ id: "SEG-A", shot_ids: ["SA"], mode: "T2VA" }, { id: "SEG-B", shot_ids: ["SB"], mode: "T2VA" }], utterances: [], asset_plan: [], asset_cards: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } };
     const director: DirectorProduction = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
     production.edit("canvas", { operationId: "seed", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
     const service = new DirectorSubagents(stores, { run: request => { calls.push(request); return new Promise(resolve => settles.push(output => resolve({ threadId: "worker", output }))); } }, events, root, undefined, () => production);
@@ -104,12 +104,14 @@ test("adoption refuses changed dependencies, foreign edits, incomplete and unbou
 
 test("partial continuation retains original thread, cursor and immutable history without duplicate turns", async t => {
     const { service, calls, settles } = fixture(t);
-    const taskId = (service.execute(spawn) as any).task.taskId;
+    const taskId = (service.execute({ ...spawn, model: "selected-channel::model", effort: "high" }) as any).task.taskId;
+    assert.equal(calls[0].model, "selected-channel::model");
+    assert.equal(calls[0].effort, "high");
     calls[0].onThread("worker"); calls[0].onTurn?.("turn-1");
     settles[0]({ ...complete, status: "partial", cursor: "scene-2" }); await tick();
     const artifactHash = (service.execute(read(taskId)) as any).task.artifactHash;
     const command = { ...read(taskId), action: "continue", operationId: "next" };
-    service.execute(command); assert.equal(calls.length, 2); assert.equal(calls[1].threadId, "worker"); assert.match(calls[1].prompt, /scene-2/);
+    service.execute(command); assert.equal(calls.length, 2); assert.equal(calls[1].threadId, "worker"); assert.equal(calls[1].model, "selected-channel::model"); assert.equal(calls[1].effort, "high"); assert.match(calls[1].prompt, /scene-2/);
     assert.equal(service.execute(command).replayed, true); assert.equal(calls.length, 2);
     settles[1](complete); await tick();
     const old = service.execute({ ...read(taskId), view: "result", artifactHash }) as any;
@@ -118,14 +120,14 @@ test("partial continuation retains original thread, cursor and immutable history
     assert.throws(() => service.execute({ ...command, operationId: "extra" }), /NOT_PARTIAL/);
 });
 
-test("startup reconciles more than ten tasks and recover reads the exact original turn without spawning", async t => {
+test("startup reconciles more than ten tasks and recover reads the exact original turn and model without spawning", async t => {
     const { stores, events } = fixture(t);
     for (let index = 0; index < 13; index++) {
-        const task = stores.tasks.create(`orphan-${index}`, "director-subagent", { projectId: "canvas", parentThreadId: "director", title: "lost", role: "story", sourceRevision: 0 }, {});
+        const task = stores.tasks.create(`orphan-${index}`, "director-subagent", { projectId: "canvas", parentThreadId: "director", title: "lost", role: "story", sourceRevision: 0, model: "selected-channel::model", effort: "high" }, { model: "selected-channel::model" });
         stores.tasks.update(task.id, { status: "running", result: { workerThreadId: `worker-${index}`, workerTurnId: `turn-${index}` } });
     }
     let reads = 0;
-    const service = new DirectorSubagents(stores, { run: async request => { reads++; assert.equal(request.recoverOutput, true); assert.equal(request.threadId, "worker-0"); assert.equal(request.turnId, "turn-0"); return { threadId: "worker-0", output: complete }; } }, events);
+    const service = new DirectorSubagents(stores, { run: async request => { reads++; assert.equal(request.recoverOutput, true); assert.equal(request.threadId, "worker-0"); assert.equal(request.turnId, "turn-0"); assert.equal(request.model, "selected-channel::model"); assert.equal(request.effort, "high"); return { threadId: "worker-0", output: complete }; } }, events);
     service.reconcileStartup(); assert.equal(reads, 0);
     assert.equal(stores.tasks.list({ kind: "director-subagent" }).filter(task => task.status === "failed").length, 13);
     const command = { ...read("orphan-0"), action: "recover", operationId: "recover-original" };

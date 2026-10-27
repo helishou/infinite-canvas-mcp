@@ -64,13 +64,17 @@ assert abs(w/h - 16/9) < 0.02        # 2×2
 assert abs(w/h - 8/3)  < 0.02        # 3×2
 ```
 
-## 三、MCP 切分（`canvas_split_image`）
+## 三、切分（⚠️ STALE audit 2026-10-27：MCP `canvas_split_image` 已移除，不在当前 tools/list）
+
+旧 MCP 接口（仅作历史参考，勿调用）：
 
 ```
-canvas_split_image(nodeId, rows, columns, inset, gap)
+canvas_split_image(nodeId, rows, columns, inset, gap)   # 已下线
 ```
 
-- 行为与前端「分割」工具**同一算法**（等分口径 `floor(index*size/count)`），切出的节点排在被切节点右侧并自动连线。
+现行两条路径：(a) 本地离线用 PIL 按等分 + inset 内缩切图，逐块用 `canvas_import_local_images` 导入并命名；(b) 前端「分割」工具手动切。下面的算法口径、inset 实测与验比例规则对两条路径同样有效。
+
+- 前端「分割」算法（等分口径 `floor(index*size/count)`），切出的节点排在被切节点右侧并自动连线。
 - **`inset` 是必备参数，不是可选项**：宫格图的分隔线正好压在切割线上，不内缩会把白线切进每块边缘（实测源图竖线在 x=834–837、横线在 y=469–471，各 3–4px 宽）。`inset=4` 后 8 条内边缘亮度从 241/255 降到 30–102，白线彻底消失。
 - **切之前必须确认切的是整张宫格，不是已切出的子块**：拿 `metadata.naturalWidth/naturalHeight` 与预期源尺寸比对（子块只有源图的一半）。实测连续两次切错子块，产出 412×229 的碎块。
 - 切完逐块验比例（每块应为 16:9）。

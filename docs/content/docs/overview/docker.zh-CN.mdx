@@ -59,7 +59,8 @@ Compose 自动读取根 `.env`；原生 Node 启动不会自动读取它，需�
 | /data/backend | runtime.sqlite、backend.json、日志、自定义工作流与生产数据 |
 | /data/backend/runtime-media | 归档的原始图片、视频、音频与文件 |
 | /data/agent | Agent 配置、站点工作空间与对话素材 |
-| /data/codex | 可选 Codex 登录/会话、Acheng 固定版本与激活记录 |
+| /data/codex | 可选 Codex 登录与会话 |
+| /data/acheng-runtime | 项目固定的 Acheng 运行版本与激活记录 |
 
 `stop`、普通 `down`、容器重建都保留卷。`down --volumes` 会删除数据，不用于升级。升级前停止 Backend 并备份整个卷；SQLite 迁移快照仅覆盖数据库，不能替代媒体和工作空间备份。浏览器未确认编辑与冲突草稿也须保留。继续使用相同 Compose 项目名与卷，避免误连一套空数据。
 
@@ -84,7 +85,7 @@ COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-co
 
 PowerShell：`$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'`，然后运行相同的 `docker compose` 命令。
 
-- 安装 Acheng 导演引擎：`docker compose exec backend node scripts/acheng-engine.mjs update`。用 status 检查、rollback 回退；显式 ACHENG_SOURCE 指向持久卷中的可写 fork 克隆，固定运行版本也存入该卷。基础 Backend 启动不自动下载引擎，缺少时会提示，其他功能可继续使用。
+- 安装 Acheng 导演引擎：`docker compose exec backend node scripts/acheng-engine.mjs update`。用 status 检查、rollback 回退；显式 ACHENG_SOURCE 指向持久卷中的可写 fork 克隆。运行版本由项目管理并保存在 /data/acheng-runtime，与 CODEX_HOME 分离。基础 Backend 启动不自动下载引擎，缺少时会提示，其他功能可继续使用。
 - 需要侧边栏 Codex 对话时设置 BACKEND_IMAGE_TARGET=backend-codex，再构建并运行 `docker compose exec backend codex login --device-auth`。登录与本机不同，容器使用 /data/codex 保存自身状态。Claude Code 等外部 CLI 同样需部署者另行安装配置。
 
 ## 原生部署与静态前端
@@ -92,12 +93,12 @@ PowerShell：`$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'`，然后运行相同的 `do
 无需 Docker 时，在仓库根目录安装并构建项目、启动 Backend，再由自己的静态服务器提供 web/dist：
 
 ```bash
-npm ci
-npm run build --workspace canvas-agent
-npm run build:plugins
-npm run build --workspace backend
-npm run build --workspace web
-npm run start --workspace backend
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @basketikun/canvas-agent run build
+corepack pnpm run build:plugins
+corepack pnpm --filter @helishou/infinite-canvas-backend run build
+corepack pnpm --filter infinite-canvas run build
+corepack pnpm --filter @helishou/infinite-canvas-backend run start
 ```
 
 构建会包含本地官方插件清单。若连接独立 Backend，在 Web 构建环境设置 `VITE_BACKEND_URL`，并在 Backend 来源名单中加入网页 origin。
@@ -109,7 +110,8 @@ npm run start --workspace backend
 | INFINITE_CANVAS_ORIGINS | 逗号分隔的完整 HTTP(S) origins，覆盖文件/SQLite 来源配置 |
 | INFINITE_CANVAS_BACKEND_TOKEN | 覆盖连接密钥；否则使用持久配置或首次生成 |
 | INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | 自行选择的数据/媒体位置 |
-| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent 工作空间与可选 Codex/Acheng 状态位置 |
+| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent 工作空间与可选 Codex 状态位置 |
+| INFINITE_CANVAS_ACHENG_HOME | 项目专属 Acheng 运行时目录；默认位于仓库的 .canvas-runtime |
 | FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | 可选执行程序路径；否则从 PATH 查找 |
 
 环境变量中的网络设置优先于本地网络设置，容器需通过部署配置调整。静态网页可在 config.js 中设置公开的 `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };`，由自己的代理将该前缀转发到 Backend。密钥在连接设置填写。

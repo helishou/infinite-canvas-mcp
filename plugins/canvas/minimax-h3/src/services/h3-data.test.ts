@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
     applyCharacterGroupEdits,
+    displayReferenceName,
     promoteCharacterSourceReferences,
     refsForSegment,
+    refsForSubmission,
     refsFromCharacterGroup,
     syncCharacterGroupFromSource,
     upsertCharacterGroup,
@@ -12,9 +14,16 @@ import {
     removeCharacterGroup,
     segmentRefsPatch,
 } from "./h3-data";
-import type { H3CharacterGroup, H3Segment } from "../types";
+import type { H3CharacterGroup, H3Ref, H3Segment } from "../types";
 
-import { characterGroupBindings } from "../../../../../canvas-agent/src/canvas/reference-contract";
+import { characterGroupBindings, compileReferenceSubmission } from "../../../../../canvas-agent/src/canvas/reference-contract";
+
+test("ordinal-only H3 reference labels follow the current Clip order without renaming descriptive references", () => {
+    assert.equal(displayReferenceName({ type: "image", name: "<Picture 6>" } as H3Ref, 5, "Ref 5"), "<Picture 5>");
+    assert.equal(displayReferenceName({ type: "video", name: "<Video 2>" } as H3Ref, 1, "Ref 1"), "<Video 1>");
+    assert.equal(displayReferenceName({ type: "image", name: "苏青璃·金色礼服" } as H3Ref, 5, "Ref 5"), "苏青璃·金色礼服");
+    assert.equal(displayReferenceName({ type: "image", name: "" } as H3Ref, 5, "Ref 5"), "Ref 5");
+});
 
 function derivedFixture(): H3Segment {
     const groups = Object.fromEntries(["su", "shen"].map((id) => [id, {
@@ -27,6 +36,16 @@ function derivedFixture(): H3Segment {
         { id: "disabled", assetId: "disabled-asset", label: "保留", role: "other", mediaType: "image", storageKey: "image:disabled", enabled: false, tags: ["keep"] },
     ] };
 }
+
+test("manual character Ref order agrees in the editor, prompt ordinals and actual submission", () => {
+    const segment = derivedFixture();
+    const refs = refsForSegment(segment);
+    segment.referenceOrder = [refs[2].bindingId!, refs[0].bindingId!, refs[1].bindingId!];
+    const expected = ["image:shen", "image:scene", "image:su"];
+    assert.deepEqual(refsForSubmission(segment).map(ref => ref.storageKey), expected);
+    assert.deepEqual(compileReferenceSubmission({}, segment).references.map(ref => ref.storageKey), expected);
+    assert.equal(segment.referenceBindings?.find(binding => binding.id === "disabled")?.enabled, false);
+});
 
 test("手工场景与两个角色组共享解析得到三张参考，ID 来源顺序对齐后台", () => {
     const segment = derivedFixture();
@@ -43,6 +62,25 @@ test("旧角色参考在场景之前时，参考卡与共享编译保留同一�
         id: "old-su", storageKey: "image:old", url: "https://media.test/old",
     });
     assert.deepEqual(refsForSegment(segment).map((ref) => ref.storageKey), ["image:su", "image:scene", "image:shen"]);
+});
+
+test("提示词引用序号与提交序号共用分镜优先顺序", () => {
+    const segment: H3Segment = { id: "prompt-order", taskMode: "ref2va", referenceBindings: [
+        { id: "hongxiao", assetId: "hongxiao", label: "红绡", role: "character_turnaround", subjectId: "hongxiao", mediaType: "image", storageKey: "image:hongxiao" },
+        { id: "cottage", assetId: "cottage", label: "草庐", role: "scene", subjectId: "cottage", mediaType: "image", storageKey: "image:cottage" },
+        { id: "shenyan", assetId: "shenyan", label: "沈砚", role: "character_turnaround", subjectId: "shenyan", mediaType: "image", storageKey: "image:shenyan" },
+        { id: "board-2", assetId: "board-2", label: "Shot 2", role: "storyboard", mediaType: "image", storageKey: "image:board-2" },
+        { id: "board-3", assetId: "board-3", label: "Shot 3", role: "storyboard", mediaType: "image", storageKey: "image:board-3" },
+        { id: "sword", assetId: "sword", label: "佩剑", role: "prop", subjectId: "sword", mediaType: "image", storageKey: "image:sword" },
+    ], storyboardShots: [
+        { id: "SH-1" },
+        { id: "SH-2", referenceBindingId: "board-2" },
+        { id: "SH-3", referenceBindingId: "board-3" },
+        { id: "SH-4" },
+    ] };
+
+    assert.deepEqual(refsForSegment(segment).map((ref) => ref.bindingId), ["hongxiao", "cottage", "shenyan", "board-2", "board-3", "sword"]);
+    assert.deepEqual(refsForSubmission(segment).map((ref) => ref.bindingId), ["board-2", "board-3", "hongxiao", "cottage", "shenyan", "sword"]);
 });
 
 test("历史角色快照由当前组刷新且删除孤儿，手工编辑不双写派生项并保留禁用绑定", () => {

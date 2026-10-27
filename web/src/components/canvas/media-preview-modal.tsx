@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Button, Modal } from "antd";
+import { Button, Modal, message } from "antd";
 import { BetweenHorizontalStart, ChevronLeft, ChevronRight, GalleryHorizontal, GalleryHorizontalEnd, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -118,6 +118,48 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
             setCopying(null);
         }
     }, [closeVideoMenu, url]);
+
+    const addFrameToStoryboard = useCallback(async (position: "current" | "first" | "last") => {
+        const nodeId = request?.canvasNodeId;
+        if (!nodeId) return;
+        closeVideoMenu();
+        setCopying("分镜板");
+        try {
+            const video = videoRef.current;
+            const sourceTime = position === "first" ? 0 : position === "last"
+                ? Math.max(0, Number(video?.duration || 0) - 0.001)
+                : Number(video?.currentTime || 0);
+            const blob = await captureVideoFrame(url, position, sourceTime);
+            window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-add-frame", { detail: {
+                nodeId,
+                blob,
+                sourceTime,
+                name: item?.name || "H3 输出视频",
+                position,
+            } }));
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "当前帧截取失败。");
+        } finally {
+            setCopying(null);
+        }
+    }, [closeVideoMenu, item?.name, request?.canvasNodeId, url]);
+
+    const extractStoryboardFrames = useCallback(() => {
+        const nodeId = item?.canvasNodeId;
+        const times = item?.storyboardFrameTimes || [];
+        if (!nodeId || !times.length) {
+            message.error("当前 Clip 没有可提取的分镜轨首帧。");
+            return;
+        }
+        closeVideoMenu();
+        window.dispatchEvent(new CustomEvent("minimax-h3-quick-storyboard-capture", { detail: {
+            nodeId,
+            url,
+            name: item?.name || "H3 输出视频",
+            duration: Number(videoRef.current?.duration || 0),
+            times,
+        } }));
+    }, [closeVideoMenu, item?.canvasNodeId, item?.name, item?.storyboardFrameTimes, url]);
 
     useEffect(() => {
         if (!videoMenu) return;
@@ -312,7 +354,7 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
                     style={{
                         position: "fixed",
                         left: Math.min(videoMenu.x, window.innerWidth - 190),
-                        top: Math.min(videoMenu.y, window.innerHeight - 190),
+                        top: Math.min(videoMenu.y, window.innerHeight - 250),
                         zIndex: 1200,
                         minWidth: 176,
                         padding: 4,
@@ -329,6 +371,12 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
                     <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label={copying === "首帧" ? "正在复制首帧…" : "复制首帧"} onClick={() => void copyVideoFrame("first")} />
                     <MenuButton icon={<GalleryHorizontalEnd className="size-4" />} label={copying === "尾帧" ? "正在复制尾帧…" : "复制尾帧"} onClick={() => void copyVideoFrame("last")} />
                     <MenuButton icon={<GalleryHorizontal className="size-4" />} label={copying === "当前帧" ? "正在复制当前帧…" : "复制当前帧"} onClick={() => void copyVideoFrame("current")} />
+                    {item?.canvasNodeId ? <>
+                        <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label={copying === "分镜板" ? "正在加入分镜板…" : "首帧截取到分镜板"} onClick={() => void addFrameToStoryboard("first")} />
+                        <MenuButton icon={<GalleryHorizontalEnd className="size-4" />} label={copying === "分镜板" ? "正在加入分镜板…" : "尾帧截取到分镜板"} onClick={() => void addFrameToStoryboard("last")} />
+                        <MenuButton icon={<GalleryHorizontal className="size-4" />} label={copying === "分镜板" ? "正在加入分镜板…" : "当前帧截取到分镜板"} onClick={() => void addFrameToStoryboard("current")} />
+                        {item.storyboardFrameTimes?.length ? <MenuButton icon={<BetweenHorizontalStart className="size-4" />} label="截取全部分镜首帧" onClick={extractStoryboardFrames} /> : null}
+                    </> : null}
                 </div>
             ) : null}
         </Modal>

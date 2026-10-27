@@ -22,7 +22,8 @@
 ## 构建与验证
 
 - 改插件源码后在该插件目录 `node build.mjs`，更新可分发产物；SDK 修改同时重建受影响消费者。
-- H3 既有插件分发包，也有宿主内置源码路径。Vite dev 使用 HMR；生产宿主 UI 需要 Web build，复制 `minimax-h3.js` 不能代替它。
+- H3 是宿主内置插件：Web 经 `plugin-loader` 直接 import 其源码并打进宿主 JS，不加载 `web/public` 下的 bundle，其 build 传 `publicDir: null` 只产出 `dist/` 供外部宿主分发。Vite dev 走 HMR；生产宿主 UI 必须重建 Web，复制 `minimax-h3.js` 不能代替它。
+- 官方插件经根目录 `corepack pnpm run build:plugins` 集中构建进 `web/public/plugins`，同一份产物另由 CI 发布到 `plugins-dist` 供 jsDelivr 远程拉取；增删官方插件要同时改 registry 登记表，构建会清理清单中已移除的旧 bundle。
 - H3 版本唯一来源为 `canvas-agent/src/plugins/minimax-h3/version.ts`，其 build 会同步 package、lock、manifest；不手动维护互相冲突的版本。
 - 布局/交互验收核对相邻区域不受串扰、缩放坐标正确、深浅主题一致；不以 bundle 构建成功代替实际界面行为。
 - 多份 CSS 规则、媒体查询、容器查询先确认最终生效声明，再最小修改；不盲目把所有匹配选择器改成相同数值。

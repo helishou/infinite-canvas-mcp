@@ -4,6 +4,8 @@ import { useCanvasHost } from "@/lib/canvas/canvas-host";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
+import { shouldStartCanvasPan } from "@/lib/canvas/canvas-gesture";
+import { syncCanvasZoom } from "./canvas-node-panel-frame";
 
 /** 平移/缩放时是否只做命令式 DOM 写入（跳过 React 渲染）。 */
 export type ViewportChangeOptions = { live?: boolean };
@@ -19,14 +21,13 @@ type InfiniteCanvasProps = {
     onViewportChange: (viewport: ViewportTransform, options?: ViewportChangeOptions) => void;
     onCanvasMouseDown?: (event: React.PointerEvent<HTMLDivElement>) => void;
     onCanvasDeselect?: () => void;
-    onCanvasDoubleClick?: (event: React.MouseEvent<HTMLDivElement>) => void;
     onContextMenu?: (event: React.MouseEvent) => void;
     onDrop?: (event: React.DragEvent<HTMLDivElement>) => void;
     overlay?: React.ReactNode;
     children: React.ReactNode;
 };
 
-export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onCanvasDoubleClick, onContextMenu, onDrop, overlay, children }: InfiniteCanvasProps) {
+export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWriter, tool, backgroundMode = "lines", onViewportChange, onCanvasMouseDown, onCanvasDeselect, onContextMenu, onDrop, overlay, children }: InfiniteCanvasProps) {
     const active = useCanvasHost()?.active ?? true;
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const transformRef = useRef<HTMLDivElement | null>(null);
@@ -45,7 +46,10 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         const grid = gridRef.current;
         const previous = lastWrittenViewportRef.current;
         if (previous && previous.frame === frame && previous.grid === grid && previous.x === next.x && previous.y === next.y && previous.k === next.k) return;
-        if (frame) frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
+        if (frame) {
+            frame.style.transform = `translate(${next.x}px, ${next.y}px) scale(${next.k})`;
+            syncCanvasZoom(frame, next.k);
+        }
         if (grid) {
             const gridSize = 48 * next.k;
             grid.style.backgroundSize = `${gridSize}px ${gridSize}px`;
@@ -180,7 +184,9 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
         const isBackgroundClick = !target?.closest("[data-node-id],[data-connection-id]");
         const temporaryTool = event.ctrlKey || isSpacePressed;
         const activeTool = temporaryTool ? (tool === "select" ? "pan" : "select") : tool;
-        const shouldPan = event.button === 1 || (event.button === 0 && activeTool === "pan" && isBackgroundClick);
+        const handToolNodeTarget = !temporaryTool && tool === "pan" && Boolean(target?.closest("[data-node-id]"));
+        const hitInteractiveControl = handToolNodeTarget || Boolean(target?.closest("button,input,textarea,select,[contenteditable='true'],video,audio,[data-canvas-node-panel],[data-resize-handle],[data-connection-handle]"));
+        const shouldPan = shouldStartCanvasPan(event.button, activeTool, hitInteractiveControl);
 
         if (shouldPan) {
             event.preventDefault();
@@ -208,12 +214,6 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             event.currentTarget.setPointerCapture(event.pointerId);
             onCanvasMouseDown?.(event);
         }
-    };
-
-    const handleDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
-        const target = event.target instanceof Element ? event.target : null;
-        if (target?.closest("[data-canvas-no-zoom],[data-node-id],[data-connection-id]")) return;
-        onCanvasDoubleClick?.(event);
     };
 
     useEffect(() => {
@@ -292,7 +292,6 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             className="relative h-full w-full select-none overflow-hidden"
             style={{ background: theme.canvas.background, cursor }}
             onPointerDown={handlePointerDown}
-            onDoubleClick={handleDoubleClick}
             onWheel={handleWheel}
             onContextMenu={onContextMenu}
             onDragOver={(event) => event.preventDefault()}
@@ -301,10 +300,12 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             <CanvasGrid viewport={viewportRef.current} mode={backgroundMode} gridRef={gridRef} />
             <div
                 ref={transformRef}
+                data-canvas-viewport-transform
                 className="absolute origin-top-left"
                 style={{
                     transform: `translate(${viewportRef.current.x}px, ${viewportRef.current.y}px) scale(${viewportRef.current.k})`,
-                }}
+                    "--canvas-zoom": viewportRef.current.k,
+                } as React.CSSProperties & { "--canvas-zoom": number }}
             >
                 {children}
             </div>

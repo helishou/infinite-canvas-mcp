@@ -8,7 +8,7 @@ import { BackendDatabase } from "./db.js";
 import { DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { historicalDatabase } from "./test-helpers/historical-database.js";
 
-test("H3 migration retries after rollback without overwriting old or failed-attempt backups", (t) => {
+test("H3 migration retries after rollback without overwriting snapshots and keeps the family bounded", (t) => {
     const base = path.resolve(process.env.INFINITE_CANVAS_DATA_DIR || os.tmpdir());
     fs.mkdirSync(base, { recursive: true });
     const directory = fs.mkdtempSync(path.join(base, "h3-upgrade-retry-"));
@@ -26,7 +26,9 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
     // A previous release may have left its fixed-name snapshot behind.
     const oldBackup = `${file}.pre-h3-v14-reference-archive.sqlite`;
     fs.copyFileSync(file, oldBackup);
-    const oldBytes = fs.readFileSync(oldBackup);
+    // 遗留快照在现实中就是更旧的：显式回溯 mtime，让「保留最新若干份」的顺序确定。
+    const legacyTime = new Date(Date.now() - 3_600_000);
+    fs.utimesSync(oldBackup, legacyTime, legacyTime);
     const exec = DatabaseSync.prototype.exec;
     const fault = t.mock.method(DatabaseSync.prototype, "exec", function (this: DatabaseSync, sql: string) {
         if (sql.includes("CREATE TABLE IF NOT EXISTS h3_reference_legacy_archive")) throw new Error("transient migration failure");
@@ -37,7 +39,6 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
     const failedBackups = fs.readdirSync(directory).filter((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-"));
     assert.equal(failedBackups.length, 1);
     const failedBackup = path.join(directory, failedBackups[0]);
-    const failedBytes = fs.readFileSync(failedBackup);
     const check = new DatabaseSync(file, { readOnly: true });
     try {
         assert.equal(check.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, 13);
@@ -46,10 +47,12 @@ test("H3 migration retries after rollback without overwriting old or failed-atte
     migrated = new BackendDatabase(file);
     assert.equal(migrated.getCanvasProject("p")?.title, "User content");
     assert.equal(migrated.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-    assert.deepEqual(fs.readFileSync(oldBackup), oldBytes);
-    assert.deepEqual(fs.readFileSync(failedBackup), failedBytes);
-    const backups = fs.readdirSync(directory).filter((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-"));
-    assert.equal(backups.length, 2);
+    // 保留策略：同一用途只留最新若干份，每份都是本次尝试独立生成的完整副本（从不覆写既有文件）。
+    // 这次成功迁移链会连续产生新的 pre-h3 快照，于是更早的（含上一版本遗留的那份）被回收。
+    const backups = fs.readdirSync(directory).filter((name) => name.startsWith("runtime.sqlite.pre-h3-"));
+    assert.equal(backups.length, 2, "the pre-h3 family stays bounded");
+    assert.equal(fs.existsSync(oldBackup), false, "the eldest snapshot is reclaimed, never overwritten");
+    assert.equal(fs.existsSync(failedBackup), false, "older attempts are reclaimed once newer snapshots exist");
     for (const name of backups) {
         const backup = new DatabaseSync(path.join(directory, name), { readOnly: true });
         try { assert.equal(backup.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok"); }

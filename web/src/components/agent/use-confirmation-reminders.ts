@@ -24,7 +24,6 @@ export function useConfirmationReminders() {
     const threadId = useAgentStore(state => state.activeThreadId);
     const context = useProductionWorkspaceStore(state => state.context);
     const production = useProductionWorkspaceStore(state => state.production);
-    const readiness = useProductionWorkspaceStore(state => state.readiness);
     const taskConfirmations = useTaskConfirmationStore(state => state.items);
     const canvasMatch = /^\/canvas\/([^/]+)/.exec(location.pathname);
     let canvasId = context?.canvasId;
@@ -35,7 +34,7 @@ export function useConfirmationReminders() {
     const [sendFailed, setSendFailed] = useState(false);
     const focused = useRef(document.hasFocus());
     const mounted = useRef(false);
-    const requests = useMemo(() => collectConfirmationReminders({ approvals, pendingTool, threadId, route: location.pathname + location.search, context, production, readiness, taskConfirmations: taskConfirmations.filter(item => item.projectId === canvasId) }), [approvals, pendingTool, threadId, location.pathname, location.search, context, production, readiness, taskConfirmations, canvasId]);
+    const requests = useMemo(() => collectConfirmationReminders({ approvals, pendingTool, threadId, route: location.pathname + location.search, context, production, taskConfirmations: taskConfirmations.filter(item => item.projectId === canvasId) }), [approvals, pendingTool, threadId, location.pathname, location.search, context, production, taskConfirmations, canvasId]);
     const live = useRef({ requests, enabled, t, navigate }); live.current = { requests, enabled, t, navigate };
     const controller = useRef<ConfirmationReminderController | null>(null);
     if (!controller.current) controller.current = new ConfirmationReminderController({

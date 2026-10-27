@@ -78,14 +78,14 @@ export function CanvasCoverPicker({ open, nodes, onSelect, onClose }: Props) {
                         <button
                             key={`${candidate.nodeId}:${candidate.storageKey || candidate.url.slice(-24)}`}
                             type="button"
-                            className="group relative aspect-square overflow-hidden rounded-md border border-stone-200 bg-stone-50 text-left dark:border-stone-700 dark:bg-stone-900"
+                            className="group relative aspect-square overflow-hidden rounded-md border border-border bg-muted text-left dark:bg-muted"
                             onClick={() => onSelect(candidate)}
                         >
                             <img src={candidate.url} alt={candidate.title} className="size-full object-cover transition duration-200 group-hover:scale-[1.04]" loading="lazy" />
                             <Tooltip title={candidate.title}>
-                                <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/55 px-1 text-[9px] uppercase text-white/90">{candidate.kind}</span>
+                                <span className="pointer-events-none absolute left-1 top-1 rounded bg-black/55 px-1 text-[11px] uppercase text-white/90">{candidate.kind}</span>
                             </Tooltip>
-                            <span className="absolute inset-x-0 bottom-0 truncate bg-black/55 px-1.5 py-0.5 text-[10px] text-white">{candidate.title}</span>
+                            <span className="absolute inset-x-0 bottom-0 truncate bg-black/55 px-1.5 py-0.5 text-[11px] text-white">{candidate.title}</span>
                         </button>
                     ))}
                 </div>

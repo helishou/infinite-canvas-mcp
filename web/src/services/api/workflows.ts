@@ -9,6 +9,8 @@ export type WorkflowItem = {
     hasConfig?: boolean;
 };
 
+export type LocalComfyWorkflowFile = { id: string; instance: string; relativePath: string; name: string; bytes: number; modifiedAt: string };
+
 // 字段与配置类型只有一份定义在 @/types/workflow；这里只做转发，
 // 避免两个同名类型各自漂移。跟 backend/src/db.ts 的 WorkflowField / WorkflowConfig 对齐。
 import type { WorkflowConfig, WorkflowField } from "@/types/workflow";
@@ -19,13 +21,17 @@ export type WorkflowDetail = {
     description?: string;
     workflow: Record<string, unknown>;
     config?: WorkflowConfig;
+    source?: { instance: string; relativePath: string; syncedSha256: string; syncedAt: string; syncState?: "current" | "changed" | "missing" };
 };
 
 export type WorkflowPackage = {
     format: "infinite-canvas-workflow";
     version: 1;
     name: string;
+    /** ComfyUI API 格式（本地执行用）。 */
     workflow: Record<string, unknown>;
+    /** 原始 UI 格式（nodes/links）；上传到 RunningHub 网页端用这个，API 格式编辑器解析不了。 */
+    uiWorkflow?: Record<string, unknown>;
     config: WorkflowConfig;
 };
 
@@ -75,6 +81,18 @@ export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
     return request<{ workflows: WorkflowItem[] }>("GET", "/api/workflows");
 }
 
+export function fetchLocalComfyWorkflows(): Promise<{ workflows: LocalComfyWorkflowFile[] }> {
+    return request<{ workflows: LocalComfyWorkflowFile[] }>("GET", "/api/comfyui/local-workflows");
+}
+
+export function importLocalComfyWorkflow(input: Pick<LocalComfyWorkflowFile, "instance" | "relativePath">): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", "/api/workflows/import-comfyui", input);
+}
+
+export function syncWorkflowFromComfyUI(name: string): Promise<{ name: string }> {
+    return request<{ name: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/sync-comfyui`);
+}
+
 export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
     return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
 }
@@ -83,8 +101,8 @@ export function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
     return request<WorkflowPackage>("GET", `/api/workflows/${encodeURIComponent(name)}/export`);
 }
 
-export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string }> {
-    return request<{ name: string }>("POST", "/api/workflows/import", { name, package: workflowPackage, exposeModel: options?.exposeModel });
+export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string; inheritedFrom?: string }> {
+    return request<{ name: string; inheritedFrom?: string }>("POST", "/api/workflows/import", { name, package: workflowPackage, exposeModel: options?.exposeModel });
 }
 
 // 仅重命名显示标题（title），不动底层文件名

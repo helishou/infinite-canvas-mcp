@@ -2,7 +2,7 @@ import { validateH3CharacterGroups } from "./character-reference-contract.js";
 export { productionImageInput, type ProductionImageInput, type ProductionImageReference } from "./production-image-input.js";
 export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
-import { orderStoryboardReferencesFirst, remapPictureTags } from "./storyboard-reference-order.js";
+import { applyReferenceOrder, orderReferencesForSubmission, remapPictureTags } from "./storyboard-reference-order.js";
 
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
@@ -52,6 +52,10 @@ export type ReferenceBinding = {
     storageKey?: string;
     mimeType?: string;
     sourceNodeId?: string;
+    /** Stable link to the formal Subject picture binding that produced this H3 reference. */
+    pictureBindingId?: string;
+    /** Formal Subject picture purposes, preserved independently of the generic H3 role. */
+    picturePurpose?: string[];
     groupId?: string;
     outfitId?: string;
     resultSelectionPolicy?: NodeImageSelectionPolicy;
@@ -165,7 +169,8 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
             assetId: stableReferenceId("asset", `${characterNodeId}:${key}`),
             label: `${characterName} · ${String(outfit.name || "outfit")}`,
             role: inferReferenceRole(outfit),
-            tags: ["character-group", String(outfit.role || "character_turnaround")],
+            tags: ["character-group", String(outfit.role || "character_turnaround"), ...(Array.isArray(outfit.picturePurpose) ? outfit.picturePurpose.map(String) : [])],
+            ...(Array.isArray(outfit.picturePurpose) && outfit.picturePurpose.length ? { picturePurpose: outfit.picturePurpose.map(String) } : {}),
             enabled: true,
             usage: "reference",
             subjectId,
@@ -215,7 +220,8 @@ export function resolveCharacterGroupBindings(bindings: ReferenceBinding[], segm
         used.add(current.id);
         return [current];
     });
-    return [...ordered, ...derived.filter((binding) => !used.has(binding.id))];
+    return applyReferenceOrder([...ordered, ...derived.filter((binding) => !used.has(binding.id))], segment.referenceOrder,
+        (binding) => binding.id);
 }
 
 export function compileReferenceSubmission(project: Record<string, unknown>, segment: Record<string, unknown>): ReferenceCompilation {
@@ -224,9 +230,13 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     const originalBindings = resolveCharacterGroupBindings(rawBindings, segment);
     const shotIds = (Array.isArray(segment.storyboardShots) ? segment.storyboardShots : [])
         .map((shot) => String(recordOf(shot).referenceBindingId || "")).filter(Boolean);
-    const bindings = orderStoryboardReferencesFirst(originalBindings, shotIds,
+    const bindings = orderReferencesForSubmission(originalBindings, shotIds,
         (binding) => binding.id,
-        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image");
+        (binding) => binding.enabled && binding.role === "storyboard" && (binding.mediaType || inferReferenceMediaType(binding)) === "image",
+        (binding) => binding.enabled
+        && binding.role !== "storyboard"
+        && (binding.mediaType || inferReferenceMediaType(binding)) === "image"
+        && Boolean(binding.subjectId || binding.groupId), segment.referenceOrder);
     const issues: ReferenceIssue[] = [...validateH3CharacterGroups(project, { ...segment, referenceBindings: bindings })];
     const counters: Record<ReferenceMediaType, number> = { image: 0, video: 0, audio: 0 };
     const references = bindings.filter((binding) => binding.enabled).flatMap((binding): CompiledReference[] => {
@@ -260,12 +270,6 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         return [{ ...merged, mediaType, ordinal, token }];
     });
     const semanticPrompt = String(segment.prompt || "");
-    // Existing Clips keep their saved prompt until an explicit edit. Preserve each Picture's
-    // source image when compiling the storyboard-first execution order.
-    const orderedPrompt = bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
-        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
-            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
-        : semanticPrompt;
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
     let nextSubjectOrdinal = 1;
     const registerSubject = (reference: CompiledReference, ids: Array<string | undefined>) => {
@@ -285,6 +289,16 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
             if (!bySubjectId.has(id)) registerSubject(reference, [id]);
         });
     });
+    // Structured production prompts already name storyboard frames by their local Shot
+    // and entity pictures by Subject. Those declarations are the stable binding map; do
+    // not reinterpret their Picture numbers using a stale referenceBindings array order.
+    // For legacy/free-form prompts without a complete map, retain the historical
+    // binding-identity remap below.
+    const pictureOrderIsExplicit = promptUsesSubmissionPictureOrder(semanticPrompt, segment, references, bySubjectId);
+    const orderedPrompt = !pictureOrderIsExplicit && bindings.some((binding, index) => binding.id !== originalBindings[index]?.id)
+        ? remapPictureTags(semanticPrompt, originalBindings.filter((binding) => binding.enabled), bindings.filter((binding) => binding.enabled),
+            (binding) => binding.id, (binding) => (binding.mediaType || inferReferenceMediaType(binding)) === "image")
+        : semanticPrompt;
     // Subject is a semantic prompt token, not a media-slot reference. It may
     // describe a character, prop, scene, object, or an entity defined elsewhere;
     // never validate it against character bindings or enabled media count.
@@ -293,8 +307,74 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         .replace(/<(subject|picture|video|audio)\s+(\d+)>/giu, (_marker, kind: string, ordinal: string) => `<${kind[0].toUpperCase()}${kind.slice(1).toLowerCase()} ${ordinal}>`)
         .replace(/(<Subject\s+\d+>)(?=[\p{L}\p{N}(])/gu, "$1 ");
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
+    const promptWithBoundOutfits = bindOutfitReferenceDetails(promptWithBoundSubjects, project, segment, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
-    return { semanticPrompt, compiledPrompt: promptWithBoundSubjects, bindings, references, issues, migratedLegacyRefs };
+    return { semanticPrompt, compiledPrompt: promptWithBoundOutfits, bindings, references, issues, migratedLegacyRefs };
+}
+
+function promptUsesSubmissionPictureOrder(
+    prompt: string,
+    segment: Record<string, unknown>,
+    references: CompiledReference[],
+    bySubjectId: Map<string, { reference: CompiledReference; ordinal: number }>,
+) {
+    const images = references.filter((reference) => reference.mediaType === "image");
+    const mapped = new Set<string>();
+    const storyboardShots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots.map(recordOf) : [];
+    const storyboardBindings = images.filter((reference) => reference.role === "storyboard");
+    if (storyboardBindings.length) {
+        if (!storyboardShots.length) return false;
+        for (const [index, shot] of storyboardShots.entries()) {
+            const bindingId = String(shot.referenceBindingId || "");
+            if (!bindingId) continue;
+            const reference = storyboardBindings.find((item) => item.id === bindingId);
+            if (!reference) return false;
+            const shotNumber = index + 1;
+            const anchor = new RegExp(`<Picture\\s+(\\d+)>[^\\n]*\\[Shot\\s+${shotNumber}\\]`, "i").exec(prompt);
+            if (!anchor || Number(anchor[1]) !== reference.ordinal) return false;
+            mapped.add(reference.id);
+        }
+        if (storyboardBindings.some((reference) => !mapped.has(reference.id))) return false;
+    }
+
+    const sourceByOrdinal = new Map<number, { reference: CompiledReference; ordinal: number }>();
+    for (const source of bySubjectId.values()) sourceByOrdinal.set(source.ordinal, source);
+    const subjectSection = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im.exec(prompt);
+    const subjectLines = subjectSection ? [...subjectSection[2].matchAll(/<Subject\s+(\d+)>[^\r\n]*/g)] : [];
+    if (!subjectLines.length) return false;
+    const subjectReferenceIds = new Set([...bySubjectId.values()].map((source) => source.reference.id));
+    const explicitlyUsedPictures = new Set<number>();
+    for (const match of subjectLines) {
+        const source = sourceByOrdinal.get(Number(match[1]));
+        const pictureNumbers = [...new Set([...match[0].matchAll(/<Picture\s+(\d+)>/gi)].map((picture) => Number(picture[1])))];
+        if (!pictureNumbers.length) return false;
+        for (const pictureNumber of pictureNumbers) {
+            if (!Number.isSafeInteger(pictureNumber) || explicitlyUsedPictures.has(pictureNumber)) return false;
+            explicitlyUsedPictures.add(pictureNumber);
+            if (source) {
+                // A bound Subject explicitly names the same Picture slot that its
+                // stable subject binding occupies in the final submission order.
+                // In that case an older persisted referenceOrder must not rebase it.
+                const reference = source.reference;
+                const candidate = images[pictureNumber - 1];
+                if (!candidate || !(candidate.id === reference.id
+                    || (reference.subjectId && candidate.subjectId === reference.subjectId)
+                    || (reference.groupId && candidate.groupId === reference.groupId))) return false;
+                for (const candidate of images) {
+                    if (candidate.id === reference.id || (reference.subjectId && candidate.subjectId === reference.subjectId)
+                        || (reference.groupId && candidate.groupId === reference.groupId)) mapped.add(candidate.id);
+                }
+            } else {
+                // Non-entity references such as an environment image can be
+                // explicitly assigned to their final Picture slot as well.
+                const reference = images[pictureNumber - 1];
+                if (!reference || subjectReferenceIds.has(reference.id) || reference.role === "storyboard") return false;
+                mapped.add(reference.id);
+            }
+        }
+    }
+
+    return images.length > 0 && images.every((reference) => mapped.has(reference.id));
 }
 
 function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBinding) {
@@ -316,17 +396,89 @@ function sourceMediaOf(project: Record<string, unknown>, binding: ReferenceBindi
     return { ...(storageKey ? { storageKey } : {}), ...(url ? { url } : {}), ...(media.mimeType ? { mimeType: String(media.mimeType) } : {}) };
 }
 
+function bindOutfitReferenceDetails(
+    prompt: string,
+    project: Record<string, unknown>,
+    segment: Record<string, unknown>,
+    references: CompiledReference[],
+    bySubjectId: Map<string, { reference: CompiledReference; ordinal: number }>,
+) {
+    const groups = Object.values(recordOf(segment.h3CharacterGroups));
+    const nodes = Array.isArray(project.nodes) ? project.nodes.map(recordOf) : [];
+    const additions = new Map<number, Array<{ token: string; instruction: string }>>();
+    for (const reference of references) {
+        if (reference.mediaType !== "image" || !reference.outfitId) continue;
+        const group = groups.map(recordOf).find((item) =>
+            String(item.id || "") === String(reference.groupId || "")
+            || String(item.subjectId || "") === String(reference.subjectId || "")
+            || String(item.characterNodeId || "") === String(reference.sourceNodeId || ""));
+        if (!group) continue;
+        const subject = [reference.subjectId, reference.groupId, reference.id]
+            .map((id) => id ? bySubjectId.get(id) : undefined)
+            .find(Boolean);
+        if (!subject) continue;
+        const outfits = Array.isArray(group.outfits) ? group.outfits.map(recordOf) : [];
+        const outfit = outfits.find((item) => String(item.id || "") === reference.outfitId);
+        if (!outfit || outfit.enabled === false) continue;
+        const characterNodeId = String(group.characterNodeId || reference.sourceNodeId || "");
+        const characterNode = nodes.find((item) => String(item.id || "") === characterNodeId);
+        const metadata = recordOf(characterNode?.metadata);
+        const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.map(recordOf) : [];
+        const outfitImage = images.find((item) => String(item.storageKey || "") === String(reference.storageKey || ""))
+            || images.find((item) => String(item.outfit || item.name || "") === String(outfit.name || ""));
+        const description = String(outfitImage?.outfitDescription || outfit.outfitDescription || outfit.description || "").trim();
+        const purposes = [...(Array.isArray(reference.picturePurpose) ? reference.picturePurpose : []), ...(Array.isArray(outfit.picturePurpose) ? outfit.picturePurpose : [])].map(String);
+        // A character image can be present in the outfit group while serving only as
+        // the identity reference. Add wardrobe instructions only when that role is
+        // explicit or the user supplied an outfit description for this image.
+        if (purposes.length && !purposes.includes("wardrobe")) continue;
+        if (!purposes.includes("wardrobe") && !description) continue;
+        const instruction = description
+            ? `Authored outfit description: ${description}. Match these details and the exact visible design; do not substitute or redesign it.`
+            : "This is the exact outfit reference for this Subject. Reproduce its visible clothing design without substitution, simplification, or invented details.";
+        const items = additions.get(subject.ordinal) || [];
+        items.push({ token: reference.token, instruction });
+        additions.set(subject.ordinal, items);
+    }
+    if (!additions.size) return prompt;
+    const sectionPattern = /(^subject_definitions\s*[:：]\s*\r?\n)([\s\S]*?)(?=^\s*(?:summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music|storyboard_timeline)\s*[:：]|$(?![\s\S]))/im;
+    const section = sectionPattern.exec(prompt);
+    if (!section) return prompt;
+    const linkedSection = section[2].replace(/<Subject\s+(\d+)>[^\r\n]*/g, (line, ordinalText: string) => {
+        const items = additions.get(Number(ordinalText));
+        if (!items?.length) return line;
+        const missing = items.filter(({ token }) => !line.includes(token));
+        if (missing.length) return line;
+        const detail = items.map(({ instruction }) => instruction).join(" ");
+        return `${line.trimEnd().replace(/[.。]+$/u, "")}; ${detail}`;
+    });
+    return `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
+}
+
 /** Resolve one image for a formal binding. Existing clips retain their legacy primary-image rule. */
 export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImageSelectionPolicy) {
     const metadata = recordOf(metadataValue);
+    let implicitPrimarySelection = false;
     if (policy?.mode === "node_selection") {
         const nodePolicy = recordOf(metadata.smartImageReferenceSelection);
         if (nodePolicy.mode === "selected_result" && typeof nodePolicy.resultId === "string" && nodePolicy.resultId) policy = { mode: "selected_result", resultId: nodePolicy.resultId };
-        else if (nodePolicy.mode === undefined || nodePolicy.mode === "latest_success") policy = { mode: "latest_success" };
+        else if (nodePolicy.mode === undefined) {
+            const primaryImageId = String(metadata.primaryImageId || "");
+            if (primaryImageId) {
+                policy = { mode: "selected_result", resultId: primaryImageId };
+                implicitPrimarySelection = true;
+            }
+            else {
+                policy = { mode: "selected_result", resultId: "" };
+                implicitPrimarySelection = true;
+            }
+        } else if (nodePolicy.mode === "latest_success") policy = { mode: "latest_success" };
         else return { error: "智能节点的引用选择策略无效；不会回退到浏览中的图片。" };
     }
     const images = Array.isArray(metadata.images) ? metadata.images.map(recordOf) : [];
-    const completed = (item: Record<string, unknown>) => item.status === "success" && Boolean(item.storageKey);
+    // 只把真正可引用的结果算作 candidate：失败/运行中的槽位即使带 storageKey 也不能被引用。
+    // 没有写 status 的条目是历史画布上的已完成结果，按契约继续可用。
+    const completed = (item: Record<string, unknown>) => Boolean(item.storageKey) && (item.status === undefined || item.status === "success");
     if (policy?.mode === "latest_success") {
         const image = images.map((item, index) => ({ item, index })).filter(entry => completed(entry.item)).sort((left, right) => {
             const leftSequence = Number.isSafeInteger(Number(left.item.generationTaskSequence)) ? Number(left.item.generationTaskSequence) : undefined;
@@ -344,6 +496,10 @@ export function selectSmartImageResult(metadataValue: unknown, policy?: NodeImag
     }
     if (policy?.mode === "selected_result") {
         const image = images.find(item => item.id === policy.resultId && completed(item));
+        if (!image && implicitPrimarySelection) {
+            const firstAvailable = images.find(completed);
+            return firstAvailable ? { image: firstAvailable } : { error: "智能节点没有成功归档的图片结果；不会引用运行中、失败或占位图片。" };
+        }
         return image ? { image } : { error: `选定历史结果 ${policy.resultId} 不存在、未成功或未归档。` };
     }
     const legacy = images.find(item => item.id === metadata.primaryImageId && (item.content || item.storageKey))
@@ -388,6 +544,10 @@ function bindLiteralSubjectsToPictures(
     if (!subjectMap.size) return prompt;
 
     const linkedSection = section[2].replace(/<Subject\s+(\d+)>[^\r\n]*/g, (line, labelText: string) => {
+        // An authored Picture citation owns this definition, including non-character
+        // Subjects such as environments. Only fill a definition with no image anchor;
+        // a partial character registry must not add a conflicting positional guess.
+        if (/<Picture\s+\d+>/u.test(line)) return line;
         const source = subjectMap.get(Number(labelText));
         if (!source) return line;
         const existingPictures = new Set([...line.matchAll(/<Picture\s+(\d+)>/g)].map((match) => `<Picture ${match[1]}>`));
@@ -396,13 +556,10 @@ function bindLiteralSubjectsToPictures(
         const pictureList = missingPictures.length === 1
             ? missingPictures[0]
             : `${missingPictures.slice(0, -1).join(", ")} and ${missingPictures.at(-1)}`;
-        return `${line.trimEnd()} The source appearance and costume are referenced from ${pictureList}.`;
+        return `${line.trimEnd().replace(/[.。]+$/u, "")} (${pictureList}).`;
     });
-    const withLinkedDefinitions = `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
-    return withLinkedDefinitions.replace(/<Subject\s+(\d+)>/g, (marker, labelText: string) => {
-        const source = subjectMap.get(Number(labelText));
-        return source ? `<Subject ${source.ordinal}>` : marker;
-    });
+    // Subject labels are semantic identities, independent of Picture slot numbers.
+    return `${prompt.slice(0, section.index)}${section[1]}${linkedSection}${prompt.slice(section.index + section[0].length)}`;
 }
 
 export class ReferenceCompilationError extends Error {

@@ -11,7 +11,7 @@ description: 操作 Infinite Canvas 当前网页画布，读取节点、选区�
 
 - 如果用户还没有打开或连接网页画布，使用 `open-canvas` 技能打开 Infinite Canvas，不要要求用户手动复制 URL 或 token。
 - 已有准确节点 ID 和足够参数时直接操作；需要寻找节点时用 `canvas_get_state` 读取精简目录，需要布局或连线时传 `view: "graph"`，需要单节点详情时传 `nodeIds`。用户提到选中内容、当前节点或“这个”时用 `canvas_get_selection`。
-- 创建单个文本内容优先用 `canvas_create_text_node`。
+- MCP 只创建智能生成节点；不要创建普通文本、图片、视频或音频节点。
 - 创建生成内容优先用 `canvas_generate_text`、`canvas_generate_image`、`canvas_generate_video`、`canvas_generate_audio`。
 - 需要把提示词、配置和生成节点串成流程时，使用 `canvas_create_generation_flow` 或项目已有的流程工具。
 - 需要批量增删改、移动、连接节点或设置视口时，使用 `canvas_apply_ops`。

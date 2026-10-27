@@ -1,11 +1,11 @@
 ---
 title: Third-party Prompt Sources
-description: The seven third-party prompt sources built into the application
+description: The seven third-party prompt sources and the three local MJ asset libraries (character portraits / scene environments / colossal creatures) built into the application
 ---
 
 # Third-party Prompt Sources
 
-The application includes the following seven sources. Prompt data is read as standard JSON from the [Image Prompts](https://github.com/yukkcat/image-prompts) registry; the original project links identify the upstream content.
+The application includes the following seven third-party sources plus three local sources (MJ 角色·人像 / MJ 场景·环境 / MJ 巨物·怪兽). Third-party prompt data is read as standard JSON from the [Image Prompts](https://github.com/yukkcat/image-prompts) registry; the original project links identify the upstream content.
 
 | Source | Original project |
 | --- | --- |
@@ -16,5 +16,7 @@ The application includes the following seven sources. Prompt data is read as sta
 | Awesome GPT-4o | https://github.com/ImgEdify/Awesome-GPT4o-Image-Prompts |
 | YouMind GPT Image 2 | https://github.com/YouMind-OpenLab/awesome-gpt-image-2 |
 | YouMind Nano Banana Pro | https://github.com/YouMind-OpenLab/awesome-nano-banana-pro-prompts |
+
+The three local sources "MJ 角色·人像", "MJ 场景·环境" and "MJ 巨物·怪兽" ship with the app's static assets (`/prompt-sources/mj-char.json`, `mj-scene.json`, `mj-juwu.json`): 493 Midjourney prompts in total with webp thumbnails covering character portraits, scene environments and colossal creatures/monsters, tagged by solo/mixed style codes and medium. Data and images are generated from the "MJ 码图对照库" HTML by `scripts/import-mj-asset-prompts.mjs` (thumbnails converted to webp); rerun that script to refresh them.
 
 Each built-in source can be enabled and refreshed independently. Settings also supports custom standard JSON sources and scheduled bulk refreshes; a failed refresh keeps the source's last successful cache available.

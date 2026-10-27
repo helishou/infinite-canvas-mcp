@@ -2,6 +2,57 @@
 
 export type ClipRow = Record<string, any>;
 
+type ClipBoundaryPointerEvent = {
+    pointerId: number;
+    button: number;
+    currentTarget: { setPointerCapture(pointerId: number): void };
+    preventDefault(): void;
+};
+
+type ClipBoundaryPointerRef = { current: number | null };
+
+/** Keep a captured primary pointer on the boundary surface until it finishes or is cancelled. */
+export function createClipBoundaryPointerHandlers<Event extends ClipBoundaryPointerEvent>(
+    activePointer: ClipBoundaryPointerRef,
+    handlers: {
+        begin: (event: Event) => boolean;
+        move: (event: Event) => void;
+        finish: (event: Event) => void;
+        cancel: () => void;
+    },
+) {
+    const ownsPointer = (event: Event) => activePointer.current === event.pointerId;
+    const cancelPointer = (event: Event) => {
+        if (!ownsPointer(event)) return;
+        activePointer.current = null;
+        handlers.cancel();
+    };
+
+    return {
+        onPointerDown(event: Event) {
+            if (event.button !== 0 || activePointer.current !== null || !handlers.begin(event)) return;
+            event.preventDefault();
+            activePointer.current = event.pointerId;
+            try {
+                event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+                activePointer.current = null;
+                handlers.cancel();
+            }
+        },
+        onPointerMove(event: Event) {
+            if (ownsPointer(event)) handlers.move(event);
+        },
+        onPointerUp(event: Event) {
+            if (!ownsPointer(event)) return;
+            activePointer.current = null;
+            handlers.finish(event);
+        },
+        onPointerCancel: cancelPointer,
+        onLostPointerCapture: cancelPointer,
+    };
+}
+
 export const clipShotIds = (clip: ClipRow | undefined): string[] => (Array.isArray(clip?.shot_ids) ? clip!.shot_ids : []).map(String);
 
 /** 分割块只能落在「每个 Clip 至少 1 个 Shot」的位置：合计 N 个镜头时有 N-1 个候选。 */
@@ -77,4 +128,20 @@ export function clipBoundaryPositions(rects: Array<{ left: number; right: number
         const viewport = vertical ? (rects[count - 1].bottom + rects[count].top) / 2 : (rects[count - 1].right + rects[count].left) / 2;
         return { count, viewport, content: viewport - (vertical ? track.top : track.left) + scroll };
     });
+}
+
+/** One animation-frame scroll step toward the pointer when a vertical boundary drag reaches the track edge. */
+export function clipBoundaryAutoScrollDelta(pointerY: number, track: { top: number; bottom: number }, scrollTop: number, scrollHeight: number, clientHeight: number, edgeSize = 48, maxStep = 14) {
+    const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+    const current = Math.min(Math.max(0, scrollTop), maxScrollTop);
+    const edge = Math.max(1, Math.min(edgeSize, (track.bottom - track.top) / 2));
+    const step = (distance: number) => Math.max(1, Math.ceil(maxStep * Math.min(1, Math.max(0, edge - Math.max(0, distance)) / edge)));
+
+    const fromTop = pointerY - track.top;
+    if (fromTop < edge && current > 0) return -Math.min(current, step(fromTop));
+
+    const fromBottom = track.bottom - pointerY;
+    if (fromBottom < edge && current < maxScrollTop) return Math.min(maxScrollTop - current, step(fromBottom));
+
+    return 0;
 }

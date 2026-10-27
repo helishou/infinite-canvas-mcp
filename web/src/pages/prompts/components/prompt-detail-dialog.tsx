@@ -7,6 +7,10 @@ import { MediaImage } from "@/components/media/media-image";
 
 export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdit }: { prompt: Prompt | null; onClose: () => void; onCopy: (prompt: string) => void; onSaveAsset?: (prompt: Prompt) => void; onEdit?: (prompt: Prompt) => void }) {
     const { i18n, t } = useTranslation();
+    const copyBody = (value: Prompt) => {
+        const body = value.category.startsWith("MJ ") ? value.prompt.replace(/\s+--[a-z][\w-]*(?=\s|$)[\s\S]*$/i, "").trimEnd() : value.prompt;
+        return [value.description, body].filter(Boolean).join("\n");
+    };
 
     return (
         <Modal title={prompt?.title} open={Boolean(prompt)} onCancel={onClose} footer={null} width={720} centered styles={{ body: { height: "min(760px, calc(85dvh - 55px))", overflow: "hidden" } }}>
@@ -38,7 +42,7 @@ export function PromptDetailDialog({ prompt, onClose, onCopy, onSaveAsset, onEdi
                     </div>
                     <div className="shrink-0 border-t border-border pt-4">
                         <div className="flex flex-wrap gap-2">
-                            <Button type="primary" icon={<Copy className="size-4" />} onClick={() => onCopy(prompt.prompt)}>
+                            <Button type="primary" icon={<Copy className="size-4" />} onClick={() => onCopy(copyBody(prompt))}>
                                 {t("prompts.workspace.copyText")}
                             </Button>
                             {onSaveAsset ? (

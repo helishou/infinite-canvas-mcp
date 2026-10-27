@@ -3,13 +3,14 @@ import type { ServerResponse } from "node:http";
 
 import type { AgentAttachment } from "../agent/types.js";
 import { logger } from "../utils/logger.js";
-import { buildCanvasToolRequest, fitAttachmentNodeSize } from "./operations.js";
+import { buildCanvasToolRequest } from "./operations.js";
 import type { ToolName } from "./schemas.js";
-import { compactNode, isToolName, nextCanvasX, parseToolInput } from "./tools.js";
-import { summarizeCanvasState } from "./state-summary.js";
+import { compactNode, isToolName, parseToolInput } from "./tools.js";
+import { canvasNodeIndex, summarizeCanvasState } from "./state-summary.js";
 import type { CanvasSnapshot } from "./types.js";
 
-type PendingRequest = { clientId: string; resolve: (value: unknown) => void; reject: (error: Error) => void };
+type PendingRequest = { clientId: string; delivery?: { requestId: string; name: ToolName; input: Record<string, unknown> }; resolve: (value: unknown) => void; reject: (error: Error) => void };
+export type CanvasSessionOptions = { clientGraceMs?: number };
 type TurnAttachment = { clientId: string; id: string; name: string; type: string; size: number; width: number; height: number; dataUrl: string };
 type ReplayEvent = { type: string; payload: Record<string, unknown> };
 export type CodexState = { busy: boolean; threadId: string; turnId: string };
@@ -26,6 +27,8 @@ export type ConversationState = {
 type McpInventoryItem = { name: string; authStatus?: string };
 export const AGENT_PROTOCOL_VERSION = 6;
 const RUNTIME_HEARTBEAT_INTERVAL_MS = 15000;
+/** 网页断线后的身份保留窗口：期间任务与未回包的工具请求保持存活，重连即可恢复。 */
+const DEFAULT_CLIENT_GRACE_MS = 60_000;
 
 const SITE_TOOLS = new Set<ToolName>([
     "site_navigate",
@@ -43,10 +46,12 @@ const SITE_TOOLS = new Set<ToolName>([
 /** 管理网页画布连接、状态、附件和工具请求。 */
 export class CanvasSession {
     private clients = new Map<string, ServerResponse>();
+    private clientGraceTimers = new Map<string, NodeJS.Timeout>();
     private clientFocusOrder = new Map<string, number>();
     private pending = new Map<string, PendingRequest>();
     private pendingApprovals = new Map<string, Record<string, unknown>>();
     private canvasStates = new Map<string, CanvasSnapshot>();
+    private activeDramaIds = new Map<string, string>();
     private turnAttachments = new Map<string, TurnAttachment>();
     private codexReplayEvents = new Map<string, ReplayEvent>();
     private codexReplayActiveItems = new Set<string>();
@@ -62,7 +67,7 @@ export class CanvasSession {
     private conversationInventoryComplete = false;
     private preparedConversationThreadId = "";
 
-    constructor(activeThreadId = "", private readonly exportSnapshot?: (projectId: string) => Promise<unknown>) {
+    constructor(activeThreadId = "", private readonly exportSnapshot?: (projectId: string) => Promise<unknown>, private readonly sessionOptions: CanvasSessionOptions = {}) {
         this.conversationState = {
             revision: 1,
             conversationId: activeThreadId || crypto.randomUUID(),
@@ -80,6 +85,22 @@ export class CanvasSession {
     /** 获取当前 turn 绑定或最近激活的网页客户端。 */
     private get targetClientId() {
         return this.boundClientId || this.activeClientId;
+    }
+
+    /** 当前目标网页的画布，用于解析活动剧目。 */
+    focusedCanvasProjectId() {
+        return this.canvasState?.projectId || null;
+    }
+
+    /** 显式固定或解除当前目标网页对应的活动剧目。 */
+    setActiveDramaId(dramaId: string | null) {
+        const clientId = this.targetClientId || "default";
+        if (dramaId) this.activeDramaIds.set(clientId, dramaId);
+        else this.activeDramaIds.delete(clientId);
+    }
+
+    activeDramaId() {
+        return this.activeDramaIds.get(this.targetClientId || "default") || null;
     }
 
     /** 返回 Canvas Agent 当前连接状态。 */
@@ -205,9 +226,9 @@ export class CanvasSession {
         return this.updateConversation({ status: hasFailure ? "warning" : "ready" });
     }
 
-    /** 判断网页客户端是否仍连接到当前 Agent。 */
+    /** 判断网页客户端是否仍连接到当前 Agent，或处于断线宽限窗内。 */
     hasClient(clientId: string) {
-        return this.clients.has(clientId);
+        return this.clients.has(clientId) || this.clientGraceTimers.has(clientId);
     }
 
     /** 读取指定网页上报的画布，避免提炼时受最近焦点或其他标签页影响。 */
@@ -262,7 +283,8 @@ export class CanvasSession {
             this.codexReplayActiveItems.clear();
         }
         if (!next.busy) {
-            if (this.boundClientId && !this.clients.has(this.boundClientId)) this.boundClientId = "";
+            // 宽限窗内的发起页仍保有绑定，避免断线期间 turn 被错误解绑。
+            if (this.boundClientId && !this.hasClient(this.boundClientId)) this.boundClientId = "";
         }
         if (next.busy === this.codexState.busy && next.threadId === this.codexState.threadId && next.turnId === this.codexState.turnId) return;
         this.codexState = next;
@@ -292,16 +314,23 @@ export class CanvasSession {
         logger.info("SSE client connected", { clientId, statusOnly });
         res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
         if (!statusOnly) {
+            this.releaseClientGrace(clientId);
             this.clients.set(clientId, res);
             if (!this.clientFocusOrder.has(clientId)) this.clientFocusOrder.set(clientId, 0);
             if (!this.activeClientId) {
                 this.activeClientId = clientId;
                 this.clientFocusOrder.set(clientId, ++this.focusSequence);
             }
+            // 宽限窗内回来的页面接回仍在等待的工具请求（原有 30s 计时与结算闭包保持不变）。
+            if (this.codexState.busy) this.pending.forEach((item) => {
+                if (item.clientId === clientId && item.delivery) sendEvent(res, "tool_call", item.delivery);
+            });
         }
         sendEvent(res, "hello", { ok: true, protocolVersion: AGENT_PROTOCOL_VERSION, clientId, workspace: { activeThreadId }, conversation: this.conversationStateSnapshot, codex: this.codexState, pendingApprovals: this.codexPendingApprovals, runtime: this.runtimeStateSnapshot });
         if (!statusOnly && activeThreadId && this.codexState.threadId === activeThreadId) this.codexReplayEvents.forEach((event) => sendEvent(res, event.type, event.payload));
         const timer = setInterval(() => sendEvent(res, "ping", { time: Date.now(), runtime: this.runtimeStateSnapshot }), RUNTIME_HEARTBEAT_INTERVAL_MS);
+        // 心跳是尽力而为的保活：不该独自把进程/测试挂在事件循环上（与宽限窗同规则）。
+        timer.unref?.();
         res.on("close", () => {
             clearInterval(timer);
             logger.info("SSE client disconnected", { clientId, statusOnly });
@@ -309,12 +338,47 @@ export class CanvasSession {
             this.clients.delete(clientId);
             this.clientFocusOrder.delete(clientId);
             this.canvasStates.delete(clientId);
-            this.pending.forEach((item, requestId) => {
-                if (item.clientId !== clientId) return;
-                this.pending.delete(requestId);
-                item.reject(new Error("请求页面已断开"));
-            });
+            this.activeDramaIds.delete(clientId);
+            // 断线不等于任务死亡：保留身份与未回包请求进入宽限窗，重连即恢复。
+            this.scheduleClientGrace(clientId);
             if (this.activeClientId === clientId) this.activeClientId = [...this.clients.keys()].sort((a, b) => (this.clientFocusOrder.get(b) || 0) - (this.clientFocusOrder.get(a) || 0))[0] || "";
+        });
+    }
+
+    /** 断线网页进入宽限窗：到期前身份与未回包的工具请求保持存活。 */
+    private scheduleClientGrace(clientId: string) {
+        const graceMs = this.sessionOptions.clientGraceMs ?? DEFAULT_CLIENT_GRACE_MS;
+        clearTimeout(this.clientGraceTimers.get(clientId));
+        if (graceMs <= 0) {
+            this.rejectPendingForClient(clientId);
+            return;
+        }
+        const graceTimer = setTimeout(() => {
+            this.clientGraceTimers.delete(clientId);
+            if (this.boundClientId === clientId) this.boundClientId = "";
+            this.rejectPendingForClient(clientId);
+            logger.info("Canvas client grace expired", { clientId });
+        }, graceMs);
+        // 宽限窗是尽力而为的状态：不该阻塞进程退出（退出时未完成的 turn 由恢复逻辑标记）。
+        graceTimer.unref?.();
+        this.clientGraceTimers.set(clientId, graceTimer);
+    }
+
+    /** 网页在宽限窗内重连，撤除定时清理。 */
+    private releaseClientGrace(clientId: string) {
+        const timer = this.clientGraceTimers.get(clientId);
+        if (!timer) return;
+        clearTimeout(timer);
+        this.clientGraceTimers.delete(clientId);
+        logger.debug("Canvas client grace released", { clientId });
+    }
+
+    /** 宽限窗到期后清理该网页尚未回包的工具请求。 */
+    private rejectPendingForClient(clientId: string) {
+        this.pending.forEach((item, requestId) => {
+            if (item.clientId !== clientId) return;
+            this.pending.delete(requestId);
+            item.reject(new Error("请求页面已断开"));
         });
     }
 
@@ -335,17 +399,22 @@ export class CanvasSession {
         logger.debug("Canvas state updated", { clientId: targetClientId, nodes: state.nodes?.length || 0, connections: state.connections?.length || 0 });
     }
 
-    /** 将指定网页设为最近激活的工具目标。 */
+    /**
+     * 将指定网页设为最近激活的工具目标。
+     * 网页在窗口聚焦、标签页切换和 SSE 重连时会重复上报；重连握手完成前该网页尚未
+     * 登记在clients 中属于正常瞬时状态，此时保持原焦点即可，网页会在 hello 后再次上报。
+     */
     activateClient(clientId: string) {
-        if (!this.clients.has(clientId)) throw new Error("当前网页未连接");
+        if (!this.clients.has(clientId)) return false;
         this.activeClientId = clientId;
         this.clientFocusOrder.set(clientId, ++this.focusSequence);
         logger.debug("Canvas client activated", { clientId });
+        return true;
     }
 
-    /** 将当前 Agent turn 固定绑定到指定网页。 */
+    /** 将当前 Agent turn 固定绑定到指定网页（宽限窗内的断线页面同样有效）。 */
     bindClient(clientId: string) {
-        if (!this.clients.has(clientId)) throw new Error("当前网页未连接");
+        if (!this.hasClient(clientId)) throw new Error("当前网页未连接");
         this.boundClientId = clientId;
         logger.debug("Canvas client bound to turn", { clientId });
     }
@@ -481,39 +550,16 @@ export class CanvasSession {
         }
         if (name === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
-            return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
+            const selected = (this.canvasState?.nodes || []).filter((node) => ids.has(node.id));
+            if (input.view === "full") return { nodes: selected };
+            const nodes = selected.map((node) => canvasNodeIndex(node as unknown as Record<string, unknown>));
+            return { nodeCount: nodes.length, nodes, nextRead: nodes.length ? {
+                tool: "canvas_get_state", input: { projectId: this.canvasState?.projectId, nodeIds: nodes.map((node) => node.id) },
+            } : undefined };
         }
-        if (name === "canvas_create_attachment_nodes") return await this.createAttachmentNodes(input as { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" });
         if (!this.clients.size) throw new Error("当前没有已连接画布");
         const request = buildCanvasToolRequest(name, input, this.canvasState);
         return await this.requestCanvasTool(request.name, request.input);
-    }
-
-    /** 将当前 turn 的附件转换为画布图片节点。 */
-    private async createAttachmentNodes(input: { attachmentIds: string[]; x?: number; y?: number; gap?: number; direction?: "row" | "column" }) {
-        const clientId = this.targetClientId;
-        if (!this.clients.has(clientId)) throw new Error("当前没有已连接画布");
-        const attachments = input.attachmentIds.map((id) => this.getTurnAttachment(clientId, id));
-        const x = Number(input.x ?? nextCanvasX(this.canvasState));
-        const y = Number(input.y ?? 0);
-        const gap = Number(input.gap ?? 40);
-        const direction = input.direction || "row";
-        let offset = 0;
-        const nodes = attachments.map((attachment) => {
-            const size = fitAttachmentNodeSize(attachment.width, attachment.height);
-            const node = {
-                id: `image-${crypto.randomUUID()}`,
-                attachmentId: attachment.id,
-                title: attachment.name,
-                position: { x: direction === "row" ? x + offset : x, y: direction === "column" ? y + offset : y },
-                width: size.width,
-                height: size.height,
-            };
-            offset += (direction === "row" ? size.width : size.height) + gap;
-            return node;
-        });
-        await this.requestCanvasTool("canvas_create_attachment_nodes", { nodes });
-        return { nodes: nodes.map(({ id, attachmentId, title }) => ({ id, attachmentId, title })) };
     }
 
     /** 向目标网页发送工具请求并等待调用结果。 */
@@ -522,7 +568,8 @@ export class CanvasSession {
         const clientId = this.targetClientId;
         const client = this.clients.get(clientId);
         if (!client) throw new Error("当前没有已连接画布");
-        sendEvent(client, "tool_call", { requestId, name, input });
+        const delivery = { requestId, name, input };
+        sendEvent(client, "tool_call", delivery);
         logger.debug("Canvas tool request sent", { requestId, name, input, clientId });
         return await new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -530,7 +577,7 @@ export class CanvasSession {
                 logger.warn("Canvas tool request timed out", { requestId, name, clientId });
                 reject(new Error("画布操作超时"));
             }, 30000);
-            this.pending.set(requestId, { clientId, resolve: (value) => (clearTimeout(timer), resolve(value)), reject: (error) => (clearTimeout(timer), reject(error)) });
+            this.pending.set(requestId, { clientId, delivery, resolve: (value) => (clearTimeout(timer), resolve(value)), reject: (error) => (clearTimeout(timer), reject(error)) });
         });
     }
 }

@@ -360,7 +360,7 @@ test("站位图独立定义和结算空间关系，不充当人物身份图", ()
 
     const savedSubjectPictures = generated.content.subjects.map((subject) => ({ ...subject, pictures: [...subject.pictures, "<Picture 2>"] }));
     const withSavedDefinitions = buildStoryboardPromptSections(savedSubjectPictures, generated.content.references, generated.content.shots);
-    assert.match(withSavedDefinitions.subjectDefinitions, /spatial blocking guided by <Picture 2>/u);
+    assert.match(withSavedDefinitions.subjectDefinitions, /blocking: <Picture 2>/u);
     assert.doesNotMatch(withSavedDefinitions.subjectDefinitions, /visual identity defined by reference\(s\) <Picture 2>/u);
     const mapOnlyShot = buildStoryboardPromptSections(savedSubjectPictures, generated.content.references, [{ description: "镜头只引用 <Picture 2> 的站位规划。" }]);
     assert.match(mapOnlyShot.retentionAnalysis, /<Subject 1> \(no shot appearance is explicitly assigned\)/u);

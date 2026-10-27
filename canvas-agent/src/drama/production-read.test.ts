@@ -12,6 +12,20 @@ test("28 long prompts can be traversed through a compact index without prompt le
     do { const page: any = projectProductionRead(production, { view: "artifact_index", pageSize: 5, cursor }); found.push(...page.artifacts.items); cursor = page.artifacts.nextCursor || undefined; } while (cursor);
     assert.equal(found.length, 28); assert.ok(found.every(item => !('prompt' in item))); assert.ok(JSON.stringify(found).length < 15000);
 });
+
+test("artifact index exposes only a short stale reason and leaves current statuses unchanged", () => {
+    const production: any = record();
+    production.draft.director.artifacts[0].status = "stale";
+    let validityPrompt: string | undefined;
+    const result: any = projectProductionRead(production, { view: "artifact_index", targetIds: ["seg0"], pageSize: 10 }, digest, undefined,
+        (artifact: any) => { validityPrompt = artifact.prompt; return artifact.targetId === "seg0" ? "scope_input_changed" : undefined; });
+    const artifact = result.artifacts.items[0];
+    assert.equal(result.artifacts.items.length, 1);
+    assert.equal(artifact.status, "stale");
+    assert.equal(artifact.staleReason, "scope_input_changed");
+    assert.equal(validityPrompt, production.draft.director.artifacts[0].prompt);
+    assert.equal("prompt" in artifact, false);
+});
 test("UTF-8 chunks reconstruct a complete prompt and hash; changed revisions reject the cursor", () => {
     const production = record(); let cursor: string | undefined; let text = ""; let hash = "";
     do { const part: any = projectProductionRead(production, { view: "artifacts", targetIds: ["seg0"], chunkBytes: 2049, cursor }, digest); text += part.chunk.text; hash = part.chunk.sha256; cursor = part.chunk.nextCursor || undefined; } while (cursor);
@@ -74,13 +88,57 @@ test("repeated full checks preserve content while reducing total UTF-8 response 
 
 test("workspace write receipts retain layout, identity and conflicts without repeating source or prompt data", () => {
     const production = record();
-    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT" }] }] }, layoutReceipt: { planHash: "layout", created: [{ nodeIds: ["node"] }] }, mediaSubmitted: false });
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT", message: "Keep the authored prompt" }] }] }, layoutReceipt: { planHash: "layout", created: [{ nodeIds: ["node"] }] }, mediaSubmitted: false });
     assert.equal(result.production.revision, 3);
     assert.equal(result.layoutReceipt.planHash, "layout");
     assert.equal(result.warnings.codes[0], "CLIP_EDIT_CONFLICT");
+    assert.deepEqual(result.syncIssues, [{ targetId: "seg2", status: "blocked", diagnostics: [{ code: "CLIP_EDIT_CONFLICT", message: "Keep the authored prompt" }] }]);
     assert.equal(result.mediaSubmitted, false);
     assert.equal(result.production.draft, undefined);
     assert.ok(!JSON.stringify(result).includes("长提示词"));
+});
+
+test("production edit receipts verify submitted shared utterance delivery against the persisted source", () => {
+    const production: any = record();
+    production.draft.director.source.utterances = [{ id: "UTT1", delivery: "先说完半句再起跑。" }];
+    const receipt: any = productionWriteReceipt({ ok: true, production }, { tool: "production_edit", input: {
+        kind: "episode", id: "e", operationId: "edit-utterance",
+        ops: [{ type: "set_director_shot_utterances", shotId: "S1", utterances: [{ utteranceId: "UTT1", delivery: "先说完半句再起跑。" }] }],
+    } });
+    assert.deepEqual(receipt.writeVerification, { status: "verified", fields: [{ path: "utterances.UTT1.delivery", status: "verified" }] });
+    production.draft.director.source.utterances[0].delivery = "旧指导";
+    const mismatch: any = productionWriteReceipt({ ok: true, production }, { tool: "production_edit", input: {
+        kind: "episode", id: "e", operationId: "edit-utterance", ops: [{ type: "set_director_shot_utterances", shotId: "S1", utterances: [{ utteranceId: "UTT1", delivery: "先说完半句再起跑。" }] }],
+    } });
+    assert.equal(mismatch.writeVerification.status, "mismatch");
+});
+
+test("multi-Clip edit receipts give one summary and one aggregate status read", () => {
+    const production = record();
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, clipRefreshes: [
+        { operationId: "edit:clip:A", status: "queued", segmentId: "A", selectedTargets: ["A"], savedRevision: 4, compilationOperationId: "compile:A" },
+        { operationId: "edit:clip:B", status: "queued", segmentId: "B", selectedTargets: ["B"], savedRevision: 4, compilationOperationId: "compile:B" },
+    ] } }, { tool: "production_edit", input: { kind: "episode", id: "e", operationId: "edit" } });
+    assert.deepEqual(result.clipRefreshSummary, { sourceSaved: true, targetCount: 2, targetIds: ["A", "B"], ready: 0, running: 2, blocked: 0, failed: 0, mediaSubmitted: false });
+    assert.deepEqual(result.nextAction, { tool: "production_get_compilation", input: { kind: "episode", id: "e", operationId: "edit" } });
+});
+
+test("write receipts include ready Clip conflicts but omit healthy targets and extra diagnostics", () => {
+    const production = record();
+    const result: any = productionWriteReceipt({ ok: true, production: { ...production, referenceSync: [
+        { targetId: "seg-ready", status: "ready", diagnostics: [] },
+        { targetId: "seg-conflict", status: "ready", diagnostics: [
+            { code: "MANUAL_INPUT_CONFLICT", message: "Preserve the manual binding", path: "referenceBindings" },
+            { code: "NON_BLOCKING_NOTICE", message: "Not an issue target" },
+        ] },
+        { targetId: "seg-blocked", status: "blocked", diagnostics: [{ code: "CLIP_INPUT_BLOCKED", message: "Current compilation artifact missing" }] },
+    ] } }, { tool: "production_edit", input: { kind: "episode", id: "e", operationId: "sync-issues" } });
+    assert.deepEqual(result.syncIssues, [
+        { targetId: "seg-conflict", status: "ready", diagnostics: [{ code: "MANUAL_INPUT_CONFLICT", message: "Preserve the manual binding" }] },
+        { targetId: "seg-blocked", status: "blocked", diagnostics: [{ code: "CLIP_INPUT_BLOCKED", message: "Current compilation artifact missing" }] },
+    ]);
+    assert.ok(!JSON.stringify(result.syncIssues).includes("referenceBindings"));
+    assert.ok(!JSON.stringify(result).includes("long authored prompt"));
 });
 
 test("ledger entries can be read by stable identity without pulling the complete context", () => {

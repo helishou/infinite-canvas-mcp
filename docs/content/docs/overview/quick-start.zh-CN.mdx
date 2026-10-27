@@ -12,8 +12,8 @@ description: 用最少步骤把无限画布跑起来
 ```bash
 git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
 cd infinite-canvas-mcp
-npm ci
-npm run dev
+corepack pnpm install --frozen-lockfile
+corepack pnpm run dev
 ```
 
 启动后访问：
@@ -22,7 +22,7 @@ npm run dev
 http://localhost:3001
 ```
 
-`npm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 与 `dev:watch` 在源码变化后等待任务、确认、Agent 回合及写请求空闲再重载；单次启动使用 `dev:once`。共享 Agent 源码仍需构建，更新 dist 后会触发重载。
+`corepack pnpm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 与 `dev:watch` 在源码变化后等待任务、确认、Agent 回合及写请求空闲再重载；单次启动使用 `dev:once`。共享 Agent 源码仍需构建，更新 dist 后会触发重载。
 
 | 地址 | 用途 |
 | --- | --- |
@@ -31,15 +31,16 @@ http://localhost:3001
 | `http://127.0.0.1:17371` | 可选旧客户端兼容代理 |
 | `http://localhost:3000` | Docker 网关，包含同源 Backend 代理 |
 
-需要旧代理时使用 `npm run dev:services`。Windows 专用 `dev:local` 会清理这些端口上的旧服务，再启动三进程，不作为检查服务状态的命令。
+需要旧代理时使用 `corepack pnpm run dev:services`。Windows 专用 `dev:local` 会清理这些端口上的旧服务，再启动三进程，不作为检查服务状态的命令。
 
 基础业务栈可用源码或完整 Compose 部署；模型、ComfyUI 和导演引擎按需另行配置。
 
 ## 安装与启动排障
 
 - 下载慢时先使用 HTTPS 浅克隆；不需要 Git 历史时也可从 GitHub 的 Code 菜单下载源码 ZIP。项目不自动切换第三方镜像。
-- 本仓库维护 npm 锁文件，优先使用 `npm ci`。你也可以从仓库根目录使用已安装的 Bun 执行 `bun install`，再用 Node/npm 启动；不要在单个 workspace 中建立另一套依赖。Bun 生成的锁文件须单独核对，不提交并行锁文件。Backend 运行需要符合 `backend/package.json` 的 Node 版本，Bun 安装器不替代 Node 的 SQLite 运行时。
-- `canvas-agent/dist/...` 缺失时先运行 `npm run build --workspace canvas-agent`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
+- 仓库命令使用 `corepack pnpm`，由 Corepack 按根目录 `package.json` 固定到 pnpm 12.12.1；如果没有 Corepack，请安装此固定版本的 pnpm。Node 版本至少为 22.13。
+- 本仓库只维护一份 workspace 锁文件；从仓库根目录运行 `corepack pnpm install --frozen-lockfile`，不要在单个 workspace 内安装或生成另一套锁文件。
+- `canvas-agent/dist/...` 缺失时先运行 `corepack pnpm --filter @basketikun/canvas-agent run build`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
 - `safe-delete state lock timeout` 若来自宿主注入的 `NODE_OPTIONS`，应在该运行环境中排查注入与 Vite 缓存清理的冲突。项目启动脚本保留 `NODE_OPTIONS`，不自动移除删除守卫或其他宿主保护。
 - Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.160.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。模型下拉框使用 Canvas Agent 实际启动的 Codex app-server 返回的目录。
 

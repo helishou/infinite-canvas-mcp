@@ -12,13 +12,38 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     const { app, stores, config } = ctx;
     const routePath = (value: string) => `${ctx.basePath || ""}${value}`;
 
+    /** 模型清单短 TTL 缓存 + 在途合并：ComfyUI 不可达或 URL 变化时回退到实时读取，不缓存失败。 */
+    const MODEL_CATALOG_TTL_MS = 5000;
+    type ModelCatalog = Awaited<ReturnType<ComfyUiBackend["models"]>>;
+    let modelCatalogUrl = "";
+    let modelCatalogAt = 0;
+    let modelCatalogValue: ModelCatalog | null = null;
+    let modelCatalogInFlight: Promise<ModelCatalog> | null = null;
+    const resetModelCatalogCache = () => { modelCatalogUrl = ""; modelCatalogAt = 0; modelCatalogValue = null; modelCatalogInFlight = null; };
+    const loadModelCatalog = (): Promise<ModelCatalog> => {
+        const url = bridge.getUrl();
+        if (modelCatalogUrl === url && modelCatalogValue && Date.now() - modelCatalogAt <= MODEL_CATALOG_TTL_MS) return Promise.resolve(modelCatalogValue);
+        if (modelCatalogUrl === url && modelCatalogInFlight) return modelCatalogInFlight;
+        modelCatalogUrl = url;
+        modelCatalogInFlight = bridge.models().then((catalog) => {
+            modelCatalogValue = catalog;
+            modelCatalogAt = Date.now();
+            modelCatalogInFlight = null;
+            return catalog;
+        }, (error) => {
+            modelCatalogInFlight = null;
+            throw error;
+        });
+        return modelCatalogInFlight;
+    };
+
     app.get(routePath("/comfy/status"), async (_req, res) => {
         res.json({ ok: true, ...(await bridge.status()) });
     });
 
     app.get(routePath("/comfy/models"), async (req, res) => {
         try {
-            const catalog = await bridge.models();
+            const catalog = await loadModelCatalog();
             const input = { ...req.query, categories: typeof req.query.categories === "string" ? req.query.categories.split(",") : req.query.categories };
             res.json({ ok: true, data: req.query.view ? projectModelCatalog(catalog, input) : catalog });
         } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
@@ -38,6 +63,7 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
     app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl(), localH3Direct: bridge.localH3DirectConfig() }));
     app.put(routePath("/comfy/config"), (req, res) => {
         const url = typeof req.body?.url === "string" ? bridge.setUrl(req.body.url) : bridge.getUrl();
+        if (typeof req.body?.url === "string") resetModelCatalogCache();
         const localH3Direct = Object.prototype.hasOwnProperty.call(req.body || {}, "localH3RootDir") ? bridge.setLocalH3ComfyRoot(String(req.body.localH3RootDir || "")) : bridge.localH3DirectConfig();
         res.json({ ok: true, url, localH3Direct });
     });
@@ -75,6 +101,16 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         if (!task.kind.startsWith("comfyui:") && task.kind !== "workflow") return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
         // backend 重启后遗留的 running 任务在此懒恢复（用 events 里的 promptId 重新挂观察循环）
         if ((task.status === "running" || task.status === "queued") && task.kind.startsWith("comfyui:")) bridge.resume(task.id);
+        if (req.query.view === "summary") {
+            return void res.json({ ok: true, task: {
+                id: task.id, kind: task.kind, status: task.status, progress: task.progress,
+                createdAt: task.createdAt, updatedAt: task.updatedAt,
+                ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
+                ...(task.projectId ? { projectId: task.projectId } : {}),
+                ...(task.nodeId ? { nodeId: task.nodeId } : {}),
+                ...(task.error ? { errorPreview: task.error.slice(0, 300) } : {}),
+            } });
+        }
         res.json({ ok: true, task, preview: bridge.getLivePreview(taskId) || null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
     });
 

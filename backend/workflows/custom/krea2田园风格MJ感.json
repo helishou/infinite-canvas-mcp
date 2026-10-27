@@ -58,7 +58,7 @@
         "105",
         0
       ],
-      "lora_name": "krea2-Cc-MJ-风格滤镜.safetensors",
+      "lora_name": "krea2\\krea2-Cc-MJ-风格滤镜.safetensors",
       "strength_model": 0.4
     }
   },

@@ -15,7 +15,7 @@ export function segmentsFor(metadata: Record<string, unknown>): H3Segment[] {
     let start = 0;
     return raw.map((segment, index) => {
         const duration = Math.max(0.5, Math.min(60, Number(segment.duration || metadata.duration || 5)));
-        const mode = canonicalH3TaskMode(segment.mode ?? segment.taskMode ?? metadata.mode ?? metadata.taskMode) as H3Segment["mode"];
+        const mode = canonicalH3TaskMode(segment.taskMode ?? segment.mode ?? metadata.taskMode ?? metadata.mode) as H3Segment["mode"];
         const normalized: H3Segment = {
             ...segment,
             id: String(segment.id || `segment-${index + 1}`),

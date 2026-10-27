@@ -27,7 +27,7 @@
 - `backend` 是业务数据与任务的权威：SQLite、媒体归档、ops 事务、任务执行、共享 HTTP MCP。
 - `canvas-agent` 提供对话运行时、工具与共享契约；Backend 通过该包导出的 `dist` 消费它。
 - `web` 提供界面、用户编辑和浏览器执行器；`plugins/canvas` 通过 SDK 接入宿主。画布生成由 Backend 统一建任务。
-- npm workspaces 为 `backend`、`canvas-agent`、`web`；文档和插件按各自 package 配置执行。依赖版本、命令和模型能力以当前代码与运行配置为准。
+- pnpm workspace 为 `backend`、`canvas-agent`、`web`、Canvas 插件 SDK 与内置 H3 插件；独立插件模板与外部消费示例可保留适用于 npm 用户的命令。依赖版本、命令和模型能力以当前代码与运行配置为准。
 
 ## 效率优先，拒绝过度设计
 
@@ -74,6 +74,12 @@
 | 被 dist/bundle 消费的源码 | 重建受影响产物，并确认实际消费路径 |
 
 默认不执行全仓 typecheck/test/build。一次相关检查通过后，不无理由扩大或重复；发布流程的验证例外见交付流程。不能执行的验证如实列出，不称为通过。
+
+## 文件编码
+
+- 仓库内所有文本文件（含 `.cjs`/`.ts` 脚本与注释）一律无 BOM UTF-8。PowerShell 写文件用 `Set-Content -Encoding utf8NoBOM`、`Out-File -Encoding utf8NoBOM` 或 `[System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))`；禁止 `-Encoding UTF8`（PS7 下该别名带 BOM，Node 直接报 Unexpected token）。
+- 读回校验：首字节为 `EF BB BF` 即 BOM 污染，重写。
+- 改写含中文内容的脚本优先用 write/edit 工具而非 PS 文本管道；必须用 PS 时遵守上述编码规则。
 
 ## 指引如何维护
 

@@ -15,6 +15,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
       - name: Configure isolated test directories
         run: |
           echo "INFINITE_CANVAS_DATA_DIR=$RUNNER_TEMP/canvas-unit-data" >> "$GITHUB_ENV"
@@ -24,26 +27,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm ci --prefix plugins/canvas/minimax-h3
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: npm run build --workspace canvas-agent
+      - run: pnpm --filter @basketikun/canvas-agent run build
       - name: Build pinned Acheng test runtime
-        run: npm run acheng:vendor
-      - run: npm run typecheck --workspace web
-      - run: npm run build --workspace backend
+        run: pnpm run acheng:vendor
+      - run: pnpm --filter infinite-canvas run typecheck
+      - run: pnpm --filter @helishou/infinite-canvas-backend run build
       - name: Build Web
-        run: bash .github/scripts/check-with-diagnostics.sh npm run build --workspace web
-      - run: npm run typecheck --prefix plugins/canvas/minimax-h3
-      - run: npm test --prefix plugins/canvas/minimax-h3
+        run: bash .github/scripts/check-with-diagnostics.sh pnpm --filter infinite-canvas run build
+      - run: pnpm --filter canvas-plugin-minimax-h3 run typecheck
+      - run: pnpm --filter canvas-plugin-minimax-h3 run test
       - name: Test Backend
-        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace backend
+        run: bash .github/scripts/check-with-diagnostics.sh pnpm --filter @helishou/infinite-canvas-backend run test
       - name: Test Canvas Agent
-        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace canvas-agent
+        run: bash .github/scripts/check-with-diagnostics.sh pnpm --filter @basketikun/canvas-agent run test
       - name: Test Web
-        run: bash .github/scripts/check-with-diagnostics.sh npm test --workspace web
-      - run: npx --no-install playwright install --with-deps chromium
+        run: bash .github/scripts/check-with-diagnostics.sh pnpm --filter infinite-canvas run test
+      - run: pnpm exec playwright install --with-deps chromium
       - run: node scripts/run-canvas-browser-tests.mjs collaboration
       - run: node scripts/run-canvas-browser-tests.mjs usability
       - run: node scripts/run-canvas-browser-tests.mjs h3-output-preview

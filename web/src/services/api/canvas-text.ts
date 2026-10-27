@@ -1,9 +1,10 @@
 import localforage from "localforage";
 import { nanoid } from "nanoid";
+import i18n from "@/i18n";
 import { BackendApiError, getBackendUrl, getCanvasCollaborationClient, getCanvasDraftSessionId, request } from "@/services/backend-api";
 import { canvasTextKey, CollaborativeTextSession, type CanvasTextTarget, type TextDraft } from "@/lib/canvas/collaborative-text-session";
 import { canvasDraftPersistence } from "@/lib/canvas/canvas-draft-persistence";
-import { evictDeletedCanvasTextSessions, flushCurrentCanvasTextSessions } from "./canvas-text-lifecycle";
+import { CanvasTextTargetUnavailableError, evictDeletedCanvasTextSessions, flushCurrentCanvasTextSessions, hasCurrentCanvasTextTarget, type CanvasTextProjectSnapshot } from "./canvas-text-lifecycle";
 
 type StoredDraft = TextDraft & { ownerId: string; backend: string; projectId: string; target: CanvasTextTarget; source: ReturnType<typeof getCanvasCollaborationClient> };
 const outbox = localforage.createInstance({ name: "infinite-canvas-text-outbox" });
@@ -22,7 +23,13 @@ export function publishCanvasTextCommit(projectId: string, response: { revision:
     commitListeners.forEach((listener) => listener({ type: "canvas.updated", entityId: projectId, revision: response.revision, payload: response.project }));
 }
 let prepareDocument: () => Promise<void> = async () => {};
-export const prepareCanvasTextWith = (prepare: () => Promise<void>) => { prepareDocument = prepare; };
+let currentProject: (projectId: string) => CanvasTextProjectSnapshot | undefined = () => undefined;
+export const prepareCanvasTextWith = (prepare: () => Promise<void>, readProject: typeof currentProject = () => undefined) => { prepareDocument = prepare; currentProject = readProject; };
+const targetExists = (projectId: string, target: CanvasTextTarget) => hasCurrentCanvasTextTarget(currentProject(projectId), target);
+
+function pruneMissingCanvasTextSessions(projectId: string) {
+    for (const [key, entry] of sessions) if (entry.backend === getBackendUrl() && entry.projectId === projectId && !targetExists(projectId, entry.target)) sessions.delete(key);
+}
 export const onCanvasTextCommit = (listener: (event: unknown) => void) => { commitListeners.add(listener); return () => commitListeners.delete(listener); };
 
 export function getCanvasTextSession(projectId: string, target: CanvasTextTarget) {
@@ -36,9 +43,11 @@ export function getCanvasTextSession(projectId: string, target: CanvasTextTarget
     const source = getCanvasCollaborationClient();
     const path = `/canvas/projects/${encodeURIComponent(projectId)}`;
     const assertBackend = () => { if (getBackendUrl() !== backend) throw new Error("后台地址已切换，旧文本草稿仍保留在原后台名下"); };
+    const assertTarget = () => { if (!targetExists(projectId, target)) throw new CanvasTextTargetUnavailableError(i18n.t("canvasRecovery.textTargetRemoved")); };
     const readState = async () => {
         assertBackend();
         await prepareDocument();
+        assertTarget();
         return request<{ state: string; documentId: string }>("GET", `${path}/text?${new URLSearchParams(Object.entries(target).filter((entry): entry is [string, string] => typeof entry[1] === "string"))}`);
     };
     const session = new CollaborativeTextSession({
@@ -59,13 +68,14 @@ export function getCanvasTextSession(projectId: string, target: CanvasTextTarget
         },
         send: async (draft) => {
             assertBackend();
+            assertTarget();
             const record = records.get(draft.operationId);
             if (!record) throw new Error("协作文本草稿不存在");
             const response = await request<{ revision: number; project: Record<string, unknown> }>("POST", `${path}/ops`, { operationId: draft.operationId, source: record.source, operations: [{ type: "text_update", target, documentId: draft.documentId, update: draft.update }] });
             session.receive(await readState());
             commitListeners.forEach((listener) => listener({ type: "canvas.updated", entityId: projectId, revision: response.revision, payload: response.project }));
         },
-        isPermanentError: (error) => error instanceof BackendApiError && [400, 401, 403, 404, 409].includes(error.status),
+        isPermanentError: (error) => error instanceof CanvasTextTargetUnavailableError || error instanceof BackendApiError && [400, 401, 403, 404, 409].includes(error.status),
     });
     sessions.set(key, { backend, projectId, target, session });
     void session.initialize().then(() => session.flush()).catch(() => {});
@@ -95,10 +105,27 @@ export function receiveCanvasTextEvent(event: unknown) {
         const key = JSON.stringify([getBackendUrl(), value.entityId, canvasTextKey(target)]);
         try { sessions.get(key)?.session.receive({ state: update.update, documentId: update.documentId }); } catch { /* session records the blocking state */ }
     }
-    if (value.payload.operations.some((operation) => !operation.textUpdate && operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key)))) for (const entry of sessions.values()) if (entry.backend === getBackendUrl() && entry.projectId === value.entityId) void entry.session.reconnect();
+    const refreshAllNodeSegments = new Set<string>();
+    const refreshH3Prompts = new Set<string>();
+    for (const operation of value.payload.operations) {
+        if (operation.type === "update_node" && ["texts", "segments"].some((key) => Object.hasOwn(operation.metadata || {}, key) || (operation.metadataDelete || []).includes(key))) {
+            refreshAllNodeSegments.add(String(operation.id || ""));
+        } else if (operation.type === "update_h3_segment" && operation.patch && typeof operation.patch === "object" && Object.hasOwn(operation.patch, "prompt")) {
+            // Production compilation uses this fine-grained op. Refresh the open
+            // Yjs document too; metadata-only projection otherwise leaves an
+            // already-mounted H3 editor displaying its stale collaborative text.
+            refreshH3Prompts.add(JSON.stringify([String(operation.nodeId || ""), String(operation.segmentId || "")]));
+        }
+    }
+    if (refreshAllNodeSegments.size || refreshH3Prompts.size) for (const entry of sessions.values()) {
+        if (entry.backend !== getBackendUrl() || entry.projectId !== value.entityId || entry.target.field !== "prompt" || !entry.target.segmentId) continue;
+        const targetKey = JSON.stringify([entry.target.nodeId || "", entry.target.segmentId]);
+        if (refreshAllNodeSegments.has(String(entry.target.nodeId || "")) || refreshH3Prompts.has(targetKey)) void entry.session.reconnect();
+    }
 }
 
 export async function reconnectCanvasTexts(projectId: string) {
+    pruneMissingCanvasTextSessions(projectId);
     await Promise.all([...sessions.values()].filter((entry) => entry.backend === getBackendUrl() && entry.projectId === projectId).map(({ session }) => session.reconnect()));
 }
 
@@ -115,8 +142,9 @@ export async function replaceCanvasText(projectId: string, target: CanvasTextTar
 }
 
 export async function flushCanvasTexts(projectId: string) {
+    pruneMissingCanvasTextSessions(projectId);
     const targets = new Map<string, CanvasTextTarget>();
-    await outbox.iterate<StoredDraft, void>((draft) => { if (draft.ownerId === getCanvasDraftSessionId() && draft.backend === getBackendUrl() && draft.projectId === projectId) targets.set(canvasTextKey(draft.target), draft.target); });
+    await outbox.iterate<StoredDraft, void>((draft) => { if (draft.ownerId === getCanvasDraftSessionId() && draft.backend === getBackendUrl() && draft.projectId === projectId && targetExists(projectId, draft.target)) targets.set(canvasTextKey(draft.target), draft.target); });
     targets.forEach((target) => getCanvasTextSession(projectId, target));
     await flushCurrentCanvasTextSessions([...sessions.values()].filter((entry) => entry.backend === getBackendUrl() && entry.projectId === projectId).map((entry) => entry.session));
 }

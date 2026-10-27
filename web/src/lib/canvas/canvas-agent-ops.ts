@@ -1,9 +1,9 @@
 import { nanoid } from "nanoid";
 
 import { GROUP_FRAME_PADDING, groupFrameOfMembers } from "@/lib/canvas/canvas-node-geometry";
+import { applyBackendCanvasDelta } from "@/lib/canvas/canvas-delta";
 import i18n from "@/i18n";
 import { getNodeSpec, isRegisteredNodeType } from "@/lib/canvas/node-registry";
-import { syncOrderedGroupMembership } from "@/lib/canvas/ordered-group";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type ViewportTransform } from "@/types/canvas";
 
 export type CanvasAgentOp =
@@ -23,6 +23,8 @@ export type CanvasAgentSnapshot = {
     connections: CanvasConnection[];
     selectedNodeIds: string[];
     viewport?: ViewportTransform;
+    /** Backend 画布 revision；本地回放 delta 时沿用，不参与 Agent 语义。 */
+    revision?: number;
 };
 
 export function summarizeCanvasAgentOps(ops?: CanvasAgentOp[]) {
@@ -761,15 +763,34 @@ export function arrangeGroupMembers(group: CanvasNodeData, nodes: CanvasNodeData
     return result;
 }
 
-export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasAgentOp[]) {
-    let nodes = snapshot.nodes;
-    let connections = snapshot.connections;
-    let selectedNodeIds = snapshot.selectedNodeIds;
+/** Agent / 插件 op 到 Backend 画布 op 的计划结果：前者是编辑意图，后者才是持久化契约。 */
+export type CanvasBackendOperation = Record<string, unknown> & { type: string };
+
+export type CanvasAgentPlan = {
+    operations: CanvasBackendOperation[];
+    selectedNodeIds: string[];
+};
+
+/**
+ * 把 Agent/插件的编辑意图翻译成 Backend 画布 op。
+ *
+ * 这里只做「意图 → 显式 op」的解析（节点 id、默认尺寸、自动排布、组框几何），
+ * 不直接改动画布状态；状态由 Backend 事务落库，本地用同一份 delta 回放（见 canvas-delta）。
+ */
+export function planCanvasAgentOperations(snapshot: CanvasAgentSnapshot, ops?: CanvasAgentOp[]): CanvasAgentPlan {
+    let state: CanvasAgentSnapshot = { ...snapshot, nodes: [...snapshot.nodes], connections: [...snapshot.connections] };
+    let selectedNodeIds = [...(snapshot.selectedNodeIds || [])];
+    const operations: CanvasBackendOperation[] = [];
+    const autoLayout: Array<{ index: number; id: string }> = [];
 
     // 自动排布的网格起点：画布现有节点的右边界之外，避免压住既有内容。
-    const anchorX = nodes.length ? Math.max(...nodes.map((node) => node.position.x + node.width)) + AUTO_LAYOUT_GAP : 0;
-    // 收集未显式指定坐标的节点，循环结束后按连接关系（输入在左、输出在右）统一分层排布。
-    const autoIds: string[] = [];
+    const anchorX = state.nodes.length ? Math.max(...state.nodes.map((node) => node.position.x + node.width)) + AUTO_LAYOUT_GAP : 0;
+    // 记录 op 并按同一份 delta 投影，后续 op 才能看到前序 op 的结果（与 Backend 顺序执行一致）。
+    const emit = (operation: CanvasBackendOperation) => {
+        operations.push(operation);
+        state = applyBackendCanvasDelta(state, [operation], Number(state.revision || 0));
+        return operations.length - 1;
+    };
 
     (Array.isArray(ops) ? ops : []).forEach((op, index) => {
         if (!op?.type) return;
@@ -780,101 +801,123 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             const height = op.height || spec.height;
             const nodeId = op.id || `${nodeType}-${Date.now()}-${index}`;
             // 优先尊重显式坐标（含碰撞时向右铺开）；未给坐标先占位，循环后统一分层。
-            let position: { x: number; y: number };
-            if (op.position || op.x !== undefined || op.y !== undefined) {
-                const desired = { x: op.position?.x ?? op.x ?? 0, y: op.position?.y ?? op.y ?? 0 };
-                position = resolveFreePosition(nodes, desired, width, height);
-            } else {
-                position = { x: anchorX, y: 0 };
-            }
-            const node: CanvasNodeData = {
+            const hasExplicitPosition = Boolean(op.position) || op.x !== undefined || op.y !== undefined;
+            const position = hasExplicitPosition
+                ? resolveFreePosition(state.nodes, { x: op.position?.x ?? op.x ?? 0, y: op.position?.y ?? op.y ?? 0 }, width, height)
+                : { x: anchorX, y: 0 };
+            const operationIndex = emit({
+                type: "add_node",
                 id: nodeId,
-                type: nodeType,
+                nodeType,
                 title: op.title || spec.title,
                 position,
                 width,
                 height,
                 metadata: { ...spec.metadata, ...op.metadata },
-            };
-            nodes = [...nodes, node];
-            nodes = syncOrderedGroupMembership(nodes, node.id);
-            selectedNodeIds = [node.id];
-            const isOrderedGroupMember = nodes.some((item) => item.id === node.id && item.metadata?.groupId && nodes.some((group) => group.id === item.metadata?.groupId && group.type === CanvasNodeType.Group && group.metadata?.orderedGroup));
-            if (!isOrderedGroupMember && !(op.position || op.x !== undefined || op.y !== undefined)) autoIds.push(nodeId);
+            });
+            selectedNodeIds = [nodeId];
+            const isOrderedGroupMember = state.nodes.some((item) => item.id === nodeId && item.metadata?.groupId && state.nodes.some((group) => group.id === item.metadata?.groupId && group.type === CanvasNodeType.Group && group.metadata?.orderedGroup));
+            if (!isOrderedGroupMember && !hasExplicitPosition) autoLayout.push({ index: operationIndex, id: nodeId });
+            return;
         }
         if (op.type === "update_node") {
             if (!op.id) return;
-            const previousGroupId = nodes.find((node) => node.id === op.id)?.metadata?.groupId;
-            nodes = nodes.map((node) => (node.id === op.id ? { ...node, ...op.patch, metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata } } : node));
-            if (previousGroupId !== nodes.find((node) => node.id === op.id)?.metadata?.groupId) nodes = syncOrderedGroupMembership(nodes, op.id, previousGroupId);
+            const patch: Record<string, unknown> = { ...(op.patch || {}) };
+            const patchMetadata = (patch.metadata && typeof patch.metadata === "object" && !Array.isArray(patch.metadata) ? patch.metadata : {}) as Record<string, unknown>;
+            const metadata = { ...patchMetadata, ...(op.metadata || {}) };
+            delete patch.metadata;
+            emit({ type: "update_node", id: op.id, patch, ...(Object.keys(metadata).length ? { metadata } : {}) });
+            return;
         }
         if (op.type === "delete_node") {
-            const ids = new Set(op.ids || (op.id ? [op.id] : op.nodeType ? nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []));
-            nodes = nodes.filter((node) => !ids.has(node.id));
-            connections = connections.filter((conn) => !ids.has(conn.fromNodeId) && !ids.has(conn.toNodeId));
-            selectedNodeIds = selectedNodeIds.filter((id) => !ids.has(id));
+            // 按 nodeType 删除是前端意图的便捷写法，落地前必须展开成具体 id。
+            const ids = op.ids || (op.id ? [op.id] : op.nodeType ? state.nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []);
+            if (!ids.length) return;
+            selectedNodeIds = selectedNodeIds.filter((id) => !ids.includes(id));
+            emit({ type: "delete_node", ids });
+            return;
         }
         if (op.type === "delete_connections") {
-            const ids = new Set(op.ids || (op.id ? [op.id] : []));
-            connections = op.all ? [] : connections.filter((conn) => !ids.has(conn.id));
+            if (op.all) {
+                emit({ type: "delete_connections", all: true });
+                return;
+            }
+            const ids = op.ids || (op.id ? [op.id] : []);
+            if (!ids.length) return;
+            emit({ type: "delete_connections", ids });
+            return;
         }
         if (op.type === "connect_nodes") {
             if (!op.fromNodeId || !op.toNodeId) return;
-            const exists = connections.some((conn) =>
-                conn.fromNodeId === op.fromNodeId &&
-                conn.toNodeId === op.toNodeId &&
-                (conn.role || undefined) === (op.role || undefined),
+            const exists = state.connections.some((connection) =>
+                connection.fromNodeId === op.fromNodeId &&
+                connection.toNodeId === op.toNodeId &&
+                (connection.role || undefined) === (op.role || undefined),
             );
-            const hasNodes = nodes.some((node) => node.id === op.fromNodeId) && nodes.some((node) => node.id === op.toNodeId);
-            if (!exists && hasNodes) connections = [...connections, { id: op.id || nanoid(), fromNodeId: op.fromNodeId, toNodeId: op.toNodeId, ...(op.role ? { role: op.role } : {}), ...(op.order === undefined ? {} : { order: op.order }) }];
+            const hasNodes = state.nodes.some((node) => node.id === op.fromNodeId) && state.nodes.some((node) => node.id === op.toNodeId);
+            if (exists || !hasNodes) return;
+            emit({ type: "connect_nodes", id: op.id || nanoid(), fromNodeId: op.fromNodeId, toNodeId: op.toNodeId, ...(op.role ? { role: op.role } : {}), ...(op.order === undefined ? {} : { order: op.order }) });
+            return;
         }
         if (op.type === "create_group") {
             const memberIds = new Set(op.memberIds || []);
             // 组不套组：选中的组节点不作为成员，否则拖动/框选的嵌套语义在这套数据结构里没有定义。
-            const members = nodes.filter((node) => memberIds.has(node.id) && node.type !== CanvasNodeType.Group);
-            if (members.length) {
-                const memberSet = new Set(members.map((node) => node.id));
-                // 成员原先所属的组：成员搬走后可能变小甚至变空，要跟着收拾。
-                const previousGroupIds = new Set(members.map((node) => node.metadata?.groupId).filter((id): id is string => Boolean(id)));
-                const spec = getNodeSpec(CanvasNodeType.Group);
-                const frame = groupFrameOfMembers(members.map((node) => ({ x: node.position.x, y: node.position.y, width: node.width, height: node.height })))!;
-                const groupId = op.id || nanoid();
-                nodes = nodes.map((node) => (memberSet.has(node.id) ? { ...node, metadata: { ...node.metadata, groupId } } : node));
-                // 组插到数组【最前面】：节点层级由 DOM 顺序决定（同 z-index 下后者在上），
-                // 追加到末尾的话新组会盖在自己的成员上，连成员的点击与拖动都被吞掉。
-                nodes = [
-                    { id: groupId, type: CanvasNodeType.Group, title: op.title || spec.title, position: { x: frame.x, y: frame.y }, width: frame.width, height: frame.height, metadata: { ...spec.metadata } },
-                    ...nodes,
-                ];
-                // 旧组重新贴合剩余成员；成员被搬空就删掉 —— 组是容器，不该留下无人认领的空框。
-                nodes = nodes
-                    .map((node) => {
-                        if (node.type !== CanvasNodeType.Group || !previousGroupIds.has(node.id)) return node;
-                        const leftovers = groupFrameOfMembers(
-                            nodes.filter((item) => item.metadata?.groupId === node.id).map((item) => ({ x: item.position.x, y: item.position.y, width: item.width, height: item.height })),
-                        );
-                        if (!leftovers) return null;
-                        return { ...node, position: { x: leftovers.x, y: leftovers.y }, width: leftovers.width, height: leftovers.height };
-                    })
-                    .filter((node): node is CanvasNodeData => Boolean(node));
-                connections = connections.filter((conn) => nodes.some((node) => node.id === conn.fromNodeId) && nodes.some((node) => node.id === conn.toNodeId));
-                selectedNodeIds = [groupId];
+            const members = state.nodes.filter((node) => memberIds.has(node.id) && node.type !== CanvasNodeType.Group);
+            if (!members.length) return;
+            const memberSet = new Set(members.map((node) => node.id));
+            // 成员原先所属的组：成员搬走后可能变小甚至变空，要跟着收拾。
+            const previousGroupIds = new Set(members.map((node) => node.metadata?.groupId).filter((id): id is string => Boolean(id)));
+            const spec = getNodeSpec(CanvasNodeType.Group);
+            const frame = groupFrameOfMembers(members.map((node) => ({ x: node.position.x, y: node.position.y, width: node.width, height: node.height })))!;
+            const groupId = op.id || nanoid();
+            for (const member of members) emit({ type: "update_node", id: member.id, metadata: { groupId } });
+            emit({
+                type: "add_node",
+                id: groupId,
+                nodeType: CanvasNodeType.Group,
+                title: op.title || spec.title,
+                position: { x: frame.x, y: frame.y },
+                width: frame.width,
+                height: frame.height,
+                metadata: { ...spec.metadata },
+                // 组是容器：垫在成员下面，避免新组盖住成员的点击与拖动。
+                index: 0,
+            });
+            selectedNodeIds = [groupId];
+            // 旧组重新贴合剩余成员；成员被搬空就删掉 —— 组是容器，不该留下无人认领的空框。
+            for (const previousGroupId of previousGroupIds) {
+                const leftovers = state.nodes.filter((node) => node.metadata?.groupId === previousGroupId);
+                const leftoverFrame = groupFrameOfMembers(leftovers.map((node) => ({ x: node.position.x, y: node.position.y, width: node.width, height: node.height })));
+                if (!leftoverFrame) emit({ type: "delete_node", ids: [previousGroupId] });
+                else emit({ type: "update_node", id: previousGroupId, patch: { position: { x: leftoverFrame.x, y: leftoverFrame.y }, width: leftoverFrame.width, height: leftoverFrame.height } });
             }
+            return;
         }
-        if (op.type === "select_nodes") selectedNodeIds = (op.ids || []).filter((id) => nodes.some((node) => node.id === id));
+        if (op.type === "select_nodes") selectedNodeIds = (op.ids || []).filter((id) => state.nodes.some((node) => node.id === id));
     });
 
     // 统一分层排布未指定坐标的节点：按连接关系把输入放左、输出放右。
-    if (autoIds.length) {
-        const positions = computeFlowLayout({ nodes, connections, ids: autoIds, anchorX, anchorY: 0 });
-        nodes = nodes.map((node) => {
-            const pos = positions.get(node.id);
-            if (!pos) return node;
-            return { ...node, position: { x: pos.x, y: pos.y }, ...(pos.width && pos.height ? { width: pos.width, height: pos.height } : {}) };
-        });
+    if (autoLayout.length) {
+        const positions = computeFlowLayout({ nodes: state.nodes, connections: state.connections, ids: autoLayout.map((item) => item.id), anchorX, anchorY: 0 });
+        for (const item of autoLayout) {
+            const pos = positions.get(item.id);
+            if (!pos) continue;
+            const operation = operations[item.index];
+            operation.position = { x: pos.x, y: pos.y };
+            if (pos.width && pos.height) {
+                operation.width = pos.width;
+                operation.height = pos.height;
+            }
+        }
     }
 
-    return { ...snapshot, nodes, connections, selectedNodeIds };
+    return { operations, selectedNodeIds };
+}
+
+export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasAgentOp[]) {
+    const plan = planCanvasAgentOperations(snapshot, ops);
+    const next = applyBackendCanvasDelta(snapshot, plan.operations, Number(snapshot.revision || 0));
+    return { ...next, selectedNodeIds: plan.selectedNodeIds };
 }
 
 function opLabel(type: string) {

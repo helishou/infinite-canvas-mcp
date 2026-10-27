@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { DATA_DIR } from "../config.js";
 import type { BackendDatabase } from "../db.js";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
+import { mergeInheritedFields } from "./workflow-field-inherit.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
@@ -11,7 +12,15 @@ const CUSTOM_SUBDIR = "custom";
 const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
 const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
 const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
-const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
+const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "MiniMax_H3.json", "MiniMax_H3_T2I.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
+
+/** 解析持久化的输出节点选择。坏数据退化成空数组（= 不过滤，保留全部输出），不会误删产物。 */
+function parseOutputNodes(raw: string): string[] {
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch { return []; }
+}
 const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
     "IndexTTS-2.5.json": {
         title: "IndexTTS 2.5 配音",
@@ -39,6 +48,21 @@ const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
             { id: "height", node: "141", input: "value", name: "高度（像素）", type: "number", default: 480, step: 32 },
             { id: "duration", node: "132", input: "value", name: "时长（秒）", type: "number", default: 8 },
             { id: "noise_seed", node: "129", input: "noise_seed", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+        ],
+    },
+    "MiniMax_H3_T2I.json": {
+        title: "MiniMax H3 文生图",
+        backend: "comfyui",
+        operation: "text-to-image",
+        description: "使用 MiniMax H3 FL2VA INT8 底模从文字生成约 1MP 静态候选图；默认 20 步，输出 5 帧供挑选。",
+        outputNodes: ["70"],
+        fields: [
+            { id: "prompt", node: "5", input: "value", name: "画面描述", type: "text", required: true, default: "", isPrompt: true },
+            { id: "width", node: "6", input: "value", name: "宽度（像素）", type: "number", default: 864, min: 32, max: 8192, step: 32 },
+            { id: "height", node: "7", input: "value", name: "高度（像素）", type: "number", default: 1152, min: 32, max: 8192, step: 32 },
+            { id: "duration_seconds", node: "8", input: "value", name: "候选时长（秒）", type: "number", default: 0.2, min: 0.2, max: 1.6, step: 0.1 },
+            { id: "seed", node: "10", input: "value", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+            { id: "steps", node: "11", input: "value", name: "采样步数", type: "number", default: 20, min: 1, max: 40, step: 1 },
         ],
     },
     "custom/视频修复FlashVSR1.1.json": {
@@ -75,6 +99,15 @@ export type WorkflowDetail = {
     workflow: Record<string, unknown>;
     config: WorkflowConfig;
     builtin: boolean;
+    source?: WorkflowSourceLink;
+};
+
+export type WorkflowSourceLink = {
+    instance: string;
+    relativePath: string;
+    syncedSha256: string;
+    syncedAt: string;
+    syncState?: "current" | "changed" | "missing";
 };
 
 export type WorkflowPackage = {
@@ -107,6 +140,10 @@ function workflowFilePath(name: string): string {
         throw new Error("工作流名称不合法：路径穿越");
     }
     return fullPath;
+}
+
+function workflowSourcePath(name: string) {
+    return `${workflowFilePath(name)}.source`;
 }
 
 function isBuiltin(name: string): boolean {
@@ -192,7 +229,23 @@ export class WorkflowStore {
             description: "",
             fields: [],
         };
-        return { name, workflow, config, builtin: isBuiltin(name) };
+        const source = await this.getSourceLink(name);
+        return { name, workflow, config, builtin: isBuiltin(name), ...(source ? { source } : {}) };
+    }
+
+    async getSourceLink(name: string): Promise<WorkflowSourceLink | null> {
+        try {
+            const value = JSON.parse(await fs.readFile(workflowSourcePath(name), "utf8")) as Partial<WorkflowSourceLink>;
+            if (typeof value.instance !== "string" || typeof value.relativePath !== "string" || typeof value.syncedSha256 !== "string" || typeof value.syncedAt !== "string") return null;
+            return { instance: value.instance, relativePath: value.relativePath, syncedSha256: value.syncedSha256, syncedAt: value.syncedAt };
+        } catch { return null; }
+    }
+
+    async saveSourceLink(name: string, source: WorkflowSourceLink): Promise<void> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!source.instance || !source.relativePath || !/^[a-f\d]{64}$/i.test(source.syncedSha256)) throw new Error("ComfyUI 工作流来源信息无效");
+        await fs.writeFile(workflowSourcePath(name), JSON.stringify({ ...source, syncState: undefined }, null, 2), "utf8");
     }
 
     async upload(name: string, workflow: Record<string, unknown>): Promise<{ name: string }> {
@@ -226,7 +279,7 @@ export class WorkflowStore {
         };
     }
 
-    async importPackage(fallbackName: string, value: unknown): Promise<{ name: string }> {
+    async importPackage(fallbackName: string, value: unknown): Promise<{ name: string; inheritedFrom?: string }> {
         if (!value || typeof value !== "object") throw new Error("工作流包格式不正确");
         const pkg = value as Partial<WorkflowPackage>;
         if (pkg.format !== "infinite-canvas-workflow") throw new Error("不是无限画布工作流包");
@@ -240,8 +293,34 @@ export class WorkflowStore {
             throw new Error("工作流包缺少有效的字段配置");
         }
         const result = await this.upload(typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : fallbackName, pkg.workflow as Record<string, unknown>);
-        await this.saveConfig(result.name, pkg.config);
-        return result;
+        // 上传到 RunningHub 时只带了节点图，云端档案的字段是平台自动发现的；
+        // 再下载回来时要沿用本地那份自定义字段配置，否则用户改过的名称/类型/默认值全丢。
+        const inherited = this.inheritFromCloudSibling(pkg.config as WorkflowConfig, result.name);
+        await this.saveConfig(result.name, inherited.config);
+        return { name: result.name, ...(inherited.inheritedFrom ? { inheritedFrom: inherited.inheritedFrom } : {}) };
+    }
+
+    /**
+     * 同一个云端档案若已经有本地工作流（用户上传后一直在本地编辑），把它的配置继承到新副本上。
+     * 字段以本地为准，云端新发现、本地没有的 `node::input` 追加在后面，避免丢掉云端新增节点。
+     */
+    private inheritFromCloudSibling(config: WorkflowConfig, selfName: string): { config: WorkflowConfig; inheritedFrom?: string } {
+        const profileId = config.runningHubProfileId;
+        if (!profileId) return { config };
+        const source = this.db.listWorkflowNamesByRunningHubProfile(profileId).find((name) => name !== selfName);
+        if (!source) return { config };
+        const sibling = this.getConfig(source);
+        if (!sibling) return { config };
+        return {
+            config: {
+                ...config,
+                fields: mergeInheritedFields(sibling.fields || [], config.fields || []),
+                ...(sibling.outputNodes?.length ? { outputNodes: sibling.outputNodes } : {}),
+                ...(sibling.mediaInputs ? { mediaInputs: sibling.mediaInputs } : {}),
+                ...(sibling.miniCards ? { miniCards: sibling.miniCards } : {}),
+            },
+            inheritedFrom: source,
+        };
     }
 
     async saveConfig(name: string, config: WorkflowConfig): Promise<{ config: WorkflowConfig }> {
@@ -255,6 +334,10 @@ export class WorkflowStore {
             fieldsJson: JSON.stringify(config.fields),
             mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
             miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+            runningHubProfileId: config.runningHubProfileId ?? "",
+            runTarget: config.runTarget ?? "local",
+            // 没带这个字段就沿用旧值；显式传 [] 要存成 '[]'，与「从未配置」的空串区分开。
+            outputNodesJson: Array.isArray(config.outputNodes) ? JSON.stringify(config.outputNodes) : undefined,
         });
         return { config };
     }
@@ -286,6 +369,10 @@ export class WorkflowStore {
                 fields: JSON.parse(row.fieldsJson) as WorkflowField[],
                 mediaInputs: JSON.parse(row.mediaInputsJson),
                 miniCards: JSON.parse(row.miniCardsJson),
+                ...(row.runningHubProfileId ? { runningHubProfileId: row.runningHubProfileId } : {}),
+                ...(row.runTarget && row.runTarget !== "local" ? { runTarget: row.runTarget as WorkflowConfig["runTarget"] } : {}),
+                // 空串 = 从未配置过（前端据此默认勾选链路末端的输出节点）；'[]' = 用户显式清空，要如实返回空数组。
+                ...(row.outputNodesJson ? { outputNodes: parseOutputNodes(row.outputNodesJson) } : {}),
             };
             if (name === "custom/视频修复FlashVSR1.1.json") {
                 config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);
@@ -298,6 +385,7 @@ export class WorkflowStore {
         const filePath = workflowFilePath(name);
         try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
         await fs.unlink(filePath);
+        await fs.unlink(workflowSourcePath(name)).catch(() => undefined);
         this.db.deleteWorkflowConfig(name);
         return { ok: true };
     }

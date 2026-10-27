@@ -13,8 +13,8 @@ export const RH_SOURCES = [
     { value: "audio", label: "参考音频" },
 ] as const;
 
-const label = "mb-0.5 block text-[10px] text-stone-500";
-const input = "w-full rounded border border-stone-200 px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900";
+const label = "mb-0.5 block text-[11px] text-muted-foreground";
+const input = "w-full rounded border border-border px-2 py-1 text-xs dark:bg-muted";
 
 /**
  * 字段编辑器：本地 ComfyUI 与 RunningHub 共用同一个编辑器。
@@ -80,10 +80,10 @@ export function FieldEditor({
 
             {(field.type === "number" || field.type === "slider") && (
                 <div className="grid grid-cols-2 gap-2">
-                    <label className="text-[10px] text-stone-500">最小值<input type="number" value={field.min ?? ""} onChange={(e) => onUpdate({ min: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
-                    <label className="text-[10px] text-stone-500">最大值<input type="number" value={field.max ?? ""} onChange={(e) => onUpdate({ max: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
-                    <label className="text-[10px] text-stone-500">步长<input type="number" value={field.step ?? ""} onChange={(e) => onUpdate({ step: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
-                    <label className="text-[10px] text-stone-500">默认值<input type="number" value={field.default as number ?? ""} onChange={(e) => onUpdate({ default: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
+                    <label className="text-[11px] text-muted-foreground">最小值<input type="number" value={field.min ?? ""} onChange={(e) => onUpdate({ min: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
+                    <label className="text-[11px] text-muted-foreground">最大值<input type="number" value={field.max ?? ""} onChange={(e) => onUpdate({ max: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
+                    <label className="text-[11px] text-muted-foreground">步长<input type="number" value={field.step ?? ""} onChange={(e) => onUpdate({ step: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
+                    <label className="text-[11px] text-muted-foreground">默认值<input type="number" value={field.default as number ?? ""} onChange={(e) => onUpdate({ default: e.target.value === "" ? undefined : parseFloat(e.target.value) })} className={`mt-0.5 ${input}`} /></label>
                 </div>
             )}
 
@@ -122,22 +122,43 @@ export function FieldEditor({
 
             {field.type === "dropdown" && (
                 <div>
-                    <label className="mb-1 block text-[10px] text-stone-500">选项列表</label>
+                    {(() => {
+                        const options = field.options || [];
+                        // 默认值已不在选项里（如选项被删/改名前残留）时保留展示，允许显式清掉。
+                        const stale = field.default !== undefined && field.default !== "" && !options.includes(String(field.default));
+                        return (
+                            <label className={label}>
+                                默认值
+                                <select value={String(field.default ?? "")} onChange={(e) => onUpdate({ default: e.target.value === "" ? undefined : e.target.value })} className={`mt-0.5 ${input}`}>
+                                    <option value="">（第一项）</option>
+                                    {stale && <option value={String(field.default)}>{String(field.default)}（已不在选项中）</option>}
+                                    {options.map((option) => <option key={option} value={option}>{option}</option>)}
+                                </select>
+                            </label>
+                        );
+                    })()}
+                    <label className="mb-1 mt-2 block text-[11px] text-muted-foreground">选项列表</label>
                     <div className="space-y-1">
                         {(field.options || []).map((option, index) => (
                             <div key={index} className="flex items-center gap-1">
-                                <input value={option} onChange={(e) => { const options = [...(field.options || [])]; options[index] = e.target.value; onUpdate({ options }); }} className={`flex-1 ${input}`} />
+                                <input value={option} onChange={(e) => {
+                                    const options = [...(field.options || [])];
+                                    const previous = options[index];
+                                    options[index] = e.target.value;
+                                    // 改名的是当前默认值时同步默认值，避免默认值悬空回退到第一项。
+                                    onUpdate(String(field.default ?? "") === previous && previous !== "" ? { options, default: e.target.value } : { options });
+                                }} className={`flex-1 ${input}`} />
                                 <button onClick={() => onUpdate({ options: (field.options || []).filter((_, i) => i !== index) })} className="text-xs text-red-400 hover:text-red-600">×</button>
                             </div>
                         ))}
                     </div>
-                    <button onClick={() => onUpdate({ options: [...(field.options || []), ""] })} className="mt-1 rounded border border-dashed border-stone-300 px-3 py-1 text-[11px] hover:border-stone-400 dark:border-stone-600">+ 添加选项</button>
+                    <button onClick={() => onUpdate({ options: [...(field.options || []), ""] })} className="mt-1 rounded border border-dashed border-border px-3 py-1 text-[11px] hover:border-foreground/30 ">+ 添加选项</button>
                 </div>
             )}
 
             {showRunningHub && (
-                <div className="space-y-2 rounded border border-dashed border-stone-200 p-2 dark:border-stone-700">
-                    <div className="text-[10px] font-medium text-stone-500">RunningHub 映射</div>
+                <div className="space-y-2 rounded border border-dashed border-border p-2 ">
+                    <div className="text-[11px] font-medium text-muted-foreground">RunningHub 映射</div>
                     <div>
                         <label className={label}>值来源</label>
                         <select
@@ -167,7 +188,7 @@ export function FieldEditor({
                 </div>
             )}
 
-            <div className="flex justify-end border-t border-stone-200/50 pt-2">
+            <div className="flex justify-end border-t border-border/50 pt-2">
                 <button onClick={onRemove} className="text-[11px] text-red-400 hover:text-red-600">移除字段</button>
             </div>
         </div>

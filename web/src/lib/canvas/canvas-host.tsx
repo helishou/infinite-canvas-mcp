@@ -1,10 +1,28 @@
-import { createContext, useContext, useEffect, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams, useSearchParams, type NavigateFunction } from "react-router-dom";
 
 export type CanvasTarget = { projectId: string; nodeId?: string; segmentId?: string };
-export const WorkbenchCanvasContext = createContext<{ openCanvas: (target: CanvasTarget) => void; restoreCanvas: () => void; visible: boolean; hasCanvas: boolean } | null>(null);
-export const CanvasHostContext = createContext<{ projectId: string; active: boolean; search: URLSearchParams; requestId: number; navigate: NavigateFunction; collapse: () => void; popupContainer: () => HTMLElement } | null>(null);
+export type ProductionCanvasTarget = { projectId: string; dramaId: string; episodeId?: string; keepCanvasOpen: boolean };
+export const WorkbenchCanvasContext = createContext<{ openCanvas: (target: CanvasTarget) => void; restoreCanvas: () => void; switchProductionCanvas: (target: ProductionCanvasTarget) => void; visible: boolean; hasCanvas: boolean } | null>(null);
+export const CanvasHostContext = createContext<{ projectId: string; active: boolean; search: URLSearchParams; requestId: number; navigate: NavigateFunction; collapse: () => void; popupContainer: () => HTMLElement; switchProductionCanvas: (target: ProductionCanvasTarget) => void } | null>(null);
+
+let workbenchCanvasOverlayTarget: HTMLElement | null = null;
+const workbenchCanvasOverlayListeners = new Set<() => void>();
+const subscribeWorkbenchCanvasOverlay = (listener: () => void) => {
+    workbenchCanvasOverlayListeners.add(listener);
+    return () => workbenchCanvasOverlayListeners.delete(listener);
+};
+const getWorkbenchCanvasOverlay = () => workbenchCanvasOverlayTarget;
+export function setWorkbenchCanvasOverlayTarget(target: HTMLElement | null) {
+    if (workbenchCanvasOverlayTarget === target) return;
+    workbenchCanvasOverlayTarget = target;
+    workbenchCanvasOverlayListeners.forEach((listener) => listener());
+}
+export function useWorkbenchCanvasOverlayTarget() {
+    return useSyncExternalStore(subscribeWorkbenchCanvasOverlay, getWorkbenchCanvasOverlay, () => null);
+}
+
 export const useWorkbenchCanvas = () => useContext(WorkbenchCanvasContext);
 export const useCanvasHost = () => useContext(CanvasHostContext);
 export function CanvasPortal({ children }: { children: ReactNode }) {

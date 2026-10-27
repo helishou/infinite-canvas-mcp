@@ -18,7 +18,7 @@ test("RH output picker updates only its profile's run selection and cannot write
 });
 test("local save is owner-bound, deduplicated, and late response never selects a different workflow", async () => {
  const pending = deferred<void>(); let current: any = { name: "B", config: { fields: [] } }; let requests = 0;
- const locked = new Set<string>(); const scope = { savingRef: { current: locked }, markSaving: (id:string,on:boolean) => on ? locked.add(id) : locked.delete(id), request: async (_method:string,path:string) => { requests++; assert.match(path,/A/); return pending.promise; }, setSelected: (fn:any) => { current=fn(current); }, fetchWorkflows: () => {}, message: { error() {} }, t: (key:string) => key };
+ const locked = new Set<string>(); const scope = { savingRef: { current: locked }, markSaving: (id:string,on:boolean) => on ? locked.add(id) : locked.delete(id), pendingFieldsRef: { current: {} as Record<string, any> }, request: async (_method:string,path:string) => { requests++; assert.match(path,/A/); return pending.promise; }, setSelected: (fn:any) => { current=fn(current); }, fetchWorkflows: () => {}, message: { error() {} }, t: (key:string) => key };
  const save = callback("handleSaveConfig", scope); const owner = { name: "A", config: { fields: [] } }; const first = save(owner, { fields: [], outputNodes: ["1"] }); assert.equal(await save(owner,{ fields: [] }), false);
  pending.resolve(); assert.equal(await first,true); assert.equal(requests,1); assert.equal(current.name,"B"); assert.equal(locked.size,0);
 });
@@ -29,7 +29,7 @@ test("failed config save leaves displayed/saved config unchanged and can retry",
 });
 test("out-of-order detail responses preserve the latest selection intent", async () => {
  const a=deferred<any>(), b=deferred<any>(); let selected:any; const loaded:any[]=[];
- const load=callback("handleLoadDetail", {detailRequest:{current:0},setDetailLoading:(v:boolean)=>loaded.push(v),setDetailError:()=>{},request:(_m:string,path:string)=>path.endsWith("A")?a.promise:b.promise,normalizeOutputNodeSelection:(v:any)=>v,setSelected:(v:any)=>{selected=v},setHistoryLogs:()=>{},setActiveTab:()=>{}});
+ const load=callback("handleLoadDetail", {detailRequest:{current:0},setDetailLoading:(v:boolean)=>loaded.push(v),setDetailError:()=>{},request:(_m:string,path:string)=>path.endsWith("A")?a.promise:b.promise,normalizeOutputNodeSelection:(v:any)=>v,lastOutputNodeId:()=>"" ,setSelected:(v:any)=>{selected=v},setHistoryLogs:()=>{},setActiveTab:()=>{}});
  const first=load("A"),second=load("B"); b.resolve({name:"B",config:{fields:[]},workflow:{}});await second;a.resolve({name:"A",config:{fields:[]},workflow:{}});await first;assert.equal(selected.name,"B");assert.equal(loaded.at(-1),false);
 });
 

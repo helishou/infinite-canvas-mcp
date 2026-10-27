@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
+import { canvasNodeDefaultSize } from "./node-sizes.js";
 import { nextCanvasFlowAnchor, nextCanvasX } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
@@ -19,18 +20,9 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
     if (name === "canvas_apply_ops") return { name, input: normalizeCanvasApplyOps(input) };
     if (name === "canvas_create_node") {
         const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
-        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width, height: data.height, metadata: data.metadata }]);
-    }
-    if (name === "canvas_create_text_node") {
-        const data = input as { text?: string; x?: number; y?: number; title?: string; width?: number; height?: number };
-        return applyOps([textNodeOp(data, data.x ?? nextCanvasX(state), data.y ?? 0)]);
-    }
-    if (name === "canvas_create_text_nodes") {
-        const data = input as { items: Array<{ text: string; title?: string; x?: number; y?: number; width?: number; height?: number }>; x?: number; y?: number; gap?: number; direction?: "row" | "column" };
-        const x = Number(data.x ?? nextCanvasX(state));
-        const y = Number(data.y ?? 0);
-        const gap = Number(data.gap ?? 40);
-        return applyOps(data.items.map((item, index) => textNodeOp(item, item.x ?? (data.direction === "row" ? x + index * (340 + gap) : x), item.y ?? (data.direction === "row" ? y : y + index * (240 + gap)))));
+        // 显式尺寸优先；省略时按该类型的默认规格落地，不再让 Backend 兜底成 320×240。
+        const size = canvasNodeDefaultSize(data.nodeType);
+        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width ?? size.width, height: data.height ?? size.height, metadata: data.metadata }]);
     }
     if (name === "canvas_create_config_node") {
         const x = Number(input.x ?? nextCanvasX(state));
@@ -156,23 +148,19 @@ function normalizeCanvasApplyOps(input: Record<string, unknown>) {
     return { ...input, ops };
 }
 
-/** 创建文本节点操作。 */
-function textNodeOp(input: { id?: string; text?: string; title?: string; width?: number; height?: number }, x: number, y: number) {
-    return { type: "add_node", id: input.id, nodeType: "text", title: input.title, position: { x, y }, width: input.width, height: input.height, metadata: { content: input.text || "", status: "success", fontSize: 14 } };
-}
-
 /** 创建生成配置节点操作。 */
 function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: number) {
     const mode = generationMode(input.mode);
     const prompt = String(input.prompt || "");
+    const size = canvasNodeDefaultSize("config");
     return {
         type: "add_node",
         id,
         nodeType: "config",
         title: String(input.title || generationTitle(mode)),
         position: { x, y },
-        width: typeof input.width === "number" ? input.width : undefined,
-        height: typeof input.height === "number" ? input.height : undefined,
+        width: typeof input.width === "number" ? input.width : size.width,
+        height: typeof input.height === "number" ? input.height : size.height,
         metadata: cleanRecord({
             smart: true,
             generationMode: mode,
@@ -201,29 +189,14 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const mode = generationMode(input.mode);
     const prompt = sanitizeCanvasPrompt(String(input.prompt || ""));
     const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
-    const textId = `text-${crypto.randomUUID()}`;
     const configId = `config-${crypto.randomUUID()}`;
-    // When the prompt only @-mentions nodes already passed as references, reuse them instead of minting a duplicate text node.
-    const mentionedIds = [...prompt.matchAll(/@\[node:([\w-]+)\]/g)].map((match) => match[1]);
-    const reuseReferences = referenceNodeIds.length > 0 && mentionedIds.length > 0
-        && mentionedIds.every((id) => referenceNodeIds.includes(id))
-        && prompt.replace(/@\[node:[\w-]+\]/g, "").trim() === "";
-    // 有 reference 时优先贴在第一个 reference 节点同行右侧；若该位置已有上一条生成流，
-    // 向右寻找完整空位，避免连续 MCP 调用把 prompt/config 叠在同一坐标。
-    // 没有 reference 时退回到画布全局最右 + y=0，保持纯文生的老行为。
-    const anchor = nextCanvasFlowAnchor(state, referenceNodeIds[0], { includePrompt: !reuseReferences });
+    // 提示词与生成参数统一保存在智能节点中，不再另造普通文本节点。
+    const anchor = nextCanvasFlowAnchor(state, referenceNodeIds[0], { includePrompt: false });
     const x = Number(input.x ?? anchor.x);
     const y = Number(input.y ?? anchor.y);
-    // 图片生产直接把提示词写入智能 config 节点；文本节点只保留给明确的提示词文档/非图片流程。
-    const smartImage = mode === "image";
-    const tokens = smartImage
-        ? [prompt]
-        : (reuseReferences ? referenceNodeIds.map((id) => `@[node:${id}]`) : [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)]);
-    const configPrompt = smartImage ? prompt : tokens.join("\n");
+    const configPrompt = prompt;
     return [
-        ...(smartImage || reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
-        configNodeOp(configId, { ...input, prompt: configPrompt }, smartImage ? x : x + 420, y),
-        ...(!smartImage && !reuseReferences ? [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }] : []),
+        configNodeOp(configId, { ...input, prompt: configPrompt }, x, y),
         ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId, role: "reference", order })),
         { type: "select_nodes", ids: [configId] },
         ...(input.autoRun ? [runGenerationOp({

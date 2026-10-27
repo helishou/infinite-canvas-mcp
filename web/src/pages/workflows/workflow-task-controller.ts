@@ -37,6 +37,15 @@ export class WorkflowTaskController {
     private reading = new Set<string>();
     subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
     get = (owner: string) => this.states.get(owner);
+    /** 某前缀下正在运行/提交中的任务数；混合运行用它判断本地还吃不吃的下。 */
+    countRunning(prefix: string) {
+        let count = 0;
+        for (const [owner, state] of this.states) {
+            if (!owner.startsWith(prefix)) continue;
+            if (state.running || state.submitting) count += 1;
+        }
+        return count;
+    }
     private update(owner: string, state: WorkflowRunState) {
         this.states.set(owner, state);
         this.listeners.forEach((listener) => listener());

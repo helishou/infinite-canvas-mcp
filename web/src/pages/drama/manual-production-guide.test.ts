@@ -18,9 +18,13 @@ test("current empty Clip prompt provides a direct Shot editor action rather than
 test("model, media and timing problems route to existing manual controls", () => {
     const target = { kind: "segment" as const, targetId: "clip", status: "blocked", blockers: [] as string[] };
     const source = { segments: [{ id: "clip", shot_ids: ["shot"] }] };
-    assert.equal(manualTargetRecovery({ ...target, blockers: ["缺少 H3 模型"] }, source).workspace, "advanced");
+    const modelRecovery = manualTargetRecovery({ ...target, blockers: ["缺少 H3 模型"] }, source);
+    assert.equal(modelRecovery.workspace, "series");
+    assert.equal(modelRecovery.seriesView, "planning");
+    assert.equal(modelRecovery.seriesTab, "settings");
+    assert.equal(manualTargetRecovery({ ...target, kind: "asset", targetId: "character", blockers: ["缺少图片模型"] }, source).seriesTab, "settings");
     assert.equal(manualTargetRecovery({ ...target, blockers: ["参考图片尚未归档"] }, source).messageKey, "referenceMissing");
-    assert.equal(manualTargetRecovery({ ...target, blockers: ["帧窗与秒数须一致"] }, source).id, "shot");
+    assert.equal(manualTargetRecovery({ ...target, blockers: ["帧窗与秒数须一致"] }, source).id, "clip");
 });
 test("typed material nodes can be bound manually while wrong types, missing nodes and duplicate sources stay unavailable", () => {
     const nodes = ["character", "scene", "prop", "image"].map(type => ({ id: type, type }));
@@ -28,4 +32,15 @@ test("typed material nodes can be bound manually while wrong types, missing node
     assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "missing" }, "canvas", nodes, []), false);
     assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "video" }, "canvas", [{ id: "video", type: "video" }], []), false);
     assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", nodes, [{ sourceNode: { projectId: "canvas", nodeId: "character" } }]), false);
+});
+
+test("one character node can provide distinct stable media keys without binding the same image twice", () => {
+    const node = { id: "character", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [
+        { storageKey: "media:cover" }, { storageKey: "media:outfit" },
+    ] } };
+    const base = { sourceNode: { projectId: "canvas", nodeId: "character" } };
+    const cover = { ...base, selection: { mode: "selected_result", resultId: "character:character-image:media:cover" } };
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [cover]), true);
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [cover, { ...base, selection: { mode: "selected_result", resultId: "media:outfit" } }]), false);
+    assert.equal(canBindSubjectImage({ projectId: "canvas", nodeId: "character" }, "canvas", [node], [{ ...base, selection: { mode: "node_selection" } }]), true);
 });

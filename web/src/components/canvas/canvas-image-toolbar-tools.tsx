@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, SlidersHorizontal, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Columns2, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, SlidersHorizontal, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "autoLevels" | "angle" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "stitch" | "upscale" | "superResolve" | "autoLevels" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "convertToCharacter" | "convertToScene" | "convertToProp" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
@@ -13,6 +13,7 @@ export type ImageToolHandlers = {
     onMaskEdit: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
+    onStitch: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAutoLevels: (node: CanvasNodeData) => void;
@@ -98,6 +99,14 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         title: () => i18n.t("canvas.imageTools.splitTitle"),
         icon: () => <Grid2x2 className="size-4" />,
         run: (node, handlers) => handlers.onSplit(node),
+    },
+    {
+        id: "stitch",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.stitch"),
+        title: () => i18n.t("canvas.imageTools.stitchTitle"),
+        icon: () => <Columns2 className="size-4" />,
+        run: (node, handlers) => handlers.onStitch(node),
     },
     {
         id: "upscale",

@@ -304,6 +304,14 @@ def apply(root):
             '    from canvas_model_contract import check_source_and_text, internal_ids\n    check_source_and_text(production, segment)\n    result["internal_ids"] = internal_ids(production)\n    result["model_subjects"] = [{key: subject.get(key) for key in ("label", "entity_id", "definition", "shot_ids")} for subject in segment.get("subjects", [])]\n    if segment["mode"] == "Ref2VA":\n        from h3_contract import remap_speech_references')
     replace("scripts/h3_final_format.py", '    _need(not re.search(r"\\b(?:CHAR|SCENE|PROP)_[A-Za-z0-9_]+\\b", text),',
             '    from canvas_model_contract import instruction_text\n    _need(not re.search(r"\\b(?:CHAR|SCENE|PROP)_[A-Za-z0-9_]+\\b", instruction_text(text)),')
+    # Spoken content lives only in <d>. Authored prose may name the line; when it
+    # carried the words too, the model can perform the line twice, so the shared
+    # compiler rule is enforced by the engine gate as well.
+    replace("scripts/h3_final_format.py", '    _check_dialogue_events(body, speech_expectations)',
+            '    from canvas_subject_prompt_v2 import repeated_spoken_dialogue\n'
+            '    repeated_speech = repeated_spoken_dialogue(text, speech_expectations)\n'
+            '    _need(not repeated_speech, "spoken dialogue repeats outside <d>: " + "; ".join(repeated_speech))\n'
+            '    _check_dialogue_events(body, speech_expectations)')
 
     # Preserve upstream gate behavior, while retaining per-target source provenance.
     path = root / "scripts/audit_storyboard_quality.py"

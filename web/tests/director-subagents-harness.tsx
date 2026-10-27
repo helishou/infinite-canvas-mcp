@@ -10,8 +10,8 @@ import "../src/styles/globals.css";
 
 const scenario = new URLSearchParams(location.search).get("scenario");
 let tasks = scenario?.startsWith("empty") ? [] : JSON.parse(sessionStorage.getItem("subagents-fixture") || "null") || [
-    { taskId: "child-a", projectId: "canvas", parentThreadId: "director", title: "核对人物连续性", role: "continuity", status: "running", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", sourceRevision: 4, error: null, resultAvailable: false },
-    { taskId: "child-b", projectId: "canvas", parentThreadId: "director", title: "检查镜头覆盖", role: "shots", status: "queued", createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z", sourceRevision: 4, error: null, resultAvailable: false },
+    { taskId: "child-a", projectId: "canvas", parentThreadId: "director", title: "核对人物连续性", role: "continuity", status: "running", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", sourceRevision: 4, model: "selected-channel::reasoning-model", error: null, resultAvailable: false },
+    { taskId: "child-b", projectId: "canvas", parentThreadId: "director", title: "检查镜头覆盖", role: "shots", status: "queued", createdAt: "2026-01-01T00:00:01Z", updatedAt: "2026-01-01T00:00:01Z", sourceRevision: 4, model: "selected-channel::reasoning-model", error: null, resultAvailable: false },
 ];
 const calls: Record<string, any>[] = [];
 let holdResult = false, release: (() => void) | undefined;

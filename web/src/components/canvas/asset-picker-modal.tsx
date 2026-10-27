@@ -1,6 +1,6 @@
 import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { useEffect, useMemo, useState } from "react";
-import { Empty, Input, Modal, Pagination, Tag } from "antd";
+import { Alert, Empty, Input, Modal, Pagination, Tag } from "antd";
 import { Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -14,7 +14,8 @@ export type InsertAssetPayload = { sharedAssetSource?: SharedAssetSource } & (
     | { kind: "video"; url: string; title: string; storageKey?: string; width?: number; height?: number }
     | { kind: "audio"; url: string; title: string; storageKey?: string; bytes: number; mimeType: string; durationMs?: number }
     | { kind: "character"; assetId: string; title: string; description: string; images: CharacterImage[]; primaryIndex: number; voice: string; voiceName: string; voiceDescription: string; voiceStorageKey?: string; voiceAssetId: string }
-    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorPalette?: string[]; colorCardPrompt: string });
+    | { kind: "scene"; assetId: string; title: string; description: string; image: SceneImage; colorCard?: SceneImage; colorPalette?: string[]; colorCardPrompt: string }
+    | { kind: "prop"; assetId: string; title: string; description: string; image: SceneImage });
 
 type Props = {
     open: boolean;
@@ -35,30 +36,30 @@ export function AssetPickerModal({ open, allowedKinds, onInsert, onClose }: Prop
 
 const PAGE_SIZE = 8;
 
-const kindOptions = ["all", "text", "image", "video", "audio", "character", "scene"];
+const kindOptions = ["all", "text", "image", "video", "audio", "character", "scene", "prop"];
 
 function PickerCard({ title, kind, cover, onClick }: { title: string; kind: string; cover: string; onClick: () => void }) {
     const { t } = useTranslation();
     return (
         <button
             type="button"
-            className="group relative cursor-pointer overflow-hidden rounded-lg border border-stone-200 bg-white text-left transition hover:border-stone-400 hover:shadow-md dark:border-stone-700 dark:bg-stone-900 dark:hover:border-stone-500"
+            className="group relative cursor-pointer overflow-hidden rounded-lg border border-border bg-card text-left transition hover:border-foreground/30 hover:shadow-md"
             onClick={onClick}
         >
             {cover ? (
                             <img src={cover} alt={title} className="aspect-[4/3] w-full object-cover" />
                         ) : (
-                            <div className="flex aspect-[4/3] items-center justify-center bg-stone-100 p-3 text-center text-xs leading-5 text-stone-500 dark:bg-stone-800 dark:text-stone-400">
+                            <div className="flex aspect-[4/3] items-center justify-center bg-muted p-3 text-center text-xs leading-5 text-muted-foreground dark:bg-muted dark:text-muted-foreground">
                                 {kind === "character" || kind === "audio" ? t(`assets.kinds.${kind}`) : title}
                             </div>
                         )}
             <div className="p-2.5">
                 <div className="flex items-center justify-between gap-2">
-                    <span className="line-clamp-1 text-xs font-medium text-stone-800 dark:text-stone-200">{title}</span>
-                    <Tag className="m-0 shrink-0 text-[10px]">{t(`assets.kinds.${kind}`)}</Tag>
+                    <span className="line-clamp-1 text-xs font-medium text-foreground">{title}</span>
+                    <Tag className="m-0 shrink-0 text-[11px]">{t(`assets.kinds.${kind}`)}</Tag>
                 </div>
             </div>
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-stone-950/0 text-sm font-medium text-white opacity-0 transition group-hover:bg-stone-950/55 group-hover:opacity-100">{t("canvas.assetPicker.insert")}</div>
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-background/0 text-sm font-medium text-white opacity-0 transition group-hover:bg-background/55 group-hover:opacity-100">{t("canvas.assetPicker.insert")}</div>
         </button>
     );
 }
@@ -66,6 +67,7 @@ function PickerCard({ title, kind, cover, onClick }: { title: string; kind: stri
 function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onInsert: (payload: InsertAssetPayload) => void }) {
     const { t } = useTranslation();
     const assets = useAssetStore((state) => state.assets);
+    const missingSourceCount = assets.filter((asset) => asset.metadata?.sharedAssetMissing === true).length;
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState("all");
     const [page, setPage] = useState(1);
@@ -73,10 +75,11 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
         return assets
-            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character" || a.kind === "scene")
+            .filter((a) => a.kind === "text" || a.kind === "image" || a.kind === "video" || a.kind === "audio" || a.kind === "character" || a.kind === "scene" || a.kind === "prop")
+            .filter((a) => a.metadata?.sharedAssetMissing !== true)
             .filter((a) => !allowedKinds?.length || allowedKinds.includes(a.kind))
             .filter((a) => kindFilter === "all" || a.kind === kindFilter)
-            .filter((a) => !query || [a.title, ...(a.kind === "character" || a.kind === "scene" ? [] : a.tags || [])].join(" ").toLowerCase().includes(query));
+            .filter((a) => !query || [a.title, ...(a.kind === "character" || a.kind === "scene" || a.kind === "prop" ? [] : a.tags || [])].join(" ").toLowerCase().includes(query));
     }, [allowedKinds, assets, keyword, kindFilter]);
 
     const visible = useMemo(() => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [filtered, page]);
@@ -120,6 +123,8 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
             });
         } else if (asset.kind === "scene") {
             insert({ kind: "scene", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image, colorCard: asset.data.colorCard, colorPalette: asset.data.colorPalette, colorCardPrompt: asset.data.colorCardPrompt });
+        } else if (asset.kind === "prop") {
+            insert({ kind: "prop", assetId: asset.id, title: asset.title, description: asset.data.description, image: asset.data.image });
         } else {
             insert({ kind: "image", dataUrl: (asset as ImageAsset).data.dataUrl, storageKey: (asset as ImageAsset).data.storageKey, title: asset.title });
         }
@@ -127,11 +132,12 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
 
     return (
         <div className="space-y-4">
+            {missingSourceCount > 0 && <Alert type="warning" showIcon message={t("assets.sharedAssetMissingSummary", { count: missingSourceCount, names: t("assets.sharedAssetMissing") })} />}
             <div className="flex flex-wrap items-center gap-3">
                 <Input
                     className="w-56"
                     size="small"
-                    prefix={<Search className="size-3.5 text-stone-400" />}
+                    prefix={<Search className="size-3.5 text-muted-foreground" />}
                     placeholder={t("canvas.assetPicker.search")}
                     value={keyword}
                     allowClear
@@ -160,7 +166,7 @@ function MyAssetsTab({ allowedKinds, onInsert }: { allowedKinds?: string[]; onIn
             {visible.length ? (
                 <div className="grid grid-cols-4 gap-3">
                     {visible.map((asset) => (
-                        <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? (asset as ImageAsset).data.dataUrl : asset.kind === "scene" ? asset.data.image.url : "")} onClick={() => handleInsert(asset)} />
+                        <PickerCard key={asset.id} title={asset.title} kind={asset.kind} cover={asset.coverUrl || (asset.kind === "image" ? (asset as ImageAsset).data.dataUrl : asset.kind === "scene" || asset.kind === "prop" ? asset.data.image.url : "")} onClick={() => handleInsert(asset)} />
                     ))}
                 </div>
             ) : (

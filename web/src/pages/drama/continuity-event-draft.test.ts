@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { appendContinuityChange, continuityChangeFormInput, type ContinuityChangeInput } from './continuity-event-draft';
 const shots = [{ id: 'S', timeline_id: 'T', story_order: 1, start_frame: 200, end_frame: 272, duration_frames: 72 }];
-const fixture = () => ({ contract_version: 2, facts: [{ id: 'F', allowed_values: ['a', 'b'] }], timelines: [{ id: 'T' }], initial: [{ timeline_id: 'T', fact_id: 'F', value: 'a' }], events: [] as Record<string, any>[], requirements: [] as Record<string, any>[], coverage: [] as Record<string, any>[] });
+const fixture = (): Record<string, any> => ({ contract_version: 2, facts: [{ id: 'F', allowed_values: ['a', 'b'] }], timelines: [{ id: 'T' }], initial: [{ timeline_id: 'T', fact_id: 'F', value: 'a' }], events: [] as Record<string, any>[], requirements: [] as Record<string, any>[], coverage: [] as Record<string, any>[] });
 const input: ContinuityChangeInput = { shotId: 'S', factId: 'F', frame: '36', after: 'b', reason: 'The object changes hands', sourceBlockId: 'B' };
 let index = 0; const id = () => `new${++index}`;
 test('inline and advanced creation append one atomic linked ledger change without mutating input', () => {
@@ -10,8 +10,14 @@ test('inline and advanced creation append one atomic linked ledger change withou
  assert.deepEqual(ledger, before); assert.equal(result.ledger.events[0].before, 'a'); assert.equal(result.ledger.events[0].local_frame, 36);
  assert.equal(result.ledger.events[0].after, 'b'); assert.deepEqual(result.ledger.requirements[0].event_ids, [result.eventId]); assert.deepEqual(result.ledger.coverage[0].event_ids, [result.eventId]); assert.equal(result.ledger.coverage[0].source_digest, 'digest');
 });
-test('missing explicit state, reason or evidence cannot create partial records', () => {
- for (const patch of [{ after: '' }, { reason: ' ' }, { sourceBlockId: '' }]) assert.throws(() => appendContinuityChange(fixture(), shots, { ...input, ...patch }, 'digest', id, true), /EVENT_FIELDS_REQUIRED/);
+test('missing state is rejected, but a change without a matching script passage is still confirmable', () => {
+ assert.throws(() => appendContinuityChange(fixture(), shots, { ...input, after: '' }, 'digest', id, true), /EVENT_FIELDS_REQUIRED/);
+ assert.equal(appendContinuityChange(fixture(), shots, { ...input, reason: ' ' }, 'digest', id, true).ledger.events[0].reason, '');
+ const result = appendContinuityChange(fixture(), shots, { ...input, sourceBlockId: '' }, undefined, id, true);
+ assert.equal(result.ledger.events[0].after, 'b');
+ assert.equal(result.ledger.events[0].source_anchor, undefined);
+ assert.equal(result.ledger.requirements[0].source_anchor, undefined);
+ assert.equal(result.ledger.coverage.length, 0);
 });
 test('empty, fractional and out-of-window positions are rejected', () => {
  for (const frame of ['', '-1', '2.5', '72']) assert.throws(() => appendContinuityChange(fixture(), shots, { ...input, frame }, 'digest', id, true), /INVALID_EVENT_FRAME/);
@@ -32,9 +38,8 @@ test('legacy advanced creation retains absolute-frame anchors', () => {
  assert.equal(result.ledger.events[0].frame, 236); assert.equal(result.ledger.events[0].local_frame, undefined);
 });
 
-test('reason length matches Python Unicode code points at the seven/eight boundary', () => {
- for (const reason of ['1234567', '😀'.repeat(7)]) assert.throws(() => appendContinuityChange(fixture(), shots, { ...input, reason }, 'digest', id, true), /EVENT_FIELDS_REQUIRED/);
- for (const reason of ['12345678', '😀'.repeat(8)]) assert.equal(appendContinuityChange(fixture(), shots, { ...input, reason }, 'digest', id, true).ledger.events.length, 1);
+test('an omitted reason never blocks a change and is stored trimmed', () => {
+ for (const reason of ['', ' ', '改']) assert.equal(appendContinuityChange(fixture(), shots, { ...input, reason }, 'digest', id, true).ledger.events[0].reason, reason.trim());
 });
 
 test('record-change task preserves the selected Shot/fact and starts inside its visible interval', () => {

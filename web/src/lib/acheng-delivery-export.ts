@@ -1,13 +1,16 @@
 import { Zip, ZipPassThrough } from "fflate";
 
-import { backendMediaUrl, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
+import { backendMediaUrl, fetchBackendGenerationLogs, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
+import { productionSegmentRuntimeMatches, productionSegments } from "@/lib/production-source";
+import type { CanvasNodeData } from "@/types/canvas";
 
 type RecordValue = Record<string, unknown>;
-type CanvasNode = { id: string; title?: string; type?: string; metadata?: Record<string, unknown> };
+type CanvasNode = CanvasNodeData;
 type BinaryEntry = Omit<MediaEntry, "included" | "requested" | "missingReason">;
 type ExportOptions = {
     owner: { kind: "canvas" | "episode" | "scene"; id: string };
     title: string;
+    projectId: string;
     production: EpisodeProduction;
     readiness: ProductionReadiness;
     canvasNodes: CanvasNode[];
@@ -27,6 +30,24 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
     if (!director) throw new Error("尚未建立 Acheng 正式制作稿");
     const artifacts = director.artifacts;
     const binaries = new Map<string, BinaryEntry>();
+    const generatedPrompts = await Promise.all(productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null }).flatMap(group => {
+        const locked = (Array.isArray(director.source?.segments) ? director.source.segments : []).map(record).find(segment => String(segment.id || "") === String(group.id));
+        if (locked?.locked !== true) return [];
+        const runtime = productionSegmentRuntimeMatches(options.canvasNodes, String(group.id), options.owner)[0]?.segment
+            || options.canvasNodes.find(item => item.id === group.nodeId)?.metadata?.segments?.map(record).find(item => String(item.id || "") === String(group.segmentId || ""));
+        const nodeId = String(group.nodeId || ""), segmentId = String(group.segmentId || ""), outputKey = String(runtime?.resultStorageKey || "");
+        if (!nodeId || !segmentId || !outputKey) return [{ targetId: String(group.id), status: "missing" as const }];
+        return [fetchBackendGenerationLogs({ projectId: options.projectId, nodeId, segmentId, limit: 100 }).then(({ logs = [] }) => {
+            const log = logs.find(item => item.status === "success" && item.outputs.some(output => String(output.storageKey || "") === outputKey) && typeof item.prompt === "string" && item.prompt.length > 0);
+            return log ? { targetId: String(group.id), status: "recorded" as const, prompt: log.prompt, logId: log.id, startedAt: log.startedAt, outputStorageKey: outputKey }
+                : { targetId: String(group.id), status: "missing" as const };
+        }).catch(() => ({ targetId: String(group.id), status: "unavailable" as const }))];
+    }));
+    const generatedPromptFiles = generatedPrompts.flatMap(item => {
+        if (item.status !== "recorded") return [];
+        const path = `prompts/generated/h3/${safeName(item.targetId)}.txt`;
+        return [{ ...item, path }];
+    });
     const artifactFiles = artifacts.map(artifact => {
         const kind = artifact.kind === "image" ? "image" : "h3";
         const base = `${kind}/${safeName(artifact.targetId)}`;
@@ -56,11 +77,13 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
     const actualMedia: BinaryEntry[] = [];
     for (const [assetId, asset] of Object.entries(d?.assets || {})) if (asset.storageKey) actualMedia.push({ key: asset.storageKey, path: `outputs/assets/${safeName(assetId)}.${extensionOf(asset.storageKey)}`, kind: "asset", targetId: assetId, sha256: asset.sha256 });
     for (const [shotId, frame] of Object.entries(snapshot.keyframes)) if (frame.storageKey) actualMedia.push({ key: frame.storageKey, path: `outputs/keyframes/${safeName(shotId)}.${extensionOf(frame.storageKey)}`, kind: "keyframe", targetId: shotId });
-    for (const group of snapshot.clipGroups) {
-        const node = options.canvasNodes.find(item => item.id === group.nodeId);
-        const segments = Array.isArray(node?.metadata?.segments) ? node.metadata!.segments.map(record) : [];
-        const segment = segments.find(item => String(item.id || "") === String(group.segmentId || ""));
-        const storageKey = String(segment?.resultStorageKey || "");
+    const lockedClipIds = new Set((Array.isArray(d?.source?.segments) ? d.source.segments : [])
+        .map(record).filter(segment => segment.locked === true).map(segment => String(segment.id || "")).filter(Boolean));
+    for (const group of productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null })) {
+        if (!lockedClipIds.has(String(group.id)) && group.locked !== true) continue;
+        const runtime = productionSegmentRuntimeMatches(options.canvasNodes, String(group.id), options.owner)[0]?.segment
+            || options.canvasNodes.find(item => item.id === group.nodeId)?.metadata?.segments?.map(record).find(item => String(item.id || "") === String(group.segmentId || ""));
+        const storageKey = String(runtime?.resultStorageKey || "");
         if (storageKey) actualMedia.push({ key: storageKey, path: `outputs/video/${safeName(group.id)}.${extensionOf(storageKey)}`, kind: "video", targetId: group.id });
     }
     const chosenOutputs = options.includeGeneratedMedia ? actualMedia : [];
@@ -102,6 +125,9 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
             unresolved: options.readiness.unresolved,
             targets: options.readiness.targets,
             artifacts: artifactFiles.map(item => item.manifest),
+            generatedPrompts: generatedPrompts.map(item => item.status === "recorded"
+                ? { targetId: item.targetId, status: item.status, logId: item.logId, startedAt: item.startedAt, outputStorageKey: item.outputStorageKey, promptFile: `prompts/generated/h3/${safeName(item.targetId)}.txt` }
+                : { targetId: item.targetId, status: item.status }),
             media: mediaEntries,
             outputsIncluded: options.includeGeneratedMedia === true,
             readinessSummary: { ready: readyTargets, total: options.readiness.targets.length, nextAction: options.readiness.nextAction },
@@ -111,6 +137,7 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
             addBytes(item.promptPath, encoder.encode(item.artifact.prompt));
             addJson(item.uploadPath, { targetId: item.artifact.targetId, kind: item.artifact.kind, references: item.refs, receipt: item.artifact.receipt });
         }
+        for (const item of generatedPromptFiles) addBytes(item.path, encoder.encode(item.prompt));
         for (const binary of allBinaries) {
             const response = await fetch(backendMediaUrl(binary.key));
             if (!response.ok) {

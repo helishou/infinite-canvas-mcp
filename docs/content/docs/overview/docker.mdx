@@ -59,7 +59,8 @@ The canvas-data named volume mounts at /data; its actual name includes the Compo
 | /data/backend | runtime.sqlite, backend.json, logs, custom workflows and production data |
 | /data/backend/runtime-media | Original archived images, videos, audio and files |
 | /data/agent | Agent configuration, site workspace and conversation assets |
-| /data/codex | Optional Codex authentication/sessions and pinned Acheng runtime state |
+| /data/codex | Optional Codex authentication and sessions |
+| /data/acheng-runtime | Project-pinned Acheng runtime versions and activation state |
 
 Stopping, normal down and container recreation preserve this volume. down --volumes deletes data and is not an upgrade command. Stop the Backend and back up the entire volume before upgrading. SQLite migration snapshots exclude media and workspaces. Preserve browser pending edits and conflict drafts too. Keep the same Compose project name and volume to avoid selecting a new empty dataset.
 
@@ -84,7 +85,7 @@ COMFYUI_HOST_PATH=/srv/ComfyUI docker compose -f docker-compose.yml -f docker-co
 
 In PowerShell set `$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'` and run the same docker compose command. Backend sees the installation at /opt/ComfyUI; configure that container path in the UI. Input/output caches need write access and canvas media must remain separate. A URL alone does not provide remote filesystem access.
 
-- Install and validate Acheng with docker compose exec backend node scripts/acheng-engine.mjs update; use status and rollback to inspect or revert. The explicit ACHENG_SOURCE setting selects a writable fork checkout in the persistent volume; runtime versions persist there too. Startup does not download an engine automatically. Missing-engine warnings do not prevent other Backend functions.
+- Install and validate Acheng with docker compose exec backend node scripts/acheng-engine.mjs update; use status and rollback to inspect or revert. The explicit ACHENG_SOURCE setting selects a writable fork checkout in the persistent volume. Runtime versions are project-owned and persist at /data/acheng-runtime, independently of CODEX_HOME. Startup does not download an engine automatically. Missing-engine warnings do not prevent other Backend functions.
 - For sidebar Codex chat set BACKEND_IMAGE_TARGET=backend-codex, rebuild, and run docker compose exec backend codex login --device-auth. The container uses its own /data/codex state. External CLIs such as Claude Code need their own installation and configuration.
 
 ## Native hosting and frontend-only images
@@ -92,12 +93,12 @@ In PowerShell set `$env:COMFYUI_HOST_PATH = 'C:/ComfyUI'` and run the same docke
 Without Docker, install and build from the repository root, run the Backend, and serve web/dist with your own static server:
 
 ```bash
-npm ci
-npm run build --workspace canvas-agent
-npm run build:plugins
-npm run build --workspace backend
-npm run build --workspace web
-npm run start --workspace backend
+corepack pnpm install --frozen-lockfile
+corepack pnpm --filter @basketikun/canvas-agent run build
+corepack pnpm run build:plugins
+corepack pnpm --filter @helishou/infinite-canvas-backend run build
+corepack pnpm --filter infinite-canvas run build
+corepack pnpm --filter @helishou/infinite-canvas-backend run start
 ```
 
 The build includes the local official-plugin registry. For another Backend, set VITE_BACKEND_URL in the Web build environment and allow the site's origin in Backend configuration.
@@ -109,7 +110,8 @@ The build includes the local official-plugin registry. For another Backend, set 
 | INFINITE_CANVAS_ORIGINS | Comma-separated HTTP(S) origins overriding file/SQLite settings |
 | INFINITE_CANVAS_BACKEND_TOKEN | Override the key; otherwise use persistent configuration or generate once |
 | INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | Data and media locations |
-| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent workspace and optional Codex/Acheng state |
+| INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent workspace and optional Codex state |
+| INFINITE_CANVAS_ACHENG_HOME | Project-specific Acheng runtime directory; defaults to .canvas-runtime in the repository |
 | FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | Optional executable paths; otherwise resolve from PATH |
 
 Deployment network variables override local network settings. Configure containers through deployment settings. A static frontend can set public config.js to `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };` and proxy that prefix to Backend. Enter the key in connection settings.

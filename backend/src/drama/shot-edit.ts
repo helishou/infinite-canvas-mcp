@@ -1,26 +1,70 @@
 import crypto from "node:crypto";
 import { canonicalProduction, directorProductionSchema, isSubjectPromptAssembly, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
+import { ProductionValidationError, requireShotFraming } from "@basketikun/canvas-agent/drama/production-validation";
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { defaultDirectorBoundary } from "./continuity-defaults.js";
 
 type Row = Record<string, any>;
 type Edit = Extract<ProductionOperation, { type: "edit_director_shot" }>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value : [];
+const isRecord = (value: unknown): value is Row => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function reject(code: string, path: string, message: string): never { throw new ProductionValidationError([{ code, path, targetId: path.split(".")[1], message, severity: "error" }]); }
 const clip = (source: Row, id: string) => rows(source.segments).find(segment => (segment.shot_ids || []).includes(id));
 const patchFields = new Set(["title", "visual", "camera", "audio", "performance", "subject_usages"]);
+function mergeNestedRecord(base: unknown, patch: unknown): Row {
+    const merged: Row = isRecord(base) ? { ...base } : {};
+    if (!isRecord(patch)) return merged;
+    for (const [key, value] of Object.entries(patch)) {
+        merged[key] = isRecord(value) && isRecord(merged[key]) ? mergeNestedRecord(merged[key], value) : value;
+    }
+    return merged;
+}
+function mergeAttentionIds(...cameras: unknown[]): string[] | undefined {
+    const arrays = cameras.filter(isRecord).map(camera => camera.attention_subject_ids).filter(Array.isArray) as unknown[][];
+    return arrays.length ? [...new Set(arrays.flat().map(String))] : undefined;
+}
+function cameraMergeConflicts(left: unknown, right: unknown, parent = "camera"): string[] {
+    if (!isRecord(left) || !isRecord(right)) return canonicalProduction(left) === canonicalProduction(right) ? [] : [parent];
+    const conflicts: string[] = [];
+    for (const key of Object.keys(left)) {
+        if (key === "attention_subject_ids" || !Object.hasOwn(right, key)) continue;
+        const a = left[key], b = right[key], path = `${parent}.${key}`;
+        if (isRecord(a) && isRecord(b)) conflicts.push(...cameraMergeConflicts(a, b, path));
+        else if (canonicalProduction(a) !== canonicalProduction(b)) conflicts.push(path);
+    }
+    return conflicts;
+}
 function patch(shot: Row, value?: Row) {
     if (!value) return;
     for (const key of Object.keys(value)) if (!patchFields.has(key)) reject("SHOT_PATCH_FIELD", `shots.${shot.id}.${key}`, "拆镜补丁只接受名称、画面、摄影、声音和表演字段");
-    Object.assign(shot, value);
+    const next = { ...value };
+    if (Object.hasOwn(value, "camera")) {
+        next.camera = mergeNestedRecord(shot.camera, value.camera);
+        requireShotFraming(next.camera, String(shot.id));
+    }
+    if (isRecord(value.performance)) next.performance = mergeNestedRecord(shot.performance, value.performance);
+    Object.assign(shot, next);
+}
+function mergeCamera(left: unknown, right: unknown, preferRight: boolean): Row {
+    const a = isRecord(left) ? left : {};
+    const b = isRecord(right) ? right : {};
+    const preferred = preferRight ? b : a;
+    const fallback = preferRight ? a : b;
+    const merged = mergeNestedRecord(fallback, preferred);
+    const attentionIds = mergeAttentionIds(preferred, fallback);
+    if (attentionIds) merged.attention_subject_ids = attentionIds;
+    return merged;
 }
 function sound(source: Row) {
     const windows = subjectShotWindows(source), order = rows(source.utterances).map(utterance => {
         const start = windows.get(utterance.start?.shotId), end = windows.get(utterance.end?.shotId);
         return { id: utterance.id, text: utterance.text, timeline: start?.timelineId, start: Number(start?.startFrame) + Number(utterance.start?.localFrame), duration: Number(end?.startFrame) + Number(utterance.end?.localFrame) - Number(start?.startFrame) - Number(utterance.start?.localFrame) };
     });
-    return order.sort((a, b) => String(a.timeline).localeCompare(String(b.timeline)) || a.start - b.start).map(({ start, ...value }) => value);
+    // Absolute start positions can move when a Shot is inserted before an utterance.
+    // Compare the stable utterance identities, timeline and duration; sorting by the
+    // shifted start and then discarding it can reorder otherwise unchanged entries.
+    return order.sort((a, b) => String(a.id).localeCompare(String(b.id))).map(({ start: _start, ...value }) => value);
 }
 function sliceUsages(shot: Row, start: number, end: number) {
     return rows(shot.subject_usages).flatMap(usage => {
@@ -36,12 +80,80 @@ function slicePerformance(value: Row | undefined, start: number, end: number, ca
         return to > from ? [{ ...event, start: from - start, end: to - start, ...(event.start < start && typeof event.cue === "string" ? { cue: `延续切点前已经开始的${category}：${event.cue}` } : {}) }] : [];
     }) };
 }
+function mergeUtteranceRefs(left: Row[], right: Row[], offset: number) {
+    const combined: Row[] = [
+        ...left.map((ref): Row => ref),
+        ...right.map((ref): Row => ({ ...ref, localStartFrame: ref.localStartFrame + offset, localEndFrame: ref.localEndFrame + offset })),
+    ]
+        .sort((a, b) => Number(a.localStartFrame) - Number(b.localStartFrame) || Number(a.textStart) - Number(b.textStart));
+    return combined.reduce((result: Row[], ref) => {
+        const previous = result.at(-1);
+        if (previous && previous.utteranceId === ref.utteranceId && previous.role === ref.role
+            && previous.localEndFrame === ref.localStartFrame && previous.textEnd === ref.textStart) {
+            previous.localEndFrame = ref.localEndFrame;
+            previous.textEnd = ref.textEnd;
+        } else result.push(ref);
+        return result;
+    }, []);
+}
+
 function mergeAudio(left: unknown, right: unknown, offset: number, duration: number) {
     const a: Row = left && typeof left === "object" ? left : { description: typeof left === "string" ? left : "" };
     const b: Row = right && typeof right === "object" ? right : { description: typeof right === "string" ? right : "" };
     const extra = (row: Row) => Object.fromEntries(Object.entries(row).filter(([key]) => !["description", "events"].includes(key)));
     if (Object.keys(extra(a)).length && Object.keys(extra(b)).length && canonicalProduction(extra(a)) !== canonicalProduction(extra(b))) reject("SHOT_MERGE_AUDIO", "shots.audio", "两镜声音配置不同，请在合镜表单明确填写新的声音设计");
-    return { ...(Object.keys(extra(a)).length ? extra(a) : extra(b)), description: `[0–${offset}帧] ${a.description || ""}\n[${offset}–${offset + duration}帧] ${b.description || ""}`, events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))] };
+    const descriptions = [a.description, b.description].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    const description = [...new Set(descriptions)].join("\n");
+    return { ...(Object.keys(extra(a)).length ? extra(a) : extra(b)), description, events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))] };
+}
+function mergePerformance(left: unknown, right: unknown, offset: number) {
+    const a: Row = left && typeof left === "object" ? left : {};
+    const b: Row = right && typeof right === "object" ? right : {};
+    const fields = new Set([...Object.keys(a), ...Object.keys(b)].filter(key => !["events", "beat_id", "beat_ids"].includes(key)));
+    for (const key of fields) if (a[key] !== undefined && b[key] !== undefined && canonicalProduction(a[key]) !== canonicalProduction(b[key])) reject("SHOT_MERGE_PERFORMANCE", `shots.performance.${key}`, `两镜表演字段 ${key} 不同，请先统一后再合镜`);
+    if (!Object.keys(a).length && !Object.keys(b).length) return undefined;
+    const merged: Row = {
+        ...b,
+        ...a,
+        events: [...rows(a.events), ...rows(b.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))],
+    };
+    const beatIds = [...new Set([a.beat_id, ...rows(a.beat_ids), b.beat_id, ...rows(b.beat_ids)]
+        .filter((value): value is string => typeof value === "string" && Boolean(value.trim())))];
+    delete merged.beat_id;
+    delete merged.beat_ids;
+    if (beatIds.length === 1) merged.beat_id = beatIds[0];
+    else if (beatIds.length > 1) merged.beat_ids = beatIds;
+    return merged;
+}
+function mergeShotInputs(left: DirectorProduction["shotInputs"][string] | undefined, right: DirectorProduction["shotInputs"][string] | undefined, leftId: string, rightId: string, subjectAssembly: boolean) {
+    const projection = (input: DirectorProduction["shotInputs"][string] | undefined) => {
+        if (!input) return undefined;
+        const cloned = structuredClone(input);
+        if (subjectAssembly) {
+            // Prompt v2 stores the full keyframe list on source.shots[].keyframes.
+            // The legacy shotInputs slot can name only one frame, so it is not
+            // a valid merge constraint or source of keyframe truth here.
+            delete cloned.keyframeAssetId;
+            cloned.keyframePolicy = "none";
+        }
+        return cloned;
+    };
+    const projectedLeft = projection(left), projectedRight = projection(right);
+    if (!projectedLeft) return projectedRight;
+    if (!projectedRight) return projectedLeft;
+    if (!subjectAssembly && projectedLeft.keyframePolicy !== undefined && projectedRight.keyframePolicy !== undefined && projectedLeft.keyframePolicy !== projectedRight.keyframePolicy) reject("SHOT_MERGE_INPUT_POLICY", `shotInputs.${leftId}.keyframePolicy`, "两镜关键帧策略不同，请先统一后再合镜");
+    if (!subjectAssembly && projectedLeft.keyframeAssetId && projectedRight.keyframeAssetId && projectedLeft.keyframeAssetId !== projectedRight.keyframeAssetId) reject("SHOT_MERGE_INPUT_KEYFRAME", `shotInputs.${leftId}.keyframeAssetId`, "两镜指定了不同关键帧素材，请先统一后再合镜");
+    return {
+        ...projectedRight,
+        ...projectedLeft,
+        assetIds: [...new Set([...projectedLeft.assetIds, ...projectedRight.assetIds])],
+        keyframePolicy: projectedLeft.keyframePolicy ?? projectedRight.keyframePolicy,
+        keyframeAssetId: projectedLeft.keyframeAssetId ?? projectedRight.keyframeAssetId,
+    };
+}
+function withAudioDescription(value: unknown, description: string): Row {
+    const audio: Row = value && typeof value === "object" ? value : { description: typeof value === "string" ? value : "" };
+    return { ...audio, description };
 }
 
 /** Shared deletion cleanup for one Shot or an entire Clip. */
@@ -81,7 +193,7 @@ export function reconcileShotClipBoundaries(director: DirectorProduction, previo
         const to = ids[index + 1], existing = edges.filter(edge => edge.from === from && edge.to === to);
         if (existing.length) return existing;
         if (previousIds.some((id, oldIndex) => id === from && previousIds[oldIndex + 1] === to)) return [];
-        return [{ from, to, tailFrame: false, motionContext: false, reason: "镜头结构修改后形成的新剪辑边界；不继承旧片段的尾帧或运动上下文。" }];
+        return [defaultDirectorBoundary(director, from, to)];
     });
 }
 
@@ -101,7 +213,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
 
     if (operation.action === "insert" || operation.action === "duplicate") {
         if (operation.action === "duplicate") requireSelected();
-        const authored: Row = operation.action === "duplicate" ? { ...selected!, id: freshId(operation.newShotId), title: `${selected!.title || "镜头"} · 副本`, keyframes: [], utterance_refs: [], audio: {}, performance: undefined, outcome_events: [] } : structuredClone(operation.shot || {});
+        const authored: Row = operation.action === "duplicate" ? { ...selected!, id: freshId(operation.newShotId), title: `${selected!.title || "镜头"} · 副本`, keyframes: [], reference_requirements: [], utterance_refs: [], audio: {}, performance: undefined, outcome_events: [] } : structuredClone(operation.shot || {});
         if (operation.action === "insert") authored.id = freshId(authored.id);
         if (selected) {
             for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== selected[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增镜头须沿用所在片段的场次和时间线");
@@ -111,9 +223,25 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         } else {
             const segment = structuredClone(operation.segment || {});
             if (!segment.id || rows(source.segments).some(row => row.id === segment.id)) reject("SHOT_NEW_CLIP", "segment.id", "首镜需要新的 Clip 身份及执行模式");
-            segment.shot_ids = [authored.id]; source.segments = [...rows(source.segments), segment]; shots.push(authored);
+            segment.shot_ids = [authored.id];
+            const anchor = operation.anchorShotId ? shots.find(row => row.id === operation.anchorShotId) : undefined;
+            if (operation.anchorShotId) {
+                if (!anchor) reject("SHOT_NOT_FOUND", `shots.${operation.anchorShotId}`, "新增 Clip 的锚点镜头不存在");
+                const anchorGroup = clip(source, anchor.id);
+                if (!anchorGroup) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
+                for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== anchor[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增 Clip 须沿用锚点镜头所在的场次和时间线");
+                Object.assign(authored, { scene_id: anchor.scene_id, timeline_id: anchor.timeline_id, ...(anchor.source_scene_id ? { source_scene_id: anchor.source_scene_id } : {}) });
+                shots.splice(shots.indexOf(anchor) + 1, 0, authored);
+                const segments = rows(source.segments);
+                source.segments = [...segments.slice(0, segments.indexOf(anchorGroup) + 1), segment, ...segments.slice(segments.indexOf(anchorGroup) + 1)];
+            } else { source.segments = [...rows(source.segments), segment]; shots.push(authored); }
         }
         if (!Number.isInteger(authored.duration_frames) || authored.duration_frames <= 0) reject("SHOT_DURATION", `shots.${authored.id}.duration_frames`, "镜头时长必须为正整数帧");
+        if (operation.anchorShotId) {
+            const seconds = Number(authored.duration_frames) / (Number(source.fps_num || 24) / Number(source.fps_den || 1));
+            if (!Number.isFinite(seconds) || seconds < 4 || seconds > 15) reject("CLIP_DURATION_OUT_OF_RANGE", `shots.${authored.id}.duration_frames`, `新 Clip 时长 ${seconds.toFixed(2)} 秒，必须在 4–15 秒范围内`);
+        }
+        requireShotFraming(authored.camera, String(authored.id));
         next.shotInputs[authored.id] = { assetIds: [], keyframePolicy: "none" };
     } else if (operation.action === "delete") {
         const shot = requireSelected();
@@ -134,8 +262,17 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         shot.performance = slicePerformance(original.performance, 0, cut); right.performance = slicePerformance(original.performance, cut, duration);
         if (original.audio && typeof original.audio === "object" && Array.isArray(original.audio.events)) { shot.audio = slicePerformance(original.audio, 0, cut, "声音"); right.audio = slicePerformance(original.audio, cut, duration, "声音"); }
         shot.keyframes = []; right.keyframes = [];
+        const compositionReferences = [
+            ...rows(original.reference_requirements),
+            ...rows(original.keyframes).filter(frame => frame.anchor === "composition").map(frame => ({
+                id: String(frame.id), asset_id: String(frame.assetId || frame.id), asset_version: String(frame.asset_version || `node:${frame.sourceNode?.nodeId || frame.id}`), purpose: "构图参考", sourceNode: frame.sourceNode,
+                selection: frame.selection, retain: frame.retain || [], exclude: frame.exclude || [], requiredForSubmission: frame.requiredForSubmission !== false,
+            })),
+        ];
+        shot.reference_requirements = structuredClone(compositionReferences);
+        right.reference_requirements = compositionReferences.map(reference => ({ ...structuredClone(reference), id: `${String(reference.id)}:${newId}` }));
         for (const frame of rows(original.keyframes)) {
-            if (frame.anchor === "composition") { shot.keyframes.push(frame); right.keyframes.push({ ...frame, id: `${frame.id}:${newId}` }); }
+            if (frame.anchor === "composition") continue;
             else if (frame.anchor === "opening") shot.keyframes.push(frame);
             else if (frame.anchor === "closing") right.keyframes.push(frame);
             else if (frame.localFrame < cut) shot.keyframes.push(frame);
@@ -170,7 +307,18 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             return [row];
         });
         for (const row of rows(ledger.coverage)) if (Array.isArray(row.shot_ids)) row.shot_ids = row.shot_ids.flatMap((id: string) => id === shot.id ? [id, newId] : [id]);
-        patch(shot, operation.firstShotPatch); patch(right, operation.shot);
+        const firstPatch = { ...(operation.firstShotPatch || {}) }, secondPatch = { ...(operation.shot || {}) };
+        const slicedRightUsages = structuredClone(right.subject_usages);
+        const firstAudio = firstPatch.audio, secondAudio = secondPatch.audio;
+        if (typeof firstAudio === "string") delete firstPatch.audio;
+        if (typeof secondAudio === "string") delete secondPatch.audio;
+        patch(shot, firstPatch); patch(right, secondPatch);
+        if (typeof firstAudio === "string") shot.audio = withAudioDescription(shot.audio, firstAudio);
+        if (typeof secondAudio === "string") right.audio = withAudioDescription(right.audio, secondAudio);
+        if (Object.hasOwn(secondPatch, "subject_usages")) {
+            const visible = rows(secondPatch.subject_usages).filter(usage => usage.presentation === "visible"), visibleIds = new Set(visible.map(usage => String(usage.subjectId)));
+            right.subject_usages = [...rows(slicedRightUsages).filter(usage => usage.presentation !== "visible" && !visibleIds.has(String(usage.subjectId))), ...visible];
+        }
         shot.subject_usages = sliceUsages(shot, 0, cut); right.subject_usages = sliceUsages(right, 0, duration - cut);
         if (operation.reaction) {
             const speakers = new Set(rows(source.utterances).filter(utterance => right.utterance_refs.some((ref: Row) => ref.utteranceId === utterance.id)).map(utterance => utterance.speakerSubjectId));
@@ -186,9 +334,9 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
     } else if (operation.action === "merge") {
         const left = requireSelected(), right = shots[index + 1];
         if (!right || right.id !== operation.targetShotId || clip(source, right.id)?.id !== group!.id) reject("SHOT_MERGE_SCOPE", `shots.${left.id}`, "只能合并同一片段内的相邻镜头");
-        if (canonicalProduction(left.camera) !== canonicalProduction(right.camera) && ![left.id, right.id].includes(operation.cameraShotId!)) reject("SHOT_MERGE_CAMERA", `shots.${left.id}.camera`, "两镜摄影不同，请明确选择合并后使用哪一个摄影方案");
-        if (left.performance?.source_beat_id && right.performance?.source_beat_id && left.performance.source_beat_id !== right.performance.source_beat_id) reject("SHOT_MERGE_PERFORMANCE", `shots.${left.id}.performance`, "两镜主要表演来源不同，请先统一表演设计再合镜");
+        if (cameraMergeConflicts(left.camera, right.camera).length && ![left.id, right.id].includes(operation.cameraShotId!)) reject("SHOT_MERGE_CAMERA", `shots.${left.id}.camera`, "两镜摄影存在相互冲突的字段，请明确选择合并后优先使用哪一个摄影方案");
         const offset = Number(left.duration_frames), rightDuration = Number(right.duration_frames);
+        if (right.title && right.title !== left.title) left.title = [left.title, right.title].filter(Boolean).join(" / ");
         const leftUsages = sliceUsages(left, 0, offset), rightUsages = sliceUsages(right, 0, rightDuration).map(usage => ({ ...usage, localStartFrame: usage.localStartFrame + offset, localEndFrame: usage.localEndFrame + offset }));
         const usages: Row[] = [];
         for (const usage of [...leftUsages, ...rightUsages]) {
@@ -197,13 +345,28 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             if (previous) previous.localEndFrame = usage.localEndFrame; else usages.push(usage);
         }
         left.subject_usages = usages;
-        left.camera = structuredClone(operation.cameraShotId === right.id ? right.camera : left.camera);
+        left.camera = mergeCamera(left.camera, right.camera, operation.cameraShotId === right.id);
         left.visual = `[0–${offset}帧] ${left.visual || ""}\n[${offset}–${offset + rightDuration}帧] ${right.visual || ""}`;
         left.duration_frames = offset + rightDuration;
-        left.audio = operation.firstShotPatch && Object.hasOwn(operation.firstShotPatch, "audio") ? operation.firstShotPatch.audio : mergeAudio(left.audio, right.audio, offset, rightDuration);
-        left.utterance_refs = [...rows(left.utterance_refs), ...rows(right.utterance_refs).map(ref => ({ ...ref, localStartFrame: ref.localStartFrame + offset, localEndFrame: ref.localEndFrame + offset }))];
-        left.keyframes = [...rows(left.keyframes).map(frame => frame.anchor === "closing" ? { ...frame, anchor: "at_frame", localFrame: offset - 1 } : frame), ...rows(right.keyframes).map(frame => frame.anchor === "opening" || frame.anchor === "composition" ? { ...frame, anchor: "at_frame", localFrame: offset } : frame.anchor === "at_frame" ? { ...frame, localFrame: frame.localFrame + offset } : frame)];
-        if (left.performance || right.performance) left.performance = { ...(left.performance || right.performance), events: [...rows(left.performance?.events), ...rows(right.performance?.events).map(event => ({ ...event, start: event.start + offset, end: event.end + offset }))] };
+        const mergedAudio = mergeAudio(left.audio, right.audio, offset, rightDuration);
+        const audioPatch = operation.firstShotPatch?.audio;
+        left.audio = typeof audioPatch === "string" ? { ...mergedAudio, description: audioPatch } : audioPatch !== undefined ? audioPatch : mergedAudio;
+        left.utterance_refs = mergeUtteranceRefs(rows(left.utterance_refs), rows(right.utterance_refs), offset);
+        const legacyCompositionReferences = (shot: Row) => rows(shot.keyframes).filter(frame => frame.anchor === "composition").map(frame => ({
+            id: String(frame.id), asset_id: String(frame.assetId || frame.id), asset_version: String(frame.asset_version || `node:${frame.sourceNode?.nodeId || frame.id}`), purpose: "构图参考", sourceNode: frame.sourceNode,
+            selection: frame.selection, retain: frame.retain || [], exclude: frame.exclude || [], requiredForSubmission: frame.requiredForSubmission !== false,
+        }));
+        const compositionReferences = [...rows(left.reference_requirements), ...legacyCompositionReferences(left), ...rows(right.reference_requirements), ...legacyCompositionReferences(right)];
+        const referenceById = new Map<string, Row>();
+        for (const reference of compositionReferences) {
+            const id = String(reference.id), previous = referenceById.get(id);
+            if (previous && canonicalProduction(previous) !== canonicalProduction(reference)) reject("SHOT_MERGE_REFERENCE", `shots.${left.id}.reference_requirements.${id}`, "两镜存在同 ID 但内容不同的构图参考，请先整理参考绑定再合镜");
+            referenceById.set(id, reference);
+        }
+        left.reference_requirements = [...referenceById.values()];
+        left.keyframes = [...rows(left.keyframes).filter(frame => frame.anchor !== "composition").map(frame => frame.anchor === "closing" ? { ...frame, anchor: "at_frame", localFrame: offset - 1 } : frame), ...rows(right.keyframes).filter(frame => frame.anchor !== "composition").map(frame => frame.anchor === "opening" ? { ...frame, anchor: "at_frame", localFrame: offset } : frame.anchor === "at_frame" ? { ...frame, localFrame: frame.localFrame + offset } : frame)];
+        const performance = mergePerformance(left.performance, right.performance, offset);
+        if (performance) left.performance = performance;
         for (const utterance of rows(source.utterances)) for (const boundary of ["start", "end"]) if (utterance[boundary].shotId === right.id) utterance[boundary] = { shotId: left.id, localFrame: utterance[boundary].localFrame + offset };
         for (const event of rows(ledger.events)) if (event.shot_id === right.id) { event.shot_id = left.id; event.local_frame += offset; }
         for (const key of ["requirements", "coverage"]) for (const row of rows(ledger[key])) {
@@ -215,9 +378,15 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             return !original || canonicalProduction({ ...row, id: original.id }) !== canonicalProduction(original);
         });
         left.outcome_events = [...new Set([...rows(source.shots).filter(row => row.id === left.id || row.id === right.id).flatMap(row => Array.isArray(row.outcome_events) ? row.outcome_events : [])])];
-        const rightInput = next.shotInputs[right.id];
-        if (rightInput) next.shotInputs[left.id] = { ...rightInput, ...next.shotInputs[left.id], assetIds: [...new Set([...(next.shotInputs[left.id]?.assetIds || []), ...rightInput.assetIds])], ...(next.shotInputs[left.id]?.keyframePolicy === "none" && rightInput.keyframePolicy !== "none" ? { keyframePolicy: rightInput.keyframePolicy, keyframeAssetId: rightInput.keyframeAssetId } : {}) };
+        if (Array.isArray(group!.audio_bindings)) group!.audio_bindings = group!.audio_bindings.map((binding: Row) => ({
+            ...binding,
+            shotIds: Array.isArray(binding.shotIds) ? [...new Set(binding.shotIds.map((id: string) => id === right.id ? left.id : id))] : binding.shotIds,
+        }));
+        const mergedInput = mergeShotInputs(next.shotInputs[left.id], next.shotInputs[right.id], left.id, right.id, isSubjectPromptAssembly(source));
+        if (mergedInput) next.shotInputs[left.id] = mergedInput;
         patch(left, operation.firstShotPatch);
+        const attentionIds = mergeAttentionIds(left.camera, right.camera, operation.firstShotPatch?.camera);
+        if (attentionIds) left.camera.attention_subject_ids = attentionIds;
         shots.splice(index + 1, 1); group!.shot_ids = group!.shot_ids.filter((id: string) => id !== right.id); delete next.shotInputs[right.id];
     }
     const counters = new Map<string, number>();

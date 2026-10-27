@@ -7,7 +7,7 @@ import { applyDirectorSourcePatch } from "./production-validation.js";
 test("continuity reads are owner scoped and cursor-bearing", () => {
     assert.deepEqual(productionWorkspaceRequest("production_get_continuity", { kind: "episode", id: "ep", view: "issues", snapshot: "draft", pageSize: 20 }).path,
         "/drama/episodes/ep/production/continuity?snapshot=draft&view=issues&pageSize=20");
-    assert.equal(productionWorkspaceRequest("production_get_continuity", { kind: "scene", id: "scene" }).path, "/drama/scenes/scene/production/continuity?snapshot=draft&view=summary");
+    assert.equal(productionWorkspaceRequest("production_get_continuity", { kind: "scene", id: "scene" }).path, "/drama/scenes/scene/production/continuity?snapshot=draft&view=summary&pageSize=20");
 });
 
 test("ledger source patch changes the authored source and never accepts projected shot snapshots", () => {
@@ -17,5 +17,6 @@ test("ledger source patch changes the authored source and never accepts projecte
     assert.notEqual(director.sourceHash, "0".repeat(64));
     assert.ok(director.artifacts.every((artifact: any) => artifact.status === "stale"));
     assert.throws(() => applyDirectorSourcePatch(director, "continuity", undefined, { state_in: {} }), /连续性修改只接受/);
-    assert.equal(productionOperationSchema.safeParse({ type: "patch_director_continuity", ledger: { contract_version: 2 } }).success, true);
+    assert.equal(productionOperationSchema.safeParse({ type: "patch_director_continuity", ledger: { contract_version: 2 } }).success, false);
+    assert.equal(productionOperationSchema.safeParse({ type: "edit_director_continuity", changes: [{ collection: "facts", action: "upsert", id: "F1", value: { id: "F1" } }] }).success, true);
 });

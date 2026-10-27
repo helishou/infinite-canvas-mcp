@@ -1,6 +1,6 @@
 import { useCanvasHost, useCanvasRoute, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { useEffect, useRef, useState } from "react";
-import { ArchiveRestore, Clapperboard, MessagesSquare, Download, FileText, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
+import { ArchiveRestore, Clapperboard, MessagesSquare, Download, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
@@ -16,6 +16,7 @@ import { CanvasTextSuggestionsDialog } from "./canvas-text-suggestions-dialog";
 import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
+import { markProductionEntry } from "@/lib/production-navigation";
 
 export function CanvasTopBar({
     projectId,
@@ -39,7 +40,6 @@ export function CanvasTopBar({
     onOpenPlugins,
     onUndo,
     onRedo,
-    onOpenGenerationLogs,
     collaborators,
 }: {
     projectId: string;
@@ -63,7 +63,6 @@ export function CanvasTopBar({
     onOpenPlugins: () => void;
     onUndo: () => void;
     onRedo: () => void;
-    onOpenGenerationLogs: () => void;
     collaborators: CanvasCollaborator[];
 }) {
     const host = useCanvasHost();
@@ -111,7 +110,7 @@ export function CanvasTopBar({
                             items: [
                                 ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}&workspace=series`}>{t("productionCanvas.backDrama")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
-                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to={`/director/${encodeURIComponent(projectId)}`}>{t("productionCanvas.enter")}</Link> }] : []),
+                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to={`/director/${encodeURIComponent(projectId)}`} onClick={() => markProductionEntry()}>{t("productionCanvas.enter")}</Link> }] : []),
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: t("canvas.create"), onClick: onCreateProject },
@@ -166,8 +165,7 @@ export function CanvasTopBar({
                             <button type="button" className="flex h-8 items-center gap-2 rounded px-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setToolsOpen(false); setRecoveryDialog("drafts"); }}><ArchiveRestore className="size-3.5" />{t("canvasRecovery.localDrafts")}</button>
                         </div>
                         <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>}
-                    <Tooltip title={t("productionCanvas.generationLogs")}><button type="button" aria-label={t("productionCanvas.generationLogs")} className="grid size-8 place-items-center rounded-lg transition hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={onOpenGenerationLogs}><FileText className="size-4" /></button></Tooltip>
-                    <CanvasTaskCenterButton projectId={projectId} />
+                    <CanvasTaskCenterButton projectId={projectId} dramaId={productionDramaId} />
                 </div>
             </div>
             <CanvasTextSuggestionsDialog key={projectId} projectId={projectId} open={recoveryDialog === "suggestions"} onClose={() => setRecoveryDialog(null)} />

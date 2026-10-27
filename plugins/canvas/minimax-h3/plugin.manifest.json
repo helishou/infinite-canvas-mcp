@@ -4,7 +4,7 @@
   "version": "1.5.12",
   "trust": "first-party",
   "entries": {
-    "browser": "/plugins/minimax-h3.js",
+    "browser": "src/system.tsx",
     "mcp": "canvas-agent/src/plugins/minimax-h3/mcp.ts"
   },
   "mcp": {
@@ -18,6 +18,7 @@
       "h3_run_clip",
       "h3_get_task",
       "h3_cancel_task",
+      "h3_preview_run",
       "h3_update_clip",
       "h3_move_clip",
       "h3_bind_existing_character_groups",

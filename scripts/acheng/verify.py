@@ -114,11 +114,10 @@ with tempfile.TemporaryDirectory() as tmp:
     prompt.write_text(text, encoding="utf-8")
     body = text.split("detailed_description:\n", 1)[1].split("\n\noverall_soundscape:", 1)[0]
     receipt_contract["minimum_words"] = english_word_count(body) + 1
-    try:
-        validate_h3_file(prompt, receipt_contract)
-        raise AssertionError("insufficient detail accepted")
-    except ValueError as error:
-        assert "minimum" in str(error), str(error)
+    short_receipt = validate_h3_file(prompt, receipt_contract)
+    assert short_receipt["format_pass"] == "PASSED"
+    assert any(item["code"] == "REF2VA_DETAIL_BELOW_RECOMMENDED_MINIMUM"
+               for item in short_receipt.get("quality_diagnostics", [])), short_receipt
 assert detail_policy({"shots": []}, {"generation_clip_duration": 10, "prompt_detail_policy": {"ref2va_max_words": 100, "ref2va_target_words": 6000}})["target_words"] == 6000
 assert contract()["ref2vaMaximumWords"] is None
 assert contract()["scopedCompilation"] is True
@@ -130,8 +129,8 @@ assert "STYLE_MOTHER must be the final uploaded reference slot" in (root / "scri
 skill = (root / "SKILL.md").read_text(encoding="utf-8")
 assert "固定角色四格模板（用户指定）" not in skill
 assert "动态密度与硬性上限（2200-2900 词）" not in skill
-from asset_plan import DEFAULT_CHARACTER_VIEW_LAYOUT
-assert DEFAULT_CHARACTER_VIEW_LAYOUT["views"] == ["front_face_above_clavicle", "right_profile_above_clavicle", "headless_front_costume_full_body", "back_full_body"]
+from asset_plan import DEFAULT_CHARACTER_VIEW_LAYOUT, _canvas_headless_character_layout
+assert _canvas_headless_character_layout["views"] == ["front_face_above_clavicle", "right_profile_above_clavicle", "headless_front_costume_full_body", "back_full_body"]
 assert "@图片1" not in skill
 assert "Infinite Canvas 集成：视频制作启动确认" in skill
 assert "videoAspectRatioConfirmed=true" in skill
@@ -149,7 +148,7 @@ default_card = prepare_asset_card(layout_card, layout_payload)
 check_character_view_layout(default_card, layout_payload)
 assert prepare_asset_card(default_card, layout_payload) == default_card
 headless_card = copy.deepcopy(layout_card)
-headless_card["view_layout"] = {**copy.deepcopy(DEFAULT_CHARACTER_VIEW_LAYOUT), "selection": "user_explicit",
+headless_card["view_layout"] = {**copy.deepcopy(_canvas_headless_character_layout), "selection": "user_explicit",
                                "selection_reason": "The user explicitly selected the current headless costume board."}
 creature_card = copy.deepcopy(layout_card)
 creature_card["view_layout"] = {"type": "four_view_creature_turnaround", "views": ["front_head", "side_head", "coiled_full_body", "mid_body_scale_detail"],

@@ -5,7 +5,7 @@ import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createInstance } from "i18next";
 import { I18nextProvider } from "react-i18next";
-import { ProductionWorkspaceMenus, ProductionWorkspaceNavigation } from "./production-workspace-navigation";
+import { ProductionWorkspaceNavigation } from "./production-workspace-navigation";
 import { productionNavigationGroups } from "./production-workspace";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
@@ -15,24 +15,19 @@ void i18n.init({ lng: "en", initAsync: false, resources: {} });
 const render = (element: ReactElement) =>
     renderToStaticMarkup(createElement(I18nextProvider, { i18n }, element));
 
-test("production menus and mobile drawer never add a second app-preferences action", () => {
+test("production navigation never adds a second app-preferences action", () => {
     // Closed Ant overlays are not emitted by server rendering: inspect their source as well.
     assert.doesNotMatch(navigationSource, /app-preferences|openConfigDialog|config\.title|config\.preferences/);
-    assert.match(navigationSource, /items: group\.items\.map/);
-    assert.match(navigationSource, /if \(item\) onSelect\(item\)/);
     for (const scope of ["episode", "canvas", "shared-assets"] as const) {
         const groups = productionNavigationGroups({ hasSeries: scope === "episode", scope });
         assert.deepEqual(groups.find(group => group.id === "settings")?.items, [
             { id: "advanced", workspace: "advanced", labelKey: "director.workspace.tab.advanced" },
         ]);
         const props = { groups, selectedId: "advanced", onSelect: () => undefined };
-        const menus = render(createElement(ProductionWorkspaceMenus, props));
-        assert.match(menus, /director.workspaceHierarchy.settings/);
-        assert.doesNotMatch(menus, /config\.title|app-preferences/);
         for (const layout of [{ horizontal: true, compact: false }, { horizontal: false, compact: true }, { horizontal: false, compact: false }]) {
             const html = render(createElement(ProductionWorkspaceNavigation, { ...props, ...layout }));
             assert.doesNotMatch(html, /app-preferences|config\.preferences/);
-            if (!layout.horizontal) assert.match(html, /director.workspace.tab.advanced/);
+            assert.match(html, /director\.workspace\.tab\.advanced/);
         }
     }
 });
@@ -43,12 +38,12 @@ test("standalone, setup, and embedded production share the real global settings 
     const topNav = read("../../components/layout/app-top-nav.tsx");
     const agent = read("../../components/agent/agent-panel.tsx");
     const production = read("./production.tsx");
-    assert.match(router, /<UserLayout>[\s\S]*<Outlet \/>[\s\S]*children: \[/);
+    assert.match(router, /<UserLayout>[\s\S]*<Outlet \/>[\s\S]*children: appRoutes/);
     assert.match(router, /path: "\/director\/:projectId", element: lazyPage\(EpisodeProductionPage\)/);
     assert.match(layout, /<AppTopNav \/>/);
     assert.match(layout, /<AgentPanel \/>/);
     assert.match(agent, /<ProductionEditor[^>]*embedded dialog/);
-    assert.match(production, /ProductionWorkspaceNavigation groups=\{productionNavigationGroups\(\{ hasSeries: true, scope: "episode", setup: true \}\)/);
+    assert.match(production, /const seriesNav = productionNavigationGroups\(\{ hasSeries: true, scope: "episode", setup: true, seriesSubviews: true \}\)/);
     assert.equal((topNav.match(/<UserStatusActions \/>/g) || []).length, 1);
     assert.equal((topNav.match(/<AppConfigModal \/>/g) || []).length, 1);
 });
@@ -63,29 +58,4 @@ test("global app preferences remain reachable on mobile and desktop", () => {
     const iconClass = actions.match(/const naturalIconClass = "([^"]+)"/)?.[1];
     assert.ok(iconClass);
     assert.doesNotMatch(iconClass, /hidden/);
-});
-
-
-test("single production settings destination is a direct action, while series keeps its menu", () => {
-    const groups = productionNavigationGroups({ hasSeries: true, scope: "episode" });
-    const settings = groups.filter(group => group.id === "settings");
-    const series = groups.filter(group => group.id === "series");
-    const props = { selectedId: "advanced", onSelect: () => undefined };
-    const activeSettings = render(createElement(ProductionWorkspaceMenus, { ...props, groups: settings }));
-    assert.equal((activeSettings.match(/<button /g) || []).length, 1);
-    assert.match(activeSettings, /aria-current="page"/);
-    assert.match(activeSettings, /!bg-accent !text-accent-foreground/);
-    assert.doesNotMatch(activeSettings, /chevron-down|ant-dropdown-trigger|aria-haspopup/);
-    const inactiveSettings = render(createElement(ProductionWorkspaceMenus, { ...props, groups: settings, selectedId: "shots" }));
-    assert.doesNotMatch(inactiveSettings, /aria-current|!bg-accent/);
-    const seriesMenu = render(createElement(ProductionWorkspaceMenus, { ...props, groups: series, selectedId: "series:episodes" }));
-    assert.match(seriesMenu, /ant-dropdown-trigger/);
-    assert.match(seriesMenu, /chevron-down/);
-    assert.match(seriesMenu, /aria-current="page"/);
-    assert.match(seriesMenu, /director.workspaceHierarchy.seriesAndEpisodes/);
-    const directBranch = navigationSource.slice(navigationSource.indexOf("if (group.items.length === 1)"), navigationSource.indexOf("return <Dropdown"));
-    assert.match(directBranch, /const item = group.items\[0\]/);
-    assert.match(directBranch, /onClick=\{\(\) => onSelect\(item\)\}/);
-    assert.doesNotMatch(directBranch, /Dropdown|ChevronDown/);
-    assert.match(navigationSource, /selectedKeys: \[selectedId\]/);
 });

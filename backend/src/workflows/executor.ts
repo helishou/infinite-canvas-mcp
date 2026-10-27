@@ -202,25 +202,65 @@ export function injectParams(
 
 type WfNode = { class_type?: string; inputs?: Record<string, unknown> } | null;
 
+/** 媒体加载器节点类型 → 承载文件名的输入名。 */
+const MEDIA_LOADER_INPUTS: Record<string, string> = {
+    LoadImage: "image",
+    LoadAudio: "audio",
+    LoadVideo: "video",
+    VHS_LoadVideo: "video",
+};
+
+/** MiniMaxH3ReferenceToVideo 的自动增长参考输入，全部可选。 */
+const H3_OPTIONAL_REF_INPUT = /^ref_(?:images|videos|video_audios|audios)\./;
+
 /**
- * 从「注入参数后的最终 graph」判定哪些 LoadImage 节点真正“被提供”。
- * 这是 ComfyUI 实际会看到的真相来源：只要某 LoadImage 节点的 inputs.image
- * 是非空字符串（上传后得到的文件名，或工作流预置文件名），即视为已提供。
+ * 从「注入参数后的最终 graph」判定哪些媒体加载器节点真正“被提供”。
+ * 这是 ComfyUI 实际会看到的真相来源：只要某加载器节点的文件输入
+ * （LoadImage.image / LoadAudio.audio / VHS_LoadVideo.video）是非空字符串
+ * （上传后得到的文件名，或工作流预置文件名），即视为已提供。
  *
- * 之所以不直接用 processedValues 判断，是因为 processImageFields 上传失败/返回异常时
- * processedValues 可能为 null，进而 injectParams 会把该 LoadImage 的 inputs.image 删掉，
+ * 之所以不直接用 processedValues 判断，是因为上传失败/返回异常时
+ * processedValues 可能为 null，进而 injectParams 会把该节点的输入删掉，
  * 此时 graph 才是唯一可靠的“是否提供”判据。
  */
-function getPresentLoadImages(workflow: Record<string, unknown>): Set<string> {
+function getPresentMediaLoaders(workflow: Record<string, unknown>): Set<string> {
     const present = new Set<string>();
     for (const [id, node] of Object.entries(workflow)) {
         if (!node || typeof node !== "object") continue;
         const item = node as WfNode;
-        if (item!.class_type !== "LoadImage") continue;
-        const img = item!.inputs?.image;
-        if (typeof img === "string" && img.trim().length > 0) present.add(id);
+        const inputName = item!.class_type ? MEDIA_LOADER_INPUTS[item!.class_type] : undefined;
+        if (!inputName) continue;
+        const value = item!.inputs?.[inputName];
+        if (typeof value === "string" && value.trim().length > 0) present.add(id);
     }
     return present;
+}
+
+/** 仅图片加载器的“已提供”集合（尺寸路由只关心图片）。 */
+function getPresentLoadImages(workflow: Record<string, unknown>): Set<string> {
+    const present = new Set<string>();
+    for (const id of getPresentMediaLoaders(workflow)) {
+        if ((workflow[id] as WfNode)?.class_type === "LoadImage") present.add(id);
+    }
+    return present;
+}
+
+/**
+ * 判断某个媒体加载器的所有下游连线是否都是 H3 的可选参考槽。
+ * 视频/音频裁剪只在满足该条件时进行：把空音频接到输出节点这类流保持原样，
+ * 交给 ComfyUI 报缺失输入，而不是在裁剪阶段被整条误删。
+ * 没有下游的孤岛节点视为安全（本来就不会执行）。
+ */
+function consumersAreOptionalH3Refs(workflow: Record<string, unknown>, id: string): boolean {
+    for (const node of Object.values(workflow)) {
+        if (!node || typeof node !== "object") continue;
+        const item = node as WfNode;
+        for (const [name, value] of Object.entries(item!.inputs || {})) {
+            if (!Array.isArray(value) || String(value[0]) !== id) continue;
+            if (item!.class_type !== "MiniMaxH3ReferenceToVideo" || !H3_OPTIONAL_REF_INPUT.test(name)) return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -241,30 +281,36 @@ function isNodePresent(workflow: Record<string, unknown>, id: string): boolean {
  *
  * 正确规则（对齐参考项目 rhPruneWorkflowForMissingFields 的“只删字段所在节点及直接连接”思路，
  * 并修正 Flux2-Klein 这类多分支共用输出/尺寸链的工作流）：
- * 1. 只移除空图片字段对应的 LoadImage 节点本身。
+ * 1. 只移除空媒体字段对应的加载器节点本身（LoadImage / LoadAudio / VHS_LoadVideo）。
+ *    视频/音频只在“下游全是 H3 可选参考槽”时裁剪，避免误删把空音频接到输出节点的流。
  * 2. 级联裁剪：
- *    - 普通节点：只要「任一」必需连线输入指向已删除节点就移除；Qwen 图像编码和提示词增强节点的图片槽位可选。
+ *    - 普通节点：只要「任一」必需连线输入指向已删除节点就移除；
+ *      Qwen 图像编码、提示词增强和 MiniMaxH3ReferenceToVideo 的参考槽位可选。
  *    - ComfySwitchNode：仅当「选中分支」指向已删除节点才移除；未选中分支悬空不影响执行。
  *    - SaveImage / PreviewImage 永远保留（但其悬空输入会在提交前被校验捕获）。
  * 3. 清理存活节点上指向已删除节点的悬空连线（删除该 input 而不是删节点）。
  */
-export function removeEmptyImageNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
-    // 用 graph 真相判断“哪些 LoadImage 未被提供”：只要节点的 inputs.image 为空即视为缺失。
+export function removeEmptyMediaNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
+    // 用 graph 真相判断“哪些加载器未被提供”：只要节点的文件输入为空即视为缺失。
     // 不再依赖 values[field.id]（processedValues 在上传异常时可能为 null）。
-    const present = getPresentLoadImages(workflow);
+    const present = getPresentMediaLoaders(workflow);
     const removed = new Set<string>();
-    // 1) 收集空图片字段对应的 LoadImage 节点（field.node 可能是逗号分隔的多个 id）
+    // 1) 收集空媒体字段对应的加载器节点（field.node 可能是逗号分隔的多个 id）
     for (const field of fields) {
-        if (!isImageField(field, workflow)) continue;
+        if (!isMediaField(field, workflow)) continue;
         let fieldMissing = false;
         for (const id of field.node.split(",").map((value) => value.trim())) {
-            if (isNodePresent(workflow, id) && (workflow[id] as WfNode)!.class_type === "LoadImage" && !present.has(id)) {
-                removed.add(id);
-                fieldMissing = true;
-            }
+            if (!isNodePresent(workflow, id)) continue;
+            const item = workflow[id] as WfNode;
+            const loaderInput = item!.class_type ? MEDIA_LOADER_INPUTS[item!.class_type] : undefined;
+            if (!loaderInput || present.has(id)) continue;
+            // 图片沿用既有裁剪行为；视频/音频仅在其下游全部是 H3 可选参考槽时裁剪。
+            if (item!.class_type !== "LoadImage" && !consumersAreOptionalH3Refs(workflow, id)) continue;
+            removed.add(id);
+            fieldMissing = true;
         }
         if (fieldMissing && field.required === true) {
-            throw new Error(`工作流缺少必选图片：${field.name || field.id}`);
+            throw new Error(`工作流缺少必选媒体：${field.name || field.id}`);
         }
     }
     if (!removed.size) return workflow;
@@ -287,7 +333,7 @@ export function removeEmptyImageNodes(workflow: Record<string, unknown>, fields:
                 ([name, v]) =>
                     Array.isArray(v) &&
                     typeof (v as unknown[])[0] === "string" &&
-                    !isOptionalImageLink(workflow, cls, name, v as unknown[]),
+                    !isOptionalMediaLink(workflow, cls, name, v as unknown[]),
             );
             if (!linkEntries.length) continue;
             let shouldRemove = false;
@@ -325,7 +371,10 @@ export function removeEmptyImageNodes(workflow: Record<string, unknown>, fields:
     return result;
 }
 
-function isOptionalImageLink(workflow: Record<string, unknown>, classType: string | undefined, inputName: string, link: unknown[]) {
+function isOptionalMediaLink(workflow: Record<string, unknown>, classType: string | undefined, inputName: string, link: unknown[]) {
+    // MiniMaxH3ReferenceToVideo 的参考图/视频/音频槽位全是可选自动增长输入：
+    // 未提供参考时只断开连线，不能把 H3 节点本身级联删掉。
+    if (classType === "MiniMaxH3ReferenceToVideo" && H3_OPTIONAL_REF_INPUT.test(inputName)) return true;
     if (classType === "TextEncodeQwenImage21" && inputName.startsWith("images.")) return true;
     // ComfyUI declares every image input on this prompt enhancer optional. Removing
     // an unused LoadImage must clear that link, not delete the prompt/output chain.
@@ -383,7 +432,7 @@ function routeSizeImage(workflow: Record<string, unknown>, presentLoadImages: Se
  * 提交给 ComfyUI 前的静态图校验。
  *
  * 注意：被检查的对象必须是**裁剪 + 清理后**的最终 workflow（prepared），不是裁剪前的 full。
- * 原因：`removeEmptyImageNodes` 第 3 步会清掉存活节点上指向已删节点的悬空 input，
+ * 原因：`removeEmptyMediaNodes` 第 3 步会清掉存活节点上指向已删节点的悬空 input，
  * 拿裁剪前的 full 校验会把「已经被清掉的」悬空引用再次当错报上来。
  *
  * 校验内容：
@@ -669,7 +718,7 @@ export class WorkflowExecutor {
         // 节点图里 LoadImage 写死了旧文件名（如 "jk美少女 (1).png"），getPresentLoadImages 仅靠
         // graph 真相判定“已提供”，会把这些写死文件名当成已提供 → 全部发到 ComfyUI。
         // 这里把「用户未显式提供」的 LoadImage 节点 inputs.image 显式置空，使 graph 真相 = “未提供”，
-        // 下游 getPresentLoadImages / removeEmptyImageNodes 据此把它们剪掉。
+        // 下游 getPresentMediaLoaders / removeEmptyMediaNodes 据此把它们剪掉。
         // “显式提供”= 原始字段值是 data:/http(s):// /media/ 这三类媒体引用（processMediaFields 之后
         // 已转成 ComfyUI 文件名，故必须用 processMediaFields 之前的 effectiveFieldValues 判定）。
         for (const field of config.fields || []) {
@@ -702,9 +751,9 @@ export class WorkflowExecutor {
                     .map(([id, n]) => [id, (n as WfNode)!.inputs?.image]),
             ),
         });
-        const prepared = removeEmptyImageNodes(full, config.fields, processedValues);
+        const prepared = removeEmptyMediaNodes(full, config.fields, processedValues);
         // 提交前静态校验：必须用「裁剪+清理后」的最终图 prepared，不能用裁剪前的 full；
-        // 否则 removeEmptyImageNodes 第 3 步已经清掉的悬空 input 会被误判为「指向已被裁剪的节点」。
+        // 否则 removeEmptyMediaNodes 第 3 步已经清掉的悬空 input 会被误判为「指向已被裁剪的节点」。
         try {
             validatePromptGraph(prepared);
         } catch (err) {

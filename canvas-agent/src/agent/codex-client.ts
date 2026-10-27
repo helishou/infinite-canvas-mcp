@@ -57,6 +57,7 @@ export class CodexAppClient {
     private approvalRequests = new Map<string, ApprovalRequest>();
     private finalizingTurns = new Map<string, Promise<void>>();
     private skillReloads = new Map<string, Promise<CodexRequestResult<"skills/list">>>();
+    private listReadCache = new Map<string, { promise: Promise<unknown>, pending: boolean, expiresAt: number }>();
     private silentThreadIds = new Set<string>();
     private structuredOutputByTurn = new Map<string, string>();
     private pendingSilentThreadStarts = new Set<symbol>();
@@ -74,7 +75,14 @@ export class CodexAppClient {
         const launch = requireCodexLaunch();
         logger.info("Starting Codex app-server", { executable: launch.command, source: launch.source });
         fixCcSwitchModelCatalog();
-        const child = spawn(launch.command, [...launch.args, "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+        // 本机 MCP（127.0.0.1）绝不能走系统代理：代理在 Backend 热重载窗口会把连不上
+        // 的上游包装成 HTTP 502，rmcp 直接 fatal 关闭传输。给子进程补齐 NO_PROXY。
+        const childEnv = { ...process.env };
+        const localBypass = ["127.0.0.1", "localhost", "::1"];
+        const existingNoProxy = String(childEnv.NO_PROXY || childEnv.no_proxy || "").split(",").map(item => item.trim()).filter(Boolean);
+        childEnv.NO_PROXY = [...existingNoProxy, ...localBypass.filter(item => !existingNoProxy.includes(item))].join(",");
+        delete childEnv.no_proxy;
+        const child = spawn(launch.command, [...launch.args, "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: childEnv });
         const client = new CodexAppClient(child, emit);
         let stopped = false;
         const stop = () => {
@@ -169,7 +177,7 @@ export class CodexAppClient {
 
     /** 查询 Codex 线程列表。 */
     listThreads(params: CodexRequestParams<"thread/list">) {
-        return this.request("thread/list", params);
+        return this.cachedListRead(`thread/list:${JSON.stringify(params)}`, 5000, () => this.request("thread/list", params));
     }
 
     /** 读取指定 Codex 线程。 */
@@ -294,21 +302,35 @@ export class CodexAppClient {
         }
     }
 
+    /** 对只读列表请求做短 TTL 缓存与在途合并：同一键在 TTL 内或请求未完成时复用同一次结果。 */
+    private cachedListRead<T>(key: string, ttlMs: number, read: () => Promise<T>): Promise<T> {
+        const now = Date.now();
+        const existing = this.listReadCache.get(key);
+        if (existing && existing.expiresAt > now) return existing.promise as Promise<T>;
+        const promise = read().then(
+            (value) => { const entry = this.listReadCache.get(key); if (entry && entry.promise === promise) entry.pending = false; return value; },
+            (error) => { if (this.listReadCache.get(key) && this.listReadCache.get(key)!.promise === promise) this.listReadCache.delete(key); throw error; },
+        );
+        this.listReadCache.set(key, { promise, pending: true, expiresAt: now + ttlMs });
+        return promise as Promise<T>;
+    }
+
     /** 查询当前账号可用的 Codex 模型。 */
     listModels() {
-        return this.request("model/list", { limit: 100, includeHidden: false });
+        return this.cachedListRead("model/list", 5000, () => this.request("model/list", { limit: 100, includeHidden: false }));
     }
 
     /** 查询指定工作空间可发现的 Codex Skills。 */
     listSkills(cwd: string, forceReload = false) {
-        if (!forceReload) return this.request("skills/list", { cwds: [cwd] });
         const key = process.platform === "win32" ? path.resolve(cwd).toLowerCase() : path.resolve(cwd);
+        if (!forceReload) return this.cachedListRead(`skills/list:${key}`, 5000, () => this.request("skills/list", { cwds: [cwd] }));
         const current = this.skillReloads.get(key);
         if (current) return current;
         const reload = this.request("skills/list", { cwds: [cwd], forceReload: true });
         this.skillReloads.set(key, reload);
         const clear = () => {
             if (this.skillReloads.get(key) === reload) this.skillReloads.delete(key);
+            this.listReadCache.delete(`skills/list:${key}`);
         };
         void reload.then(clear, clear);
         return reload;

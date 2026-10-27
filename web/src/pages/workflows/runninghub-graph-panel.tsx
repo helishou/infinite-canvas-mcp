@@ -65,8 +65,8 @@ export function RunningHubGraphPanel({
 
     return (
         <div className="flex h-full min-h-0 flex-col gap-2">
-            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-900">
-                <span className="text-xs text-stone-500">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-white px-3 py-2 dark:bg-muted">
+                <span className="text-xs text-muted-foreground">
                     图结构以 RunningHub 平台为准，改结构请到平台操作后重新同步；节点输入映射可直接在这里配置
                 </span>
                 <Button size="small" icon={<ExternalLink className="size-3.5" />} href={openUrl} target="_blank" rel="noopener noreferrer">
@@ -74,7 +74,7 @@ export function RunningHubGraphPanel({
                 </Button>
             </div>
             {Object.keys(graph).length ? (
-                <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-900">
+                <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-white dark:bg-muted">
                     <WorkflowGraphView
                         workflow={graph}
                         fields={exposedFields}
@@ -119,7 +119,7 @@ export function RunningHubGraphPanel({
                     />
                 </div>
             ) : (
-                <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-stone-300 dark:border-stone-700">
+                <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-border">
                     <Empty description="该档案还没有节点图快照，点「重新同步」从平台读取" />
                 </div>
             )}

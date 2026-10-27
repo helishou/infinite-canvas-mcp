@@ -1,8 +1,8 @@
 import type { AgentPendingApproval, AgentPendingToolCall } from "../stores/use-agent-store";
-import type { BackendRuntimeTask, EpisodeProduction, ProductionCanvasContext, ProductionReadiness } from "../services/backend-api";
+import type { BackendRuntimeTask, EpisodeProduction, ProductionCanvasContext } from "../services/backend-api";
 import { productionObjectPath, type ProductionObject } from "./production-object";
 
-export type ConfirmationReminder = { id: string; kind: "approval" | "tool" | "decision" | "review" | "task"; path: string; threadId?: string; object?: ProductionObject };
+export type ConfirmationReminder = { id: string; kind: "approval" | "tool" | "decision" | "task"; path: string; threadId?: string; object?: ProductionObject };
 export type TaskConfirmationReminder = { id: string; taskId: string; projectId: string; nodeId?: string; segmentId?: string };
 
 export function taskConfirmationReminders(tasks: BackendRuntimeTask[], projectId: string): TaskConfirmationReminder[] {
@@ -21,7 +21,7 @@ export function taskConfirmationReminders(tasks: BackendRuntimeTask[], projectId
 /** Only authoritative pending states; assistant prose and automatic reviews are not prompts. */
 export function collectConfirmationReminders(input: {
     approvals: AgentPendingApproval[]; pendingTool: AgentPendingToolCall | null; threadId: string; route: string;
-    context: ProductionCanvasContext | null; production: EpisodeProduction | null; readiness: ProductionReadiness | null;
+    context: ProductionCanvasContext | null; production: EpisodeProduction | null;
     taskConfirmations?: TaskConfirmationReminder[];
 }): ConfirmationReminder[] {
     const reminders: ConfirmationReminder[] = [];
@@ -37,7 +37,7 @@ export function collectConfirmationReminders(input: {
                 : `/canvas/${encodeURIComponent(projectId)}` : input.route;
         reminders.push({ id: `tool:${input.threadId}:${input.pendingTool.requestId}`, kind: "tool", path, threadId: input.threadId });
     }
-    const { context, production, readiness } = input;
+    const { context, production } = input;
     for (const task of input.taskConfirmations || []) {
         const owner = context?.canvasId === task.projectId ? context.owner : undefined;
         const query = new URLSearchParams();
@@ -53,19 +53,6 @@ export function collectConfirmationReminders(input: {
     const ownerKey = `${context.owner.kind}:${context.owner.id}`;
     for (const decision of director.workflow.pendingDecisions || []) if (decision.status === "pending") {
         reminders.push({ id: `decision:${ownerKey}:${decision.workId}:${decision.id}:${decision.sourceHash}`, kind: "decision", path: productionObjectPath({ owner: context.owner, canvasId: context.canvasId, workspace: "overview", title: "" }), threadId: director.workflow.agentThreadId });
-    }
-    const mediaMode = director.workflow.mediaProductionMode || (production.draft.settings.mode === "auto" ? "automatic" : "per_item");
-    if (mediaMode !== "per_item") return reminders;
-    for (const target of readiness?.targets || []) {
-        if (target.status !== "needs_review" || !["asset", "keyframe"].includes(target.kind)) continue;
-        const frame = target.kind === "keyframe" ? production.draft.keyframes[target.targetId] : undefined;
-        const assetId = target.kind === "keyframe" ? director.shotInputs[target.targetId]?.keyframeAssetId : target.targetId;
-        const asset = assetId ? director.assets[assetId] : undefined;
-        const storageKey = frame?.storageKey || asset?.storageKey;
-        if (!storageKey) continue;
-        const object: ProductionObject = { owner: context.owner, canvasId: context.canvasId, workspace: target.kind === "keyframe" ? "shots" : "assets",
-            targetKind: target.kind === "keyframe" ? "shot" : "asset", targetId: target.targetId, nodeId: frame?.nodeId || asset?.nodeId, title: target.title };
-        reminders.push({ id: `review:${ownerKey}:${target.id}:${storageKey}:${asset?.sha256 || ""}:${production.publishedVersion}`, kind: "review", path: productionObjectPath(object), object });
     }
     return reminders;
 }

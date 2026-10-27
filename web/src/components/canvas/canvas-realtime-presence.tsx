@@ -98,7 +98,7 @@ export const CanvasRealtimePresenceLayer = memo(function CanvasRealtimePresenceL
                         })}
                         {peer.cursor ? <div className="absolute flex origin-top-left items-start" style={{ left: peer.cursor.x, top: peer.cursor.y, transform: "scale(var(--inverse-scale))", color: peer.color }}>
                             <MousePointer2 className="size-5 fill-current" />
-                            <span className="ml-0.5 mt-4 rounded px-1.5 py-0.5 text-[10px] font-medium text-white" style={{ background: peer.color }}>{peer.label}</span>
+                            <span className="ml-0.5 mt-4 rounded px-1.5 py-0.5 text-[11px] font-medium text-white" style={{ background: peer.color }}>{peer.label}</span>
                         </div> : null}
                     </div>
                 ))}

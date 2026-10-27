@@ -42,6 +42,16 @@ test("zero-match searches have one actionable empty state per asset renderer", (
   assert.match(assets, /director\.crud\.addManualAsset/);
 });
 
+test("legacy keyframe cards expose binding for registered assets even before media exists", () => {
+  const frame = director.slice(director.indexOf("  const renderShotKeyframe ="), director.indexOf("  const renderShotDetails ="));
+  assert.match(frame, /keyframeBindingState\(assetId, draftNodeId \|\| media\?\.nodeId, storageKey/);
+  assert.match(frame, /if \(!storageKey && !binding\.registered\) return null/);
+  assert.match(frame, /data-keyframe-binding/);
+  assert.match(frame, /value=\{editor\?\.nodeId \|\| binding\.selectedNodeId\}/);
+  assert.match(frame, /binding\.unavailableNode/);
+  assert.match(director, /options\.binding !== false/);
+});
+
 
 test("populated story fields retain visible and accessible labels", () => {
   const story = director.slice(director.indexOf("  const renderStoryWorkspace ="), director.indexOf("  const visibleSubjects ="));

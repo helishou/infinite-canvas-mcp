@@ -203,3 +203,13 @@ return resolveReceiptDedup(JSON.parse(row.receipt_json));
 - [ ] `VACUUM` 后文件降 ~27MB
 - [ ] 现有 production 测试全过
 - [ ] 无 API 行为变化
+
+## 7. 后续存储格式（2026-10-16：已实施）
+
+本设计保留的是 JSON 内部的 `$ref` 去重策略；它本身只解决 `published.director` / `published.shots` 与 draft 字节完全一致时的重复块，不能消除每行完整 `ProductionRecord` 快照的主成本。2026-10-16 实测 2324 行回执的 UTF-8 原始体积为 5,176,506,065 bytes（不要用 `SUM(LENGTH(TEXT))` 代替 UTF-8 字节数；SQLite 对 TEXT 的 `LENGTH` 返回字符数），因此另加无损 gzip BLOB 存储，保持完整快照与幂等重放语义。
+
+- `backend/src/drama/receipt-storage.ts`：新写 BLOB、兼容读历史 TEXT。
+- `backend/src/maintenance/compress-production-receipts.ts`：流式 dry-run/apply；100 行一事务，CAS + 解压深比较。
+- 所有业务读取必须经过 `decodeReceipt()`；禁止在操作表上直接 `JSON.parse(receipt_json)`。
+- 迁移后实测 2323 行新压缩、1 行先前已有 BLOB；共 2324/2324 行解码后与备份语义相同，逻辑体积 5.176 GB → 827.373 MB。随后 `VACUUM` 将 runtime.sqlite 6.08 GB → 1.72 GB，`integrity_check=ok`。
+- 含 source-only v2 的快照在重放/读回前要先用 `episodeProductionHistoryDataSchema.parse` 补回内存投影视图默认数组，再调用 `projectDirector`；对数据库 JSON 直接解码后裸调投影会因 `clipGroups` 不存在而崩溃。

@@ -11,7 +11,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { applyCanvasAgentOps, arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
+import { applyCanvasAgentOps, arrangeGroupMembers, computeFlowLayout, planCanvasAgentOperations } from "@/lib/canvas/canvas-agent-ops";
+import { applyBackendCanvasDelta } from "@/lib/canvas/canvas-delta";
+import { getNodeSpec } from "@/lib/canvas/node-registry";
 import type { CanvasConnection, CanvasNodeData } from "@/types/canvas";
 
 const node = (id: string, type: string, x: number, y: number, width: number, height: number) =>
@@ -789,4 +791,38 @@ test("组内整理：重复执行结果不变（幂等），非画面节点不�
         assert.equal(b.width, a.width, `${member.id} 第二次整理宽度应不变`);
         assert.equal(b.height, a.height, `${member.id} 第二次整理高度应不变`);
     });
+});
+
+test("Agent 意图只产出显式后端 op：组展开为成员归属 + 组节点，回放与本地结果一致", () => {
+    const a = node("a", "image", 0, 0, 300, 200);
+    const b = node("b", "image", 400, 0, 300, 200);
+    const snapshot = { projectId: "p", title: "画布", nodes: [a, b], connections: [], selectedNodeIds: [] as string[] };
+    const plan = planCanvasAgentOperations(snapshot, [{ type: "create_group", id: "g", memberIds: ["a", "b"] }]);
+
+    assert.deepEqual(plan.operations.map((operation) => operation.type), ["update_node", "update_node", "add_node"]);
+    assert.deepEqual(plan.operations.slice(0, 2).map((operation) => (operation as any).metadata.groupId), ["g", "g"]);
+    const groupOperation = plan.operations[2] as any;
+    assert.equal(groupOperation.nodeType, "group");
+    assert.equal(groupOperation.index, 0, "组必须插到成员之前（渲染在成员下面）");
+    assert.deepEqual(plan.selectedNodeIds, ["g"]);
+
+    const replayed = applyCanvasAgentOps(snapshot, [{ type: "create_group", id: "g", memberIds: ["a", "b"] }]);
+    const direct = applyBackendCanvasDelta(snapshot as any, plan.operations, 0) as any;
+    assert.deepEqual(replayed.nodes, direct.nodes, "本地回放与提交的 op 必须得到同一结果");
+    assert.deepEqual(replayed.nodes.map((item) => item.id), ["g", "a", "b"]);
+});
+
+test("Agent 意图：自动排布写进 add_node 的显式坐标，提交后不再依赖前端二次求差分", () => {
+    const snapshot = { projectId: "p", title: "画布", nodes: [] as CanvasNodeData[], connections: [] as CanvasConnection[], selectedNodeIds: [] as string[] };
+    const plan = planCanvasAgentOperations(snapshot, [
+        { type: "add_node", nodeType: "image", id: "src" },
+        { type: "add_node", nodeType: "image", id: "out" },
+        { type: "connect_nodes", fromNodeId: "src", toNodeId: "out" },
+    ]);
+    const added = plan.operations.filter((operation) => operation.type === "add_node") as any[];
+    assert.deepEqual(added.map((operation) => operation.id), ["src", "out"]);
+    assert.ok(added[0].position.x < added[1].position.x, "输出节点应排在输入节点右侧");
+    assert.equal(added[0].width, getNodeSpec("image").width, "默认尺寸来自节点规格，而不是落到 Backend 的 320×240");
+    const hasExplicitIds = plan.operations.filter((operation) => operation.type === "connect_nodes").every((operation) => Boolean((operation as any).id));
+    assert.ok(hasExplicitIds, "连线 op 必须自带稳定 id，回放才能命中");
 });

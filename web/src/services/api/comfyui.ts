@@ -42,7 +42,10 @@ type ComfyPreview = { promptId: string; dataUrl: string; step?: number; total?: 
 export type H3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3TaskResult = { url: string; storageKey?: string; mimeType: string; taskId: string; width?: number; height?: number; durationMs?: number; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> };
 type ComfyTask = { id: string; status: "queued" | "running" | "succeeded" | "failed" | "cancelled"; progress: number; preview?: ComfyPreview | null; result?: { media?: ComfyMedia[]; actualSubmission?: H3ActualSubmission; segments?: Array<{ media?: ComfyMedia[] }> } | null; error?: string | null };
-type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia } | null; error?: string | null };
+type VideoConcatTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia; layout?: "sequence" | "hstack" | "vstack" } | null; error?: string | null };
+type VideoAudioExtractTask = { id: string; status: ComfyTask["status"]; progress: number; result?: { media?: ComfyMedia & { bytes?: number; durationMs?: number } } | null; error?: string | null };
+
+const RETRYABLE_AGENT_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 export function resolveComfyImageSize(value: string) {
     const size = value.trim();
@@ -97,8 +100,8 @@ function proxyComfyMedia(item: ComfyMedia, endpoint: string, token: string): Com
 
 /**
  * 轮询任务状态时容忍网络层瞬时失败（backend dev 是 tsx --watch，源码变更会让 backend 重启
- * 几秒；ComfyUI 任务本身不受影响）。此前一次 fetch 失败就把还在跑的任务判死为
- * "Failed to fetch"。HTTP 4xx/5xx 是确定性错误（token/404 等），不重试直接抛。
+ * 几秒；ComfyUI 任务本身不受影响）。网络失败和临时 HTTP 状态使用同一有限预算重试；
+ * 鉴权、参数错误、未知任务等确定性 HTTP 错误立即返回。
  */
 async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     let failures = 0;
@@ -106,7 +109,7 @@ async function pollTaskWithRetry<T>(fetchOnce: () => Promise<T>, signal?: AbortS
         try {
             return await fetchOnce();
         } catch (error) {
-            if (error instanceof AgentApiError) throw error;
+            if (error instanceof AgentApiError && !RETRYABLE_AGENT_HTTP_STATUSES.has(error.status)) throw error;
             failures += 1;
             if (failures > 15) throw error;
             await new Promise((resolve) => setTimeout(resolve, Math.min(1200 * failures, 5000)));
@@ -155,15 +158,15 @@ export async function getLocalH3Task(endpoint: string, token: string, taskId: st
     return { ...response.task, preview, result: { url: output?.url || "", storageKey: output?.storageKey, mimeType: output?.mimeType || "video/mp4", taskId: response.task.id, actualSubmission: response.task.result.actualSubmission, segments: (response.task.result.segments || []).map((segment) => ({ media: (segment.media || []).map(proxy) })) } };
 }
 
-export type VideoConcatLayout = "sequence" | "hstack";
+export type VideoConcatLayout = "sequence" | "hstack" | "vstack" | "adaptive";
 
 export async function runVideoConcatTask(endpoint: string, token: string, videos: LocalReference[], signal?: AbortSignal, options: { layout?: VideoConcatLayout; longEdge?: number | "auto" } = {}) {
     const inputs = videos.map((video) => video.storageKey || video.url || "").filter(Boolean);
     if (!inputs.length) throw new Error("视频拼接至少需要两个视频输入");
-    if (options.layout === "hstack" && inputs.length < 2) throw new Error("横向拼接至少需要两个视频");
+    if (["hstack", "vstack", "adaptive"].includes(options.layout || "") && inputs.length < 2) throw new Error("并排拼接至少需要两个视频");
     const body: Record<string, unknown> = { videos: inputs };
     if (options.layout) body.layout = options.layout;
-    // sequence 用 longEdge 限制单片长边；hstack 下后端把它当每格高度，所以直接给目标像素高。
+    // sequence 限制单片长边；横/纵并排分别以每格高/宽作为 longEdge。
     if (options.longEdge !== undefined) body.longEdge = options.longEdge;
     const created = await fetchAgentJson<{ task: VideoConcatTask }>(endpoint, token, "/video-concat/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const cancel = () => { void fetchAgentJson(endpoint, token, `/video-concat/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
@@ -176,9 +179,58 @@ export async function runVideoConcatTask(endpoint: string, token: string, videos
             const media = response.task.result?.media;
             if (!media) throw new Error("视频拼接完成但没有返回媒体");
             signal?.removeEventListener("abort", cancel);
-            return { url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey || decodeURIComponent(media.url.slice(7))) : media.url, storageKey: media.storageKey, mimeType: media.mimeType || "video/mp4", taskId: created.task.id };
+            return { url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey || decodeURIComponent(media.url.slice(7))) : media.url, storageKey: media.storageKey, mimeType: media.mimeType || "video/mp4", taskId: created.task.id, layout: response.task.result?.layout };
         }
         await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+}
+
+export async function runVideoAudioExtractTask(endpoint: string, token: string, input: { storageKey?: string; url: string; name: string; projectId: string; nodeId: string; taskId: string }, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    let storageKey = input.storageKey || "";
+    if (!storageKey) {
+        const parsed = new URL(input.url, window.location.origin);
+        const backendOrigin = new URL(getBackendUrl(), window.location.origin).origin;
+        const localMedia = parsed.origin === window.location.origin || parsed.origin === backendOrigin;
+        const match = localMedia ? /^\/media\/([^/]+)$/.exec(parsed.pathname) : null;
+        storageKey = match ? decodeURIComponent(match[1]) : "";
+    }
+    if (!storageKey) {
+        const response = await fetch(input.url, { signal });
+        if (!response.ok) throw new Error(`读取视频失败（HTTP ${response.status}）`);
+        const blob = await response.blob();
+        signal?.throwIfAborted();
+        const media = await uploadBackendMedia({ name: input.name, blob, mimeType: blob.type.startsWith("video/") ? blob.type : "video/mp4", category: "input" });
+        storageKey = media.storageKey;
+    }
+    signal?.throwIfAborted();
+    const created = await fetchAgentJson<{ task: VideoAudioExtractTask }>(endpoint, token, "/video-audio-extract/tasks", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ storageKey, name: input.name, projectId: input.projectId, nodeId: input.nodeId, clientTaskId: input.taskId }),
+    });
+    const cancel = () => { void fetchAgentJson(endpoint, token, `/video-audio-extract/tasks/${created.task.id}/cancel`, { method: "POST" }).catch(() => undefined); };
+    signal?.addEventListener("abort", cancel, { once: true });
+    try {
+        for (;;) {
+            if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+            const response = await pollTaskWithRetry(() => fetchAgentJson<{ task: VideoAudioExtractTask }>(endpoint, token, `/runtime/tasks/${created.task.id}`), signal);
+            if (["succeeded", "failed", "cancelled"].includes(response.task.status)) {
+                if (response.task.status !== "succeeded") throw new Error(response.task.error || "音频提取失败");
+                const media = response.task.result?.media;
+                if (!media?.storageKey) throw new Error("音频提取完成但没有归档媒体");
+                return {
+                    url: media.url.startsWith("/media/") ? backendMediaUrl(media.storageKey) : media.url,
+                    storageKey: media.storageKey,
+                    mimeType: media.mimeType || "audio/mpeg",
+                    bytes: media.bytes,
+                    durationMs: media.durationMs,
+                    taskId: created.task.id,
+                };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+    } finally {
+        signal?.removeEventListener("abort", cancel);
     }
 }
 

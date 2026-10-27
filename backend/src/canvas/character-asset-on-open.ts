@@ -25,7 +25,7 @@ export function syncCharacterAssetsForProject(stores: Stores, projectId: string)
         const images = Array.isArray(data.images) ? data.images : [];
         const fields: Record<string, unknown> = {
             characterAssetId: asset.id,
-            characterName: asset.title,
+            characterName: data.name || asset.title,
             characterEnglishName: data.englishName || "",
             characterDescription: data.description || "",
             characterImages: images,

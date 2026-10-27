@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip, type MenuProps } from "antd";
-import { Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { AudioLines, Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Images, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -10,10 +10,11 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
-import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
+import { propNodeAssetImage } from "@/lib/canvas/prop-node-asset";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
-import { groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
+import { canvasNodeDropdownActions, groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
 import { buildImageToolbarTools, type ImageQuickToolId } from "./canvas-image-toolbar-tools";
 
 type CanvasNodeHoverToolbarProps = {
@@ -33,9 +34,12 @@ type CanvasNodeHoverToolbarProps = {
     onDiscardSharedEdits?: (node: CanvasNodeData) => void;
     onCompareVideo: (node: CanvasNodeData) => void;
     onTrimVideo: (node: CanvasNodeData) => void;
+    onExtractAudio: (node: CanvasNodeData) => void;
+    extractingAudio?: boolean;
     onMaskEdit: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
+    onStitch?: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAutoLevels: (node: CanvasNodeData) => void;
@@ -50,9 +54,11 @@ type CanvasNodeHoverToolbarProps = {
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onArrangeGroup: (node: CanvasNodeData) => void;
+    onCreateOrderedGroupCollage: (node: CanvasNodeData) => void;
     onToggleOrderedGroup: (node: CanvasNodeData) => void;
     onToggleGroupLock: (node: CanvasNodeData) => void;
     onDelete: (node: CanvasNodeData) => void;
+    canDeleteNode?: boolean;
     extraTools?: CanvasNodeToolbarItem[];
     productionActions?: CanvasNodeToolbarItem[];
     productionSelected?: boolean;
@@ -89,9 +95,12 @@ export function CanvasNodeHoverToolbar({
     onDiscardSharedEdits,
     onCompareVideo,
     onTrimVideo,
+    onExtractAudio,
+    extractingAudio = false,
     onMaskEdit,
     onCrop,
     onSplit,
+    onStitch,
     onUpscale,
     onSuperResolve,
     onAutoLevels,
@@ -106,9 +115,11 @@ export function CanvasNodeHoverToolbar({
     onSaveSceneToAsset,
     onToggleFreeResize,
     onArrangeGroup,
+    onCreateOrderedGroupCollage,
     onToggleOrderedGroup,
     onToggleGroupLock,
     onDelete,
+    canDeleteNode = true,
     extraTools = [],
     productionActions,
     productionSelected = false,
@@ -170,7 +181,8 @@ export function CanvasNodeHoverToolbar({
     const isAudio = node.type === CanvasNodeType.Audio || (isSmartGenerationNode && smartMode === "audio");
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
-    const hasImage = isImage && Boolean(canvasNodeImage(node));
+    const hasPropImage = Boolean(propNodeAssetImage(node));
+    const hasImage = isImage && Boolean(canvasNodePrimaryImage(node));
     const hasVideo = isVideo && Boolean(node.metadata?.content);
     const hasAudio = isAudio && Boolean(node.metadata?.content);
     const isText = node.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text");
@@ -188,7 +200,7 @@ export function CanvasNodeHoverToolbar({
         }
         copyText(prompt, t("common.promptCopied"));
     };
-    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onMaskEdit, onCrop, onSplit, onUpscale, onSuperResolve, onAutoLevels, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
+    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onMaskEdit, onCrop, onSplit, onStitch: onStitch || (() => {}), onUpscale, onSuperResolve, onAutoLevels, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
 
     function openImageToolSettings() {
         onKeep(activeNode.id);
@@ -200,16 +212,18 @@ export function CanvasNodeHoverToolbar({
     const baseToolbarTools: ToolbarTool[] = [
         { id: "info", title: t("canvas.nodeToolbar.infoTitle"), label: t("canvas.nodeToolbar.info"), icon: <Info className="size-4" />, onClick: () => onInfo(node) },
         ...(isGroup ? [{ id: "arrangeGroup", title: t("canvas.nodeToolbar.arrangeGroupTitle"), label: t("canvas.nodeToolbar.arrangeGroup"), icon: <LayoutGrid className="size-4" />, onClick: () => onArrangeGroup(node) }] : []),
+        ...(isGroup && node.metadata?.orderedGroup ? [{ id: "createOrderedGroupCollage", title: t("canvas.nodeToolbar.createOrderedGroupCollage"), label: t("canvas.nodeToolbar.createOrderedGroupCollage"), icon: <Images className="size-4" />, onClick: () => onCreateOrderedGroupCollage(node) }] : []),
         ...(isGroup ? [{ id: "toggleOrderedGroup", title: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), label: t(node.metadata?.orderedGroup ? "canvas.nodeActions.unorderedGroup" : "canvas.nodeActions.orderedGroup"), icon: <ListOrdered className="size-4" />, onClick: () => onToggleOrderedGroup(node), active: Boolean(node.metadata?.orderedGroup) }] : []),
-        { id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true },
+        ...(canDeleteNode ? [{ id: "delete", title: t("canvas.nodeToolbar.removeTitle"), label: t("common.delete"), icon: <Trash2 className="size-4" />, onClick: () => onDelete(node), danger: true }] : []),
         ...(isGroup ? [{ id: "groupLock", title: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), label: t(node.metadata?.groupLocked ? "canvas.nodeActions.unlockGroup" : "canvas.nodeActions.lockGroup"), icon: node.metadata?.groupLocked ? <Unlock className="size-4" /> : <Lock className="size-4" />, onClick: () => onToggleGroupLock(node), active: Boolean(node.metadata?.groupLocked) }] : []),
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
-        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
+        ...(hasImage || hasPropImage || hasVideo || isText ? [{ id: "saveAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(hasImage || hasVideo || hasAudio || hasText ? [{ id: "download", title: hasAudio ? t("canvas.nodeToolbar.downloadAudio") : hasVideo ? t("canvas.nodeToolbar.downloadVideo") : hasImage ? t("canvas.nodeToolbar.downloadImage") : t("common.download"), label: t("common.download"), icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
         ...(hasVideo ? [{ id: "compareVideo", title: t("canvas.videoCompare.title"), label: t("canvas.videoCompare.open"), icon: <Columns2 className="size-4" />, onClick: () => onCompareVideo(node) }] : []),
         ...(hasVideo ? [{ id: "trimVideo", title: t("canvas.videoTrim.range"), label: t("canvas.videoTrim.open"), icon: <Scissors className="size-4" />, onClick: () => onTrimVideo(node) }] : []),
+        ...(hasVideo ? [{ id: "extractAudio", title: t("canvas.videoAudioExtract.title"), label: t("canvas.videoAudioExtract.extract"), icon: <AudioLines className="size-4" />, onClick: () => onExtractAudio(node), loading: extractingAudio, disabled: extractingAudio }] : []),
         ...(isVideo && !isSmartGenerationNode ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText && !isSmartGenerationNode ? [{ id: "generateImage", title: t("canvas.node.generateImage"), label: t("canvas.node.generate"), icon: <ImageIcon className="size-4" />, onClick: () => onGenerateImage(node) }] : []),
         ...(isConfig ? [{ id: "config", title: t("canvas.configNode.title"), label: t("canvas.configNode.title"), icon: <Settings2 className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
@@ -231,7 +245,10 @@ export function CanvasNodeHoverToolbar({
     const toolbarTools = hasImage ? [...baseToolbarTools, ...nodeToolbarTools].filter((tool) => quickImageToolIdSet.has(tool.id as ImageQuickToolId)).concat(sharedTools) : [...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools];
     const allToolbarTools: ToolbarTool[] = [...new Map([...baseToolbarTools, ...nodeToolbarTools, ...extraTools, ...sharedTools].map((tool) => [tool.id, tool])).values()];
     const nearbyTools = nearbyCanvasNodeActions(allToolbarTools, hasImage ? quickImageToolIdSet : undefined);
-    const actionMenuItems: MenuProps["items"] = groupCanvasNodeActions(allToolbarTools).map((group) => ({
+    const nearbyToolIds = new Set(nearbyTools.map((tool) => tool.id));
+    const moreTools = allToolbarTools.filter((tool) => !nearbyToolIds.has(tool.id));
+    const dropdownTools = canvasNodeDropdownActions(allToolbarTools, moreTools, Boolean(productionActions));
+    const actionMenuItems: MenuProps["items"] = groupCanvasNodeActions(dropdownTools).map((group) => ({
         type: "group",
         key: group.id,
         label: t(`canvas.nodeActions.groups.${group.id}`),
@@ -266,7 +283,7 @@ export function CanvasNodeHoverToolbar({
         <span className="w-full truncate px-2 text-sm font-medium" title={node.title}>{node.title || node.type}</span>
         {productionStatus && <span data-production-node-status className="w-full px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>{productionStatus}</span>}
         {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-2 py-1.5 hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
-        <Dropdown trigger={["click"]} menu={{ items: [...new Map([...extraTools, ...toolbarTools].map(tool => [tool.id, tool])).values()].map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
+        <Dropdown trigger={["click"]} menu={{ items: dropdownTools.map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.loading ? <LoaderCircle className="size-4 animate-spin" /> : tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
     </div>;
 
     return (
@@ -274,7 +291,7 @@ export function CanvasNodeHoverToolbar({
             <div
                 ref={toolbarRef}
                 data-canvas-node-toolbar
-                className="absolute z-[70] flex h-12 -translate-x-1/2 -translate-y-full items-center rounded-lg border border-border bg-popover text-[13px] text-popover-foreground shadow-sm"
+                className="absolute z-[70] flex h-12 min-w-0 -translate-x-1/2 -translate-y-full items-center rounded-lg border border-border bg-popover text-[13px] text-popover-foreground shadow-sm"
                 style={{ left: toolbarLeft, top: Math.max(64, top), maxWidth: Math.max(0, availableWidth - 16) }}
                 onMouseEnter={() => onKeep(node.id)}
                 onMouseLeave={() => {
@@ -283,8 +300,7 @@ export function CanvasNodeHoverToolbar({
                 onMouseDown={(event) => event.stopPropagation()}
                 onPointerDown={(event) => event.stopPropagation()}
             >
-                <span className="canvas-node-context" title={node.title}>{node.title || getNodeDefinition(node.type)?.title || node.type}</span>
-                <div className="flex min-w-0 items-center overflow-x-auto" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
+                <div className="flex min-w-0 flex-1 items-center overflow-x-auto hide-scrollbar" data-canvas-no-zoom onWheel={(event) => event.stopPropagation()}>
                     {nearbyTools.map((tool) => (
                         <ToolbarAction key={tool.id} {...tool} showLabel={isImage ? showImageToolLabels : true} />
                     ))}
@@ -299,7 +315,7 @@ export function CanvasNodeHoverToolbar({
                         if (event.key === "Tab") setActionsOpen(false);
                     }}>{menu}</div>}
                     onOpenChange={(open) => { setActionsOpen(open); if (open) onKeep(node.id); }}
-                    menu={{ items: actionMenuItems, selectable: true, selectedKeys: allToolbarTools.filter((tool) => tool.active).map((tool) => tool.id), onClick: () => setActionsOpen(false), style: { maxHeight: "min(560px, calc(100dvh - 32px))", overflowY: "auto", maxWidth: "calc(100vw - 24px)" } }}
+                    menu={{ items: actionMenuItems, selectable: true, selectedKeys: moreTools.filter((tool) => tool.active).map((tool) => tool.id), onClick: () => setActionsOpen(false), style: { maxHeight: "min(560px, calc(100dvh - 32px))", overflowY: "auto", maxWidth: "calc(100vw - 24px)" } }}
                 >
                     <button ref={actionsTriggerRef} type="button" data-canvas-shortcuts-ignore aria-label={t("canvas.nodeActions.all")} aria-expanded={actionsOpen} className="canvas-blocking-overlay flex h-12 shrink-0 items-center gap-1 border-l border-border px-3 hover:bg-muted">
                         <Ellipsis className="size-4" /><span>{t("canvas.imageTools.more")}</span>

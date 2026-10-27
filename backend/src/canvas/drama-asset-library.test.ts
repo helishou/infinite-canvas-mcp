@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackendDatabase, type Asset } from "../db.js";
-import { rawProject, sourceOf } from "./drama-asset-library.js";
+import { rawProject, reconcileSharedAssetConsumers, sourceOf } from "./drama-asset-library.js";
 import { ensureProductionCanvas } from "../drama/production-canvas.js";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { startServer } from "../server.js";
@@ -49,6 +49,163 @@ test("promotion is atomic, idempotent and stores a single source with live refer
         assert.equal((rawProject(db, "a")!.nodes as any[])[0].metadata.sharedAssetReference.edits, undefined);
         assert.throws(() => db.deleteAsset(asset.id), /仍被画布引用/);
         assert.throws(() => db.applyCanvasProjectOperations(source.sourceProjectId, undefined, [{ type: "delete_node", id: source.sourceNodeId }]), /仍被画布引用/);
+    } finally { db.close(); }
+});
+test("production-selected write-through refs update the shared source and sibling episode references", () => {
+    const { db, asset } = fixture();
+    try {
+        const shared = ensureProductionCanvas(db, "shared-assets", "drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-character", nodeType: "character", title: "共享角色", position: { x: 20, y: 30 }, width: 240, height: 320, metadata: { characterName: "共享角色", characterDescription: "初始说明", characterImages: [] } }], { runtimeWrite: true });
+        const source = { dramaId: "drama", assetId: "shared-character-asset", sourceProjectId: shared.project.id, sourceNodeId: "shared-character" };
+        db.upsertAssetRecord({ ...asset, id: source.assetId, kind: "character", data: {}, metadata: { sharedAssetSource: source } });
+        for (const [projectId, episodeId] of [["a", "episode-a"], ["b", "episode-b"]]) db.applyCanvasProjectOperations(projectId, undefined, [{
+            type: "add_node", id: `shared-ref-${projectId}`, nodeType: "character", title: "共享角色", position: { x: 400, y: 30 }, width: 240, height: 320,
+            metadata: { productionEntity: { ownerKind: "episode", ownerId: episodeId, kind: "character", entityId: `CHAR_${projectId}` }, characterName: "共享角色", characterDescription: "初始说明", sharedAssetReference: { ...source, writeThrough: true } },
+        }], { runtimeWrite: true });
+
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "shared-ref-a", patch: { title: "新角色名" }, metadata: { characterDescription: "更新说明" } }]);
+
+        const canonical = (db.getCanvasProject(shared.project.id)!.nodes as any[]).find(node => node.id === source.sourceNodeId);
+        const sibling = (db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "shared-ref-b");
+        assert.equal(canonical.title, "新角色名");
+        assert.equal(canonical.metadata.characterDescription, "更新说明");
+        assert.equal((db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "shared-ref-a").title, "新角色名");
+        assert.equal(sibling.title, "新角色名");
+        assert.equal(sibling.metadata.characterDescription, "更新说明");
+        assert.equal(sibling.metadata.sharedAssetReference.writeThrough, true);
+        assert.equal((rawProject(db, "b")!.nodes as any[]).find(node => node.id === "shared-ref-b").metadata.characterDescription, undefined);
+
+        const successfulTask = db.createTask("shared-ref-generation", "canvas-image", { projectId: "a", nodeId: "shared-ref-a" }, {});
+        db.updateTask(successfulTask.id, { status: "succeeded", progress: 1, result: { media: [{ storageKey: "shared-result", content: "/media/shared-result", mimeType: "image/png", width: 80, height: 120 }] } });
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "shared-ref-a", metadata: { content: "/media/shared-result", storageKey: "shared-result", naturalWidth: 80, naturalHeight: 120 } }], { runtimeWrite: true, source: { kind: "task", clientId: `task:${successfulTask.id}` } });
+        assert.equal((db.getCanvasProject(shared.project.id)!.nodes as any[]).find(node => node.id === source.sourceNodeId).metadata.storageKey, "shared-result");
+        assert.equal((db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "shared-ref-b").metadata.storageKey, "shared-result");
+
+        const staleTask = db.createTask("stale-shared-ref-generation", "canvas-image", { projectId: "a", nodeId: "shared-ref-a" }, {});
+        db.updateTask(staleTask.id, { status: "succeeded", progress: 1, result: { media: [{ storageKey: "stale-result", content: "/media/stale-result", mimeType: "image/png" }] } });
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "shared-ref-a", metadata: { content: "/media/stale-result", storageKey: "stale-result", inputOutdated: true, generatedImageHistory: [{ taskId: staleTask.id, storageKey: "stale-result" }] } }], { runtimeWrite: true, source: { kind: "task", clientId: `task:${staleTask.id}` } });
+        assert.equal((db.getCanvasProject(shared.project.id)!.nodes as any[]).find(node => node.id === source.sourceNodeId).metadata.storageKey, "shared-result");
+        assert.equal((rawProject(db, "a")!.nodes as any[]).find(node => node.id === "shared-ref-a").metadata.generatedImageHistory.at(-1).taskId, staleTask.id);
+        const failedTask = db.createTask("failed-shared-ref-generation", "canvas-image", { projectId: "a", nodeId: "shared-ref-a" }, {});
+        db.updateTask(failedTask.id, { status: "failed", error: "fixture failure", result: { media: [{ storageKey: "failed-result" }] } });
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "shared-ref-a", metadata: { content: "/media/failed-result", storageKey: "failed-result" } }], { runtimeWrite: true, source: { kind: "task", clientId: `task:${failedTask.id}` } });
+        assert.equal((db.getCanvasProject(shared.project.id)!.nodes as any[]).find(node => node.id === source.sourceNodeId).metadata.storageKey, "shared-result");
+    } finally { db.close(); }
+});
+
+test("shared consumer reconciliation force-clears old local projections and is idempotent", () => {
+    const { db, asset } = fixture();
+    try {
+        const saved = db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } });
+        const source = sourceOf(saved)!;
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "add_node", id: "episode-reference", nodeType: "character", title: "旧投影", metadata: {
+            sharedAssetReference: { ...source, writeThrough: true, edits: { "metadata.characterDescription": { base: "原始", value: "旧本地差异" } } },
+        } }, { type: "add_node", id: "versioned-reference", nodeType: "character", title: "旧版本引用", metadata: {
+            sharedAssetOrigin: { dramaId: "drama", assetId: source.assetId, approvedId: "approved-old", sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId },
+            characterImages: [{ storageKey: "image:old", url: "/media/old.png" }],
+        } }], { runtimeWrite: true });
+
+        const first = reconcileSharedAssetConsumers(db, source.sourceProjectId);
+        const synced = (db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "episode-reference");
+        assert.equal(synced.metadata.characterDescription, "原始");
+        assert.equal(synced.metadata.sharedAssetReference.edits, undefined);
+        const versioned = (db.getCanvasProject("b")!.nodes as any[]).find(node => node.id === "versioned-reference");
+        assert.equal(versioned.metadata.sharedAssetReference.sourceNodeId, source.sourceNodeId);
+        assert.equal(versioned.metadata.sharedAssetOrigin, undefined);
+        assert.equal(versioned.metadata.characterImages[0].storageKey, "a");
+        const revision = Number(db.getCanvasProject("b")!.revision);
+        const second = reconcileSharedAssetConsumers(db, source.sourceProjectId);
+        assert.equal(Number(db.getCanvasProject("b")!.revision), revision);
+        assert.ok(first.synchronizedCanvasRevisions.length > 0);
+        assert.equal(second.synchronizedCanvasRevisions.length, 0);
+    } finally { db.close(); }
+});
+test("saving a prop node to the library stores its propImage as a reusable image asset", () => {
+    const { db, asset } = fixture();
+    try {
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "add_node", id: "lantern-prop", nodeType: "prop", title: "檐下防风灯笼", metadata: {
+            propName: "檐下防风灯笼", propDescription: "古铜六角笼罩与克制暖光。", propImage: { url: "/media/lantern.png", storageKey: "lantern-image", name: "檐下防风灯笼", width: 640, height: 960, bytes: 1234, mimeType: "image/png" },
+        } }]);
+        const saved = db.upsertAsset({ ...asset, id: "lantern-image-asset", kind: "image", title: "檐下防风灯笼", coverUrl: "/media/lantern.png", data: {
+            dataUrl: "", storageKey: "lantern-image", width: 640, height: 960, bytes: 1234, mimeType: "image/png",
+        }, note: "古铜六角笼罩与克制暖光。", metadata: { source: "canvas", projectId: "a", nodeId: "lantern-prop", propDescription: "古铜六角笼罩与克制暖光。" } }, {
+            canvasSource: { projectId: "a", nodeId: "lantern-prop" }, operationId: "save-lantern-prop-image",
+        });
+        assert.equal(saved.kind, "image");
+        assert.equal(saved.data.storageKey, "lantern-image");
+        assert.ok(sourceOf(saved), "the image is registered in the drama shared asset canvas");
+        assert.deepEqual((db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "lantern-prop").metadata.propImage.storageKey, "lantern-image", "saving does not replace or remove the original prop node");
+    } finally { db.close(); }
+});
+test("shared prop references project and refresh their canonical prop image", () => {
+    const { db, asset } = fixture();
+    try {
+        const shared = ensureProductionCanvas(db, "shared-assets", "drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-umbrella", nodeType: "prop", title: "青竹纸伞", metadata: {
+            propName: "青竹纸伞", propDescription: "旧青竹骨油纸伞", propImage: { storageKey: "umbrella-v1", url: "/media/umbrella-v1.png", name: "青竹纸伞身份图", width: 512, height: 768, bytes: 123, mimeType: "image/png" },
+        } }], { runtimeWrite: true });
+        const source = { dramaId: "drama", assetId: "shared-umbrella-asset", sourceProjectId: shared.project.id, sourceNodeId: "shared-umbrella" };
+        db.upsertAssetRecord({ ...asset, id: source.assetId, kind: "prop", title: "青竹纸伞", data: {}, metadata: { sharedAssetSource: source } });
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "add_node", id: "episode-umbrella", nodeType: "prop", title: "青竹纸伞", metadata: { sharedAssetReference: source } }]);
+        const ref = (db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "episode-umbrella");
+        assert.equal(ref.metadata.propImage.storageKey, "umbrella-v1");
+        assert.equal((rawProject(db, "a")!.nodes as any[]).find(node => node.id === "episode-umbrella").metadata.propImage, undefined, "shared media remains a live projection, not a local copy");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "update_node", id: "shared-umbrella", metadata: { propImage: { storageKey: "umbrella-v2", url: "/media/umbrella-v2.png", name: "青竹纸伞身份图新版" } } }], { runtimeWrite: true });
+        assert.equal((db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "episode-umbrella").metadata.propImage.storageKey, "umbrella-v2");
+    } finally { db.close(); }
+});
+test("episode canvas can reference a canonical shared asset from another drama", () => {
+    const { db, asset } = fixture();
+    try {
+        db.upsertCanvasFolder({ id: "other-drama", name: "另一部剧", isDrama: true, createdAt: new Date().toISOString() });
+        const shared = ensureProductionCanvas(db, "shared-assets", "other-drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "other-character", nodeType: "character", title: "跨剧目角色", metadata: {
+            characterName: "跨剧目角色", characterDescription: "来自另一部剧的共享角色", characterImages: [{ url: "/media/other.png", storageKey: "other-image" }], characterPrimaryIndex: 0,
+        } }], { runtimeWrite: true });
+        const source = { dramaId: "other-drama", assetId: "other-character-asset", sourceProjectId: shared.project.id, sourceNodeId: "other-character" };
+        db.upsertAssetRecord({ ...asset, id: source.assetId, dramaId: "other-drama", title: "跨剧目角色", data: {}, metadata: { sharedAssetSource: source } });
+
+        db.applyCanvasProjectOperations("a", undefined, [{ type: "add_node", id: "cross-drama-ref", nodeType: "character", title: "跨剧目角色", metadata: { sharedAssetReference: source } }]);
+
+        const referenced = (db.getCanvasProject("a")!.nodes as any[]).find(node => node.id === "cross-drama-ref");
+        assert.equal(referenced.metadata.characterDescription, "来自另一部剧的共享角色");
+        assert.equal(referenced.metadata.characterImages[0].storageKey, "other-image");
+        assert.deepEqual(referenced.metadata.sharedAssetReference, source);
+    } finally { db.close(); }
+});
+test("orphaned shared-asset records auto-purge when unreferenced, stay while referenced, and surface as placeholders until swept", () => {
+    const { db, asset } = fixture();
+    try {
+        db.upsertAssetRecord(asset);
+        const orphan = (id: string, sourceProjectId: string, sourceNodeId: string): Asset => ({
+            ...asset, id, data: {}, metadata: { sharedAssetSource: { dramaId: "drama", assetId: id, sourceProjectId, sourceNodeId } },
+        });
+        // missing-project: source canvas hard-deleted, nobody references it -> auto-purged on read.
+        db.upsertAssetRecord(orphan("missing-project", "deleted-project", "deleted-node"));
+        // missing-node: built the real way — valid source first, live reference added, then the
+        // whole source canvas disappears (the path that leaves dangling consumers behind).
+        const shared = ensureProductionCanvas(db, "shared-assets", "drama");
+        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-character", nodeType: "character", title: "共享角色", position: { x: 20, y: 30 }, width: 240, height: 320, metadata: { characterName: "共享角色" } }], { runtimeWrite: true });
+        db.upsertAssetRecord(orphan("missing-node", shared.project.id, "shared-character"));
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "add_node", id: "live-ref", nodeType: "character", title: "共享角色", position: { x: 400, y: 30 }, width: 240, height: 320, metadata: { sharedAssetReference: sourceOf(db.getAssetRecord("missing-node"))! } }]);
+        // Simulate the production accident that leaves dangling consumers behind: a hard project
+        // deletion with no cascade cleanup, which is exactly how records go orphaned.
+        db.db.exec("PRAGMA foreign_keys=OFF");
+        try { db.db.prepare("DELETE FROM canvas_projects WHERE id = ?").run(shared.project.id); } finally { db.db.exec("PRAGMA foreign_keys=ON"); }
+
+        const listed = db.listAssets();
+        assert.equal(listed.some(item => item.id === "missing-project"), false, "unreferenced orphan is purged automatically");
+        assert.equal(db.getAssetRecord("missing-project"), null);
+        const kept = listed.find(item => item.id === "missing-node")!;
+        assert.ok(kept, "referenced orphan survives the sweep");
+        assert.equal(kept.metadata.sharedAssetMissing, true);
+        assert.equal(kept.metadata.sharedAssetMissingReason, "source_project_missing");
+        assert.ok(listed.some(item => item.id === "asset"), "unrelated assets remain readable");
+        assert.equal(db.getAssetRecord("missing-node")!.metadata.sharedAssetMissing, undefined, "projection does not rewrite the stored record");
+
+        db.applyCanvasProjectOperations("b", undefined, [{ type: "delete_node", id: "live-ref" }]);
+        assert.equal(db.listAssets().some(item => item.id === "missing-node"), false, "next read purges once the last reference is gone");
+        assert.ok(db.getAssetRecord("asset"), "surviving records are untouched");
     } finally { db.close(); }
 });
 test("independent source fields merge, same fields conflict and discard restores current source", () => {
@@ -141,7 +298,7 @@ test("formal scripts and pinned approved references remain protected from generi
     try {
         for (const metadata of [{ productionScriptId: "script-owner" }, { sharedAssetOrigin: { approvedId: "approved-version" } }]) {
             db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "character", metadata, metadataDelete: ["productionScriptId", "sharedAssetOrigin"].filter(key => !(key in metadata)) }], { runtimeWrite: true });
-            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|已批准共享引用/);
+            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|共享引用请沿正式采用入口/);
             assert.equal(db.getAsset(asset.id), null);
             assert.equal(db.listCanvasProjects().length, 2);
         }

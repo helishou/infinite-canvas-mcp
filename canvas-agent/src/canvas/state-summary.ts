@@ -26,7 +26,9 @@ export function canvasNodeIndex(node: Node) {
     const metadata = record(node.metadata);
     const type = String(node.type || "");
     const generationMode = String(node.generationMode || metadata.generationMode || (type.includes("minimax") ? "video" : ""));
-    return { id: String(node.id || ""), type, title: String(node.title || ""), ...(generationMode ? { generationMode } : {}) };
+    const title = String(node.title || "");
+    return { id: String(node.id || ""), type, title: title.length > 240 ? `${title.slice(0, 239)}…` : title,
+        ...(title.length > 240 ? { titleTruncated: true, titleLength: title.length } : {}), ...(generationMode ? { generationMode } : {}) };
 }
 
 function canvasNodeGraph(node: Node) {
@@ -52,8 +54,10 @@ export function summarizeCanvasState(project: Project, input: StateInput, maxByt
     const revision = typeof project.revision === "number" ? project.revision : undefined;
     const totalNodes = typeof project.nodeCount === "number" ? project.nodeCount : nodes.length;
     const connectionCount = typeof project.connectionCount === "number" ? project.connectionCount : connections.length;
+    const projectTitle = String(project.title || "");
     const base = {
-        id, title: String(project.title || ""), ...(revision !== undefined ? { revision } : {}),
+        id, title: projectTitle.length > 240 ? `${projectTitle.slice(0, 239)}…` : projectTitle,
+        ...(projectTitle.length > 240 ? { titleTruncated: true, titleLength: projectTitle.length } : {}), ...(revision !== undefined ? { revision } : {}),
         ...(project.projectId ? { projectId: String(project.projectId) } : {}),
         ...(project.updatedAt ? { updatedAt: project.updatedAt } : {}),
         nodeCount: totalNodes, connectionCount, totalNodes,
@@ -70,7 +74,7 @@ export function summarizeCanvasState(project: Project, input: StateInput, maxByt
     }
     const graph = input.view === "graph";
     const offset = Math.min(totalNodes, Math.max(0, input.nodeOffset || 0));
-    const limit = input.nodeLimit ?? totalNodes;
+    const limit = input.nodeLimit ?? Math.min(100, totalNodes);
     const available = nodes.slice(offset, offset + limit).map(graph ? canvasNodeGraph : canvasNodeIndex);
     const page = (count: number) => {
         const chosen = available.slice(0, count);

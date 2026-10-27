@@ -5,6 +5,92 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- When translating compiled H3 prompts, verify that all visible text in doorplates, signs, subtitles, props, and phone/computer/system interfaces stays in its original wording, whether quoted or not, while surrounding descriptions and directions become English. Old cached translations must not bypass the updated rule.
+
+- Edit a Shot's content or references in an existing production. Verify that saving queues compilation, canvas synchronization, and translation for the affected Clips, without reporting missing H3 artifacts while compilation is pending or unrelated Clip blockers. Recovering or replaying the original edit must not register duplicate compilation jobs. An explicit refresh must also repair an unchanged target with no current artifact. No video is generated.
+
+- For a production-bound H3 Clip, drag two archived Quick Storyboard images into its storyboard slots. Verify the production Shots save and preview those exact keyframes, the H3 track reflects the same order and bindings, and the switch between composite and individual submission leaves both slots intact. Compile the Clip and confirm each Shot description cites the matching Picture number in H3 submission order; archived images without image-node owners are accepted, while unarchived or missing media are rejected.
+
+- With the selected video model disabled, native H3 always runs on local ComfyUI and displays only the local execution location. Old RH/auto values in Clips or defaults must not make native runs read RH configuration. Verify local child tasks for current-and-following Clips, and that enabling a selected model restores local, RH, and hybrid choices.
+
+- When routing or input preparation fails before an H3 child task is created, the current Clip shows the specific failure while keeping its previous output. Unstarted Clips keep their existing status. Verify missing RH workflow settings, cancellation, concurrent Clips, and first-pass confirmation recovery.
+
+- H3 current-Clip and current-and-following runs keep the current workbench and canvas mounted, following targets within that canvas. Verify later Clips, task failures, and reconnection recovery without entry-route navigation or canvas remounts; manual follow pause and navigation to another canvas should still work.
+
+- The workflows page is back to three tabs (Workflow library / Local models / Runtime environment) with bilingual labels, and the tab bar shows a ComfyUI connection badge on the right. The status is checked when the page opens, when switching to Runtime environment, and when the badge is clicked — there is no polling. Verify the connected, offline and unknown states, that hovering shows the ComfyUI address or failure reason, the messaging when Backend or ComfyUI is offline, and light and dark themes.
+
+- RunningHub failed-task history now displays available platform diagnostics: node name/ID, exception type, node details, and remote task ID, with the full error wrapping onto multiple lines. Verify validation errors, missing-input errors, generic errors without node details, and readability in light and dark themes.
+
+- Storage: new large task inputs and canvas operation history use lossless compression, while small and legacy records remain readable. The Backend `compress-snapshot-json` maintenance command previews by default; `--apply` converts legacy records after backup and verifies the original JSON bytes, while `--backup` reuses a snapshot only if it contains every candidate's original text. Use `--vacuum` while idle to reclaim free database pages. Verify idempotent reruns, no writes on a backup mismatch, transaction rollback on failure, and task filtering, model usage, canvas synchronization, history recovery and operation replay after restart. Media and history retention remain unchanged.
+
+- Local usage analytics: open several routes and scroll through semantic sections to create PV, MV and MC records. At `/analytics/local`, select date ranges and check the overview, daily trend, page/module summaries and event details; export the selected range as JSON. Confirm query strings, button text and input contents are absent from stored records, that reports remain available after refresh in the same browser, and that the report page itself creates no records. Page stats group by route by default (`/canvas/:id`, `/director/:projectId`) and can switch to exact pages; a static route such as `/canvas/performance` is not swallowed by `:id`. Modules that were only seen and never clicked appear with MC 0, and the table can be filtered to "Seen, not clicked". The position column draws a small box (hover for the numbers) and hovering or selecting a row highlights that region in the preview. A page-tall container counts as viewed once it fills roughly a quarter of the viewport; unnamed containers appear as `parent › div#n` with an "Auto-named" tag, the global top bar shows as "Global top bar", records without a position show —, and selecting such a row still previews the page's other modules.
+
+- Deleted text targets: keep an unsent prompt draft, delete its node (or Clip/text item), then refresh and generate from another node. The deleted target must not receive `/text` reads or block the current node; its original local draft remains recoverable. A current target's actual save failure must still stop generation. Also check reconnect and Undo with a new document identity.
+
+- Canvas interaction performance: hovering, selecting and panning should no longer rerender unrelated nodes, and moving or resizing a node should reuse unchanged content. Verify ordinary and H3 nodes, content editing, panel closing, rapid panning, pointer-centered zoom and culling coverage at 5% zoom on a large canvas.
+
+- H3 reference edits survive parent refreshes until applied or cancelled. Verify changing a smart-image reference role and description, and toggling character clothing/voice while the node updates. Drag character references before/after ordinary references: visible slots, prompt Picture ordinals and submitted inputs must agree; storyboard images still lead in shot order, and other Clips and historical outputs remain unchanged.
+
+- H3 submission preserves explicit Picture citations in Subject definitions without adding another image by character order or renumbering Subjects. Prompts already aligned to submission order also retain their numbering when character and ordinary environment images are mixed. Verify two-person video replacement, a single character from a character group, environment images, storyboard-first ordering and legacy prompt ordering; compare the logged prompt with the actual reference order.
+
+- Switching between Codex CLI and API models automatically creates a matching conversation while keeping the composer text, images, canvas references and selected Skill ready to send. Switching models within the same runtime keeps the conversation. Verify both directions, readable previous history, draft preservation and retry after creation failure, no conversation switch during an active task, and recovery of an already-incompatible selection before sending without automatic submission.
+
+- A Clip-only compilation retains script blocks needed by continuity events from earlier scene occurrences. Character reference retention also stays limited to Shots that consume the image, while dialogue-only off-screen appearances retain their original Shot numbers. Verify a later-scene Clip compiles independently and a dialogue reverse shot does not report a missing script block or a Subject retention-scope mismatch.
+
+- Formal production compilation always requires a stable `operationId` and immediately returns a recoverable queued receipt; input manifests and SHA-256 media checks run in the bounded background pool using streaming reads. Verify a missing ID returns HTTP 400 while compile preflight remains ID-free, same-ID replay reuses the job, media changes block apply, and `/health` stays responsive with a large-media compile in progress. Apply retries only the stable proxy's pre-forward `BACKEND_RELOADING` response, and the top connection banner rechecks immediately after that known transient state.
+
+- MCP query defaults now return a drama project preview, paginated episode summaries without legacy `fullPlot`, paginated model names, a ComfyUI task status summary without event payloads, and at most 50 H3 history materials unless a limit is supplied. Verify the next model/episode pages and full drama/ComfyUI reads, ensure status/errors remain actionable, and confirm the Agent compatibility route uses the same projections.
+
+- The Shot editor's Direction section exposes `camera.description` as an editable field and saves it through the existing Shot source flow. Verify editing persists after save and reload, does not replace the other camera fields, and is clear in both languages and themes.
+
+- Shot subject image purpose is filled from the subject type and is read-only: character identity and appearance, prop, or scene environment. New prop bindings compile under the `prop` purpose, while legacy prop `identity` bindings remain compatible. Verify default image selection and the compilation reference closure include the correct prop image, scene environment references still bind, and check both languages and light/dark themes.
+
+- New H3 Clip boundaries enable previous-Clip tail-frame continuation by default; it is off when the destination Clip's first Shot has an explicit opening-frame image. Verify a normal boundary with no opening keyframe defaults on, an opening or frame-zero keyframe defaults off, and a keyframe only at a later time leaves it on. Existing boundary choices, manually disabled settings and Motion Context remain intact, and Motion Context is never enabled together with tail-frame continuation.
+
+- The production workbench header now shows one save-state badge (saved / unsaved changes / submission unconfirmed / not saved), and a rejected submission no longer appears as both a toast and the receipt card. Clip compilation state is reduced to four values: not compiled, compiling, ready to generate, needs attention, with the exact phase or staleness reason in the hover title. Verify the badge after saving, that a rejected submission only shows the receipt card, that compiling shows elapsed seconds and ends at "ready to generate", and that hovering reveals the phase or reason in both languages and themes.
+
+- The production workbench shows elapsed time beside an active Clip compilation (for example "compiling prompt · 12s"), and a ready Clip offers "generate video" directly from the timeline heading and the Clip status row instead of requiring the generation workspace. The workbench canvas overlay no longer reopens after a browser refresh; it keeps the last located node, while switching episodes in the same page still honors the previous open state. Verify the counter advances after saving, disappears when compilation ends, generation enters the normal batch flow, and a refresh leaves the canvas collapsed with "expand canvas" restoring the same node.
+
+- Saving a shot, a storyboard track, or a continuation boundary in the production workbench now triggers that Clip's validation and compilation. Verify the Clip status shows "checking continuity", "compiling prompt", then "syncing canvas" within a few seconds, and that prompts and references land on the H3 node without a second manual compile; saving unchanged input must not start a new compilation. Split, merge and regrouping still show "needs recompile" and require the manual action. Clips not yet projected onto the canvas do not refresh on save. Check both languages and light/dark themes.
+
+- After prompt compilation succeeds and applies, the production workbench automatically translates the ready H3 Clips from that compilation and writes them to the canvas; a Clip refresh triggered by saving a Shot, storyboard track or continuation boundary also translates that Clip after apply. Each Clip heading shows its own translation status, and the progress list includes only targets in the current translation batch. Verify a full compile translates all ready Clips, while a single-Clip or scene compile translates only its ready targets; save-triggered refresh translates only its Clip. Heading status reflects waiting, translating, writing, complete or failed, and non-target Clips show no translation badge. Blocked targets are skipped, translation errors retain their receipt, and writeback still checks that each target and source prompt remain unchanged.
+
+- Acheng production proceeds from the latest committed source and technically valid media. Parallel scene production no longer offers review-policy selection or approval cards, and review/keyframe verdicts do not gate media use; review records remain historical information. Verify unreviewed or historically returned media can compile and continue when its bound node, source task, archived file and SHA-256 are valid; Subject images resolve from the current binding and compilation apply saves the exact media binding used, so newly written artifacts do not immediately become stale; missing media, wrong source/ownership, hash conflicts and concurrent target occupancy still block execution; legacy `awaiting_review` runs resume on the original runId without resubmitting tasks. Confirm the production panel no longer asks for a review policy or approval click.
+
+- Acheng runtime installation and activation are project-scoped: verify status/update/rollback use `.canvas-runtime` in a native checkout even when `CODEX_HOME` points elsewhere; in Docker verify runtime files persist under `/data/acheng-runtime`, while Codex login/session files remain under `/data/codex`.
+
+- MCP exposes smart node creation only. Verify `tools/list` no longer includes ordinary text, image, video, audio, attachment, import, crop, or split node creation tools; verify generic `canvas_create_node`, `canvas_apply_ops`, and `canvas_apply_commands` reject non-smart node additions; verify text, image, video, and audio generation each create one smart node with the prompt stored in its metadata.
+
+- Channel type selection offers Remote API, Local and Codex CLI. Local uses the same protocol, Base URL, API key and request path as Remote API, with Local retained as a label. When an existing ComfyUI channel is loaded, verify its type changes to Local and the migrated config is saved back to Backend; confirm the saved model and credentials remain intact.
+- The storyboard scene page skips SHA-256 cache hits and sends cache misses sequentially in LLM batches of at most three, maps results back by Clip ID, and writes them to H3 in one operation batch. Eligibility uses the current compiled artifact, receipt and formal H3 binding; an earlier manual prompt edit does not block translation. Translate shot descriptions into English while preserving dialogue, lyrics and all visible on-screen text in their original wording, including signs, doorplates and system UI, whether quoted or not. Verify uncompiled, partially ready and compiling scopes remain disabled; H3 sections, reference tags, shot markers, timestamps and numbers survive; Chinese dialogue and on-screen text are accepted; concurrent prompt edits reject the whole write; identical prompts reuse SHA-256 cache entries; and translation failures remain visible in the workbench without changing a valid compilation to "recompile required".
+- MCP `production_translate_compiled_prompts` processes cache misses sequentially in batches of at most three LLM inputs and writes the full result through one canvas operation batch. Verify tools/list and tools/call, rejection of uncompiled/stale/unowned targets, missing or duplicate model outputs rejecting the whole write, Chinese dialogue acceptance, same-operation replay, UI/MCP SHA-256 cache sharing, and preservation of prompts with a retry using a new operationId after canvas or production revision changes.
+- H3 nodes add an English translation toggle beside “Enhance prompt”. It uses the configured translation model and shared SHA-256 cache, replaces the collaborative prompt with the translated version, and toggles back to the original captured in the current editor session; the existing Chinese read-only preview remains separate. Verify translation and restore, Clip switching, concurrent edits/document changes refusing stale writes, visible model errors, and cache sharing with the storyboard page.
+- Clip states that need recompilation expose the stale reason on hover (compiler change, source change or Clip input change); verify each reason and that a still-current artifact remains marked valid.
+
+- Compiling a single Clip (after splitting or merging Clips) is no longer blocked by “图片绑定 … 不属于 Subject …”: when compiling with a Clip scope, Shots kept only for continuity replay keep their authored Subject picture-binding declarations, and the Subject registry trim now follows the Shots the projection actually retains. Media and the Clip reference closure still collect only output Shots (including keyframe-output Shots), so replay Shots never pull in picture files. Verify that “校验并编译” on a single Clip succeeds and produces its prompt after split/merge, and that full compiles, Clip auto-refresh and canvas sync are unaffected.
+
+- Acheng v2 production now stores Story, Shot, Segment and continuity only in `draft.director.source`; the workbench edits these canonical rows while Canvas and task state is read-only runtime context. Verify source-only save/reload, Shot and Segment edits, regrouping, publish/version restore, local Save/Cancel behavior and draft retention after a failed request. Confirm full/source/summary/workbench API reads omit duplicate v2 fields, ordinary editing/compile/generation rejects old formats and stale dual-write rows, and only the explicit maintenance CLI can inspect/apply migrations. In a temporary database, verify inspection is read-only, clean mirrors deduplicate under revision/operationId, conflicts or missing/duplicate Canvas ownership preserve the original, and legacy source migration requires a complete prepared v2 file. Confirm ordinary Canvas Clips and no-Director productions still work.
+- Backend now records Acheng compilation jobs, frozen apply packets and continuity receipts in SQLite; applied packets are compacted and compile work directories are removed. MediaStore rows record SHA-256, and explicit `apply` backfills digests for indexed files after checking their size and file existence. Newly compiled media inputs must already be indexed in MediaStore. Verify prepare/enqueue/restart/apply replay, sourceHash and preparedId readback, unapplied packet recovery, packet corruption rejection, media digest validation and cancellation cleanup. Run `media-and-compilation-storage inspect` to confirm it is read-only and reports legacy job/report import blockers; run `apply` only against a disposable database first, and verify old files remain until a separate reference audit. Confirm video-concat and H3 combined outputs are removed only after MediaStore archival succeeds.
+- Episode character, scene and prop registrations sync with canvas nodes by stable identity. The episode asset page can select character, scene and prop nodes from the shared-assets canvas, creating formal Subject registrations and reference nodes. Editing an episode reference writes through to the shared source and updates other references and registered episodes; a precise, successful, non-stale generation result from a reference also updates the shared source. Verify include, duplicate include, remove and re-include; asset page/source/canvas consistency after refresh; cross-episode name, description and media propagation; failed or stale tasks not replacing shared content; same-field conflicts retaining input; removal not deleting the source; and referenced Subjects not being silently removed. Confirm approved production versions still use the existing adoption flow, and check both locales, themes and real workbench interactions.
+- The Subject editor can switch directly to a same-type node from the episode or shared canvas. Selecting a shared node that is not yet in the episode adds it, creates its reference and switches the Subject in one transaction. The Backend changes the stable entity link, follows that node's image reference, and remaps Shot and continuity entity IDs. An asset card with no prompt reference slots must explicitly store `reference_policy=none`. Verify character/scene/prop filtering, selecting a shared entity, preserving the Subject ID in Shots, refreshing image resolution, asset-card compilation and rejecting a wrong-type target.
+- A Subject's default prop/scene image reference is projected onto its matching canvas entity node and follows the existing image-reference node without copying media. Verify that choosing or switching the Subject picture updates the prop/scene node, later source-image updates reach the entity node, and removing the binding leaves the source media and history intact.
+
+- Direct add/edit entry points on the continuity subject timeline: each item row can add a change (landing on the first visible Shot with a free frame), the inspector can add a change and edit it inside the panel, and selecting a cell lists every change in that Shot. The change form runs After → When → Reason → Script evidence, shows the position in seconds with the exact shot frame, and keeps the before-state as a read-only starting point; the state picker accepts typed input, offering an “Add …” entry for an unregistered name that joins the item's states together with a registered description, while descriptions missing from history are completed from the value before saving so every legal value satisfies the save contract, and the button is disabled with a stated reason when no free frame exists. Verify save and reload after adding, editing and adding a state value, and check both locales and themes.
+
+- A continuity event's reason is now optional metadata: leaving it empty no longer blocks saving or marks the scope blocked, and a filled reason is still compiled into the prompt as Recorded cause. Verify adding and editing with an empty reason, that the check reports no `CONTINUITY_EVENT_REASON`, and that a filled reason reaches the compiled prompt. This depends on the active Acheng runtime already containing the contract change, so rebuild the runtime before verifying.
+
+- Slow-operation telemetry is local: verify that Backend HTTP requests and browser API calls still in progress after one second produce a pending record, and that completion records duration and outcome. Verify canvas sync waits and ComfyUI `/queue`/`/interrupt` cancellation calls are identifiable; browser main-thread tasks over 250 ms are reported. Confirm logs contain operation names and timing only, with no request/response content, credentials, or entity IDs.
+
+- Shot image inputs now separate temporal keyframes from composition references. Keyframes accept opening, closing or Shot-local frame anchors and alone supply the timeline thumbnail; composition references remain sibling Shot requirements and constrain framing without implying a time point. Legacy `anchor: composition` entries stay readable and migrate on the next explicit Shot save. Verify save/reload, reference compilation and media validation, Ref2VA mode selection without I2VA/FL2VA inference, split/merge preservation, and both locales/themes.
+
+- The Shot detail's Picture and Camera section always shows the Subjects appearing in the Shot and allows direct edits; while editing the full section, Subject changes join the draft save. Verify adding, removing and switching Subjects through save and refresh; existing image bindings and appearance timing remain intact, and offscreen-voice or continuity-context Subjects are unaffected. Check both locales and themes.
+
+- Double-clicking blank canvas no longer opens the node picker. Verify the popup does not appear on the background, grid, nodes, connections or node-result previews; existing node double-click editing/previews, right-click and other creation entry points still work.
+
+- Prompt, reference and generation controls for regular canvas nodes are anchored below their nodes and stay readable at screen size while the node moves. Verify edge clamping and scrolling, while the Config node editor remains in its side panel. Check Scene, Image, Video, Audio, Text and Loop nodes, zoom, narrow viewports, node reselection and model-parameter popovers.
+
+- Episode “Canvas characters and materials” cards edit the node name and description inside the workbench. Verify the node title, name and description update and persist after refresh; Cancel restores the prior values and a failed save retains the draft. Removal behavior and shared-asset ownership remain unchanged. Check both locales and themes.
+
 - Canvas tools and settings again includes project-wide rewrite suggestions and local draft recovery without adding top-bar buttons. Verify opening, Escape/close and reopening both dialogs on standalone and embedded canvases; deleted targets remain readable, copyable and dismissible but cannot be applied. Existing targets retain text-conflict checks, and the local draft dialog keeps its original session-ownership, import/export and explicit recovery protections. Check English/Chinese and light/dark themes.
 
 - Legacy H3 clips with a saved nonzero seed and no explicit noise mode keep that seed fixed across new runs. Verify both seed aliases and request/Clip/node/default precedence, explicit random mode, explicit fixed zero, duplicate-request idempotency and unchanged saved inputs. Built-in fallback behavior for missing or zero legacy seeds remains unchanged.
@@ -70,6 +156,7 @@ description: Implemented changes that still need manual verification
 - Character, scene and prop details in Production now expose Delete material for manually created entries. Verify unused entries and Subject registrations disappear after deletion and stay removed after refresh; names do not determine identity, and referenced, bound, published or generated entries are rejected without data loss. Canvas nodes and archived media are retained.
 
 - The canvas picker now switches directly between shared-asset and episode canvases, preparing an episode canvas only when no binding exists. Converted character, scene and image media can join the drama library without being rejected by production-purpose markers or automatically approved. Save actions show a pending state, and drama-context read failures are surfaced. Verify canonical nodes appear in the shared canvas, original nodes become references, and repeated saves reuse the existing asset.
+- The production canvas More menu includes the full set of node actions. Generated images and prop nodes with a main image can be saved to the asset library even when the quick toolbar hides the action. Verify both save paths, reuse on repeated saves, pending feedback and drama-context read failures; a prop's main image is stored as an image asset, and saving does not submit a generation task.
 
 - Production defaults to optional review: source saves do not wait for compilation, quality and continuity findings remain visible warnings, and verified media can feed downstream work without recording a false approval. Verify explicit review policies still work, legacy policy migration and resume preserve original task/media identities, independent targets continue when one fails, and missing files, hash mismatches, binding errors and conflicting continuation modes still block their dependent targets.
 
@@ -293,7 +380,7 @@ description: Implemented changes that still need manual verification
 
 - Settings and history no longer show a pinned compiler version. Director stage tasks and continuity repair requests read the active contract without selecting a historical runtimeId. Actual compiler provenance and original batch snapshots remain preserved.
 
-- Manually update and activate the engine with `npm run acheng:update`. Existing productions use the locally active version for their next contract read, compilation and validation, without a production upgrade step. The `production_get_contract` runtimeId parameter remains accepted for compatibility but no longer selects a compiler.
+- Manually update and activate the engine with `pnpm run acheng:update`. Existing productions use the locally active version for their next contract read, compilation and validation, without a production upgrade step. The `production_get_contract` runtimeId parameter remains accepted for compatibility but no longer selects a compiler.
 - Verify that scoped compilation updates only its targets and retains other scenes’ prompts and actual compiler receipts. Activation does not regenerate media or change submitted compilation requests and task inputs. Later Agent turns synchronize the active Skill while preserving workspace edits.
 
 ## ComfyUI preset task timeout
@@ -570,8 +657,8 @@ description: Implemented changes that still need manual verification
 
 - Production MCP reads default to `view=summary`; use `view=source` for one complete source snapshot and `view=artifacts` with `targetIds` for complete selected prompts. Edits/publications/restores return compact revision/hash receipts. Verify a large production no longer fails merely because the tool repeats source, prompt text and published history; Web API consumers retain their full-record default.
 
-- `production_compile` accepts `kind` (`canvas` or `episode`), `id`, `expectedRevision`, and an optional complete candidate `director`. It runs the locally active `compile_assets.py` / `compile_h3.py` and validation scripts, then freezes a `preparedId`, per-target diagnostics, prompt hashes and real media references. It does not save, publish or generate media.
-- `production_apply_compilation` accepts the same owner and the exact `preparedId`. Check one atomic draft revision, identical replay receipts, rejection after concurrent edits, changed packet bytes, wrong owner or missing media, and no generation task. The packet retains its original revision and operation ID; it cannot be rebased by changing request fields.
+- `production_compile` requires `kind`, `id`, `expectedRevision` and a stable `operationId`; the HTTP endpoint returns 400 if the ID is omitted. It immediately persists a queued receipt, then streams media hashes and builds the manifest in the bounded background pool before the existing worker compiler runs. Poll with the same ID; it does not save, publish or generate media.
+- `production_apply_compilation` accepts the same owner and the exact `preparedId`. Check one atomic draft revision, identical replay receipts, rejection after concurrent edits, changed packet bytes, wrong owner or missing media, and no generation task. The packet retains its original revision and operation ID; it cannot be rebased by changing request fields. Apply rechecks current media asynchronously before committing.
 - `production_diagnose_bindings` should distinguish source version/status, draft binding, published binding, active node images, actual archived hashes and dependent prompts. A corrected draft can differ from an old published version; diagnostics must identify that difference without deleting history or approving media.
 - Confirm Windows CRLF H3 prompts produce the same word counts as LF while prompt bytes and hashes remain unchanged. Check interpreter discovery with a stale `py` launcher and Microsoft Store Python; a configured `ACHENG_PYTHON` must not silently switch interpreters.
 
@@ -650,7 +737,8 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - Open a workflow whose saved output selection contains a removed node ID. Verify checkboxes, the selected-node summary, and submitted task parameters contain only outputs available in the current graph. Change the graph and confirm stale IDs are cleared.
 - For image/video/audio run fields stored as Backend `/media/` URLs, verify the submission uploads them and sends RunningHub filenames. Empty `SaveImageToLocal.file_path` and a uniquely inferable `SamplerCustomAdvanced.noise` link should be patched only in the submitted copy; ambiguous noise links must remain untouched.
 - Cancel a queued and a submitted workflow task. Restart Backend with a RunningHub workflow active and confirm it resumes by the saved remote task ID without running H3 Clip writeback.
-
+- Use "Upload to RunningHub" on a local workflow row to push the current graph to the cloud and create its profile automatically. Verify the page switches to the RunningHub library and selects the new profile, the returned workflowId opens on RunningHub, and nothing happens when the web session is missing. After opening and running the uploaded workflow once in the RunningHub web editor, verify "Resync" on the profile replaces the uploaded graph with the platform graph.
+- Upload-site switching: switch "Upload site" from "Follow the runtime site" to runninghub.ai / runninghub.cn and verify each site keeps its own web session (connect, disconnect, paste token). Uploading with the .cn site must hit runninghub.cn, and the error must name the site that is not connected. With no API Key for a non-default site, resync and run must refuse up front and point to that site's key instead of reusing the other site's key.
 
 ## Self-hosted deployment and portability
 
@@ -680,7 +768,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Acheng production and upstream updates
 
-- Use `npm run acheng:status`, `acheng:update -- --check`, `acheng:update`, and `acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
+- Use `pnpm run acheng:status`, `pnpm run acheng:update -- --check`, `pnpm run acheng:update`, and `pnpm run acheng:rollback` to inspect, validate, activate, and revert engine versions. Dirty sources, contract changes and patch conflicts must leave the active version intact.
 - The episode Acheng tab shows seven modules, asset states, complete prompts and continuity boundaries. Import through native production tools and publish the director stage; Clips follow authored Segments, with no implicit one-shot grouping. Only authorized automatic production advances ready tasks.
 - Independent asset canvases use the same production contract through canvas production tools. Keep legacy drafts/media recoverable and, after source changes, rerun the locally active compiler/validator scripts for affected prompts and receipts. This step does not regenerate media.
 - Tail-frame references and Motion Context remain independent. Bounded groups must stop at the specified last Clip. Legacy previousVideoAsReference no longer injects the preceding MP4; explicit ordinary video references remain supported.
@@ -713,7 +801,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Canvas history maintenance and performance
 
-- Run `npm run prune-canvas-batches --workspace backend -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
+- Run `pnpm --filter @helishou/infinite-canvas-backend run prune-canvas-batches -- 30` to preview only. Explicit `--apply` creates and verifies a unique backup, advances each checkpoint and removes only the contiguous expired prefix in one transaction. Invalid history or backup failures must preserve all existing records. Maintenance is manual; the default retention remains 30 days.
 - A retained request must recover its original receipt after cleanup. Older committed requests must never execute again: the browser fetches the latest canvas, acknowledges the original command durably, and preserves subsequent edits or conflict drafts. A failed refresh must keep the pending command. Existing databases receive a verified backup before the receipt schema migration.
 - Check content editing, reference order, grouping, node movement, fast panning and 5% zoom on large canvases. Content updates should reuse spatial geometry while displaying the latest content. Viewport thresholds remain unchanged.
 - PR checks include Web types/build, Backend build, H3 types/tests and isolated browser collaboration scenarios. After building `canvas-agent` and Backend and installing the locked Playwright Chromium, use `node scripts/run-canvas-browser-tests.mjs collaboration` or `node scripts/run-canvas-browser-tests.mjs performance label`. Tests isolate Backend data, media, Agent configuration, ports and Vite cache; measurements and failure evidence are saved under `artifacts/browser-tests`. No paid generation is submitted.
@@ -738,7 +826,6 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - With the SVG node plugin enabled, import an `.svg` through the file picker, canvas drop, or paste. It should create an SVG extension node whose source remains editable after refresh. Invalid SVG must not leave an empty node. With the plugin disabled, the file should fall back to a regular image with a notice.
 - Explicitly replacing an image node or uploading through the asset sidebar should keep the original SVG as image media. It should stay sharp when scaled and load after refresh.
-- Import a local SVG with a `viewBox` through `canvas_import_local_images`. The original file, MIME type, and dimensions should be preserved; a non-SVG file renamed to `.svg` should be rejected. Opening the media URL directly must not execute scripts in the SVG.
 - When SVG image assets are used as model references, Backend should submit a deterministic PNG derivative and record both the source and submitted storage keys on the task; no manual browser conversion is needed.
 
 ## H3 plan, references, and task waiting
@@ -853,7 +940,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Local startup and upgrade protection
 
-- From a clean installation, root `npm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
+- From a clean installation, root `pnpm run dev` should build the shared package before starting the Backend (17370) and Web (3001). A failed build must prevent startup. `dev:services` optionally includes the legacy proxy; Agent startup on Unix must not require Windows `set`.
 - Without Codex installed, HTTP/MCP and local ComfyUI should work; Codex chat should explain how to install it. After installation, check app-server startup through project dependencies and global PATH installations.
 - In temporary old databases, verify that pre-migration snapshots include committed WAL data, backup failure blocks migration, and retries never overwrite snapshots. Refuse newer schemas without changing the source. Protect media and browser drafts separately. Running services require a safe reload before verifying the new behavior.
 
@@ -1037,8 +1124,8 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## Local Backend startup
 
-- From a VS Code terminal, run `npm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` and explicit `dev:watch` commands use guarded reload. Use `dev:once` for a single run.
-- Start `npm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
+- From a VS Code terminal, run `pnpm run dev:local`. Backend should report that it has started and `/health` should respond before opening the canvas; Web and Agent should remain available. The default `dev:backend` and explicit `dev:watch` commands use guarded reload. Use `pnpm --filter @helishou/infinite-canvas-backend run dev:once` for a single run.
+- Start `pnpm run dev:backend` with a canvas that has accumulated H3 history. The Backend health check should become available promptly, and opening the canvas should connect without waiting for all historical H3 tasks to replay. Startup should process at most the 10 newest recovery candidates, including unfinished tasks and terminal H3 tasks still bound to a node or Clip. Older candidates should remain unchanged if excluded. A selected terminal H3 task should finish its saved writeback even if its older generation log has been pruned.
 
 ## Canvas video comparison
 
@@ -1102,7 +1189,13 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 - 对有多张图的角色节点调用 `canvas_image_input_manifest`，确认返回实际参考顺序与 storageKey，并提示未明确选择的角色图；提供 `characterImageKeys` 后再提交图片生成，输入清单应与生成快照一致。
 - 用 `canvas_replace_storyboard_slots` 一次替换有序分镜组的指定槽位及参考资产，确认只改指定槽位、画幅校验生效，旧图片与结果历史仍可读取。
-- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值，旧 storageKey 不匹配时拒绝写入。
+- 用 `canvas_get_storyboard_slots` 读取槽位：省略 `groupId` 时只列项目内分镜组摘要，给定 `groupId` 时返回逐槽位节点、画幅与已登记资产；打开一个 `groupSlots` 为空但成员归组或源视频镜头齐全的组，确认按成员归属/源视频分镜镜头重建槽位并返回 `STORYBOARD_SLOTS_REBUILT`，返回体不包含节点 metadata 大字段。
+- 省略 `expectedAspectRatio`、`expectedNodeId`、`assetIds` 各替换一次：确认画幅取组内首个有效槽位、CAS 用服务端当前槽位、资产自动复用或登记；再传 `dryRun` 预检，确认返回 `ready`、`blocked` 与 `applied: false` 且 revision 不变。连续两次只替换不换图的预检，确认第二次不重复登记资产。
+- 用 `h3_replace_storyboard_binding` 替换一个 Clip 的分镜绑定，确认人物、服装、声音和其他分镜绑定保持原值；省略 `expectedStorageKey` 时按当前值替换，显式传入不匹配的旧 storageKey 时拒绝写入。
+- 用 `h3_get_clip_prompt`（`view: "storyboard"`）读取一个已有分镜的 Clip，确认返回逐镜 id、描述、切换方式与声景；对没有基线的老 Clip 确认返回 `established: false` 与全量写入模板。
+- 对已有基线的 Clip 只传 `shots: [{ id, description }]` 改一镜：确认其余镜头、开场描述、声景与配乐保持原值，回执 `changedShotIds` 只含该镜；再传不存在的 shot id，确认被拒绝并列出可用 id。
+- 对一个有镜头轨但没有结构化基线的老 Clip 只传一镜，确认返回 `STORYBOARD_BASELINE_PARTIAL` 而不是把其余镜头静默丢弃。
+- 对正式制作 Clip 用 `production_edit` 的 `replace_director_clip_storyboard` 传 `patch: true` 只改一镜的 `visual`，确认其余镜头正文、Shot 顺序、`shotInputs` 与 Clip 分镜轨保持原值；再传不存在的 shot id，确认返回 `CLIP_SHOT_UNKNOWN`；同时传 `segment` 时确认返回 `CLIP_PATCH_SEGMENT_CONFLICT`；不带 `patch` 又省略 `segment` 时确认返回 `CLIP_SEGMENT_REQUIRED`。
 
 ## 角色资产与画布节点同步
 
@@ -1177,7 +1270,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 调 `assets_list`：不再返回内联 base64（`coverUrl` 显示为 `[inline-media:image/png]`），`pageSize`/`page`/`keyword` 真正生效。
 - **后端进程需要重启后上述 MCP 改动才生效**（backend 是 `tsx src/index.ts`，无热重载）。
 
-**未自动执行**：`backend/src/maintenance/prune-canvas-batches.ts`（画布操作批次保留清理，实测该表 5.3 万行 / 44 MB 无 TTL）。需要时手动执行 `cd backend && npm run prune-canvas-batches -- 30`，脚本会先 `VACUUM INTO` 备份再删。
+**未自动执行**：`backend/src/maintenance/prune-canvas-batches.ts`（画布操作批次保留清理，实测该表 5.3 万行 / 44 MB 无 TTL）。需要时手动执行 `pnpm --filter @helishou/infinite-canvas-backend run prune-canvas-batches -- 30`，脚本会先 `VACUUM INTO` 备份再删。
 
 ## 文本节点右键「复制内容」
 
@@ -2136,7 +2229,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 启动 Backend 后分别运行 `codex mcp list` 与 `hermes mcp test infinite-canvas`，确认两者都显示 HTTP 传输并发现同一组工具；新开多个任务时不应再出现对应数量的 `backend/dist/index.js mcp` 子进程。
 - 同时建立两个 MCP 会话，在两个会话中设置不同的活动画布，再省略 `projectId` 读取画布状态；两个会话应各自返回自己的画布，不能互相串改。
 - 打开多个画布页面并切换浏览器焦点，调用 MCP `canvas_inspect`、`canvas_get_state` 或生成工具且省略 `projectId`，确认目标跟随当前聚焦画布；只有一个浏览器画布连接但页面处于后台时也应能读取该画布；调用 `canvas_set_active_project({ id })` 后应固定到该 MCP 会话的画布，调用不带 id 的版本后恢复跟随网页焦点。
-- 连续两次运行 `npm run dev:local`，第二次应提示已有本地开发栈并退出；关闭首个启动器后应可正常重新启动 Backend、Agent 与 Web。
+- 连续两次运行 `pnpm run dev:local`，第二次应提示已有本地开发栈并退出；关闭首个启动器后应可正常重新启动 Backend、Agent 与 Web。
 
 ## H3 参考素材统一链路
 
@@ -2196,7 +2289,7 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 - 导出未打开过的画布、同步 WebDAV 或清理媒体前应加载完整详情，避免摘要占位数据被当成空画布；文件夹归属和封面媒体随导出保留。
 - 超过一页的任务记录应完整导出；任一媒体缺失或日志/任务请求失败应显示明确错误，不下载部分归档。导出 ZIP 后重新导入，校验图片、视频、中文文件名与 SHA-256。
 - 多节点画布编辑单个文本或更新单个任务时，未变化节点应保持引用稳定；验证平移、缩放和 H3 播放交互。性能收益尚待浏览器实测。
-- 根目录 `npm test` 自动执行三个 workspace 中的全部 `*.test.ts/tsx`；新增 CI 在 PR 和 main 推送时执行。Windows 文件权限测试按原有条件跳过。
+- 根目录 `pnpm test` 自动执行三个 workspace 中的全部 `*.test.ts/tsx`；新增 CI 在 PR 和 main 推送时执行。Windows 文件权限测试按原有条件跳过。
 
 ## 短剧制作 Tab
 
@@ -2407,6 +2500,8 @@ The current release needs manual verification in these areas:
 + 配置链接导入：使用两条不同 Base URL 的配置链接导入，确认同 Base URL 仅更新该渠道的 Key，陌生 Base URL 新增渠道，不覆盖其他渠道。
 
 + 素材下载 Blob 优先级：对后端已存储的图片、视频和音频分别点击下载，确认下载成功且文件可播放/打开；将原始远程 URL 设为不可访问后再次下载，仍应使用 `storageKey` 的 Backend 媒体成功保存。
+
++ 画布视频与音频节点下载：对后端已归档的视频、音频节点点击下载，确认按 `storageKey` 读取媒体后保存，文件名不再重复类型前缀（裁剪结果节点保存为 `canvas-video-canvas-trim-*.mp4`）；原始 URL 不可访问时仍能保存，媒体取不到时页面提示下载失败而不是只在浏览器下载列表留一条记录；跨域部署下媒体端点的 HEAD 探测返回 200，下载不退化成新标签页打开。
 
 + 上游文本与多参考改图：连接多段文本后生成，确认最终 prompt 以「文本 1/文本 2」区分各段；选择两张及以上参考图改图，确认请求按 `image[]` 提交且全部参考图均参与结果。
 
@@ -2736,7 +2831,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### 本地服务单实例启动
 
-- 运行 `npm run dev:local` 两次，确认第二次会先清理 17370、17371、3001 的旧进程，再只保留一套 Backend、Canvas Agent 和 Web 服务。
+- 运行 `pnpm run dev:local` 两次，确认第二次会先清理 17370、17371、3001 的旧进程，再只保留一套 Backend、Canvas Agent 和 Web 服务。
 - 在已有 Backend 运行时直接启动另一套 Backend，确认新实例因 `backend.lock` 明确退出，不会打开同一份 SQLite。
 - 保持 MCP stdio 连接调用画布操作，确认多个 MCP 客户端仍统一经由唯一 HTTP Backend 写入，且不会各自创建 SQLite/ComfyUI 业务副本。
 
@@ -2880,10 +2975,11 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### Production material canvas nodes
 
-- Saving production source creates character, scene and prop nodes by stable entity identity. Style is excluded; entities with the same name retain separate nodes.
+- Saving production source creates character, scene and prop nodes by stable entity identity. Style is not an entity node; entities with the same name retain separate nodes.
 - Workbench and node name/description edits update the same current source, preserving other structured fields, geometry and connections. Published versions and task history remain intact.
 - Empty production character/scene nodes can save names and descriptions before adding images. Opening an empty character no longer triggers repeated thumbnail rendering.
-- Existing source can use “Connect canvas nodes” to materialize missing nodes. Embedded canvas workspaces reuse preparation for missing nodes; Subject cards link to their material node.
+- Production entity nodes without images show their source name and description with an Add reference image action that opens the correct editor. Confirm a canvas image can be selected and saved; double-clicking a node must not open the canvas “Choose node” menu.
+- Existing source can use “Connect canvas nodes” to materialize missing nodes. A selected STYLE_MOTHER anchor is also prepared as a separate image node, without submitting generation or approval. Embedded canvas workspaces reuse preparation for missing nodes; Subject cards link to their material node.
 - Image bindings can select character, scene and prop nodes. Prop images use the shared reference resolver; archived bytes are verified and frozen for tasks without automatic approval or generation.
 - Pending: creation, bidirectional editing, reload recovery, same-name identity, preparation replay, image selection and historical input protection.
 
@@ -2891,6 +2987,7 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 
 ### Manual production recovery
 
+- The production asset list and manual-asset management expose deletion for assets with existing bindings or generation history. Verify that deletion detaches links to the asset ID in dependencies, Shot material lists, asset references and Subject picture bindings while preserving registered scene/character entities, scene and Shot assignments, script text, and continuity records about those entities. Facts that directly describe the asset and their state records are removed; the asset stays absent after refresh. Same-name assets remain identity-scoped. An active production batch must finish first. If an asset appears in a published version, deletion changes only the current draft and keeps the published snapshot; canvas nodes, archived media and task history remain intact.
 - Overview progress follows saved scripts, Subjects, Shots and live target blockers. Earlier director notes about receipts, style or approval remain in source/advanced details and do not become manual workflow gates.
 - Each target provides an existing manual editor action for prompts, references, models or timing, plus optional director discussion. Blocked targets appear first; physical Clips also link to their canvas Prompt editor.
 - Native character, scene, prop and archived image nodes can be selected and bound manually. Subject previews resolve archived bindings even before a Shot uses them, without writing media projections back to source.
@@ -2904,3 +3001,19 @@ The Chinese version contains the complete item-by-item acceptance checklist.
 - Navigation now groups Workbench, Projects, Quick Generate, Resources and Workflows. Projects share search and type filters; existing canvas and production links remain compatible. Verify both canvas/production views retain the same project ID, folder/bulk/backup tools, and old Agent/deep-link parameters.
 - Production navigation separates series planning, episodes and the actual shared canvas from current-owner assets, script, storyboard, continuity, generation and history. Verify scope labels, breadcrumbs, old workspace queries, drawer Close/Back/Forward, and returning from the preserved canvas overlay.
 - Tasks open without leaving the current editor. Production object tools and Agent use explicit switches; closing tools preserves the source page. Verify keyboard/paste and automatic-follow isolation while tool drawers are open, plus desktop/mobile and both themes.
+
+- Verify the per-Shot “Why no low frequency” field is absent in both sound editors and both locales. Legacy `no_low_frequency_reason` values must not appear in compiled sound text; editing foley or the low-frequency limit must remove that legacy field while preserving the other audio data.
+
+- Verify that editing a script scene in the storyboard workspace can change its linked environment and updates the scene environment used by its shots. If the change would make a Clip span environments, it should be rejected with the input preserved so the boundary can be adjusted before retrying.
+
+- Verify H3 compilation checks each Shot's Subject references independently: include its registered Scene setting when that Shot references the Scene Subject, omit it when that Shot does not, even if the script scene and `scene_id` remain linked; other Shots in the same Clip follow their own references.
+
+- A full projection now mirrors the whole formal Clip list onto its scene H3 nodes: after compiling, the node's Clips must match the production Clip list, missing rows are restored and Clips that left the source are cleaned up. A Shot-local edit still only reconciles the nodes it touched, creating neither nodes nor Clips outside its targets. The manual-edit check for character groups ignores regenerated outfit binding IDs and treats an absent `outfitEnabled` as `true`. Verify that with formal Clips in two scenes of one episode, editing a single Shot in one scene leaves the other scene's Clips untouched; clearing a scene's H3 Clips and compiling again restores all of that scene's Clips in the correct order; and removing a Segment from the source cleans up its Clip row on the next compile.
+
+- The H3 workbench toolbar offers a native-versus-self-select switch for the current Clip. It writes the same value as the "self-select video model" switch in the clip settings, shows the chosen model name or "no model selected", never starts a run on its own, and turning it off restores the native H3 flow. Verify on/off before generating, that both switches stay in sync, that the model name appears after choosing one in settings, and that switching Clips shows each Clip's own state.
+
+- Self-select H3 workflows may declare more reference images, videos or audio than a Clip supplies. Empty optional slots are pruned together with their loaders, while the H3 node and output stay in the prompt graph; a required slot still fails with a clear message. Verify a workflow with fewer images, videos and audio than its slot maximum generates without submitting empty loaders, and that the existing single-image, multi-image and empty-required-image cases behave as before.
+
+- Self-select H3 workflows may declare boolean switches. The YZ "文武双全" model ships with an action-scene switch (off = drama). Off uses only the base LoRAs; on adds the martial-arts LoRA chain for that Clip. Verify the switch appears under the selected-model parameters, starts off, persists per Clip, and that one run in each mode produces a normal video without the action LoRAs applied when off.
+
+- When a Clip runs a self-select video model, H3-only latent continuation (Motion Context), staged confirmation and face refine no longer apply: they no longer block the run or split it into a first pass and confirmation, a Clip that follows a native continuation Clip starts its own run, and the saved values are kept so switching back to native H3 restores them. Verify a Clip with latent upscale confirmation and Motion Context saved runs once through the selected model without waiting for confirmation, and that turning the selected model off brings those settings back.

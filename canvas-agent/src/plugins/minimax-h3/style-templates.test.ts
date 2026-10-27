@@ -47,12 +47,17 @@ check("往返稳定", composeStoryboardOpening(roundTrip?.id ?? null, roundTrip?
 
 const savedRef2va = `summary:\n雪中相遇。\n\ndetailed_description:\n开头总体描述。\n\n[Shot 1] 人物走入画面。\n\noverall_soundscape:\n风声。`;
 const submittedRef2va = applyH3StyleTemplate(savedRef2va, "ref2va", "modern-korean");
-check("运行时插入 Ref2VA 描述段首", submittedRef2va.includes(`detailed_description:\n${currentKorean}\n\n开头总体描述。`));
+check("运行时把 Ref2VA 模板插入 summary", submittedRef2va.includes(`summary:\n${currentKorean}\n\n雪中相遇。`));
+check("Ref2VA 模板不进入详细描述", !submittedRef2va.includes(`detailed_description:\n${currentKorean}`));
+const taggedSummary = applyH3StyleTemplate(savedRef2va.replace("雪中相遇。", "[reference generation] 雪中相遇。"), "ref2va", "modern-korean");
+check("summary 模式标记仍在模板前面", taggedSummary.includes(`summary:\n[reference generation]\n\n${currentKorean}\n\n雪中相遇。`));
+check("summary 中的模板可以反推", styleTemplateFromPrompt(taggedSummary, "ref2va") === "modern-korean");
 check("不修改已保存提示词", !savedRef2va.includes(REFERENCE));
 check("关闭模板时原文不变", applyH3StyleTemplate(savedRef2va, "ref2va", null) === savedRef2va);
 const oldSaved = savedRef2va.replace("开头总体描述。", `${REFERENCE}\n\n开头总体描述。`);
 check("旧提示词能反推模板", styleTemplateFromPrompt(oldSaved, "ref2va") === "modern-korean");
-check("旧提示词运行时升级模板且不重复", !applyH3StyleTemplate(oldSaved, "ref2va", undefined).includes(REFERENCE)
+check("旧提示词运行时迁移模板且不重复", applyH3StyleTemplate(oldSaved, "ref2va", undefined).includes(`summary:\n${currentKorean}`)
+  && !applyH3StyleTemplate(oldSaved, "ref2va", undefined).includes(REFERENCE)
   && applyH3StyleTemplate(oldSaved, "ref2va", undefined).split(currentKorean).length === 2);
 check("改选模板会替换旧前缀", !applyH3StyleTemplate(oldSaved, "ref2va", "soft-light").includes(REFERENCE));
 check("清空模板会移除旧前缀", !applyH3StyleTemplate(oldSaved, "ref2va", null).includes(REFERENCE));
@@ -60,7 +65,8 @@ const guided = `detailed_description:\nKeyframe guidance.\n\n${REFERENCE}\n\n[Sh
 check("旧 MCP 指导语后的模板可识别", styleTemplateFromPrompt(guided, "ref2va") === "modern-korean");
 check("旧 MCP 指导语在运行时保留", applyH3StyleTemplate(guided, "ref2va", null).includes("Keyframe guidance."));
 const otherMode = applyH3StyleTemplate("integrated_multimodal_description:\n镜头缓慢推进。\n\noverall_soundscape:\n风声。", "i2v", "soft-light");
-check("固定首帧模式也注入到描述段首", otherMode.includes(`integrated_multimodal_description:\n${styleTemplateText("soft-light")}\n\n镜头缓慢推进。`));
+check("固定首帧模式也注入到 summary", otherMode.includes(`summary:\n${styleTemplateText("soft-light")}`)
+  && !otherMode.includes(`integrated_multimodal_description:\n${styleTemplateText("soft-light")}`));
 
 // 复现夜晚池塘场景搭配旧柔光/韩系模板的冲突，验证最终提交与原文隔离。
 const scene = "A moonlit bridge over a dark pond, illuminated by lanterns. Preserve the trees and water behind the characters.";
@@ -74,8 +80,9 @@ for (const [id, legacy] of [["modern-korean", REFERENCE], ["soft-light", legacyS
     const updated = applyH3StyleTemplate(historical, mode, undefined);
     const style = styleTemplateText(id);
     const label = `${id}/${mode}`;
-    check(`${label} 历史模板保留选择并替换`, styleTemplateFromPrompt(historical, mode) === id
-      && updated.includes(style) && !updated.includes(legacy));
+    check(`${label} 历史模板保留选择并迁移到 summary`, styleTemplateFromPrompt(historical, mode) === id
+      && updated.includes(`summary:\n${style}`) && !updated.includes(legacy)
+      && !updated.includes(`${header}:\n${style}`));
     check(`${label} 不再强制白窗背景、白天或长焦`, !updated.includes("white window light")
       && !updated.includes("sun-drenched") && !updated.includes("high-key bright exposure") && !updated.includes("long-lens"));
     check(`${label} 风格服从场景与镜头`, updated.includes("scene and shot instructions take priority")

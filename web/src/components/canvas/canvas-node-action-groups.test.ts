@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
+import { canvasNodeDropdownActions, groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
 
 const builtInIds = ["info", "delete", "saveAsset", "download", "convertToCharacter", "convertToScene", "convertToProp", "copyPrompt", "reversePrompt", "replace", "resize", "maskEdit", "crop", "split", "upscale", "superResolve", "autoLevels", "angle", "view", "compareVideo", "trimVideo", "retry", "edit", "generateImage", "config", "decreaseFont", "increaseFont", "uploadImage", "uploadVideo", "uploadAudio", "saveCharacterToAsset", "saveSceneToAsset", "arrangeGroup", "toggleOrderedGroup", "groupLock", "discardShared"];
 
@@ -21,6 +21,13 @@ test("hidden quick tools stay hidden while remaining directly executable in thei
     assert.equal(cropCalls, 1);
     assert.equal(crop, actions[1]);
     assert.deepEqual(nearbyCanvasNodeActions(actions, new Set()), []);
+});
+
+test("production toolbar More keeps Save to Asset Library even when it is not a quick tool", () => {
+    const all = [{ id: "info" }, { id: "saveAsset" }, { id: "delete", danger: true }];
+    const more = [{ id: "delete", danger: true }];
+    assert.deepEqual(canvasNodeDropdownActions(all, more, true).map(action => action.id), ["info", "saveAsset", "delete"]);
+    assert.deepEqual(canvasNodeDropdownActions(all, more, false).map(action => action.id), ["delete"]);
 });
 
 test("registered plugin actions preserve callbacks and state without recognizing a node type", () => {

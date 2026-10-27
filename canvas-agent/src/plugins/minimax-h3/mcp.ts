@@ -7,7 +7,8 @@ import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPl
 import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, resolveCharacterGroupBindings, assertReferenceCompilation } from "../../canvas/reference-contract.js";
 import { validateH3CharacterGroups } from "../../canvas/character-reference-contract.js";
 import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
-import { writeStoryboardPrompt } from "./storyboard-write.js";
+import { mergeStoryboardInput, writeStoryboardPrompt } from "./storyboard-write.js";
+import { aspectRatioOf, buildStoryboardAsset, findStoryboardAsset, listStoryboardGroups, matchesAspectRatio, parseAspectRatio, readNodeImage, resolveStoryboardGroupSlots } from "./storyboard-slots.js";
 import { isReferenceNameEcho } from "./prompt-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
@@ -35,7 +36,7 @@ const H3_NODE_PROJECTION_KEYS = [
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
-    "refImageSize", "referenceLongEdge", "teAccel", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "strictPromptTags", "referenceVideoPolicy",
+    "refImageSize", "referenceLongEdge", "teAccel", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "strictPromptTags", "referenceVideoPolicy",
 ] as const;
 
 function nodeProjection(patch: H3Segment): H3Segment {
@@ -85,7 +86,7 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
         for (const key of ["title", "prompt"]) if (Object.hasOwn(patch, key) && typeof patch[key] !== "string") throw new Error(`Clip ${segmentId} 的 ${key} 必须为字符串`);
         for (const key of ["referenceBindings", "subjects", "timeline"]) if (Object.hasOwn(patch, key) && !Array.isArray(patch[key])) throw new Error(`Clip ${segmentId} 的 ${key} 必须为数组`);
         validateH3Edit(patch);
-        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots", "tailFrameContinuation", "motionContextEnabled"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
+        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots", "storyboardInput", "tailFrameContinuation", "motionContextEnabled"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
         assertH3ClipPatch(project, target, patch, true);
         operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
         entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch), ...(edited ? { editSummary: edited.summary } : {}) });
@@ -127,10 +128,10 @@ const TOOLS: PluginMcpToolWire[] = [
     H3_GET_CLIP_TOOL,
     {
         id: "h3_get_clip_prompt", annotations: { readOnlyHint: true },
-        version: "1.0.0",
+        version: "1.2.0",
         name: "H3 读取片段提示词",
-        description: "按需读取指定 H3 Clip 的语义提示词和最终编译提示词。",
-        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
+        description: "默认只返回 H3 Clip 语义/编译提示词长度与 SHA-256；用 view='semantic' 或 'compiled' 读取指定正文，默认每次 32 KiB，按 cursor 续读并按 sha256 核对。view='storyboard' 读取结构化分镜基线（开场描述、逐镜描述/切换/时长/绑定、声景与配乐），供 h3_write_storyboard_prompt 增量改写前核对；没有基线时 established=false。",
+        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, view: { type: "string", enum: ["summary", "semantic", "compiled", "storyboard"] }, chunkBytes: { type: "integer", minimum: 1, maximum: 65536, default: 32768 }, cursor: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
     },
     {
         id: "h3_get_clip_references", annotations: { readOnlyHint: true },
@@ -150,7 +151,7 @@ const TOOLS: PluginMcpToolWire[] = [
         id: "h3_run_clip",
         version: "1.4.0",
         name: "H3 运行单段",
-        description: "通过 Backend H3 执行器运行指定片段；若上一段当前成片有匹配的完整 AV 潜变量，可直接从连续组中段续跑。",
+        description: "通过 Backend H3 执行器运行指定片段；若目标被原任务占用，先按错误建议查询并等待原任务，不要重复提交。若上一段当前成片有匹配的完整 AV 潜变量，可直接从连续组中段续跑。",
         inputJsonSchema: {
             type: "object",
             properties: {
@@ -166,9 +167,9 @@ const TOOLS: PluginMcpToolWire[] = [
         },
     },
     {
-        id: 'h3_preview_run', version: '1.0.0', name: 'H3 执行预检', annotations: { readOnlyHint: true },
-        description: '只读预检与正式运行相同的范围和参数，返回最终生效值、来源、预计尺寸、参考映射、阻断项及 planHash；不写草稿、不生成。提交时传 expectedPlanHash，过期版本或默认值变化会拒绝。',
-        inputJsonSchema: { type: 'object', properties: { projectId: { type: 'string' }, nodeId: { type: 'string' }, nodeIds: { type: 'array', items: { type: 'string' } }, segmentId: { type: 'string' }, endSegmentId: { type: 'string' }, runFromCurrent: { type: 'boolean' }, skipCompleted: { type: 'boolean' }, forceRegenerate: { type: 'boolean' }, params: { type: 'object' } }, required: ['projectId'] },
+        id: 'h3_preview_run', version: '1.1.0', name: 'H3 执行预检', annotations: { readOnlyHint: true },
+        description: '默认只返回 ready/blocked 目标、阻断项计数和 planHash；需要模型参数、参考映射与尺寸详情时传 view=full，按 clip 分页并用 cursor 续读。正式运行传同一 planHash 到 expectedPlanHash；预检过期时刷新后沿用原 idempotencyKey 提交。',
+        inputJsonSchema: { type: 'object', properties: { projectId: { type: 'string' }, nodeId: { type: 'string' }, nodeIds: { type: 'array', items: { type: 'string' } }, segmentId: { type: 'string' }, endSegmentId: { type: 'string' }, runFromCurrent: { type: 'boolean' }, skipCompleted: { type: 'boolean' }, forceRegenerate: { type: 'boolean' }, params: { type: 'object' }, view: { type: 'string', enum: ['summary', 'full'] }, pageSize: { type: 'integer', minimum: 1, maximum: 20, default: 10 }, cursor: { type: 'string' } }, required: ['projectId'] },
     },
     {
         id: "h3_get_defaults", annotations: { readOnlyHint: true },
@@ -221,9 +222,9 @@ const TOOLS: PluginMcpToolWire[] = [
     },
     {
         id: "h3_write_storyboard_prompt",
-        version: "1.3.1",
+        version: "1.5.0",
         name: "H3 写入结构化分镜提示词",
-        description: "按分镜编辑器的新结构写入单个 Clip：开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。",
+        description: "仅用于草稿（非制作绑定）Clip：按分镜编辑器的新结构写入单个 Clip——开场总体描述、逐镜描述/切换时间/切换方式/已绑定分镜图、声景和配乐；Ref2VA 模式另写 summary，并由当前人物引用按规则生成 subject_definitions 与 retention_analysis，使用共享 SHA-256 缓存。增量写入：Clip 已有结构化分镜基线（segment.storyboardInput）时，只有传入的字段被覆盖，shots 按稳定 id 逐镜合并，未提及的镜头保持原值；基线不存在时首次写入需提供完整 shots 与开场/声景/配乐。正式制作 Clip 的提示词由编译回写：改 Shot/源稿后用 production_edit(ops: replace_director_clip_storyboard) 或 production_compile(scope.targetIds=[segmentId]) 重编译，本工具对其拒绝写入。",
         inputJsonSchema: {
             type: "object",
             properties: {
@@ -232,21 +233,21 @@ const TOOLS: PluginMcpToolWire[] = [
                 segmentId: { type: "string", description: "目标 Clip 的稳定 id" },
                 dryRun: { type: "boolean", description: "只预检并返回拟写入提示词，不修改画布" },
                 summary: { type: "string", description: "Ref2VA 模式的摘要；其他模式忽略" },
-                openingDescription: { type: "string", description: "detailed_description 开头的非分镜总体描述" },
+                openingDescription: { type: "string", description: "detailed_description 开头的非分镜总体描述；增量写入时省略则保留基线" },
                 shots: {
                     type: "array",
                     minItems: 1,
+                    description: "增量写入时只需传要改的镜头（带 id），未出现的镜头保持基线原值；新镜头不能在本次写入中新增。",
                     items: {
                         type: "object",
                         properties: {
-                            id: { type: "string", description: "稳定 Shot ID；可传来源剧本的 sourceShotId，用于绑定分镜轨" },
-                            description: { type: "string", description: "分镜描述，可包含 <Subject N> 与 <Picture N> 等 H3 引用标签" },
+                            id: { type: "string", description: "稳定 Shot ID；可传来源剧本的 sourceShotId。增量写入用它定位镜头" },
+                            description: { type: "string", description: "分镜描述，可包含 <Subject N> 与 <Picture N> 等 H3 引用标签；首次写入必填" },
                             duration: { type: "number", description: "本镜在分镜轨中的精确时长（秒），可选" },
                             switchTime: { type: "string", description: "本镜头相对 Clip 开始的切换时间；第一镜忽略" },
                             transitionType: { type: "string", enum: ["continuous", "cut", "dissolve", "fade_black"], description: "从上一镜到本镜的方式：连续镜头不切镜、硬切、叠化、淡出至黑场再淡入；第一镜忽略" },
                             pictureBindingId: { type: "string", description: "当前 Clip 中已绑定的 storyboard 图片 binding id" },
                         },
-                        required: ["description"],
                     },
                 },
                 referenceBindings: {
@@ -254,10 +255,10 @@ const TOOLS: PluginMcpToolWire[] = [
                     description: "可选地原子替换本 Clip 的手工参考绑定；角色组参考仍从 h3CharacterGroups 派生。",
                     items: { type: "object", properties: { id: { type: "string" }, assetId: { type: "string" }, label: { type: "string" }, role: { type: "string" }, storageKey: { type: "string" } }, required: ["id", "assetId", "label", "role"] },
                 },
-                overallSoundscape: { type: "string" },
-                nonDiegeticMusic: { type: "string" },
+                overallSoundscape: { type: "string", description: "整体声景；增量写入时省略则保留基线" },
+                nonDiegeticMusic: { type: "string", description: "非画内配乐；增量写入时省略则保留基线" },
             },
-            required: ["projectId", "nodeId", "segmentId", "openingDescription", "shots", "overallSoundscape", "nonDiegeticMusic"],
+            required: ["projectId", "nodeId", "segmentId"],
         },
     },
     {
@@ -330,8 +331,44 @@ const TOOLS: PluginMcpToolWire[] = [
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
     { id: "h3_set_reference_bindings", version: "1.3.0", name: "设置 Clip 参考绑定", description: "整组替换指定 Clip 的手工参考绑定（场景、分镜、关键帧、音频、色卡、道具等），不修改节点位置或运行状态。角色组人物与其服装图片的参考绑定是 h3CharacterGroups 的派生视图，由编译器自动生成：增删改角色、服装或启用状态请调用 h3_bind_existing_character_groups，本工具只需管好非角色组参考。单张分镜图替换请用 h3_replace_storyboard_binding。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
-    { id: "h3_replace_storyboard_binding", version: "1.0.0", name: "替换单个 Clip 分镜绑定", description: "按 bindingId 和旧 storageKey 只替换一个 storyboard 参考；服务端读取原始绑定做 CAS，保留角色组、其他参考与任务历史。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindingId: { type: "string" }, expectedStorageKey: { type: "string" }, assetId: { type: "string", description: "已登记且指向新分镜图的项目参考资产 ID" } }, required: ["projectId", "nodeId", "segmentId", "bindingId", "expectedStorageKey", "assetId"] } },
-    { id: "canvas_replace_storyboard_slots", version: "1.0.0", name: "替换分镜组指定槽位", description: "一次画布事务替换有序分镜组的指定槽位、来源槽位及关联参考资产；旧节点和媒体保留。新图尺寸需符合 expectedAspectRatio。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, groupId: { type: "string" }, expectedAspectRatio: { type: "string", description: "目标画幅，例如 9:16" }, slots: { type: "array", items: { type: "object", properties: { slot: { type: "integer", description: "从 1 开始的槽位序号" }, expectedNodeId: { type: "string" }, nodeId: { type: "string", description: "已生成新图的节点 ID" }, assetIds: { type: "array", items: { type: "string" } }, label: { type: "string" } }, required: ["slot", "expectedNodeId", "nodeId", "assetIds"] } } }, required: ["projectId", "groupId", "expectedAspectRatio", "slots"] } },
+    { id: "h3_replace_storyboard_binding", version: "1.1.0", name: "替换单个 Clip 分镜绑定", description: "按 bindingId 只替换一个 storyboard 参考；expectedStorageKey 省略时以服务端读到的当前 storageKey 做 CAS，冲突再报错。保留角色组、其他参考与任务历史。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindingId: { type: "string" }, expectedStorageKey: { type: "string", description: "旧 storageKey；省略时用服务端当前值做 CAS" }, assetId: { type: "string", description: "已登记且指向新分镜图的项目参考资产 ID" } }, required: ["projectId", "nodeId", "segmentId", "bindingId", "assetId"] } },
+    {
+        id: "canvas_get_storyboard_slots", annotations: { readOnlyHint: true },
+        version: "1.0.0",
+        name: "读取分镜组槽位",
+        description: "读取有序分镜组的槽位账本：每槽的序号、节点、标题、活动图 storageKey、尺寸与画幅、已登记的分镜资产，以及账本漂移问题（groupSlots 为空、成员归属串组、shotCount 不符）。槽位账本为空时会按成员归属或源视频分镜镜头重建后再返回。省略 groupId 时只列出项目内全部分镜组摘要，用返回的 groupId 再读槽位明细。",
+        inputJsonSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string" },
+                groupId: { type: "string", description: "省略时只列出项目内全部分镜组摘要" },
+            },
+            required: ["projectId"],
+        },
+    },
+    {
+        id: "canvas_replace_storyboard_slots",
+        version: "1.1.0",
+        name: "替换分镜组指定槽位",
+        description: "一次画布事务替换有序分镜组的指定槽位、来源槽位及关联参考资产；旧节点和媒体保留。槽位账本为空或与成员归属不一致时先按成员/源视频分镜镜头重建。expectedAspectRatio 省略时以组内首个有效槽位图的画幅为目标；expectedNodeId 省略时以服务端读到的当前槽位做 CAS；assetIds 省略时自动复用或登记该图的分镜资产。传 dryRun 只预检不写画布。",
+        inputJsonSchema: {
+            type: "object",
+            properties: {
+                projectId: { type: "string" },
+                groupId: { type: "string", description: "有序分镜组节点 ID；不确定时先用 canvas_get_storyboard_slots 列出" },
+                expectedAspectRatio: { type: "string", description: "目标画幅，例如 9:16；省略时取组内首个有效槽位图的画幅" },
+                dryRun: { type: "boolean", description: "只校验槽位与画幅并返回将改动的资产，不写画布" },
+                slots: { type: "array", minItems: 1, items: { type: "object", properties: {
+                    slot: { type: "integer", description: "从 1 开始的槽位序号" },
+                    expectedNodeId: { type: "string", description: "当前槽位节点 ID；省略时以服务端当前值做 CAS" },
+                    nodeId: { type: "string", description: "已生成新图的节点 ID" },
+                    assetIds: { type: "array", items: { type: "string" }, description: "省略时自动复用或登记该图的分镜资产" },
+                    label: { type: "string" },
+                }, required: ["slot", "nodeId"] } },
+            },
+            required: ["projectId", "groupId", "slots"],
+        },
+    },
     { id: "h3_bind_existing_character_groups", version: "1.2.0", name: "绑定或移除 Clip 角色组", description: "从已有 character 节点构建当前 Clip 的角色组；也可按稳定 groupId 移除角色组及其角色参考绑定。characters 与 removeGroupIds 至少提供一项；不删除角色节点或画布连线。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, characters: { type: "array", items: { type: "object", properties: { characterNodeId: { type: "string" }, subjectId: { type: "string", description: "提示词使用的稳定 subjectId；将同步写入角色组和全部角色参考绑定" }, selectedOutfitStorageKeys: { type: "array", items: { type: "string" } }, voiceEnabled: { type: "boolean" } }, required: ["characterNodeId", "selectedOutfitStorageKeys"] } }, removeGroupIds: { type: "array", items: { type: "string" }, description: "要从当前 Clip 移除的稳定角色组 ID；对应角色组参考绑定也会一起移除" } }, required: ["projectId", "nodeId", "segmentId"] } },
     { id: "canvas_validate_generation", annotations: { readOnlyHint: true }, version: "1.1.0", name: "生成预检", description: "使用与 Backend 实际提交相同的编译器预检语义提示词、参考顺序、模式上限和缺失媒体。调用成功即代表预检已跑完；是否可生成看返回的 ready（true 可生成）与 blockingIssues 列表，不要把 ready:false 当作工具调用失败。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] } },
 ];
@@ -455,10 +492,15 @@ async function readH3Clip(context: PluginMcpContext, input: Record<string, unkno
         const ids = segmentsOf(node).map((item) => String(item.id || "")).filter(Boolean);
         throw new Error(`找不到片段:${segmentId}；当前 Clip ID：${ids.slice(0, 50).join("、")}${ids.length > 50 ? `（另有 ${ids.length - 50} 个）` : ""}；请先调用 h3_get_node 核对当前时间线`);
     }
-    if (!compile) return { projectId, nodeId, segmentId, segment, revision: Number(project.revision || 0), timings: { projectReadMs }, snapshot: undefined };
+    const revision = Number(project.revision || 0);
+    if (input.ifRevision !== undefined && Number(input.ifRevision) === revision
+        && !(Array.isArray(input.include) && input.include.includes("result"))) {
+        return { projectId, nodeId, segmentId, segment, revision, unchanged: true, timings: { projectReadMs }, snapshot: undefined };
+    }
+    if (!compile) return { projectId, nodeId, segmentId, segment, revision, timings: { projectReadMs }, snapshot: undefined };
     const compileStarted = Date.now();
     const compilation = compileReferenceSubmission(project, segment);
-    return { projectId, nodeId, segmentId, segment, revision: Number(project.revision || 0), timings: { projectReadMs, compileMs: Date.now() - compileStarted }, snapshot: buildH3ClipSnapshot(segment, compilation) };
+    return { projectId, nodeId, segmentId, segment, revision, timings: { projectReadMs, compileMs: Date.now() - compileStarted }, snapshot: buildH3ClipSnapshot(segment, compilation) };
 }
 
 function runtimeValuesOf(segment: H3Segment) {
@@ -565,7 +607,31 @@ export const pluginMcp: PluginMcpModule = {
         return {
             h3_preview_run: async (input) => {
                 if (!context.backend.previewH3Generation) throw new Error('Backend 缺少 H3 执行预检能力');
-                return context.backend.previewH3Generation({ ...input, mode: 'video', operation: 'h3-run' } as import('../../canvas/generation-contract.js').CanvasGenerationCommand);
+                const { view = 'summary', pageSize: rawPageSize, cursor, ...runInput } = input;
+                const pageSize = Math.min(20, Math.max(1, Number(rawPageSize) || 10));
+                const preview = await context.backend.previewH3Generation({ ...runInput, mode: 'video', operation: 'h3-run' } as import('../../canvas/generation-contract.js').CanvasGenerationCommand);
+                const clips = Array.isArray(preview.clips) ? preview.clips : [];
+                const diagnostics = Array.isArray(preview.blockedTargets) ? preview.blockedTargets : Array.isArray(preview.diagnostics) ? preview.diagnostics : [];
+                const counts = Object.fromEntries([...new Set(diagnostics.map(item => String((item as Record<string, unknown>).code || 'UNKNOWN')))].map(code => [code, diagnostics.filter(item => String((item as Record<string, unknown>).code || 'UNKNOWN') === code).length]));
+                const selection = JSON.stringify({ projectId: runInput.projectId, nodeId: runInput.nodeId, nodeIds: runInput.nodeIds, segmentId: runInput.segmentId, endSegmentId: runInput.endSegmentId, runFromCurrent: runInput.runFromCurrent, skipCompleted: runInput.skipCompleted, forceRegenerate: runInput.forceRegenerate, params: runInput.params, revision: preview.revision, planHash: preview.planHash, pageSize });
+                if (view !== 'full') return {
+                    ready: preview.ready, projectId: runInput.projectId, revision: preview.revision, planHash: preview.planHash,
+                    targetCount: clips.length, readyTargets: preview.readyTargets, blockedTargetCount: diagnostics.length,
+                    diagnosticCounts: counts, blockedTargets: diagnostics,
+                    nextRead: clips.length ? { tool: 'h3_preview_run', input: { ...runInput, view: 'full', pageSize } } : undefined,
+                };
+                let offset = 0;
+                if (cursor) {
+                    let decoded: Record<string, unknown>;
+                    try { decoded = JSON.parse(decodeURIComponent(String(cursor))); } catch { throw new Error('INVALID_CURSOR'); }
+                    if (decoded.selection !== selection) throw new Error('READ_CURSOR_EXPIRED: 预检内容或目标范围已变化，请重新读取 summary');
+                    offset = Number(decoded.offset);
+                    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('INVALID_CURSOR');
+                }
+                const page = clips.slice(offset, offset + pageSize), nextOffset = offset + page.length;
+                const nextCursor = nextOffset < clips.length ? encodeURIComponent(JSON.stringify({ selection, offset: nextOffset })) : null;
+                const { clips: _clips, diagnostics: _diagnostics, blockedTargets: _blockedTargets, ...summary } = preview;
+                return { ...summary, targetCount: clips.length, blockedTargets: diagnostics, clips: page, clipOffset: offset, pageSize, nextCursor };
             },
             h3_get_defaults: async () => context.backend.getH3Defaults(),
             h3_set_defaults: async (input) => {
@@ -653,25 +719,49 @@ export const pluginMcp: PluginMcpModule = {
                 }
                 const previous = bindings[index];
                 if (previous.storageKey === storageKey && previous.assetId === assetId) return { ok: true, unchanged: true, projectId, nodeId, segmentId, bindingId, storageKey };
-                if (previous.storageKey !== expectedStorageKey) throw new Error(`binding ${bindingId} 已变化；当前 storageKey:${previous.storageKey || ""}`);
+                // 省略 expectedStorageKey 时以本次读到的原绑定为准；写入仍带 expectedFields 做服务端 CAS。
+                if (expectedStorageKey && previous.storageKey !== expectedStorageKey) throw new Error(`binding ${bindingId} 已变化；当前 storageKey:${previous.storageKey || ""}`);
                 bindings[index] = { ...previous, assetId, label: asset.label, storageKey, url: `/media/${encodeURIComponent(storageKey)}`, mimeType: asset.mimeType || "image/png", sourceNodeId };
                 assertReferenceCompilation(compileReferenceSubmission(project, { ...segment, referenceBindings: bindings }));
                 const result = await context.backend.applyCanvasOperations(projectId, [{ type: "update_h3_segment", nodeId, segmentId, patch: { referenceBindings: bindings }, expectedFields: { referenceBindings: segment.referenceBindings } }], Number(project.revision || 0));
                 return { ok: true, projectId, nodeId, segmentId, bindingId, oldStorageKey: previous.storageKey, storageKey, revision: result.revision };
             },
+            canvas_get_storyboard_slots: async (input) => {
+                const projectId = String(input.projectId || "");
+                const project = await context.getCanvasProject(projectId);
+                const groupId = String(input.groupId || "");
+                const revision = Number(project.revision || 0);
+                if (!groupId) {
+                    const groups = listStoryboardGroups(project).map((group) => ({
+                        groupId: group.groupId,
+                        title: group.title,
+                        slotCount: group.slots.length,
+                        slotSource: group.slotSource,
+                        declaredShotCount: group.declaredShotCount,
+                        issueCodes: [...new Set(group.issues.map((issue) => issue.code))],
+                    }));
+                    return { ok: true, projectId, revision, groupCount: groups.length, groups, nextRead: groups.length ? "传 groupId 读取该组逐槽位详情" : "项目内没有有序分镜组" };
+                }
+                const resolved = resolveStoryboardGroupSlots(project, groupId);
+                return { ok: true, projectId, revision, ...resolved };
+            },
             canvas_replace_storyboard_slots: async (input) => {
                 const projectId = String(input.projectId || "");
                 const groupId = String(input.groupId || "");
-                const ratio = /^([1-9]\d*):([1-9]\d*)$/.exec(String(input.expectedAspectRatio || ""));
-                if (!ratio) throw new Error("expectedAspectRatio 必须为宽:高，例如 9:16");
-                const targetRatio = Number(ratio[1]) / Number(ratio[2]);
+                const dryRun = input.dryRun === true;
                 const project = await context.getCanvasProject(projectId);
                 const nodes = Array.isArray(project.nodes) ? project.nodes as AgentCanvasNode[] : [];
-                const group = nodes.find((item) => item.id === groupId);
-                const metadata = recordOf(group?.metadata);
-                if (!group || group.type !== "group" || metadata.orderedGroup !== true || !Array.isArray(metadata.groupSlots)) throw new Error(`找不到有序分镜组:${groupId}`);
-                const slots = [...metadata.groupSlots].map(String);
+                const resolved = resolveStoryboardGroupSlots(project, groupId);
+                if (!resolved.slots.length) throw new Error(`${resolved.issues.find((issue) => issue.code === "STORYBOARD_SLOT_EMPTY")?.message || `分镜组没有可识别的槽位:${groupId}`}；请先在画布上把镜头图归入该组`);
+                const metadata = recordOf(nodes.find((item) => item.id === groupId)?.metadata);
+                const slots = resolved.slots.map((slot) => slot.nodeId);
                 const sources = Array.isArray(metadata.sourceGroupSlots) ? [...metadata.sourceGroupSlots].map(String) : [...slots];
+                const explicitRatio = parseAspectRatio(input.expectedAspectRatio);
+                if (input.expectedAspectRatio && !explicitRatio) throw new Error("expectedAspectRatio 必须为宽:高，例如 9:16");
+                const baseline = resolved.slots.find((slot) => slot.width > 0 && slot.height > 0);
+                const targetRatio = explicitRatio ?? (baseline ? baseline.width / baseline.height : undefined);
+                if (!targetRatio) throw new Error("无法从现有槽位推导目标画幅：组内还没有带尺寸的图，请显式传 expectedAspectRatio");
+                const targetRatioText = String(input.expectedAspectRatio || "") || aspectRatioOf(baseline!.width, baseline!.height) || "";
                 const catalog = referenceCatalogOf(project);
                 const raw = Array.isArray(input.slots) ? input.slots.map(recordOf) : [];
                 if (!raw.length) throw new Error("slots 至少指定一项");
@@ -679,39 +769,72 @@ export const pluginMcp: PluginMcpModule = {
                 const usedAssets = new Set<string>();
                 const operations: Array<Record<string, unknown>> = [];
                 const changed: Array<Record<string, unknown>> = [];
-                for (const entry of raw) {
+                let sourceResynced = false;
+                const blocked: Array<{ slot: number; code: string; message: string }> = [];
+                const processEntry = (entry: Record<string, any>) => {
                     const index = Number(entry.slot) - 1;
-                    const oldNodeId = String(entry.expectedNodeId || "");
                     const nodeId = String(entry.nodeId || "");
-                    if (!Number.isInteger(index) || index < 0 || index >= slots.length || used.has(index)) throw new Error(`槽位无效或重复:${entry.slot}`);
+                    if (!Number.isInteger(index) || index < 0 || index >= slots.length || used.has(index)) throw new Error(`STORYBOARD_SLOT_INVALID: 槽位 ${String(entry.slot)} 无效或重复；该组当前 ${slots.length} 个槽位（1–${slots.length}）`);
                     used.add(index);
-                    const unchanged = slots[index] === nodeId;
-                    if (!unchanged && slots[index] !== oldNodeId) throw new Error(`第 ${index + 1} 槽已变化；当前节点:${slots[index]}`);
-                    if (unchanged && sources[index] !== nodeId) throw new Error(`第 ${index + 1} 槽来源与成员不一致`);
+                    const currentNodeId = slots[index];
+                    const unchanged = currentNodeId === nodeId;
+                    const expectedNodeId = String(entry.expectedNodeId || "");
+                    if (!unchanged && expectedNodeId && currentNodeId !== expectedNodeId) throw new Error(`STORYBOARD_SLOT_CHANGED: 第 ${index + 1} 槽已变化；当前节点 ${currentNodeId}`);
                     const node = nodes.find((item) => item.id === nodeId);
-                    if (!node || String(recordOf(node.metadata).status || "") !== "success") throw new Error(`新分镜节点尚无成功结果:${nodeId}`);
-                    const image = activeImageOf(node);
-                    if (!image.storageKey.startsWith("image:") || !(image.width > 0 && image.height > 0)) throw new Error(`新分镜缺少活动图片尺寸:${nodeId}`);
-                    if (Math.abs(image.width - image.height * targetRatio) > 1) throw new Error(`第 ${index + 1} 槽图片比例不符:${image.width}×${image.height}`);
-                    const assetIds = Array.isArray(entry.assetIds) ? [...new Set(entry.assetIds.map(String))] : [];
-                    if (!assetIds.length) throw new Error(`第 ${index + 1} 槽未指定参考资产 ID`);
+                    const nodeMetadata = recordOf(node?.metadata);
+                    if (!node || String(nodeMetadata.status || "") !== "success") throw new Error(`STORYBOARD_SLOT_NO_RESULT: 新分镜节点尚无成功结果:${nodeId}`);
+                    const image = readNodeImage(node as unknown as Record<string, any>);
+                    if (!image.storageKey.startsWith("image:") || !(image.width > 0 && image.height > 0)) throw new Error(`STORYBOARD_SLOT_NO_IMAGE: 新分镜缺少活动图片尺寸:${nodeId}`);
+                    if (!matchesAspectRatio(image.width, image.height, targetRatio)) throw new Error(`STORYBOARD_ASPECT_MISMATCH: 第 ${index + 1} 槽图片 ${image.width}×${image.height}（${aspectRatioOf(image.width, image.height) || "未知"}）不符合目标画幅 ${targetRatioText}`);
+                    let assetIds = Array.isArray(entry.assetIds) ? [...new Set(entry.assetIds.map(String))] : [];
+                    let created: ReturnType<typeof buildStoryboardAsset> | undefined;
+                    if (!assetIds.length) {
+                        // 换图最常见的诉求是「换一张」，不该强制调用方先手工登记资产。
+                        const reusable = findStoryboardAsset(project, nodeId, image.storageKey);
+                        if (reusable) assetIds = [reusable.id];
+                        else {
+                            created = buildStoryboardAsset({ nodeId, storageKey: image.storageKey, label: String(entry.label || `${resolved.title || "分镜"} 第${index + 1}镜`), url: `/media/${encodeURIComponent(image.storageKey)}`, mimeType: image.mimeType || "image/png" });
+                            assetIds = [created.id];
+                        }
+                    }
                     for (const assetId of assetIds) {
-                        if (usedAssets.has(assetId)) throw new Error(`参考资产在多个槽位重复:${assetId}`);
+                        if (usedAssets.has(assetId)) throw new Error(`STORYBOARD_ASSET_DUPLICATE: 参考资产在多个槽位重复:${assetId}`);
                         usedAssets.add(assetId);
-                        const asset = catalog.find((item) => item.id === assetId);
-                        if (!asset || inferReferenceRole(asset) !== "storyboard") throw new Error(`找不到分镜参考资产:${assetId}`);
-                        if (unchanged && (asset.storageKey !== image.storageKey || asset.sourceNodeId !== nodeId)) throw new Error(`第 ${index + 1} 槽成员已更新，但资产 ${assetId} 未同步`);
-                        if (!unchanged) operations.push({ type: "upsert_reference_asset", asset: { ...asset, ...(entry.label ? { label: String(entry.label) } : {}), storageKey: image.storageKey, url: `/media/${encodeURIComponent(image.storageKey)}`, sourceNodeId: nodeId, updatedAt: new Date().toISOString() } });
+                        const asset = created && created.id === assetId ? created : catalog.find((item) => item.id === assetId);
+                        if (!asset) throw new Error(`STORYBOARD_ASSET_NOT_FOUND: 找不到分镜参考资产:${assetId}`);
+                        if (inferReferenceRole(asset) !== "storyboard") throw new Error(`STORYBOARD_ASSET_ROLE: 资产 ${assetId} 的职责不是 storyboard`);
+                        if (unchanged && !created && (asset.storageKey !== image.storageKey || asset.sourceNodeId !== nodeId)) throw new Error(`STORYBOARD_ASSET_STALE: 第 ${index + 1} 槽成员已更新，但资产 ${assetId} 未同步`);
+                        if (!unchanged || created) operations.push({ type: "upsert_reference_asset", asset: created ?? { ...asset, ...(entry.label ? { label: String(entry.label) } : {}), storageKey: image.storageKey, url: `/media/${encodeURIComponent(image.storageKey)}`, sourceNodeId: nodeId, updatedAt: new Date().toISOString() } });
+                    }
+                    if (unchanged && sources[index] !== nodeId) {
+                        // 来源槽位账本漂移不该让整批替换失败，直接按实际成员纠正。
+                        sources[index] = nodeId;
+                        sourceResynced = true;
                     }
                     slots[index] = nodeId;
                     sources[index] = nodeId;
-                    changed.push({ slot: index + 1, oldNodeId, nodeId, storageKey: image.storageKey, width: image.width, height: image.height, assetIds, unchanged });
+                    changed.push({ slot: index + 1, oldNodeId: currentNodeId, nodeId, storageKey: image.storageKey, width: image.width, height: image.height, assetIds, autoAsset: Boolean(created), unchanged });
+                };
+                for (const entry of raw) {
+                    try {
+                        processEntry(entry);
+                    } catch (error) {
+                        // 预检要一次看全所有被拒槽位；真正写入时才在第一个错误上停下。
+                        if (!dryRun) throw error;
+                        const message = error instanceof Error ? error.message : String(error);
+                        const separator = message.indexOf(": ");
+                        const code = separator > 0 ? message.slice(0, separator) : "STORYBOARD_SLOT_REJECTED";
+                        blocked.push({ slot: Number(entry.slot) || 0, code, message: separator > 0 ? message.slice(separator + 2) : message });
+                        used.delete(Number(entry.slot) - 1);
+                    }
                 }
                 if (new Set(slots).size !== slots.length) throw new Error("分镜组成员不能重复");
-                if (!operations.length) return { ok: true, unchanged: true, projectId, groupId, revision: project.revision, slots: changed };
+                const rebuildNeeded = resolved.slotSource !== "groupSlots" || sourceResynced;
+                if (dryRun) return { ok: true, dryRun: true, ready: blocked.length === 0, applied: false, projectId, groupId, revision: Number(project.revision || 0), slotSource: resolved.slotSource, targetAspectRatio: targetRatioText, slots: changed, blocked, issues: resolved.issues };
+                if (!operations.length && !rebuildNeeded) return { ok: true, unchanged: true, projectId, groupId, revision: project.revision, slotSource: resolved.slotSource, targetAspectRatio: targetRatioText, slots: changed, issues: resolved.issues };
                 operations.unshift({ type: "update_node", id: groupId, metadata: { groupSlots: slots, sourceGroupSlots: sources } });
                 const result = await context.backend.applyCanvasOperations(projectId, operations, Number(project.revision || 0));
-                return { ok: true, projectId, groupId, revision: result.revision, slots: changed };
+                return { ok: true, projectId, groupId, revision: result.revision, slotSource: resolved.slotSource, targetAspectRatio: targetRatioText, rebuilt: resolved.slotSource !== "groupSlots" || sourceResynced, slots: changed, issues: resolved.issues };
             },
             h3_bind_existing_character_groups: async (input) => {
                 const projectId = String(input.projectId || "");
@@ -900,23 +1023,29 @@ export const pluginMcp: PluginMcpModule = {
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
                 const segment = segmentsOf(node).find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
+                if (recordOf(segment.productionClipProjection).targetId) throw new Error("FORMAL_CLIP_OWNED: 正式 Clip 提示词由编译回写；请在制作台修改对应 Shot/源稿后经 production_edit(ops: replace_director_clip_storyboard) 或 production_compile(scope.targetIds=[segmentId]) 重新编译。本工具只写入草稿 Clip。");
                 const promptStarted = Date.now();
-                const generated = writeStoryboardPrompt(project, segment, input);
+                const merged = mergeStoryboardInput(segment.storyboardInput, input, { existingShotCount: Array.isArray(segment.storyboardShots) ? segment.storyboardShots.length : 0 });
+                const generated = writeStoryboardPrompt(project, segment, {
+                    ...merged.input,
+                    ...(Array.isArray(input.referenceBindings) ? { referenceBindings: input.referenceBindings } : {}),
+                });
                 const promptBuildMs = Date.now() - promptStarted;
-                if (input.dryRun === true) return { ok: true, dryRun: true, applied: false, unchanged: generated.unchanged, projectId, nodeId, segmentId, revision: Number(project.revision || 0), fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, prompt: generated.prompt, promptLength: generated.prompt.length, referenceBindings: generated.referenceBindings || [], storyboardShots: generated.storyboardShots || [], storyboardDurations: generated.storyboardDurations, timings: { promptBuildMs, applyMs: 0 } };
-                if (generated.unchanged) return { ok: true, unchanged: true, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, promptLength: String(segment.prompt || "").length, timings: { promptBuildMs, applyMs: 0 } };
+                if (input.dryRun === true) return { ok: true, dryRun: true, applied: false, unchanged: generated.unchanged, projectId, nodeId, segmentId, revision: Number(project.revision || 0), fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, shotIds: merged.shotIds, changedShotIds: merged.changedShotIds, established: merged.established, prompt: generated.prompt, promptLength: generated.prompt.length, referenceBindings: generated.referenceBindings || [], storyboardShots: generated.storyboardShots || [], storyboardDurations: generated.storyboardDurations, timings: { promptBuildMs, applyMs: 0 } };
+                if (generated.unchanged) return { ok: true, unchanged: true, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, shotIds: merged.shotIds, changedShotIds: merged.changedShotIds, promptLength: String(segment.prompt || "").length, timings: { promptBuildMs, applyMs: 0 } };
                 const applyStarted = Date.now();
                 const result = await context.backend.applyCanvasOperations(projectId, [{ type: "update_h3_segment", nodeId, segmentId, patch: {
                     prompt: generated.prompt,
                     ...(generated.referenceBindings ? { referenceBindings: generated.referenceBindings } : {}),
                     ...(generated.storyboardShots ? { storyboardShots: generated.storyboardShots } : {}),
+                    ...(generated.storyboardInput ? { storyboardInput: generated.storyboardInput } : {}),
                     ...(generated.cache ? { storyboardPromptCache: generated.cache } : {}),
                     ...(Object.keys(generated.storyboardDurations).length ? { storyboardDurations: generated.storyboardDurations } : {}),
                 }}], Number(project.revision || 0));
                 const refreshed = (result.project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === nodeId) as AgentCanvasNode | undefined;
                 const updated = refreshed && segmentsOf(refreshed).find((item) => String(item.id || "") === segmentId);
                 if (!updated) throw new Error(`分镜提示词写入后读取失败:${segmentId}`);
-                return { ok: true, unchanged: false, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, promptLength: generated.prompt.length, timings: { promptBuildMs, applyMs: Date.now() - applyStarted } };
+                return { ok: true, unchanged: false, projectId, nodeId, segmentId, fingerprint: generated.fingerprint, subjectCount: generated.subjectCount, shotCount: generated.shotCount, shotIds: merged.shotIds, changedShotIds: merged.changedShotIds, established: merged.established, promptLength: generated.prompt.length, timings: { promptBuildMs, applyMs: Date.now() - applyStarted } };
             },
             h3_list_models: async (input) => {
                 const query = modelCatalogReadSchema.parse(input);
@@ -925,15 +1054,16 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip: async (input) => {
                 const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
-                const { projectId, nodeId, segmentId, segment, revision, timings, snapshot } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"));
+                const { projectId, nodeId, segmentId, segment, revision, timings, snapshot, unchanged } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"));
                 if ((input.taskId !== undefined || input.storageKey !== undefined) && !include.has("result")) throw Object.assign(new Error("taskId/storageKey 必须与 include:result 一起使用，不能被总览查询忽略"), { code: "INVALID_INPUT" });
                 const result = include.has("result") ? await readClipResult(context, input, segment) : undefined;
-                const projected = input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
+                const projected = unchanged || input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
                 const bindings = resolveCharacterGroupBindings(referenceBindingsOf(segment).bindings, segment);
                 const runtime = runtimeValuesOf(segment);
                 const groups = recordOf(segment.h3CharacterGroups);
                 return {
                     ok: true,
+                    ...(unchanged ? { unchanged: true } : {}),
                     projectId,
                     nodeId,
                     segmentId,
@@ -946,22 +1076,74 @@ export const pluginMcp: PluginMcpModule = {
                         resultStorageKey: segment.resultStorageKey,
                         hasResult: Boolean(segment.result || segment.resultStorageKey),
                     },
-                    prompt: { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
+                    prompt: unchanged ? { unchanged: true } : { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
                     runtimeFieldCount: Object.keys(runtime).length,
                     referenceCount: snapshot ? snapshot.references.length : bindings.filter(binding => binding.enabled).length,
                     characterGroupCount: Object.keys(groups).length,
-                    ...(snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
+                    ...(unchanged ? {} : snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
                     timings,
                     ...projected,
                     ...(include.has("prompt") && snapshot ? { prompt: snapshot.prompt } : {}),
                     ...(include.has("references") && snapshot ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
-                    ...(include.has("runtime") ? { runtime } : {}),
+                    ...(include.has("runtime") && !unchanged ? { runtime } : {}),
                     ...(result ? { result } : {}),
                 };
             },
             h3_get_clip_prompt: async (input) => {
+                if (input.view === "storyboard") {
+                    // 结构化分镜基线：增量改写前先读它，才知道每一镜当前写了什么。
+                    const { projectId, nodeId, segmentId, revision, timings, segment } = await readH3Clip(context, input, undefined, false);
+                    const storyboard = recordOf(segment?.storyboardInput);
+                    const shots = Array.isArray(storyboard.shots) ? storyboard.shots : [];
+                    return {
+                        ok: true, projectId, nodeId, segmentId, revision,
+                        storyboard: {
+                            established: shots.length > 0,
+                            summary: String(storyboard.summary || ""),
+                            openingDescription: String(storyboard.openingDescription || ""),
+                            shots,
+                            overallSoundscape: String(storyboard.overallSoundscape || ""),
+                            nonDiegeticMusic: String(storyboard.nonDiegeticMusic || ""),
+                        },
+                        nextWrite: shots.length
+                            ? { tool: "h3_write_storyboard_prompt", input: { projectId, nodeId, segmentId, shots: [{ id: String(recordOf(shots[0]).id || ""), description: "新的分镜描述" }] } }
+                            : { tool: "h3_write_storyboard_prompt", input: { projectId, nodeId, segmentId, openingDescription: "开场总体描述", shots: [{ description: "第一镜描述" }], overallSoundscape: "整体声景", nonDiegeticMusic: "配乐" } },
+                        timings,
+                    };
+                }
                 const { projectId, nodeId, segmentId, revision, timings, snapshot } = await readH3Clip(context, input);
-                return { ok: true, projectId, nodeId, segmentId, revision, prompt: snapshot!.prompt, timings };
+                const prompt = snapshot!.prompt;
+                const semantic = prompt.semantic, compiled = prompt.compiled;
+                const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+                if (!input.view || input.view === "summary") return {
+                    ok: true, projectId, nodeId, segmentId, revision,
+                    prompt: {
+                        semantic: { characters: semantic.length, bytes: Buffer.byteLength(semantic, "utf8"), sha256: hash(semantic) },
+                        compiled: { characters: compiled.length, bytes: Buffer.byteLength(compiled, "utf8"), sha256: hash(compiled) },
+                    },
+                    nextRead: { tool: "h3_get_clip_prompt", input: { projectId, nodeId, segmentId, view: "compiled", chunkBytes: 32768 } },
+                    timings,
+                };
+                const view = input.view === "semantic" ? "semantic" : "compiled";
+                const value = view === "semantic" ? semantic : compiled;
+                const chunkBytes = Math.min(65536, Math.max(1, Number(input.chunkBytes) || 32768));
+                const selection = JSON.stringify({ projectId, nodeId, segmentId, revision, view, sha256: hash(value) });
+                let offset = 0;
+                if (input.cursor) {
+                    let cursor: Record<string, unknown>;
+                    try { cursor = JSON.parse(decodeURIComponent(String(input.cursor))); } catch { throw new Error("INVALID_CURSOR"); }
+                    if (cursor.selection !== selection) throw new Error("READ_CURSOR_EXPIRED: Clip 内容或版本已变化，请从当前版本重新读取");
+                    offset = Number(cursor.offset);
+                    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("INVALID_CURSOR");
+                }
+                const bytes = new TextEncoder().encode(value);
+                if (offset > bytes.length || (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80)) throw new Error("INVALID_CURSOR: 非 UTF-8 边界");
+                let end = Math.min(bytes.length, offset + chunkBytes);
+                while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+                if (end === offset && offset < bytes.length) throw new Error("CHUNK_TOO_SMALL: chunkBytes 无法容纳下一个字符");
+                const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end));
+                const nextCursor = end < bytes.length ? encodeURIComponent(JSON.stringify({ selection, offset: end })) : null;
+                return { ok: true, projectId, nodeId, segmentId, revision, view, sha256: hash(value), bytes: bytes.length, offset, text, nextCursor, timings };
             },
             h3_get_clip_references: async (input) => {
                 const { projectId, nodeId, segmentId, revision, timings, snapshot } = await readH3Clip(context, input);

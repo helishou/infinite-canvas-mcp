@@ -1,4 +1,4 @@
-import { continuityReasonLength, type ContinuityChangeInput } from './continuity-event-draft';
+import type { ContinuityChangeInput } from './continuity-event-draft';
 import type { ContinuityRow, visibleContinuityTrack } from './continuity-timeline-model';
 
 type VisibleTrack = Pick<ReturnType<typeof visibleContinuityTrack>, "duration" | "segments"> & { markers: Array<{ frame: number; event: ContinuityRow }> };
@@ -22,6 +22,20 @@ export function continuityTrackInsertFrame(view: VisibleTrack) {
     }
 }
 
+/** The row-level add action targets the first visible Shot that still has a free change frame. */
+export function continuityRowInsertTarget(candidates: Array<{ shotId: string; view: VisibleTrack }>): { shotId: string; frame: number } | undefined {
+    for (const candidate of candidates) {
+        const frame = continuityTrackInsertFrame(candidate.view);
+        if (frame !== undefined) return { shotId: candidate.shotId, frame };
+    }
+}
+
+/** Shot-local time reads as seconds for people; exact frames stay next to it. */
+export function continuitySecondLabel(frame: number, fps: number) {
+    const safe = Number.isFinite(fps) && fps > 0 ? fps : 24;
+    return (frame / safe).toFixed(1);
+}
+
 /** A retained draft disables its original track, so return to its visible resume action first. */
 export function continuityInlineReturnFocus(trigger: HTMLElement | null, root: HTMLElement | null) {
     if (trigger?.isConnected && !trigger.matches(':disabled') && trigger.getClientRects().length) return trigger;
@@ -33,10 +47,7 @@ export function continuityInlineReturnFocus(trigger: HTMLElement | null, root: H
 export function continuityChangeInputHint(input: ContinuityChangeInput | undefined, frameError: string): { key: string; count?: number; text?: string } | undefined {
     if (!input) return;
     if (frameError) return { key: 'frameRange', text: frameError };
-    if (!input.after) return { key: 'chooseAfter' };
-    const count = continuityReasonLength(input.reason);
-    if (count < 8) return { key: 'reasonMinimum', count };
-    if (!input.sourceBlockId) return { key: 'chooseEvidence' };
+    if (!input.after) return { key: 'hintChooseAfter' };
 }
 
 /** Focus follows explicit form transitions, never ordinary field rerenders. */

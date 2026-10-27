@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
-import { Bot, History, LocateFixed, MessageSquare, Minus, PanelRightClose, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
+import { Bot, History, LocateFixed, MessageSquare, PlugZap, Plus, Sparkles, Terminal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -24,8 +24,8 @@ import { useShallow } from "zustand/react/shallow";
 import { flushAgentPromptQueue, hydrateAgentPromptQueue, useAgentStore, type AgentAttachment, type AgentBootstrapStatus, type AgentCanvasContext, type AgentCanvasReference, type AgentChatItem, type AgentConversationState, type AgentCreativeLaunch, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentQueuedPrompt, type AgentQueuedPromptPayload, type AgentReasoningEffort, type AgentScopedTask, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useConfigStore } from "@/stores/use-config-store";
-import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness } from "@/services/backend-api";
-import { productionPresentationPath, productionTarget } from "@/lib/production-navigation";
+import { discoverBackendToken, editEpisodeProduction, fetchEpisodeProduction, fetchProductionReadiness, type BackendTokenResponse } from "@/services/backend-api";
+import { markProductionEntry, productionPresentationPath, productionTarget } from "@/lib/production-navigation";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { productionObjectForPresentation, productionObjectPath, productionObjectPrompt } from "@/lib/production-object";
@@ -85,6 +85,8 @@ const MESSAGE_PREVIEW_LONG_EDGE = 192;
 const MESSAGE_PREVIEW_MAX_LENGTH = 500_000;
 const AGENT_PROTOCOL_VERSION = 6;
 const HISTORY_RETRY_DELAYS_MS = [0, 150, 350, 700, 1200];
+/** Backend 开发重载期间等它回来再判定连接结果的最长时间。 */
+const BACKEND_RELOAD_WAIT_MS = 20_000;
 const rt = (key: string, options?: Record<string, unknown>) => i18n.t(`agent.runtime.${key}`, options);
 
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
@@ -107,6 +109,10 @@ function authoritativeHistoryTurnKeys(threadId: string, settledTurnIds: string[]
 
 function agentErrorState(error: unknown) {
     return error instanceof AgentApiError ? (error.response as { state?: AgentConversationState }).state : undefined;
+}
+
+function modelNeedsNewConversation(model: AgentModel | undefined, threadId: string) {
+    return Boolean(model?.runtime && threadId && model.runtime !== (threadId.startsWith("llm-") ? "llm" : "codex"));
 }
 
 function conversationBootstrapView(conversation: AgentConversationState) {
@@ -232,6 +238,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const threadOperationRef = useRef(0);
     const scopedTaskOperationRef = useRef("");
     const threadOperationSequenceRef = useRef(0);
+    const toolCallHandledRequestIdsRef = useRef(new Set<string>());
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const backendUrl = useBackendStore((state) => state.url);
     const backendAgentUrl = useMemo(() => backendUrl.replace(/\/$/, "") + "/agent", [backendUrl]);
@@ -576,7 +583,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         source.addEventListener("tool_call", (event) => {
             if (!isCurrentConnection()) return;
             const data = parseEventData<AgentPendingToolCall>(event);
-            if (data) void handleToolCall(endpoint, token, data);
+            if (!data?.requestId) return;
+            // 宽限窗补发或重连重放会再次投递同一 requestId，已处理过的直接丢弃防止重复执行。
+            if (toolCallHandledRequestIdsRef.current.has(data.requestId)) return;
+            toolCallHandledRequestIdsRef.current.add(data.requestId);
+            void handleToolCall(endpoint, token, data);
         });
         source.addEventListener("codex_approval", (event) => {
             if (!isCurrentConnection()) return;
@@ -706,10 +717,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 pendingApprovals: [],
             });
             useAgentSkillStore.getState().reset();
-            if (!wasConnected) {
-                source.close();
-                setAgentState({ enabled: false });
-            }
+            // Keep EventSource open after the first failed handshake too. The browser
+            // retries the SSE connection; closing it here turned transient startup or
+            // reconnect failures into a permanent disconnect that needed user action.
         };
         return () => {
             disposed = true;
@@ -806,6 +816,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         const requestPrompt = object ? `${basePrompt}\n\n${productionObjectPrompt(object)}` : basePrompt;
         const canSend = currentState.connected && Boolean(requestPrompt) && !currentState.sending && !currentState.waiting && !currentState.codexRuntime.busy && !currentState.loadingThreads && ["ready", "warning"].includes(currentState.conversation.status) && !((launch || scopedTaskInput) && !selectedSkill);
         if (!canSend) return queuedItem ? currentState.codexRuntime.busy || currentState.waiting || currentState.conversation.status === "running" ? { status: "busy" } : { status: "failed", error: t("agent.queue.sendFailed") } : false;
+        // Recover an already-selected incompatible model before consuming the draft.
+        // Queued and scoped tasks remain bound to their original conversation.
+        if (!queuedItem && !scopedTaskInput && !launch && modelNeedsNewConversation(currentState.models.find((item) => item.model === currentState.model), currentState.activeThreadId)) {
+            if (await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));
+            return false;
+        }
         let referenceImages: AgentAttachment[] = [];
         if (canvasReferences.some((item) => item.kind === "image")) {
             setAgentState({ sending: true, activity: rt("readingCanvasImages") });
@@ -1095,6 +1111,28 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         }
     };
 
+    const editQueuedPrompt = (id: string) => {
+        const current = useAgentStore.getState();
+        const item = current.queuedPrompts.find((candidate) => candidate.id === id);
+        if (!item || !["queued", "failed"].includes(item.status) || item.threadId !== current.activeThreadId || item.conversationId !== current.conversation.conversationId) return;
+
+        const payload = item.payload;
+        const skill = payload.skill
+            ? useAgentSkillStore.getState().skills.find((candidate) => candidate.name === payload.skill?.name && candidate.path === payload.skill?.path && candidate.enabled) || null
+            : null;
+        useAgentSkillStore.getState().selectSkill(skill, payload.text);
+        current.setAgentState({
+            prompt: payload.text,
+            attachments: payload.attachments.map((attachment) => ({ ...attachment, url: attachment.dataUrl || attachment.url })),
+            canvasReferences: payload.canvasReferences,
+            model: payload.model,
+            reasoningEffort: payload.reasoningEffort,
+            permissionMode: payload.permissionMode,
+            productionDraftObject: payload.productionObject,
+        });
+        current.updatePromptQueue((items) => items.filter((candidate) => candidate.id !== id));
+    };
+
     const promptQueue = useAgentPromptQueue({
         endpoint,
         token,
@@ -1164,8 +1202,15 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     follow.setTarget({ ...owner, workId, runId: presentation.runId || runId, threadId: activeThreadId });
                     follow.setPresentation(presentation);
                     const path = productionPresentationPath(presentation);
+                    if (path.startsWith("/director/")) markProductionEntry();
                     if (follow.guardReason) follow.setPendingPresentation(presentation);
                     else {
+                        if (presentation.canvasId) {
+                            const workspace = useProductionWorkspaceStore.getState();
+                            workspace.setSelectedObject(productionObjectForPresentation(presentation, production));
+                            workspace.setPanelTab("object");
+                            useAgentStore.getState().openPanel();
+                        }
                         follow.expectPath(path);
                         navigate(path, { replace: true });
                     }
@@ -1181,12 +1226,6 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 if (!context) throw new Error(rt("openCanvasFirst"));
                 result = context.applyOps(appliedOps);
                 // 等待最新快照写回请求完成，再返回工具结果；否则连续 MCP 生成会用到上一轮位置。
-                await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
-            } else if (payload.name === "canvas_create_attachment_nodes") {
-                const context = canvasContextRef.current;
-                if (!context) throw new Error(rt("openCanvasFirst"));
-                appliedOps = await attachmentNodeOps(endpoint, token, clientIdRef.current, payload.input?.nodes);
-                result = context.applyOps(appliedOps);
                 await postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             } else {
                 const snapshot = canvasContextRef.current?.snapshot;
@@ -1262,7 +1301,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             const urlToken = searchParams.get("agentToken") || "";
             const urlEndpoint = searchParams.get("agentUrl") || "";
             const nextEndpoint = (urlEndpoint || backendAgentUrl).trim().replace(/\/$/, "");
-            const nextToken = (urlToken || current.token.trim() || (await discoverBackendToken()).token || "").trim();
+            const persistedToken = current.token.trim();
+            let discovered: BackendTokenResponse = { ok: false, token: "" };
+            if (!urlToken && !persistedToken) {
+                discovered = await discoverBackendToken();
+                // 开发重载期稳定代理回 503 BACKEND_RELOADING（Backend 只是重启中）。
+                // 这时报「找不到 Agent」是错的：等它就绪再判定。
+                const deadline = Date.now() + BACKEND_RELOAD_WAIT_MS;
+                while (!discovered.token && discovered.reloading && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 1_000));
+                    discovered = await discoverBackendToken();
+                }
+            }
+            const nextToken = (urlToken || persistedToken || discovered.token || "").trim();
             if (!nextEndpoint) {
                 const text = rt("addressRequired");
                 if (!silent) {
@@ -1390,28 +1441,59 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         setAgentState({ loadingThreads: false });
     };
 
-    const startNewThread = async () => {
+    const startNewThread = async ({ preserveSkill = false }: { preserveSkill?: boolean } = {}): Promise<boolean> => {
         const current = useAgentStore.getState();
-        if (!current.connected || current.sending || current.waiting || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return;
+        if (!current.connected || current.sending || current.waiting || current.codexRuntime.busy || current.loadingThreads || ["preparing", "running"].includes(current.conversation.status)) return false;
+        const previousThreadId = current.activeThreadId;
+        const previousConversationId = current.conversation.conversationId;
         const operation = beginThreadOperation();
-        clearSkillSelection();
+        if (!preserveSkill) clearSkillSelection();
         setAgentState({ activeTab: "chat", activity: rt("creatingConversation") });
         try {
             legacyHistoryRef.current = false;
             setLegacyHistory(false);
             const result = await fetchAgentJson<AgentWorkspaceResponse>(endpoint, token, "/codex/threads/reset", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clientId: clientIdRef.current, permissionMode, model: useAgentStore.getState().model }) });
-            if (threadOperationRef.current !== operation) return;
-            if (result.conversation) applyConversationState(result.conversation);
+            if (threadOperationRef.current !== operation) return false;
+            const returned = result.conversation;
+            if (!returned?.threadId || !returned.conversationId
+                || returned.threadId === previousThreadId && returned.conversationId === previousConversationId) return false;
+            const latest = useAgentStore.getState();
+            const alreadySynced = latest.conversation.conversationId === returned.conversationId && latest.activeThreadId === returned.threadId;
+            if (!alreadySynced) {
+                if (latest.conversation.conversationId !== previousConversationId && latest.conversation.conversationId !== returned.conversationId) return false;
+                // A backend runtime restart can reset its revision counter. The
+                // successful reset response is authoritative for this explicit operation.
+                applyConversationState(returned, true);
+            }
             setAgentState({ activeTab: "chat", activity: rt("newConversation") });
+            const next = useAgentStore.getState();
+            return next.activeThreadId === returned.threadId
+                && next.conversation.conversationId === returned.conversationId
+                && ["ready", "warning"].includes(next.conversation.status);
         } catch (error) {
             const state = agentErrorState(error);
             if (state) applyConversationState(state);
             addEventLog(rt("newConversationFailed"), error);
             message.error(error instanceof Error ? error.message : rt("newConversationFailed"));
             await loadThreads();
+            return false;
         } finally {
             finishThreadOperation(operation);
         }
+    };
+
+    const changeModel = async (model: string) => {
+        const current = useAgentStore.getState();
+        const selected = current.models.find((item) => item.model === model);
+        if (!selected || current.loadingThreads) return;
+        const needsConversation = modelNeedsNewConversation(selected, current.activeThreadId);
+        if (needsConversation && (current.sending || current.waiting || current.codexRuntime.busy || ["preparing", "running"].includes(current.conversation.status))) {
+            message.info(rt("modelSwitchWhenIdle"));
+            return;
+        }
+        const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
+        setAgentState({ model, reasoningEffort: effort || "" });
+        if (needsConversation && await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));
     };
 
     const resumeThread = async (threadId: string) => {
@@ -1442,9 +1524,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         if (!current.enabled || !current.connected) { reject(current.connectError || rt("connectionRequired")); return; }
         if (!clientReady || !useAgentSkillStore.getState().loaded) return;
         if (!findProjectAchengDirectorSkill(useAgentSkillStore.getState().skills)) { reject(i18n.t("productionHub.creative.skillUnavailable")); return; }
+        if (scopedTask.newThread && current.loadingThreads) return;
         if (current.sending || current.waiting || current.loadingThreads || !["ready", "warning"].includes(current.conversation.status)) { reject(rt("codexRunning")); return; }
         scopedTaskOperationRef.current = scopedTask.id;
         void (async () => {
+            if (scopedTask.newThread) {
+                const created = await startNewThread();
+                if (!created) {
+                    if (useAgentStore.getState().loadingThreads) { scopedTaskOperationRef.current = ""; return; }
+                    reject(rt("newConversationFailed")); return;
+                }
+            }
             if (scopedTask.threadId && scopedTask.threadId !== useAgentStore.getState().activeThreadId) {
                 await resumeThread(scopedTask.threadId);
                 const afterResume = useAgentStore.getState();
@@ -1452,6 +1542,17 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     reject(afterResume.connectError || rt("conversationSynced"));
                     return;
                 }
+            }
+            if (scopedTask.draftOnly) {
+                const existingDraft = useAgentStore.getState().prompt.trim();
+                setAgentState({
+                    prompt: existingDraft ? `${scopedTask.text}\n\n${existingDraft}` : scopedTask.text,
+                    scopedTask: null,
+                    scopedTaskResult: null,
+                    activeTab: "chat",
+                    activity: "",
+                });
+                return;
             }
             const sent = await sendPrompt(undefined, scopedTask);
             if (!sent && useAgentStore.getState().scopedTask?.id === scopedTask.id) reject(rt("sendFailed"));
@@ -1726,14 +1827,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 theme={theme}
                 leading={
                     <div className="flex min-w-0 items-center gap-1">
-                        <div className="mr-1 shrink-0 text-sm font-semibold leading-5">{compact ? t("productionCanvas.director") : "Agent"}</div>
                         {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
                         </span>}
                         <Tooltip title={t("agent.panel.connectionSettings", { status: connectionStatus })} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })}>
-                                <span className="hidden @min-[560px]:inline">{connectionStatus}</span>
-                            </Button>
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.panel.connectionSettingsLabel", { status: connectionStatus })} icon={<PlugZap className="size-3.5" style={{ color: connectionStatusColor }} />} onClick={() => setAgentState({ activeTab: "setup" })} />
                         </Tooltip>
                     </div>
                 }
@@ -1750,12 +1848,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 right={
                     <>
                         <Tooltip title={t("agent.history.newThread")} placement="bottom">
-                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0 @min-[560px]:!w-auto @min-[560px]:!min-w-0 @min-[560px]:!px-[7px]" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
-                                <span className="hidden @min-[560px]:inline">{t("agent.history.newThread")}</span>
-                            </Button>
-                        </Tooltip>
-                        <Tooltip title={t("agent.panel.collapse")}>
-                            <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" aria-label={t("agent.panel.collapseLabel")} style={{ color: theme.node.muted }} icon={compact ? <Minus className="size-4" /> : <PanelRightClose className="size-4" />} onClick={closePanel} />
+                            <Button size="small" type="text" className="!h-8 !w-8 !min-w-8 !px-0" aria-label={t("agent.history.newThread")} disabled={!connected || loadingThreads || sending || waiting || conversationBusy || Boolean(creativeLaunch)} icon={<Plus className="size-3.5" />} onClick={() => void startNewThread()} />
                         </Tooltip>
                     </>
                 }
@@ -1813,8 +1906,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     <AgentChatTimeline theme={theme} pendingTool={pendingTool} pendingApprovals={pendingApprovals} sending={sending} waiting={waiting} onRejectTool={rejectPendingTool} onApproveTool={approvePendingTool} onApprovalDecision={decideApproval} />
                     <AgentTaskProgress theme={theme} busy={sending || waiting} />
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
-                    <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onResume={promptQueue.resume} />
+                    <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onEdit={editQueuedPrompt} onResume={promptQueue.resume} />
                     <AgentChatComposer
+                        className="mr-20 shrink-0"
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
                         disabled={!connected || !conversationCanAcceptInput || loadingThreads || Boolean(creativeLaunch)}
@@ -1840,13 +1934,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                         models={models}
                         model={model}
                         reasoningEffort={reasoningEffort}
-                        onModelChange={(model) => {
-                            const selected = models.find((item) => item.model === model);
-                            if (!selected) return;
-                            const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
-                            setAgentState({ model, reasoningEffort: effort || "" });
-                            if (selected.runtime && Boolean(activeThreadId) && (activeThreadId.startsWith("llm-") ? selected.runtime === "codex" : selected.runtime === "llm")) message.info(t("agent.runtime.modelNeedsNewConversation"));
-                        }}
+                        onModelChange={changeModel}
                         onReasoningEffortChange={(reasoningEffort) => {
                             setAgentState({ reasoningEffort });
                         }}
@@ -1929,37 +2017,6 @@ function scopeEventChatItem(event: AgentEventPayload, item: AgentChatItem, itemI
 function approvalActivity(pendingApprovals: AgentPendingApproval[], waiting: boolean, fallback: string) {
     if (pendingApprovals.length) return rt("awaitingApproval");
     return waiting ? rt("codexRunning") : fallback;
-}
-
-async function attachmentNodeOps(endpoint: string, token: string, clientId: string, value: unknown): Promise<CanvasAgentOp[]> {
-    const nodes = Array.isArray(value) ? value : [];
-    if (!nodes.length) throw new Error(rt("noImageAttachments"));
-    return await Promise.all(
-        nodes.map(async (value) => {
-            const item = value as { id?: unknown; attachmentId?: unknown; title?: unknown; position?: unknown };
-            const id = String(item.id || "");
-            const attachmentId = String(item.attachmentId || "");
-            if (!id || !attachmentId) throw new Error(rt("invalidAttachmentNode"));
-            const res = await fetch(`${endpoint}/attachments/${encodeURIComponent(attachmentId)}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
-            if (!res.ok) {
-                const body = (await res.json().catch(() => null)) as { error?: string } | null;
-                throw new Error(body?.error || rt("attachmentReadFailed"));
-            }
-            const image = await uploadImage(await res.blob());
-            const size = fitNodeSize(image.width, image.height);
-            const position = item.position && typeof item.position === "object" ? (item.position as { x?: unknown; y?: unknown }) : {};
-            return {
-                type: "add_node" as const,
-                id,
-                nodeType: "image" as const,
-                title: String(item.title || rt("referenceImage")),
-                position: { x: Number(position.x) || 0, y: Number(position.y) || 0 },
-                width: size.width,
-                height: size.height,
-                metadata: imageMetadata(image),
-            };
-        }),
-    );
 }
 
 function createId() {

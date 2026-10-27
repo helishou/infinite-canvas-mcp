@@ -1,13 +1,12 @@
 import { executeDirectorSubagentTool } from "@basketikun/canvas-agent/agent/delegation";
 import { productionToolNames, executeProductionTool } from "@basketikun/canvas-agent/drama/production-tools";
-import { removedToolNotice, migrateToolGuidance } from "@basketikun/canvas-agent/tool-migrations";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
-import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -62,11 +61,13 @@ import { createLogger } from "./logger.js";
 import type { McpObservabilityStore } from "./stores/types.js";
 import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
 
-type McpProjectSource = "browser" | "session";
+type McpProjectSource = "browser" | "session" | "automatic";
 type BrowserActiveProjectResolver = () => string | null;
 type McpSessionState = {
   activeProjectId: string | null;
   activeProjectSource: McpProjectSource;
+  activeDramaId: string | null;
+  activeDramaSource: McpProjectSource;
   clientId: string;
   runtimeInfo?: () => Record<string, unknown>;
 };
@@ -99,6 +100,8 @@ async function createBackendMcpInstance(
   const state: McpSessionState = {
     activeProjectId: null,
     activeProjectSource: "browser",
+    activeDramaId: null,
+    activeDramaSource: "browser",
     clientId: `mcp:${crypto.randomUUID()}`,
   };
   // 插件 MCP（尤其 H3）只通过常驻 Backend API 访问画布、任务、媒体和设置，
@@ -207,6 +210,9 @@ const pluginDeclarationFingerprints = new WeakMap<PluginMcpRegistry, string>();
 type HttpMcpSession = {
   instance: BackendMcpInstance;
   transport: StreamableHTTPServerTransport;
+  clientInfo: { name: string; version: string } | null;
+  userAgent: string;
+  closeReason: "client_delete" | "backend_shutdown" | "transport_closed";
 };
 
 /**
@@ -276,13 +282,6 @@ export function registerBackendMcpHttpRoutes(
     const sessionId = sessionIdOf(req);
     const existing = sessionId ? sessions.get(sessionId) : undefined;
     if (existing) {
-      const validToolRequest = req.body?.jsonrpc === "2.0" && req.body?.method === "tools/call" && typeof req.body.params?.name === "string"
-        && ["number", "string"].includes(typeof req.body.id);
-      const notice = validToolRequest ? removedToolNotice(req.body.params.name) : undefined;
-      if (notice && req.body.id !== undefined) {
-        res.json({ jsonrpc: "2.0", id: req.body.id, error: { code: -32602, message: notice.error, data: notice } });
-        return;
-      }
       try {
         await existing.transport.handleRequest(req, res, req.body);
       } catch (error) {
@@ -310,14 +309,23 @@ export function registerBackendMcpHttpRoutes(
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         onsessioninitialized: (initializedSessionId) => {
+          const clientInfo = recordOf(recordOf(req.body).params).clientInfo;
+          const client = recordOf(clientInfo);
           sessions.set(initializedSessionId, {
             instance: instance!,
             transport,
+            clientInfo: clientInfo && typeof clientInfo === "object"
+              ? { name: String(client.name || ""), version: String(client.version || "") }
+              : null,
+            userAgent: String(req.get("user-agent") || ""),
+            closeReason: "transport_closed",
           });
           ensureDeclarationSync();
           logger.info("MCP HTTP 会话已连接", {
             sessionId: initializedSessionId,
             sessionCount: sessions.size,
+            client: sessions.get(initializedSessionId)?.clientInfo,
+            userAgent: sessions.get(initializedSessionId)?.userAgent,
           });
         },
       });
@@ -327,9 +335,12 @@ export function registerBackendMcpHttpRoutes(
         if (closedSessionId) sessions.delete(closedSessionId);
         void closed?.instance.server.close().catch(() => undefined);
         stopDeclarationSyncIfIdle();
-        logger.info("MCP HTTP 会话已断开", {
+        logger.info("MCP HTTP 会话已关闭", {
           sessionId: closedSessionId || null,
           sessionCount: sessions.size,
+          reason: closed?.closeReason || "transport_closed",
+          client: closed?.clientInfo || null,
+          userAgent: closed?.userAgent || null,
         });
       };
       transport.onerror = (error) =>
@@ -350,8 +361,13 @@ export function registerBackendMcpHttpRoutes(
       return;
     }
     try {
+      if (req.method === "DELETE") session.closeReason = "client_delete";
       await session.transport.handleRequest(req, res);
+      if (req.method === "DELETE" && sessions.get(sessionId) === session)
+        session.closeReason = "transport_closed";
     } catch (error) {
+      if (req.method === "DELETE" && sessions.get(sessionId) === session)
+        session.closeReason = "transport_closed";
       fail(res, error);
     }
   };
@@ -366,6 +382,8 @@ export function registerBackendMcpHttpRoutes(
       const active = [...sessions.values()];
       await Promise.allSettled(
         active.map(async ({ instance, transport }) => {
+          const session = sessions.get(transport.sessionId || "");
+          if (session) session.closeReason = "backend_shutdown";
           await transport.close().catch(() => undefined);
           await instance.server.close().catch(() => undefined);
         }),
@@ -384,8 +402,6 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_export_snapshot",
   "canvas_apply_ops",
   "canvas_create_node",
-  "canvas_create_text_node",
-  "canvas_create_text_nodes",
   "canvas_create_config_node",
   "canvas_create_generation_flow",
   "canvas_generate_text",
@@ -403,6 +419,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_image_input_manifest",
   "canvas_run_generation",
   "canvas_task_status",
+  "canvas_task_cancel",
   "canvas_wait_tasks",
   "canvas_h3_confirmation",
   "generation_get_status",
@@ -416,10 +433,10 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "assets_get",
   "assets_add",
   "assets_upsert_batch",
-  "canvas_split_image",
   "canvas_create_project",
   "canvas_delete_project",
   "canvas_set_active_project",
+  "drama_set_active_project",
   "canvas_diagnose_project",
   "canvas_fix_diagnostics",
   "drama_create_project",
@@ -432,6 +449,7 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "production_compile",
   "production_get_compilation",
   "production_apply_compilation",
+  "production_translate_compiled_prompts",
   "production_diagnose_bindings",
   "production_diagnose_clips",
   "drama_delete_project",
@@ -475,9 +493,61 @@ function resolveMcpProjectId(
     state.activeProjectSource = "browser";
     return { projectId: browserProjectId, source: "browser-focused" as const };
   }
+  if (state.activeProjectSource === "automatic" && state.activeProjectId)
+    return { projectId: state.activeProjectId, source: "automatic" as const };
   state.activeProjectId = null;
   state.activeProjectSource = "browser";
   return { projectId: "", source: "none" as const };
+}
+
+/** If this MCP session has no explicit or browser-focused target, bind the only canvas. */
+async function resolveMcpProjectIdWithUniqueFallback(
+  config: ResolvedConfig,
+  state: McpSessionState,
+  rawProjectId: unknown,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+) {
+  const target = resolveMcpProjectId(state, rawProjectId, getBrowserActiveProjectId);
+  if (target.projectId && target.source !== "automatic") return target;
+
+  const projects = await fetchCanvasProjects(config, undefined, { summary: true });
+  if (projects.length !== 1) {
+    if (target.source === "automatic") {
+      state.activeProjectId = null;
+      state.activeProjectSource = "browser";
+    }
+    return target.source === "automatic" ? { projectId: "", source: "none" as const } : target;
+  }
+
+  state.activeProjectId = projects[0].id;
+  state.activeProjectSource = "automatic";
+  return { projectId: projects[0].id, source: "automatic" as const };
+}
+
+type ActiveDramaResolution = { dramaId: string; source: "session-pinned" | "browser-focused" | "active-canvas" | "none" };
+
+async function resolveMcpDramaId(
+  state: McpSessionState,
+  backendApi: ReturnType<typeof createBackendClient>,
+  getBrowserActiveProjectId?: BrowserActiveProjectResolver,
+): Promise<ActiveDramaResolution> {
+  if (state.activeDramaSource === "session" && state.activeDramaId)
+    return { dramaId: state.activeDramaId, source: "session-pinned" };
+
+  const canvas = resolveMcpProjectId(state, undefined, getBrowserActiveProjectId);
+  if (!canvas.projectId) {
+    state.activeDramaId = null;
+    return { dramaId: "", source: "none" };
+  }
+  const response = await backendApi.get<{ context?: { dramaId?: string | null } }>(
+    `/canvas/projects/${encodeURIComponent(canvas.projectId)}/production-context`,
+  );
+  const dramaId = String(response.context?.dramaId || "").trim();
+  state.activeDramaId = dramaId || null;
+  return {
+    dramaId,
+    source: dramaId ? canvas.source === "session-pinned" ? "active-canvas" : "browser-focused" : "none",
+  };
 }
 
 async function executeDirectCanvasTool(
@@ -526,7 +596,7 @@ async function executeDirectCanvasTool(
   }
   if (name === "generation_get_status" || name === "canvas_task_status") {
     const taskId = String(input.taskId || "");
-    const target = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId);
+    const target = await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId);
     const query = {
       ...input,
       ...(!taskId && !input.projectId && target.projectId
@@ -544,6 +614,20 @@ async function executeDirectCanvasTool(
     if (taskId && !result.tasks.length) throw new Error(`生成任务不存在：${taskId}`);
     return summarizeCanvasTasks(result.tasks, query);
   }
+  if (name === "canvas_task_cancel") {
+    const taskId = String(input.taskId || "");
+    if (!taskId) throw Object.assign(new Error("缺少 taskId"), { code: "INVALID_INPUT" });
+    const task = await backendApi.cancelTask(taskId);
+    return {
+      ok: true,
+      taskId: task.id,
+      kind: task.kind,
+      status: task.status,
+      projectId: task.projectId,
+      nodeId: task.nodeId,
+      segmentId: task.segmentId,
+    };
+  }
   if (name === "mcp_observability_report")
     if (input.traceId && (input.from || input.to || input.tool || input.view)) throw Object.assign(new Error("traceId 不能与聚合筛选同时使用"), { code: "INVALID_INPUT" });
     else
@@ -555,9 +639,29 @@ async function executeDirectCanvasTool(
   if (name === "mcp_get_command_receipt") {
     const result = await backendApi.getMcpCommandReceipt(String(input.operationId || ""));
     const command = recordOf(result.command);
-    if (!result.command) return { found: false, operationId: String(input.operationId || "") };
-    const { requestHash: _requestHash, payload: _payload, ...visible } = command;
-    return { found: true, ...visible };
+    if (!result.command) return { found: false, status: "not_found" };
+    const receipt = recordOf(command.receipt);
+    const translationStatus = receipt.translationStatus;
+    const status = command.status === "rejected"
+      ? typeof translationStatus === "string" && translationStatus.startsWith("rejected_") ? translationStatus : "rejected"
+      : typeof translationStatus === "string" ? translationStatus : String(command.status || "unknown");
+    const translation = command.tool === "production_translate_compiled_prompts";
+    const targetIds = Array.isArray(receipt.targetIds) ? receipt.targetIds.map(String) : [];
+    return {
+      found: true,
+      status,
+      ...(translation ? { targetCount: targetIds.length, ...(targetIds.length ? { targetIds } : {}),
+        ...(typeof receipt.translatedCount === "number" ? { translatedCount: receipt.translatedCount } : {}),
+        ...(typeof receipt.cachedCount === "number" ? { cachedCount: receipt.cachedCount } : {}),
+        nextAction: status === "committed" ? { action: "done" }
+          : status === "rejected_stale" ? { action: "recompile" }
+          : command.status === "rejected" ? { action: "review_failure" }
+          : status === "retry_required" ? { action: "retry_same_operation", operationId: String(command.operationId || "") }
+          : { action: "wait", operationId: String(command.operationId || "") } } : {}),
+      ...(command.status === "rejected" && typeof recordOf(command.error).code === "string"
+        ? { errorCode: recordOf(command.error).code }
+        : {}),
+    };
   }
   if (name === "models_list") {
     const config = await backendApi.getAiConfig();
@@ -587,10 +691,12 @@ async function executeDirectCanvasTool(
           capability: String(model.capability || "text"),
         }));
     });
-    return { models };
+    const page = Math.max(1, Math.floor(Number(input.page || 1)));
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(input.pageSize || 20))));
+    return { total: models.length, page, pageSize, models: models.slice((page - 1) * pageSize, page * pageSize) };
   }
   if (name === "canvas_generate_image_batch") {
-    const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+    const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
     if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
     const items = Array.isArray(input.items)
       ? (input.items as Array<Record<string, unknown>>)
@@ -709,7 +815,7 @@ async function executeDirectCanvasTool(
   }
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
-  const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+  const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
   const mcpCommandIdentity = name === "canvas_apply_ops" ? {
     tool: "canvas_apply_ops",
     targetId: projectId,
@@ -742,7 +848,16 @@ async function executeDirectCanvasTool(
   }
   if (name === "canvas_get_selection") {
     const project = await fetchCanvasProjectSelection(config, projectId);
-    return { nodes: nodesOf(project as Record<string, unknown>) };
+    const nodes = nodesOf(project as Record<string, unknown>);
+    if (input.view === "full") return { nodes };
+    const selected = nodes.map((node) => ({
+      id: String(node.id || ""),
+      type: String(node.type || ""),
+      ...(typeof node.title === "string" ? { title: node.title.slice(0, 240), ...(node.title.length > 240 ? { titleTruncated: true, titleLength: node.title.length } : {}) } : {}),
+    }));
+    return { nodeCount: selected.length, nodes: selected, nextRead: selected.length ? {
+      tool: "canvas_get_state", input: { projectId, nodeIds: selected.map((node) => node.id) },
+    } : undefined };
   }
   if (name === "canvas_export_snapshot") {
     return backendApi.post(`/canvas/projects/${encodeURIComponent(projectId)}/mcp-export`, {});
@@ -1090,10 +1205,10 @@ function registerBackendCanvasTools(
             inputSummary,
             ...context,
           });
-          return textResult(withTraceId(value, traceId));
+          return textResult(name === "mcp_get_command_receipt" ? value : withTraceId(value, traceId));
         } catch (error) {
-          const details = classifyToolError(error, rawInput, state);
-          const errorContext = mcpToolErrorContext(error, rawInput, state);
+          const details = classifyToolError(error, rawInput, state, name);
+          const errorContext = mcpToolErrorContext(error, rawInput, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -1118,6 +1233,90 @@ function registerBackendCanvasTools(
       },
     );
   }
+  // 导入真实图片媒体节点：默认解析本 MCP session 当前活动画布，不要求调用方手填 projectId。
+  server.registerTool(
+    "canvas_import_local_images",
+    {
+      description:
+        "把本机图片文件导入当前活动画布，创建带真实 storageKey 的 image 媒体节点，可作为人物/场景/分镜参考。省略 projectId 时使用本 MCP 会话当前画布（或唯一画布）；不会仅写入素材库。附件已在本机时直接传它的绝对路径，不必再次转存。",
+      inputSchema: z.object({
+        projectId: z.string().optional().describe("可选：明确指定目标画布；省略时使用当前活动画布"),
+        items: z.array(z.union([
+          z.string().min(1).describe("本地图片绝对路径"),
+          z.object({ filePath: z.string().min(1), title: z.string().optional() }),
+        ])).min(1).max(64).describe("按顺序导入的本地图片"),
+        x: z.number().optional().describe("首个节点的画布 X；省略时自动放置"),
+        y: z.number().optional().describe("首个节点的画布 Y；省略时自动放置"),
+        width: z.number().positive().optional().describe("显示宽度；省略时按原图像素宽度"),
+        gap: z.number().min(0).optional().describe("节点间距，默认 48"),
+        columns: z.number().int().min(1).max(12).optional().describe("排列列数，默认 4"),
+        titlePrefix: z.string().optional().describe("标题前缀"),
+        docType: z.string().optional().describe("写入 metadata.docType"),
+        role: z.enum(["character_turnaround", "character_identity", "scene", "storyboard", "prop", "style"]).optional().describe("可选参考角色标签"),
+      }),
+    },
+    async (rawInput: Record<string, unknown>) => {
+      const target = await resolveMcpProjectIdWithUniqueFallback(config, state, rawInput.projectId, getBrowserActiveProjectId);
+      if (!target.projectId) throw new Error("当前会话没有活动画布；请先在 Canvas 选择目标画布，再重试");
+      const project = await fetchCurrentCanvasProject(config, target.projectId);
+      const sources = normalizeImportSources(rawInput.items);
+      const gap = Math.max(0, Number(rawInput.gap ?? 48));
+      const columns = Math.max(1, Math.min(12, Number(rawInput.columns ?? 4)));
+      const requestedWidth = Number(rawInput.width) > 0 ? Number(rawInput.width) : 0;
+      const titlePrefix = String(rawInput.titlePrefix || "").trim();
+      const docType = String(rawInput.docType || "").trim();
+      const role = String(rawInput.role || "").trim();
+      const firstPosition = recordOf(nodesOf(project)[0]?.position);
+      const baseX = rawInput.x === undefined ? (nodesOf(project)[0] ? Number(firstPosition.x || 0) + 560 : 120) : Number(rawInput.x);
+      const baseY = rawInput.y === undefined ? (nodesOf(project)[0] ? Number(firstPosition.y || 0) : 120) : Number(rawInput.y);
+      const operations: Array<Record<string, unknown>> = [];
+      const created: Array<Record<string, unknown>> = [];
+      const failed: Array<Record<string, unknown>> = [];
+
+      for (const [index, source] of sources.entries()) {
+        try {
+          const prepared = await readImportableImage(source);
+          const size = prepared.width && prepared.height ? { width: prepared.width, height: prepared.height } : probeImageSize(prepared.data);
+          const media = await uploadMediaBinary(config, prepared.data, {
+            name: prepared.name,
+            mimeType: prepared.mimeType,
+            category: "library",
+            width: size.width || null,
+            height: size.height || null,
+          });
+          const width = requestedWidth || (size.width || 400);
+          const height = Math.max(1, Math.round(width * (size.width > 0 && size.height > 0 ? size.height / size.width : 0.5625)));
+          const column = index % columns;
+          const row = Math.floor(index / columns);
+          const id = `image-${crypto.randomUUID()}`;
+          const title = source.title || (titlePrefix ? `${titlePrefix} · ${prepared.name}` : prepared.name);
+          const position = { x: baseX + column * (width + gap), y: baseY + row * (height + gap) };
+          const metadata: Record<string, unknown> = {
+            content: media.url,
+            storageKey: media.storageKey,
+            status: "success",
+            naturalWidth: size.width || null,
+            naturalHeight: size.height || null,
+            bytes: media.bytes,
+            mimeType: prepared.mimeType,
+            importSource: { kind: "local-file", fileName: prepared.name, importedAt: new Date().toISOString() },
+            ...(docType ? { docType } : {}),
+            ...(role ? { role } : {}),
+          };
+          operations.push({ type: "add_node", nodeType: "image", id, title, position, width, height, metadata });
+          created.push({ id, title, storageKey: media.storageKey, url: media.url, bytes: media.bytes, mimeType: prepared.mimeType, width: size.width, height: size.height, position });
+        } catch (error) {
+          failed.push({ fileName: source.filePath.split(/[\\/]/).pop(), error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (!operations.length) throw new Error(`没有可导入的图片：${failed.map(item => `${item.fileName}（${item.error}）`).join("；")}`);
+      const applied = await applyBackendCanvasOperations(config, project.id, Number(project.revision || 0), operations, state.clientId);
+      const result = { ok: true, projectId: project.id, projectTitle: project.title, requested: sources.length, count: created.length, created, ...(failed.length ? { failed } : {}), revision: applied.revision };
+      enforceToolOutputLimit("canvas_import_local_images", result);
+      return textResult(result);
+    },
+  );
+
   // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
   server.registerTool(
     "h3_get_node_materials",
@@ -1132,7 +1331,7 @@ function registerBackendCanvasTools(
         segmentId?: string;
         limit?: number;
       };
-      const projectId = resolveMcpProjectId(state, input.projectId, getBrowserActiveProjectId).projectId;
+      const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
       if (!projectId)
         throw new Error(
           "缺少 projectId（先调用 canvas_set_active_project 或显式传入）",
@@ -1142,7 +1341,7 @@ function registerBackendCanvasTools(
       const materials = await backendApi.getH3NodeMaterials(
         project.id,
         String(input.nodeId),
-        Number(input.limit || 200),
+        Number(input.limit || 50),
         input.segmentId ? String(input.segmentId) : undefined,
       );
       const result = { ok: true, projectId: project.id, nodeId: String(input.nodeId), materials };
@@ -1175,438 +1374,6 @@ function registerBackendCanvasTools(
     );
   }
   // ── 画布管理（创建/删除/切换） ──────────────────────────────────────
-  server.registerTool(
-    "canvas_split_image",
-    {
-      description:
-        "把画布上的一张图片节点按 rows×columns 等分切分，生成多个新的图片节点（与前端「分割」工具同一算法）。适合把宫格分镜图切成单格。切出的节点自动排在被切节点右侧并连线。",
-      inputSchema: z.object({
-        projectId: z.string().optional(),
-        nodeId: z.string(),
-        rows: z.number().optional(),
-        columns: z.number().optional(),
-        horizontalLines: z.array(z.number()).optional(),
-        verticalLines: z.array(z.number()).optional(),
-        inset: z.number().optional(),
-        gap: z.number().optional(),
-        keepEmptySlots: z.boolean().optional(),
-      }).shape,
-    },
-    async (rawInput: Record<string, unknown>) => {
-      const nodeId = String(rawInput.nodeId || "");
-      const rows = Math.max(
-        1,
-        Math.min(12, Math.floor(Number(rawInput.rows ?? 2))),
-      );
-      const columns = Math.max(
-        1,
-        Math.min(12, Math.floor(Number(rawInput.columns ?? 2))),
-      );
-      const gap = Number(rawInput.gap ?? 24);
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
-      const project = await fetchCurrentCanvasProject(config, projectId);
-      const node = nodesOf(project).find((item) => String(item.id) === nodeId);
-      if (!node) throw new Error(`画布上找不到节点：${nodeId}`);
-      const meta = (node.metadata || {}) as Record<string, unknown>;
-      const storageKey = meta.storageKey ? String(meta.storageKey) : "";
-      if (!storageKey)
-        throw new Error(`节点 ${nodeId} 没有 storageKey（不是图片结果节点？）`);
-
-      const source = await fetchMediaBuffer(config, storageKey);
-      const inset = Math.max(
-        0,
-        Math.min(40, Math.floor(Number(rawInput.inset ?? 0))),
-      );
-      const { pieces } = await splitImageBuffer(source, {
-        rows,
-        columns,
-        inset,
-        horizontalLines: Array.isArray(rawInput.horizontalLines)
-          ? rawInput.horizontalLines.map(Number)
-          : undefined,
-        verticalLines: Array.isArray(rawInput.verticalLines)
-          ? rawInput.verticalLines.map(Number)
-          : undefined,
-      });
-      if (!pieces.length) throw new Error("切分结果为空");
-
-      const pos = (node.position || {}) as Record<string, number>;
-      const nodeW = Number(node.width || 0) || 340;
-      const nodeH = Number(node.height || 0) || 240;
-      const cellW = Math.round(nodeW / columns);
-      const cellH = Math.round(nodeH / rows);
-      const baseX = (pos.x || 0) + nodeW + 96;
-      const baseY = pos.y || 0;
-      const parentTitle = String(node.title || "图片");
-
-      const created: Array<{
-        id: string;
-        row: number;
-        column: number;
-        storageKey: string;
-        width: number;
-        height: number;
-      }> = [];
-      const operations: Array<Record<string, unknown>> = [];
-      for (const piece of pieces) {
-        const media = await uploadMediaBinary(config, piece.data, {
-          name: `split_${String(nodeId).replace(/[^\w.-]/g, "_")}_r${piece.row + 1}c${piece.column + 1}.png`,
-          mimeType: "image/png",
-          category: "output",
-          width: piece.width,
-          height: piece.height,
-        });
-        const id = `image-${crypto.randomUUID()}`;
-        operations.push({
-          type: "add_node",
-          nodeType: "image",
-          id,
-          title: `${parentTitle} · r${piece.row + 1}c${piece.column + 1}`,
-          position: {
-            x: baseX + piece.column * (cellW + gap),
-            y: baseY + piece.row * (cellH + gap),
-          },
-          width: cellW,
-          height: cellH,
-          metadata: {
-            content: media.url,
-            storageKey: media.storageKey,
-            status: "success",
-            naturalWidth: piece.width,
-            naturalHeight: piece.height,
-            bytes: media.bytes,
-            mimeType: "image/png",
-            ...(meta.prompt ? { prompt: meta.prompt } : {}),
-          },
-        });
-        operations.push({
-          type: "connect_nodes",
-          fromNodeId: nodeId,
-          toNodeId: id,
-        });
-        created.push({
-          id,
-          row: piece.row,
-          column: piece.column,
-          storageKey: media.storageKey,
-          width: piece.width,
-          height: piece.height,
-        });
-      }
-
-      const applied = await applyBackendCanvasOperations(
-        config,
-        project.id,
-        Number(project.revision || 0),
-        operations,
-      );
-      return textResult({
-        ok: true,
-        sourceNodeId: nodeId,
-        rows,
-        columns,
-        count: created.length,
-        created,
-        revision: applied.revision,
-      });
-    },
-  );
-  server.registerTool(
-    "canvas_crop_image",
-    {
-      description:
-        "按指定画幅比例裁切画布图片节点，默认严格 9:16。只抽取源图像素，不拉伸、不覆盖原图；生成新的图片媒体和新节点，并保留源节点。支持 nodeId 或 nodeIds 批量裁切，anchor 可选 center/top/bottom/left/right，也可传精确 cropRect 像素矩形。",
-      inputSchema: z.object({
-        projectId: z.string().optional(),
-        nodeId: z.string().optional(),
-        nodeIds: z.array(z.string()).min(1).optional(),
-        aspectRatio: z.string().optional(),
-        anchor: z.enum(["center", "top", "bottom", "left", "right"]).optional(),
-        cropRect: z.object({
-          left: z.number(),
-          top: z.number(),
-          width: z.number(),
-          height: z.number(),
-        }).optional(),
-        gap: z.number().optional(),
-      }).shape,
-    },
-    async (rawInput: Record<string, unknown>) => {
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
-      if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
-      const nodeIds = [
-        ...(rawInput.nodeId ? [String(rawInput.nodeId)] : []),
-        ...(Array.isArray(rawInput.nodeIds) ? rawInput.nodeIds.map(String) : []),
-      ].filter(Boolean);
-      const uniqueNodeIds = [...new Set(nodeIds)];
-      if (!uniqueNodeIds.length) throw new Error("nodeId 或 nodeIds 至少传一个");
-
-      const ratio = parseAspectRatio(String(rawInput.aspectRatio || "9:16"));
-      const anchor = String(rawInput.anchor || "center") as CropAnchor;
-      const rawRect = rawInput.cropRect;
-      const cropRect = rawRect && typeof rawRect === "object" && !Array.isArray(rawRect)
-        ? {
-            left: Number((rawRect as Record<string, unknown>).left),
-            top: Number((rawRect as Record<string, unknown>).top),
-            width: Number((rawRect as Record<string, unknown>).width),
-            height: Number((rawRect as Record<string, unknown>).height),
-          }
-        : undefined;
-      const gap = Math.max(0, Number(rawInput.gap ?? 96));
-      const project = await fetchCurrentCanvasProject(config, projectId);
-      const projectNodes = nodesOf(project);
-      const operations: Array<Record<string, unknown>> = [];
-      const created: Array<Record<string, unknown>> = [];
-
-      for (let index = 0; index < uniqueNodeIds.length; index += 1) {
-        const nodeId = uniqueNodeIds[index];
-        const node = projectNodes.find((item) => String(item.id) === nodeId);
-        if (!node) throw new Error(`画布上找不到节点：${nodeId}`);
-        const meta = (node.metadata || {}) as Record<string, unknown>;
-        const storageKey = meta.storageKey ? String(meta.storageKey) : "";
-        if (!storageKey) throw new Error(`节点 ${nodeId} 没有 storageKey（不是图片结果节点？）`);
-
-        const source = await fetchMediaBuffer(config, storageKey);
-        const cropped = await cropImageBuffer(source, {
-          aspectWidth: ratio.width,
-          aspectHeight: ratio.height,
-          anchor,
-          cropRect,
-        });
-        const media = await uploadMediaBinary(config, cropped.data, {
-          name: `crop_${String(nodeId).replace(/[^\\w.-]/g, "_")}_${ratio.width}x${ratio.height}.png`,
-          mimeType: "image/png",
-          category: "output",
-          width: cropped.width,
-          height: cropped.height,
-        });
-
-        const sourcePosition = (node.position || {}) as Record<string, number>;
-        const sourceWidth = Number(node.width || 0) || 340;
-        const canvasWidth = Math.max(160, Math.round(sourceWidth));
-        const canvasHeight = Math.max(160, Math.round(canvasWidth * ratio.height / ratio.width));
-        const id = `image-${crypto.randomUUID()}`;
-        const title = `${String(node.title || "图片")} · crop ${ratio.width}:${ratio.height}`;
-        const position = {
-          x: (Number(sourcePosition.x || 0) + sourceWidth + gap),
-          y: Number(sourcePosition.y || 0) + index * (canvasHeight + gap),
-        };
-        operations.push({
-          type: "add_node",
-          nodeType: "image",
-          id,
-          title,
-          position,
-          width: canvasWidth,
-          height: canvasHeight,
-          metadata: {
-            content: media.url,
-            storageKey: media.storageKey,
-            status: "success",
-            naturalWidth: cropped.width,
-            naturalHeight: cropped.height,
-            bytes: media.bytes,
-            mimeType: "image/png",
-            cropSourceNodeId: nodeId,
-            cropSourceStorageKey: storageKey,
-            cropAspectRatio: `${ratio.width}:${ratio.height}`,
-            cropRect: {
-              left: cropped.left,
-              top: cropped.top,
-              width: cropped.width,
-              height: cropped.height,
-            },
-            ...(meta.prompt ? { prompt: meta.prompt } : {}),
-          },
-        });
-        operations.push({ type: "connect_nodes", fromNodeId: nodeId, toNodeId: id, role: "derived" });
-        created.push({
-          id,
-          sourceNodeId: nodeId,
-          sourceStorageKey: storageKey,
-          storageKey: media.storageKey,
-          url: media.url,
-          sourceWidth: cropped.sourceWidth,
-          sourceHeight: cropped.sourceHeight,
-          left: cropped.left,
-          top: cropped.top,
-          width: cropped.width,
-          height: cropped.height,
-          aspectRatio: `${cropped.width}:${cropped.height}`,
-        });
-      }
-
-      const applied = await applyBackendCanvasOperations(
-        config,
-        project.id,
-        Number(project.revision || 0),
-        operations,
-        state.clientId,
-      );
-      return textResult({
-        ok: true,
-        projectId: project.id,
-        sourceNodeIds: uniqueNodeIds,
-        requestedAspectRatio: `${ratio.width}:${ratio.height}`,
-        count: created.length,
-        created,
-        revision: applied.revision,
-        originalNodesPreserved: true,
-      });
-    },
-  );
-  server.registerTool(
-    "canvas_import_local_images",
-    {
-      description:
-        "把本地磁盘上的图片文件导入画布，成为带 storageKey 的真实图片节点，可作为 canvas_create_generation_flow / canvas_run_generation 的参考图。SVG 保留原始矢量文件；作为 Backend 图片模型参考时自动使用可追溯 PNG 派生图。与 assets_add 的区别：assets_add 用 dataURL 存素材库、不进 media_files、没有 storageKey，当不了生成参考；本工具走 Backend 媒体上传，落 media_files 并返回 storageKey/url/像素尺寸。items 接受字符串路径或 {filePath,title}，按顺序网格排列。",
-      inputSchema: z.object({
-        projectId: z.string().optional(),
-        items: z
-          .array(
-            z.union([
-              z.string(),
-              z.object({
-                filePath: z.string().describe("本地图片绝对路径"),
-                title: z.string().optional(),
-              }),
-            ]),
-          )
-          .min(1)
-          .describe("本地图片路径列表，按此顺序建节点"),
-        x: z.number().optional().describe("第一个节点的 X；不传用源节点右侧"),
-        y: z.number().optional().describe("第一个节点的 Y；不传用源节点同高"),
-        width: z.number().optional().describe("画布节点显示宽度，默认按图片原始比例自适应"),
-        gap: z.number().optional().describe("网格间距，默认 48"),
-        columns: z.number().optional().describe("网格列数，默认 4"),
-        titlePrefix: z.string().optional().describe("标题前缀；不传用文件名"),
-        docType: z.string().optional().describe("写入 metadata.docType，便于后续按类型筛选"),
-        annotation: z
-          .object({
-            x: z.number().optional(),
-            y: z.number().optional(),
-            width: z.number().optional(),
-            height: z.number().optional(),
-          })
-          .optional()
-          .describe("可选来源信息，写入 metadata.sourceAnnotation"),
-      }).shape,
-    },
-    async (rawInput: Record<string, unknown>) => {
-      const projectId = resolveMcpProjectId(state, rawInput.projectId, getBrowserActiveProjectId).projectId;
-      if (!projectId) throw new Error("缺少 projectId；请先选择活动画布");
-      const sources = normalizeImportSources(rawInput.items);
-
-      const project = await fetchCurrentCanvasProject(config, projectId);
-      const operations: Array<Record<string, unknown>> = [];
-      const created: Array<Record<string, unknown>> = [];
-      const failed: Array<Record<string, unknown>> = [];
-      const gap = Math.max(0, Number(rawInput.gap ?? 48));
-      const columns = Math.max(1, Number(rawInput.columns ?? 4));
-      const requestedWidth = Number(rawInput.width ?? 0) || 0;
-      const titlePrefix = String(rawInput.titlePrefix ?? "").trim();
-      const docType = String(rawInput.docType ?? "").trim();
-      const annotation = rawInput.annotation as Record<string, unknown> | undefined;
-
-      for (const [index, source] of sources.entries()) {
-        let prepared: Awaited<ReturnType<typeof readImportableImage>>;
-        try {
-          prepared = await readImportableImage(source);
-        } catch (error) {
-          failed.push({ filePath: source.filePath, error: String((error as Error).message || error) });
-          continue;
-        }
-        const probed = prepared.width && prepared.height
-          ? { width: prepared.width, height: prepared.height }
-          : probeImageSize(prepared.data);
-        const media = await uploadMediaBinary(config, prepared.data, {
-          name: prepared.name,
-          mimeType: prepared.mimeType,
-          category: "library",
-          width: probed.width || null,
-          height: probed.height || null,
-        });
-
-        const canvasWidth = requestedWidth || (probed.width > 0 ? probed.width : 400);
-        const canvasHeight = Math.max(
-          1,
-          Math.round(canvasWidth * (probed.height > 0 ? probed.height / probed.width : 0.5625)),
-        );
-        const column = index % columns;
-        const row = Math.floor(index / columns);
-      const firstNodePosition = (nodesOf(project)[0]?.position || {}) as Record<string, number>;
-      const baseX = Number(rawInput.x ?? 0) || (nodesOf(project)[0] ? Number(firstNodePosition.x || 0) + 560 : 120);
-      const baseY = Number(rawInput.y ?? 0) || (nodesOf(project)[0] ? Number(firstNodePosition.y || 0) : 120);
-        const id = `image-${crypto.randomUUID()}`;
-        const title = source.title || (titlePrefix ? `${titlePrefix} · ${prepared.name}` : prepared.name);
-        const position = { x: baseX + column * (canvasWidth + gap), y: baseY + row * (canvasHeight + gap) };
-        const metadata: Record<string, unknown> = {
-          content: media.url,
-          storageKey: media.storageKey,
-          status: "success",
-          naturalWidth: probed.width || null,
-          naturalHeight: probed.height || null,
-          bytes: media.bytes,
-          mimeType: prepared.mimeType,
-          importSource: {
-            kind: "local-file",
-            filePath: prepared.filePath,
-            importedAt: new Date().toISOString(),
-          },
-          ...(docType ? { docType } : {}),
-          ...(annotation ? { sourceAnnotation: annotation } : {}),
-        };
-        operations.push({
-          type: "add_node",
-          nodeType: "image",
-          id,
-          title,
-          position,
-          width: canvasWidth,
-          height: canvasHeight,
-          metadata,
-        });
-        created.push({
-          id,
-          title,
-          storageKey: media.storageKey,
-          url: media.url,
-          bytes: media.bytes,
-          mimeType: prepared.mimeType,
-          sourcePath: prepared.filePath,
-          width: probed.width,
-          height: probed.height,
-          nodeWidth: canvasWidth,
-          nodeHeight: canvasHeight,
-          position,
-        });
-      }
-
-      if (!operations.length) {
-        throw new Error(
-          `没有可导入的图片：${failed.map((item) => `${item.filePath}（${item.error}）`).join("；")}`,
-        );
-      }
-
-      const applied = await applyBackendCanvasOperations(
-        config,
-        project.id,
-        Number(project.revision || 0),
-        operations,
-        state.clientId,
-      );
-      enforceToolOutputLimit("canvas_import_local_images", created);
-      return textResult({
-        ok: true,
-        projectId: project.id,
-        requested: sources.length,
-        count: created.length,
-        created,
-        ...(failed.length ? { failed } : {}),
-        revision: applied.revision,
-      });
-    },
-  );
   server.registerTool(
     "canvas_create_project",
     {
@@ -1728,34 +1495,59 @@ function registerBackendCanvasTools(
   server.registerTool("drama_get_project", {
     description: toolDescriptions.drama_get_project,
     inputSchema: toolInputSchemas.drama_get_project,
-  }, async (input) => textResult({ drama: await backendApi.getDramaProject(input.dramaId) }));
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_get_project.parse(rawInput);
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    const drama = await backendApi.getDramaProject(dramaId, input.view);
+    return textResult({ drama, activeDramaId: dramaId });
+  });
+  server.registerTool("drama_set_active_project", {
+    description: toolDescriptions.drama_set_active_project,
+    inputSchema: toolInputSchemas.drama_set_active_project,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_set_active_project.parse(rawInput);
+    const dramaId = String(input.dramaId || "").trim();
+    if (dramaId) {
+      await backendApi.getDramaProject(dramaId);
+      state.activeDramaId = dramaId;
+      state.activeDramaSource = "session";
+      return textResult({ ok: true, activeDramaId: dramaId, source: "session-pinned" });
+    }
+    state.activeDramaId = null;
+    state.activeDramaSource = "browser";
+    const active = await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    return textResult({ ok: true, activeDramaId: active.dramaId || null, source: active.source });
+  });
   server.registerTool(
     "drama_list_episodes",
     {
-      description:
-        "列出一个剧目的全部分集，按 episodeNumber 升序返回；每项含标题、剧情和绑定画布 ID。",
-      inputSchema: z.object({
-        dramaId: z.string().trim().min(1).describe("剧目 ID"),
-      }),
+      description: toolDescriptions.drama_list_episodes,
+      inputSchema: toolInputSchemas.drama_list_episodes,
     },
     async (rawInput: Record<string, unknown>) => {
-      const dramaId = String(rawInput.dramaId).trim();
-      return textResult(await backendApi.listDramaEpisodes(dramaId));
+      const input = toolInputSchemas.drama_list_episodes.parse(rawInput);
+      const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+      const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+      if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+      return textResult(await backendApi.listDramaEpisodeSummaries(dramaId, input.page, input.pageSize));
     },
   );
   server.registerTool(
     "drama_get_episode",
     {
-      description:
-        "读取单个分集的完整字段，并返回其绑定画布的完整数据；未绑定画布时 canvas 为 null。",
-      inputSchema: z.object({
-        episodeId: z.string().trim().min(1).describe("分集 ID"),
-      }),
+      description: toolDescriptions.drama_get_episode,
+      inputSchema: toolInputSchemas.drama_get_episode,
     },
     async (rawInput: Record<string, unknown>) => {
-      return textResult(
-        await backendApi.getDramaEpisode(String(rawInput.episodeId).trim()),
-      );
+      const input = toolInputSchemas.drama_get_episode.parse(rawInput);
+      const result = input.view === "full"
+        ? await backendApi.get(`/drama/episodes/${encodeURIComponent(input.episodeId.trim())}?${new URLSearchParams({ view: "full", canvasView: input.canvasView, plotChunkBytes: String(input.fullPlotChunkBytes), ...(input.fullPlotCursor ? { plotCursor: input.fullPlotCursor } : {}) })}`)
+        : await backendApi.getDramaEpisode(input.episodeId.trim(), input.view);
+      if (input.view !== "full") return textResult(result);
+      enforceToolOutputLimit("drama_get_episode", result);
+      return textResult(result);
     },
   );
   server.registerTool(
@@ -1787,7 +1579,19 @@ function registerBackendCanvasTools(
     async (rawInput: Record<string, unknown>) => {
       const input = dramaUpdateEpisodeSchema.parse(rawInput);
       const { episodeId, ...patch } = input;
-      return textResult(await backendApi.updateDramaEpisode(episodeId, patch));
+      const result = await backendApi.updateDramaEpisode(episodeId, patch) as Record<string, any>;
+      const episode = recordOf(result.episode);
+      return textResult({
+        ok: result.ok !== false,
+        episode: {
+          id: String(episode.id || episodeId),
+          episodeNumber: episode.episodeNumber,
+          title: episode.title,
+          canvasId: episode.canvasId ?? null,
+        },
+        updatedFields: Object.keys(patch),
+        nextRead: { tool: "drama_get_episode", input: { episodeId, view: "summary" } },
+      });
     },
   );
   server.registerTool(
@@ -1806,13 +1610,31 @@ function registerBackendCanvasTools(
       });
     },
   );
+  server.registerTool("production_initialize_from_current_demand", {
+    description: "从已保存的分集 synopsis/fullPlot 原样初始化 Subject Prompt Assembly v2 正式剧本。明确的【镜头...】标记会拆成可编辑剧本段落，但不会被冒充为已定时的正式 Shot；readiness 会显示镜头、资产卡与 Clip 的后续缺口。仅允许无稿或无正文/镜头/Clip/资产/产物/活动工作游标的空壳；已有实际制作内容时拒绝覆盖。",
+    inputSchema: z.object({ episodeId: z.string().trim().min(1).describe("分集 ID"), operationId: z.string().trim().min(1).describe("稳定操作 ID；重试同一请求时复用") }).strict(),
+  }, async (rawInput: Record<string, unknown>) => {
+    const input = z.object({ episodeId: z.string().trim().min(1), operationId: z.string().trim().min(1) }).strict().parse(rawInput);
+    const base = `/drama/episodes/${encodeURIComponent(input.episodeId)}/production`;
+    const prior = await backendApi.get(`${base}/operations/${encodeURIComponent(input.operationId)}/receipt`) as Record<string, unknown>;
+    if (prior.found) return textResult(prior.production);
+    const current = await backendApi.get(base) as { production?: { revision?: number } };
+    const expectedRevision = Number(current.production?.revision || 0);
+    return textResult(await backendApi.post(`${base}/ops`, {
+      operationId: input.operationId, expectedRevision,
+      ops: [{ type: "initialize_director_from_demand" }],
+    }));
+  });
   for (const name of productionWorkspaceToolNames) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
       const request = productionWorkspaceRequest(name, raw)!;
-      return textResult(migrateToolGuidance(request.method === "GET" ? await backendApi.get(request.path) : productionWriteReceipt(await backendApi.post(request.path, request.body), { tool: name, input: raw })));
+      const result = request.method === "GET" ? await backendApi.get(request.path) : await backendApi.post(request.path, request.body);
+      if (name === "production_check_continuity") return textResult(continuityCheckReceipt(result, raw));
+      if (name === "production_get_continuity") return textResult(continuityReadProjection(result, raw));
+      return textResult(request.method === "GET" ? result : productionWriteReceipt(result, { tool: name, input: raw }));
     });
   }
-  for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_diagnose_bindings"] as const) {
+  for (const name of ["production_compile", "production_get_compilation", "production_apply_compilation", "production_translate_compiled_prompts", "production_diagnose_bindings"] as const) {
     server.registerTool(name, { description: toolDescriptions[name], inputSchema: toolInputSchemas[name] }, async (rawInput: Record<string, unknown>) => {
       const input = toolInputSchemas[name].parse(rawInput);
       const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production`
@@ -1823,14 +1645,22 @@ function registerBackendCanvasTools(
         const params = new URLSearchParams({ view: query.view, offset: String(query.offset), ...(query.pageSize ? { pageSize: String(query.pageSize) } : {}) });
         return textResult(await backendApi.get(`${base}/compilations/${encodeURIComponent(query.operationId)}?${params}`));
       }
-      if (name === "production_diagnose_bindings") return textResult(await backendApi.get(`${base}/bindings`));
+      if (name === "production_diagnose_bindings") {
+        const query = toolInputSchemas.production_diagnose_bindings.parse(rawInput);
+        const params = new URLSearchParams({ pageSize: String(query.pageSize), ...(query.cursor ? { cursor: query.cursor } : {}) });
+        return textResult(await backendApi.get(`${base}/bindings?${params}`));
+      }
       if (name === "production_apply_compilation") {
         const apply = toolInputSchemas.production_apply_compilation.parse(rawInput);
         return textResult(await backendApi.post(`${base}/apply-compilation`, { preparedId: apply.preparedId }));
       }
+      if (name === "production_translate_compiled_prompts") {
+        const translate = toolInputSchemas.production_translate_compiled_prompts.parse(rawInput);
+        return textResult(await backendApi.post(`${base}/translate-compiled-prompts`, { expectedRevision: translate.expectedRevision, operationId: translate.operationId, targetIds: translate.targetIds }));
+      }
       if (name === "production_compile") {
         const compile = toolInputSchemas.production_compile.parse(rawInput);
-        return textResult(await backendApi.post(`${base}/compile`, { operationId: compile.operationId, expectedRevision: compile.expectedRevision, director: compile.director, scope: compile.scope }));
+        return textResult(await backendApi.post(`${base}/compile`, { operationId: compile.operationId, expectedRevision: compile.expectedRevision, scope: compile.scope }));
       }
       throw new Error("Invalid compilation request");
     });
@@ -1844,10 +1674,20 @@ function registerBackendCanvasTools(
   });
   server.registerTool("production_get_contract", { description: toolDescriptions.production_get_contract, inputSchema: toolInputSchemas.production_get_contract }, async rawInput => {
     const input = toolInputSchemas.production_get_contract.parse(rawInput);
+    validateProductionContractQuery(input);
     const query = new URLSearchParams();
     if (input.runtimeId) query.set("runtimeId", input.runtimeId);
     if (input.operationType) query.set("operationType", input.operationType);
-    return textResult(await backendApi.get(`/production/contract?${query}`));
+    if (input.moduleId) query.set("moduleId", input.moduleId);
+    if (input.includeRequests) query.set("includeRequests", "true");
+    if (input.includePatchFields) query.set("includePatchFields", "true");
+    if (input.includeSourceContract) query.set("includeSourceContract", "true");
+    if (input.moduleFile) query.set("moduleFile", input.moduleFile);
+    if (input.chunkBytes) query.set("chunkBytes", String(input.chunkBytes));
+    if (input.cursor) query.set("cursor", input.cursor);
+    const contract = await backendApi.get(`/production/contract?${query}`);
+    enforceToolOutputLimit("production_get_contract", contract);
+    return textResult(contract);
   });
   server.registerTool("director_subagent", { description: toolDescriptions.director_subagent, inputSchema: toolInputSchemas.director_subagent }, async raw => { const value = await executeDirectorSubagentTool(backendApi, raw); enforceToolOutputLimit("director_subagent", value); return textResult(value); });
   for (const name of productionToolNames) {
@@ -1861,14 +1701,19 @@ function registerBackendCanvasTools(
     "drama_delete_project",
     {
       description:
-        "删除短剧制作台中的剧目。只删除剧目归档，剧目下的场景画布会保留并回到待编排场景。",
-      inputSchema: z.object({ id: z.string().trim().min(1) }).shape,
+        "删除短剧制作台中的剧目及其分集、共享资产和场景画布；如剧目下还有自由画布，请将其 ID 一并传入。",
+      inputSchema: z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
-      const input = z.object({ id: z.string().trim().min(1) }).parse(rawInput);
+      const input = z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).parse(rawInput);
       const result = await backendApi.delete<{ ok: boolean; deleted?: number }>(
         `/drama/projects/${encodeURIComponent(input.id)}`,
+        { freeCanvasIds: input.freeCanvasIds || [] },
       );
+      if (Number(result.deleted || 0) > 0 && state.activeDramaId === input.id) {
+        state.activeDramaId = null;
+        state.activeDramaSource = "browser";
+      }
       return textResult({
         ok: true,
         id: input.id,
@@ -2703,6 +2548,15 @@ async function inspectCanvasContext(
 ) {
   const projects = await fetchCanvasProjects(config, undefined, { summary: true });
   const requestedId = String(input.projectId || "");
+  if (
+    !requestedId &&
+    state.activeProjectSource === "automatic" &&
+    projects.length !== 1 &&
+    !String(getBrowserActiveProjectId?.() || "").trim()
+  ) {
+    state.activeProjectId = null;
+    state.activeProjectSource = "browser";
+  }
   const target = resolveMcpProjectId(state, requestedId, getBrowserActiveProjectId);
   const selectedId = target.projectId;
   let project = selectedId
@@ -2741,9 +2595,9 @@ async function inspectCanvasContext(
           },
     };
   }
-  if (!state.activeProjectId && projects.length === 1 && !getBrowserActiveProjectId) {
+  if (!state.activeProjectId && projects.length === 1 && !String(getBrowserActiveProjectId?.() || "").trim()) {
     state.activeProjectId = project.id;
-    state.activeProjectSource = "session";
+    state.activeProjectSource = "automatic";
   }
   project = await fetchCurrentCanvasProject(config, project.id);
   const projectState = project as Record<string, unknown>;
@@ -2753,7 +2607,7 @@ async function inspectCanvasContext(
       ? projectState.selectedNodeIds.map(String)
       : [],
   );
-  const nodeLimit = Math.max(1, Math.min(500, Number(input.nodeLimit || 100)));
+  const nodeLimit = Math.max(1, Math.min(200, Number(input.nodeLimit || 30)));
   const summaries = nodes.slice(0, nodeLimit).map(nodeSummary);
   const aiConfig = await backend.getAiConfig();
   const models = configuredModels(aiConfig);
@@ -3135,6 +2989,56 @@ function textResult(value: unknown) {
   };
 }
 
+function continuityCheckReceipt(value: unknown, input: Record<string, unknown>) {
+  const envelope = recordOf(value);
+  const check = recordOf(envelope.check || value);
+  const diagnostics = Array.isArray(check.diagnostics) ? check.diagnostics : [];
+  const selectedTargets = Array.isArray(check.selectedTargets) ? check.selectedTargets : Array.isArray(input.targetIds) ? input.targetIds : [];
+  const kind = String(input.kind || "episode"), id = String(input.id || "");
+  return {
+    ok: envelope.ok !== false,
+    operationId: String(check.operationId || input.operationId || ""),
+    replayed: check.replayed === true,
+    status: String(check.verdict || check.status || "unknown"),
+    snapshot: String(check.snapshot || input.snapshot || "draft"),
+    revision: typeof check.revision === "number" ? check.revision : undefined,
+    sourceHash: typeof check.sourceHash === "string" ? check.sourceHash : undefined,
+    selectedTargetCount: selectedTargets.length,
+    diagnosticCounts: {
+      total: diagnostics.length,
+      blocking: diagnostics.filter((item: unknown) => recordOf(item).severity !== "warning").length,
+      warnings: diagnostics.filter((item: unknown) => recordOf(item).severity === "warning").length,
+    },
+    nextRead: { tool: "production_get_continuity", input: { kind, id, snapshot: String(check.snapshot || input.snapshot || "draft"), view: "issues", pageSize: 20 } },
+  };
+}
+
+function continuityReadProjection(value: unknown, input: Record<string, unknown>) {
+  const envelope = recordOf(value), continuity = recordOf(envelope.continuity || value), report = recordOf(continuity.report);
+  const selectedTargets = Array.isArray(report.selectedTargets) ? report.selectedTargets : [];
+  const nextInput: Record<string, unknown> = { ...input, pageSize: Number(input.pageSize || 20) };
+  if (continuity.nextCursor) nextInput.cursor = continuity.nextCursor;
+  const projected = { ...continuity };
+  delete projected.report;
+  return {
+    ...envelope,
+    continuity: {
+      ...projected,
+      ...(Object.keys(report).length ? { reportSummary: {
+        operationId: report.operationId,
+        verdict: report.verdict,
+        checkedAt: report.checkedAt,
+        sourceHash: report.sourceHash,
+        runtimeId: report.runtimeId,
+        selectedTargetCount: selectedTargets.length,
+        diagnosticCount: Array.isArray(report.diagnostics) ? report.diagnostics.length : 0,
+        stale: report.stale === true,
+      } } : {}),
+      nextRead: { tool: "production_get_continuity", input: nextInput },
+    },
+  };
+}
+
 /** MCP 工具返回体硬上限（字节）。超过即报错，避免单次调用把模型上下文挤爆：
  *  实测 canvas_get_state 单次可返回 2.2M 字符（≈55 万 tokens），而 0.5 MiB 约合 13 万 tokens 的上限。
  *  可用环境变量 MCP_MAX_TOOL_OUTPUT_BYTES 覆盖；设为 0 表示关闭该保护。 */
@@ -3151,7 +3055,7 @@ class McpPayloadOverflowError extends Error {
   readonly tool: string;
   constructor(bytes: number, chars: number, limitBytes: number, tool: string) {
     super(
-      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : tool === "production_get" ? "摘要使用 production_get；指定章节使用 production_get_source(sourceSection, pageSize/cursor)，产物目录使用 production_get_artifact_index 分页，单个提示词使用 production_get_artifact(targetId, chunkBytes/cursor)。不要请求完整制作稿。" : tool === "production_get_version" ? "摘要使用 production_get_version；历史章节使用 production_get_version_source，产物目录使用 production_get_version_artifact_index 分页，单个提示词使用 production_get_version_artifact(targetId, chunkBytes/cursor)。不要请求完整历史快照。" : /production|scene_version/.test(tool) ? "使用摘要视图；按 sourceSection、targetIds 定向读取，并用 pageSize/cursor 或 chunkBytes 分页和分块。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
+      `工具 ${tool} 的返回体为 ${bytes} 字节（${chars} 字符），超过单次输出上限 ${limitBytes} 字节。${tool === "h3_list_models" ? "使用 view: entries、categories、query 和显式 pageSize 分页读取。" : tool === "director_subagent" ? "使用 action:get、view:summary 获取状态；完整结果通过 view:result、chunkBytes/cursor 分块读取。" : tool === "production_get" ? "摘要使用 production_get；指定章节使用 production_get_source(sourceSection, pageSize/cursor)，产物目录使用 production_get_artifact_index 分页，单个提示词使用 production_get_artifact(targetId, chunkBytes/cursor)。不要请求完整制作稿。" : tool === "production_get_version" ? "摘要使用 production_get_version；历史章节使用 production_get_version_source，产物目录使用 production_get_version_artifact_index 分页，单个提示词使用 production_get_version_artifact(targetId, chunkBytes/cursor)。不要请求完整历史快照。" : /production|scene_version/.test(tool) ? "使用摘要视图；按 sourceSection、targetIds 定向读取，并用 pageSize/cursor 或 chunkBytes 分页和分块。" : tool === "canvas_get_state" ? "使用 nodeIds 定向读取，或 nodeLimit/nodeOffset 分页；H3 正文使用 h3_get_clip 定向工具。" : tool === "drama_get_episode" ? "传 view='summary'，或保持 canvasView='ref' 只读剧情与画布引用；画布节点用 canvas_get_state(nodeIds/nodeLimit/nodeOffset) 分页，协作文本用 canvas_read_text。" : "请使用该工具 schema 支持的定向读取参数缩小范围。"}`,
     );
     this.name = "McpPayloadOverflowError";
     this.bytes = bytes;
@@ -3197,7 +3101,7 @@ function toolErrorResult(
   input: Record<string, unknown>,
   state: McpSessionState,
   traceId?: string,
-  classified = classifyToolError(error, input, state),
+  classified = classifyToolError(error, input, state, tool),
 ) {
   const { message, code, suggestedAction } = classified;
   return {
@@ -3222,7 +3126,7 @@ function toolErrorResult(
               requestedProjectId: input.projectId || null,
               requestedTaskId: input.taskId || null,
             },
-            errorContext: mcpToolErrorContext(error, input, state).outputSummary,
+            errorContext: mcpToolErrorContext(error, input, state, tool).outputSummary,
             suggestedAction,
           },
         ),
@@ -3238,7 +3142,8 @@ function backendErrorInfo(error: unknown) {
   const status = typeof value.status === "number" ? value.status : undefined;
   const kind = typeof value.kind === "string" ? value.kind : undefined;
   const code = typeof value.code === "string" ? value.code : undefined;
-  return { status, kind, code };
+  const taskId = typeof value.taskId === "string" ? value.taskId : undefined;
+  return { status, kind, code, taskId };
 }
 
 function structuredErrorMetadata(error: unknown) {
@@ -3249,6 +3154,7 @@ function structuredErrorMetadata(error: unknown) {
     if (typeof item === "number" || typeof item === "boolean") result[key] = item;
   }
   if (Array.isArray(value.conflictTargets)) result.conflictTargets = value.conflictTargets.map(String);
+  if (typeof value.taskId === "string") result.taskId = value.taskId;
   return result;
 }
 
@@ -3303,9 +3209,9 @@ function errorTaskIds(error: unknown) {
   const value = error && typeof error === "object"
     ? error as Record<string, unknown>
     : {};
-  return Array.isArray(value.taskIds)
-    ? [...new Set(value.taskIds.map(String).filter(Boolean))]
-    : [];
+  const taskIds = Array.isArray(value.taskIds) ? value.taskIds.map(String).filter(Boolean) : [];
+  if (typeof value.taskId === "string" && value.taskId) taskIds.unshift(value.taskId);
+  return [...new Set(taskIds)];
 }
 
 function errorOperationId(error: unknown, input: Record<string, unknown>) {
@@ -3329,6 +3235,7 @@ function mcpToolErrorContext(
   error: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
+  tool = "",
 ): Partial<McpObservabilityEventInput> {
   const backendError = backendErrorInfo(error);
   const taskIds = errorTaskIds(error);
@@ -3354,7 +3261,7 @@ function mcpToolErrorContext(
       errorKind: backendError.kind,
       httpStatus: backendError.status,
       message: safeErrorMessage(error),
-      createdTaskIds: taskIds,
+      createdTaskIds: new Set(["canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio", "canvas_generate_image_batch", "canvas_run_generation"]).has(tool) ? taskIds : [],
       waitsForTasks: input.waitForCompletion === true || Array.isArray(input.taskIds),
       ...(Object.keys(preflight).length ? { preflight } : {}),
       ...(revision ? { ...revision } : {}),
@@ -3366,6 +3273,7 @@ function classifyToolError(
   error: unknown,
   input: Record<string, unknown>,
   state: McpSessionState,
+  toolName = "",
 ) {
   const backendError = backendErrorInfo(error);
   const message =
@@ -3388,6 +3296,11 @@ function classifyToolError(
     backendError.code === "TASK_NOT_FOUND" ||
     (backendError.status === 404 && /task|任务/i.test(message)) ||
     /生成任务不存在|任务不存在|task not found/i.test(message);
+  const assetMissing = backendError.code === "ASSET_NOT_FOUND" || /素材不存在|asset not found/i.test(message);
+  const taskNotCancellable = /任务状态\s*[^，。;；]*不可取消|task (?:is )?not cancellable|cannot cancel (?:a )?(?:completed|failed|cancelled) task/i.test(message);
+  const productionRunNotFound = /找不到生产运行|production run .*not found/i.test(message);
+  const productionRunEnded = /生产运行已结束|production run (?:has )?already ended/i.test(message);
+  const productionRunNotResumable = /生产运行不能继续|production run cannot be resumed/i.test(message);
   const missingNode =
     backendError.code === "NODE_NOT_FOUND" ||
     /(?:节点|node|生成目标).*(?:不存在|not found)|找不到(?:画布)?节点/i.test(
@@ -3395,15 +3308,32 @@ function classifyToolError(
     );
   const missingSegment =
     backendError.code === "SEGMENT_NOT_FOUND" || /找不到片段|片段不存在|clip not found/i.test(message);
+  // 短剧/分集维度的资源不存在。此前这类文案（如 “分集不存在”）不匹配任何分支，
+  // 会一路落到 CANVAS_TOOL_FAILED，把“查了不存在的 ID”伪装成通用工具故障。
+  const missingEpisode =
+    backendError.code === "EPISODE_NOT_FOUND" || /分集不存在|episode not found/i.test(message);
+  const missingScene = backendError.code === "SCENE_NOT_FOUND" || /(?:正式)?场次不存在|scene not found/i.test(message);
+  const h3ClipOccupied = backendError.code === "H3_CLIP_OCCUPIED";
+  const staleH3Preview = backendError.code === "STALE_H3_PREVIEW" || /STALE_H3_PREVIEW|生成预检已过期/.test(message);
+  const browserDisconnected = /当前没有已连接网页|no connected (?:webpage|browser)/i.test(message);
+  // 分块/定向读取没选到合法产物（“分块读取必须选定一个产物”），是入参约束而非后端崩溃。
+  const artifactTargetMissing =
+    backendError.code === "ARTIFACT_NOT_FOUND" || /必须选定一个产物|no artifact was selected|must select an artifact/i.test(message);
   const missingModel =
     backendError.code === "MODEL_REQUIRED" ||
     (/模型/.test(message) && /未配置|没有配置|缺少/.test(message));
   const conflict =
-    backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线/.test(message);
-  const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT";
+    backendError.code === "REVISION_CONFLICT" || /revision|冲突|基线|版本已变化/.test(message);
+  // Backend 以 HTTP 4xx 返回的 Zod 校验体（形如 [{"code":"invalid_type","expected":"string","received":"undefined"}]）
+  // 不是客户端 z.ZodError，但语义同样是入参缺失/非法，归入 INVALID_INPUT 而不是 CANVAS_TOOL_FAILED。
+  const embeddedValidationIssues =
+    !(error instanceof z.ZodError) &&
+    /"code"\s*:\s*"invalid_/.test(message) &&
+    /"(expected|received)"\s*:/.test(message);
+  const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT" || embeddedValidationIssues;
   const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
-  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT"].includes(backendError.code || "") ? backendError.code : undefined;
+  const domainCode = productionDiagnostics.length || ["REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED", "STALE_H3_PREVIEW"].includes(backendError.code || "") ? backendError.code : undefined;
   const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
@@ -3413,6 +3343,16 @@ function classifyToolError(
   const payloadOverflow = error instanceof McpPayloadOverflowError;
   const code = cancelled
     ? "MCP_CALL_CANCELLED"
+    : taskNotCancellable
+      ? "TASK_NOT_CANCELLABLE"
+    : productionRunNotFound
+      ? "PRODUCTION_RUN_NOT_FOUND"
+    : productionRunEnded
+      ? "PRODUCTION_RUN_ALREADY_ENDED"
+    : productionRunNotResumable
+      ? "PRODUCTION_RUN_NOT_RESUMABLE"
+    : staleH3Preview
+      ? "STALE_H3_PREVIEW"
     : commandCode
     ? commandCode
     : payloadOverflow
@@ -3443,15 +3383,33 @@ function classifyToolError(
                       ? "BACKEND_NETWORK_ERROR"
                       : invalidResponse
                         ? "BACKEND_INVALID_RESPONSE"
-                        : backendError.status && backendError.status >= 500
-                          ? `BACKEND_HTTP_${backendError.status}`
-                          : "CANVAS_TOOL_FAILED";
+                        : missingEpisode
+                          ? "EPISODE_NOT_FOUND"
+          : missingScene
+            ? "SCENE_NOT_FOUND"
+            : browserDisconnected
+              ? "BROWSER_NOT_CONNECTED"
+                          : artifactTargetMissing
+                            ? "ARTIFACT_NOT_FOUND"
+                            : backendError.status && backendError.status >= 500
+                              ? `BACKEND_HTTP_${backendError.status}`
+                              : "CANVAS_TOOL_FAILED";
   const taskIds = inputTaskIds(input);
   const projectId = String(mcpInputProjectId(input, state) || "");
   const suggestedAction = productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
     ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
+    : staleH3Preview
+      ? { tool: "h3_preview_run", input: Object.fromEntries(["projectId", "nodeId", "nodeIds", "segmentId", "endSegmentId", "runFromCurrent", "skipCompleted", "forceRegenerate", "params"].filter(key => input[key] !== undefined).map(key => [key, input[key]])), action: "尚未创建生成任务。先用相同范围和参数重新预检，再用新 planHash 与原 idempotencyKey 提交。" }
+    : browserDisconnected
+      ? { action: "先在当前 Codex 会话连接 Infinite Canvas 网页，再重试此页面工具；Backend 原生 MCP 工具不依赖网页连接。" }
+    : assetMissing
+      ? { tool: "assets_list", input: { page: 1, pageSize: 20 }, action: "素材 ID 可能已删除或来自旧列表；刷新素材目录后使用其中的精确 ID。" }
+    : taskNotCancellable
+      ? { tool: toolName.startsWith("h3_") ? "h3_get_task" : "canvas_task_status", input: { taskId: String(input.taskId || "") }, action: "任务已到终态，取消不会改变结果；查询终态即可。" }
+    : productionRunNotFound || productionRunEnded || productionRunNotResumable
+      ? { tool: "production_get_batch", input: { kind: String(input.kind || "episode"), id: String(input.id || ""), runId: String(input.runId || "") }, action: "先核对原批次状态；已结束或不存在的 runId 不能暂停/继续，也不要创建替代 runId。" }
     : domainCode === "REFERENCE_INVALID"
     ? { tool: "h3_get_clip_references", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || ""), segmentId: String(input.segmentId || "") } }
     : domainCode === "MEDIA_IDENTITY_MISMATCH"
@@ -3460,9 +3418,15 @@ function classifyToolError(
       ? (typeof input.idempotencyKey === "string" && input.idempotencyKey
           ? { tool: "canvas_task_status", input: { taskId: input.idempotencyKey } }
           : { action: "原幂等键属于另一份生成输入；先查原任务，不能把它当作本次任务或重复排队" })
+    : h3ClipOccupied
+      ? (backendError.taskId
+          ? { tool: "h3_get_task", input: { taskId: backendError.taskId }, action: "先查询占用该 Clip 的原任务；不要重复提交，待原任务结束后再运行。" }
+          : { action: "目标 Clip 正被其他任务占用；先查询原任务，待其结束后再运行。" })
     : payloadOverflow
     ? {
-        action: error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
+        action: error instanceof McpPayloadOverflowError && error.tool === "production_get_contract"
+          ? "传精确 operationType 获取单操作合同；省略不需要的 moduleId 和完整合同附加项。"
+          : error instanceof McpPayloadOverflowError && ["production_get", "production_get_version"].includes(error.tool)
           ? "不要重读完整制作稿；改用摘要工具、指定 sourceSection 的源稿工具、分页产物索引或指定 targetId 的提示词分块工具。"
           : "缩小返回体后重试：为查询类工具传更小的 limit / nodeIds，或用 canvas_inspect 代替整图快照工具。",
       }
@@ -3472,6 +3436,10 @@ function classifyToolError(
       ? { tool: "canvas_list_projects", input: {} }
       : missingTask && projectId
         ? { tool: "canvas_task_status", input: { projectId } }
+    : conflict && toolName.startsWith("production_")
+      ? input.kind === "scene"
+        ? { tool: "production_get_scene_production", input: { sceneId: String(input.id || ""), view: "summary" }, action: "回读当前场次 revision 与目标状态后再准备或提交。" }
+        : { tool: "production_get", input: { kind: String(input.kind || "episode"), id: String(input.id || "") }, action: "回读当前制作稿 revision 和目标状态后再准备或提交。" }
     : missingNode || conflict
       ? {
           tool: "canvas_inspect",
@@ -3480,21 +3448,25 @@ function classifyToolError(
           },
         }
       : missingSegment
-        ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state) || ""), nodeId: String(input.nodeId || "") } }
-      : missingModel
+        ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state)) || "", nodeId: String(input.nodeId || "") } }
+        : missingEpisode
+          ? { tool: "drama_list_episodes", input: {}, action: "先用分集列表核对有效的 episodeId，再用真实存在的 ID 读取制作稿。" }
+          : artifactTargetMissing
+            ? { tool: "production_get_artifact_index", input: { projectId: String(mcpInputProjectId(input, state)) || undefined }, action: "先用产物索引核对可定向的 targetId，再按合法产物 ID 分块/分页读取。" }
+            : missingModel
         ? { tool: "models_list", input: {} }
         : timeout && taskIds.length
           ? waitTasksAction(taskIds)
           : authFailure
             ? { action: "检查 Backend 地址、Token 和权限后再重试" }
             : { action: "检查 errorContext 后修正输入或连接；不要重复提交完全相同的失败请求" };
-  const recoverable = productionDiagnostics.length > 0 || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingModel || conflict || timeout || payloadOverflow || cancelled;
+  const recoverable = productionDiagnostics.length > 0 || staleH3Preview || browserDisconnected || assetMissing || taskNotCancellable || productionRunNotFound || productionRunEnded || productionRunNotResumable || h3ClipOccupied || selectionRequired || missingProject || missingTask || missingNode || missingSegment || missingEpisode || missingScene || artifactTargetMissing || missingModel || conflict || timeout || payloadOverflow || cancelled;
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);
     return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : typeof item.path === "string" ? { path: item.path } : {}), ...(typeof recordOf(item.blockingRun).runId === "string" ? { blockingRun: item.blockingRun } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
   }) : [];
-  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : domainCode || invalidInput ? "after_input_change" : undefined;
+  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
   return {
     code,
     message,
@@ -3572,8 +3544,8 @@ function installMcpToolObservability(
               kind: typeof errorRecord.errorKind === "string" ? errorRecord.errorKind : undefined,
             },
           );
-          const details = classifyToolError(error, input, state);
-          const errorContext = mcpToolErrorContext(error, input, state);
+          const details = classifyToolError(error, input, state, name);
+          const errorContext = mcpToolErrorContext(error, input, state, name);
           await recordMcpObservabilityEvent(recordEvent, {
             sessionId: state.clientId,
             traceId,
@@ -3611,8 +3583,8 @@ function installMcpToolObservability(
         }
         return withTraceIdInToolResult(result, traceId);
       } catch (error) {
-        const details = classifyToolError(error, input, state);
-        const errorContext = mcpToolErrorContext(error, input, state);
+        const details = classifyToolError(error, input, state, name);
+        const errorContext = mcpToolErrorContext(error, input, state, name);
         await recordMcpObservabilityEvent(recordEvent, {
           sessionId: state.clientId,
           traceId,
@@ -3727,10 +3699,13 @@ function mcpToolResultContext(
       )
     : [];
   const firstTask = tasks[0] || {};
-  const createdTaskIds = [...new Set([
+  // Only submission tools own task creation. A taskId returned by status,
+  // wait, cancel, or ComfyUI lookup is a reference, not a creation receipt.
+  const createsTasks = new Set(["canvas_generate_text", "canvas_generate_image", "canvas_generate_video", "canvas_generate_audio", "canvas_generate_image_batch", "canvas_run_generation"]).has(String(tool || ""));
+  const createdTaskIds = createsTasks ? [...new Set([
     ...tasks.map((task) => String(task.taskId || "")).filter(Boolean),
     ...(typeof result.taskId === "string" ? [result.taskId] : []),
-  ])];
+  ])] : [];
   const operationResults = Array.isArray(result.operationResults)
     ? result.operationResults
     : [];
@@ -3743,7 +3718,7 @@ function mcpToolResultContext(
     outputSummary: {
       ok: result.ok !== false,
       outputChars: serializedChars(value),
-      taskCount: createdTaskIds.length || (result.taskId ? 1 : 0),
+      taskCount: createdTaskIds.length,
       createdTaskIds,
       waitsForTasks: tool === "canvas_wait_tasks" || Boolean(result.wait) || input.waitForCompletion === true,
       operationCount: operationResults.length,
@@ -4002,13 +3977,15 @@ function registerDirectComfyTools(
   server.registerTool(
     "comfyui_get_task",
     {
-      description: "查询 ComfyUI 任务。",
-      inputSchema: z.object({ taskId: z.string() }).shape,
+      description: toolDescriptions.comfyui_get_task,
+      inputSchema: toolInputSchemas.comfyui_get_task,
     },
-    async ({ taskId }) => {
-      const result = await backend.comfyGetTask(taskId);
-      enforceToolOutputLimit("comfyui_get_task", result);
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    async (rawInput) => {
+      const { taskId, view } = toolInputSchemas.comfyui_get_task.parse(rawInput);
+      const result = await backend.comfyGetTask(taskId, 0, view);
+      const response = view === "summary" ? { task: result.task } : result;
+      enforceToolOutputLimit("comfyui_get_task", response);
+      return { content: [{ type: "text", text: JSON.stringify(response) }] };
     },
   );
   server.registerTool(

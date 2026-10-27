@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDirectorClipStoryboardOperation, createProductionEditing, registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip } from "./production-editing";
+import { buildDirectorClipStoryboardOperation, createProductionEditing, registerProductionBoundaryEditor, registerProductionPromptEditor, registerProductionStoryboardEditor, sourceSegmentForCanvasClip } from "./production-editing";
+import { applyProductionCompilation } from "@/services/backend-api";
 import type { DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import type { CanvasNodeData } from "@/types/canvas";
 const input = { nodeId: "H3", segmentId: "canvas-clip", prompt: "A changed action.", artifactId: "ART", sourceHash: "source", basePromptHash: "prompt" };
@@ -28,6 +29,34 @@ const formalV2Director = (): DirectorProduction => ({
         ],
     }, assets: {}, shotInputs: { v2a: { keyframePolicy: "none", assetIds: [] }, v2b: { keyframePolicy: "none", assetIds: [] } },
 } as unknown as DirectorProduction);
+
+test("compilation apply retries only a pre-forward BACKEND_RELOADING response with the same preparedId", async t => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    const attempts: Array<{ path: string; body: unknown }> = [];
+    globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        attempts.push({ path: url.pathname, body: JSON.parse(String(init?.body)) });
+        if (attempts.length === 1) return Response.json({ ok: false, code: "BACKEND_RELOADING", error: "Backend 正在开发重载" }, { status: 503, headers: { "Retry-After": "1" } });
+        return Response.json({ ok: true, receipt: { revision: 2, operationId: "apply-op", mediaSubmitted: false } });
+    };
+    const result = await applyProductionCompilation("episode", "prepared-stable");
+    assert.equal(result.receipt.operationId, "apply-op");
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts.map(item => item.body), [{ preparedId: "prepared-stable" }, { preparedId: "prepared-stable" }]);
+});
+
+test("compilation apply does not retry an outcome-unknown 503", async t => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let attempts = 0;
+    globalThis.fetch = async () => {
+        attempts++;
+        return Response.json({ ok: false, code: "BACKEND_OUTCOME_UNKNOWN", outcomeUnknown: true, error: "unknown" }, { status: 503 });
+    };
+    await assert.rejects(applyProductionCompilation("episode", "prepared-stable"), /HTTP 503/);
+    assert.equal(attempts, 1);
+});
 test("SDK reverse synchronization awaits canvas persistence and receives an explicit editor receipt", async () => {
     const order: string[] = [], current = node();
     const remove = registerProductionPromptEditor("canvas", async request => { order.push("edit"); assert.deepEqual(request, input); return { sourceSaved: true }; });
@@ -42,15 +71,94 @@ test("missing editors and changed compiled identities fail visibly without a sou
     await assert.rejects(service.reverseSyncPrompt(input), /PRODUCTION_EDITOR_NOT_READY/);
     await assert.rejects(service.reverseSyncPrompt({ ...input, basePromptHash: "stale" }), /PROMPT_REVERSE_SYNC_BASELINE_MISMATCH/);
 });
+
+test("a stale apply response recompiles once against the current revision", async (t) => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let revision = 7, applyAttempts = 0;
+    const compileRequests: Array<{ expectedRevision: number; operationId: string }> = [];
+    globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname.includes("/canvas/draft-sessions/")) {
+            return Response.json({ lease: { owned: true, expiresAt: Date.now() + 60_000 } });
+        }
+        if (url.pathname.endsWith("/production") && url.searchParams.get("view") === "clip_workbench") {
+            const sourceHash = "hash-" + revision;
+            return Response.json({ ok: true, production: { revision, sourceHash, workbench: {
+                segment: { id: "SOURCE_C4" }, sourceHash,
+                runtime: { canvasInputs: [{ nodeId: "H3", segmentId: "canvas-clip", current: { prompt: "compiled-" + revision }, manualFields: [] }] },
+            } } });
+        }
+        if (url.pathname.endsWith("/production/compile")) {
+            const body = JSON.parse(String(init?.body)) as { expectedRevision: number; operationId: string };
+            compileRequests.push(body);
+            return Response.json({ ok: true, compilation: {
+                operationId: body.operationId, status: "succeeded", verdict: "passed",
+                expectedRevision: body.expectedRevision, sourceHash: "hash-" + body.expectedRevision,
+                preparedId: "prepared-" + body.operationId, mediaSubmitted: false,
+            } });
+        }
+        if (url.pathname.endsWith("/production/apply-compilation")) {
+            applyAttempts++;
+            if (applyAttempts === 1) {
+                revision = 8;
+                return Response.json({ ok: false, error: "制作稿版本已变化，请核对当前版本后重试" }, { status: 409 });
+            }
+            return Response.json({ ok: true, receipt: { revision, sourceHash: "hash-" + revision, operationId: "apply-2", mediaSubmitted: false } });
+        }
+        throw new Error("Unexpected request: " + (init?.method || "GET") + " " + url.pathname);
+    };
+    const service = createProductionEditing("stale-apply-canvas", () => node(), async () => {});
+    const compileInput = { nodeId: "H3", segmentId: "canvas-clip" };
+    const refreshed = await service.compilePrompt(compileInput);
+    assert.equal(refreshed.prompt, "compiled-8");
+    assert.equal(applyAttempts, 2);
+    assert.equal(compileRequests[0]?.expectedRevision, 7);
+    assert.equal(compileRequests[1]?.expectedRevision, 8);
+    assert.notEqual(compileRequests[0]?.operationId, compileRequests[1]?.operationId);
+});
 test("production storyboard writeback routes only a verified formal Clip and waits for the source editor", async () => {
     const order: string[] = [];
-    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" }, storyboardShots: [{ id: "s1", duration: 1 }] } };
+    // replaceStoryboardTrack 会用从 Backend 校验过的完整 projection 覆盖调用方携带的摘要。
+    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: node().metadata!.segments![0].productionClipProjection }, storyboardShots: [{ id: "s1", duration: 1 }] };
     const remove = registerProductionStoryboardEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {
         const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
         assert.deepEqual(await service.replaceStoryboardTrack(request), { sourceSaved: true });
         assert.deepEqual(order, ["flush", "edit"]);
         await assert.rejects(service.replaceStoryboardTrack({ ...request, segment: { ...request.segment, productionClipProjection: { targetId: "OTHER" } } }), /PROJECTION_MISMATCH/);
+    } finally { remove(); }
+});
+
+test("H3 continuation settings reverse-sync through the production boundary editor", async () => {
+    const order: string[] = [], request = { boundaries: [{ targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false }], requireNext: true };
+    const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
+    try {
+        const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
+        assert.deepEqual(await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", tailFrameContinuation: true, motionContextEnabled: false }), { sourceSaved: true });
+        assert.deepEqual(order, ["flush", "edit"]);
+        await assert.rejects(service.setContinuationBoundary({ nodeId: "H3", segmentId: "missing", tailFrameContinuation: true, motionContextEnabled: false }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
+    } finally { remove(); }
+});
+
+test("global H3 continuation settings resolve every formal Clip and submit one boundary batch", async () => {
+    const order: string[] = [], current = node();
+    current.metadata!.segments!.push({ id: "canvas-clip-next", productionClipProjection: { targetId: "SOURCE_C5" } });
+    const request = { boundaries: [
+        { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false },
+        { targetId: "SOURCE_C5", tailFrameContinuation: false, motionContextEnabled: false },
+    ] };
+    const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
+    try {
+        const service = createProductionEditing("canvas", () => current, async () => { order.push("flush"); });
+        assert.deepEqual(await service.setContinuationBoundaries({ nodeId: "H3", boundaries: [
+            { segmentId: "canvas-clip", tailFrameContinuation: true, motionContextEnabled: false },
+            { segmentId: "canvas-clip-next", tailFrameContinuation: false, motionContextEnabled: false },
+        ] }), { sourceSaved: true });
+        assert.deepEqual(order, ["flush", "edit"]);
+        await assert.rejects(service.setContinuationBoundaries({ nodeId: "H3", boundaries: [
+            { segmentId: "missing", tailFrameContinuation: true, motionContextEnabled: false },
+        ] }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
     } finally { remove(); }
 });
 
@@ -82,13 +190,68 @@ test("H3 storyboard writeback preserves Prompt v2 duration_frames without invent
     assert.deepEqual(operation.segment.shot_ids, ["v2b", "v2c"]);
 });
 
-test("a production Clip cannot lose its final formal Shot or silently claim an unadopted H3 image", () => {
+test("H3 storyboard writeback rescales Subject appearance ranges when a rebuilt Shot changes duration", () => {
+    // 画布拆分镜头后 SH-01-03 由 96 帧缩到 48 帧；克隆来的出现范围 (0,96) 必须缩放，否则
+    // 「Subject 出现范围必须位于 Shot 时长内且起止递增」校验会让整个 Clip 的分镜/参考回写 400。
+    const director = formalV2Director();
+    (director.source as Record<string, any>).asset_plan = [{ asset_id: "FRAME", kind: "keyframe" }];
+    (director as Record<string, any>).assets = { FRAME: { nodeId: "FRAME_NODE", storageKey: "k.png", version: "v1", status: "generated" } };
+    (director.source as Record<string, any>).shots = [
+        { id: "v2a", timeline_id: "TL", story_order: 0, duration_frames: 96, subject_usages: [{ subjectId: "SUB:1", localStartFrame: 0, localEndFrame: 96 }], keyframes: [{ id: "KF:v2a:1", localFrame: 48 }, { id: "KF:v2a:2", localFrame: 96 }], utterance_refs: [] },
+        { id: "v2b", timeline_id: "TL", story_order: 1, duration_frames: 24, subject_usages: [{ subjectId: "SUB:1", localStartFrame: 12, localEndFrame: 20 }], keyframes: [], utterance_refs: [] },
+    ];
+    const operation = buildDirectorClipStoryboardOperation(director, "SOURCE_V2", {
+        nodeId: "H3", segmentId: "canvas-clip", segment: {
+            id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_V2" },
+            storyboardShots: [{ id: "v2a", duration: 3, referenceBindingId: "kb" }, { id: "v2b", duration: 2 }],
+            referenceBindings: [{ id: "kb", mediaType: "image", role: "storyboard", storageKey: "k.png", sourceNodeId: "FRAME_NODE" }],
+        },
+    });
+    if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    const [shotA, shotB] = operation.shots;
+    const typedShotA = shotA as any, typedShotB = shotB as any;
+    assert.equal(shotA.duration_frames, 72);
+    assert.deepEqual(typedShotA.subject_usages[0].localStartFrame, 0);
+    assert.deepEqual(typedShotA.subject_usages[0].localEndFrame, 72);
+    // 关键帧同步缩放且必须小于新时长（48→36，96→71 贴边收敛）
+    assert.deepEqual(typedShotA.keyframes.map((keyframe: any) => keyframe.localFrame), [36, 71]);
+    // v2b 时长 24→48 帧同样翻倍：出现范围按比例缩放 (12,20)→(24,40)
+    assert.deepEqual(typedShotB.subject_usages[0], { subjectId: "SUB:1", localStartFrame: 24, localEndFrame: 40 });
+});
+
+test("unbinding a storyboard slot removes its orphan image from the production reference snapshot", () => {
+    const previousStoryboardShots = [
+        { id: "s1", duration: 0.5, referenceBindingId: "orphaned-frame" },
+        { id: "s2", duration: 0.5, referenceBindingId: "still-used" },
+    ];
+    const references = [
+        { id: "orphaned-frame", mediaType: "image", role: "storyboard", storageKey: "deleted-frame.png" },
+        { id: "still-used", mediaType: "image", role: "storyboard", storageKey: "retained-frame.png" },
+    ];
+    const operation = buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", {
+        nodeId: "H3", segmentId: "canvas-clip", segment: {
+            id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" },
+            storyboardShots: [{ id: "s1", duration: 0.5 }, { id: "s2", duration: 0.5, referenceBindingId: "still-used" }],
+            referenceBindings: references,
+        },
+    }, { storyboardShots: previousStoryboardShots, referenceBindings: references });
+    if (operation.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    assert.deepEqual(operation.removedStoryboardBindingIds, ["orphaned-frame"]);
+    assert.deepEqual(operation.keyframeBindings?.map(binding => binding.bindingId), ["still-used"]);
+});
+
+test("a production Clip keeps its final Shot and accepts any image bound to its storyboard slot", () => {
     const base = { nodeId: "H3", segmentId: "canvas-clip", segment: { id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" }, referenceBindings: [] } };
     assert.throws(() => buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: { ...base.segment, storyboardShots: [] } }), /SHOT_LAST_IN_CLIP/);
-    assert.throws(() => buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: {
+    const operation = buildDirectorClipStoryboardOperation(formalDirector(), "SOURCE_C4", { ...base, segment: {
         ...base.segment, storyboardShots: [{ id: "s1", duration: 1, referenceBindingId: "unadopted" }],
-        referenceBindings: [{ id: "unadopted", mediaType: "image", role: "storyboard", storageKey: "unknown.png", sourceNodeId: "UNKNOWN" }],
-    } }), /STORYBOARD_ASSET_NOT_ADOPTED/);
+        referenceBindings: [{ id: "unadopted", assetId: "IMAGE_ASSET", mediaType: "image", role: "storyboard", storageKey: "image:unknown", sourceNodeId: "IMAGE_NODE" }],
+    } });
+    assert.equal(operation.type, "replace_director_clip_storyboard");
+    if (operation.type !== "replace_director_clip_storyboard") return;
+    assert.equal((operation.shotInputs.s1 as any)?.keyframePolicy, "reuse");
+    assert.equal((operation.shotInputs.s1 as any)?.keyframeAssetId, "storyboard:unadopted");
+    assert.deepEqual(operation.keyframeBindings, [{ shotId: "s1", assetId: "storyboard:unadopted", bindingId: "unadopted", nodeId: "IMAGE_NODE", containerNodeId: "H3", storageKey: "image:unknown" }]);
 });
 
 test("an old editor cleanup cannot unregister a newer owner binding", async () => {
@@ -99,6 +262,8 @@ test("an old editor cleanup cannot unregister a newer owner binding", async () =
     finally { newer(); }
 });
 test("canvas node and physical Clip identity resolve to the authoritative source Segment ID", () => {
-    assert.equal(sourceSegmentForCanvasClip([{ id: "SOURCE_C4", nodeId: "H3", segmentId: "canvas-clip" }], "H3", "canvas-clip"), "SOURCE_C4");
-    assert.throws(() => sourceSegmentForCanvasClip([{ id: "SOURCE_C4", nodeId: "OTHER", segmentId: "canvas-clip" }], "H3", "canvas-clip"), /TARGET_MISMATCH/);
+    const source = { segments: [{ id: "SOURCE_C4", shot_ids: ["S1"] }] };
+    const node = { id: "H3", metadata: { segments: [{ id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_C4" } }] } };
+    assert.equal(sourceSegmentForCanvasClip([node], source, "H3", "canvas-clip"), "SOURCE_C4");
+    assert.throws(() => sourceSegmentForCanvasClip([{ ...node, id: "OTHER" }], source, "H3", "canvas-clip"), /TARGET_MISMATCH/);
 });

@@ -1,4 +1,5 @@
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSegments, productionShots, productionSegmentRuntimeMatches, shotTitle } from "@/lib/production-source";
 import type { EpisodeProduction, ProductionCanvasContext, ProductionPresentation } from "@/services/backend-api";
 import type { CanvasNodeData } from "@/types/canvas";
 
@@ -29,14 +30,35 @@ export function productionObjectForNode(context: ProductionCanvasContext, produc
         const scene = productionSceneEntries(director.source).find(item => item.id === sceneId);
         if (scene) return { ...base, workspace: "story", targetKind: "scene", targetId: scene.id, title: scene.title || scene.id };
     }
-    const group = production.draft.clipGroups.find(item => item.nodeId === node.id && Boolean(segmentId) && item.segmentId === segmentId);
-    if (group) return { ...base, workspace: "production", targetKind: "segment", targetId: group.id, segmentId: group.segmentId || undefined, clipIndex: production.draft.clipGroups.indexOf(group) + 1, title: node.title || group.id };
+    const runtimeSegments = Array.isArray(node.metadata?.segments) ? node.metadata!.segments as Array<Record<string, any>> : [];
+    const selectedRuntimeSegments = segmentId ? runtimeSegments.filter(segment => String(segment.id || "") === segmentId) : [];
+    const segments = productionSegments(production);
+    // An H3 node can contain several formally projected Clips. Resolve the selected
+    // runtime segment first; requiring the whole node to map to one production target
+    // incorrectly makes every Clip on a multi-Clip node unavailable.
+    if (selectedRuntimeSegments.length === 1) {
+        const targetId = String(selectedRuntimeSegments[0].productionClipProjection?.targetId || "");
+        if (targetId && segments.some(segment => String(segment.id) === targetId)) {
+            const runtimeMatches = productionSegmentRuntimeMatches([node as CanvasNodeData], targetId, context.owner);
+            if (runtimeMatches.length === 1 && runtimeMatches[0].segment.id === segmentId) {
+                return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId: String(runtimeMatches[0].segment.id), clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
+            }
+        }
+    }
+    // Older production records persist the same stable mapping on the source Clip.
+    // Accept it only when both nodeId and segmentId match uniquely; never choose by
+    // title, array position, or the first Clip on the H3 node.
+    const sourceMatches = segmentId ? segments.filter(segment => String(segment.nodeId || "") === node.id && String(segment.segmentId || "") === segmentId) : [];
+    if (sourceMatches.length === 1) {
+        const targetId = String(sourceMatches[0].id || "");
+        return { ...base, workspace: "production", targetKind: "segment", targetId, segmentId, clipIndex: segments.findIndex(item => String(item.id) === targetId) + 1, title: node.title || targetId };
+    }
     const frame = Object.entries(production.draft.keyframes).find(([, item]) => item.nodeId === node.id);
-    if (frame) return { ...base, workspace: "shots", targetKind: "shot", targetId: frame[0], title: production.draft.shots.find(shot => shot.id === frame[0])?.title || node.title || frame[0] };
+    if (frame) return { ...base, workspace: "shots", targetKind: "shot", targetId: frame[0], title: shotTitle(productionShots(production).find(shot => String(shot.id) === frame[0]), node.title || frame[0]) };
     const asset = Object.entries(director.assets).find(([, item]) => item.nodeId === node.id);
     if (asset) {
         const shot = Object.entries(director.shotInputs).find(([, input]) => input.keyframeAssetId === asset[0]);
-        if (shot) return { ...base, workspace: "shots", targetKind: "shot", targetId: shot[0], title: production.draft.shots.find(item => item.id === shot[0])?.title || node.title || asset[0] };
+        if (shot) return { ...base, workspace: "shots", targetKind: "shot", targetId: shot[0], title: shotTitle(productionShots(production).find(item => String(item.id) === shot[0]), node.title || asset[0]) };
         const plan = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Record<string, unknown>[] : [];
         const source = plan.find(item => String(item.asset_id || item.id) === asset[0]);
         return { ...base, workspace: "assets", targetKind: "asset", targetId: asset[0], title: String(source?.asset_name || source?.name || node.title || asset[0]) };
@@ -51,14 +73,14 @@ export function productionObjectForPresentation(presentation: ProductionPresenta
     let title = id || "";
     if (production && id) {
         if (presentation.targetKind === "segment") title = id;
-        else if (presentation.targetKind === "shot" || presentation.targetKind === "keyframe") title = production.draft.shots.find(shot => shot.id === id)?.title || title;
+        else if (presentation.targetKind === "shot" || presentation.targetKind === "keyframe") title = shotTitle(productionShots(production).find(shot => String(shot.id) === id), title);
         else if (presentation.targetKind === "asset") {
             const plan = production.draft.director?.source.asset_plan;
             const item = Array.isArray(plan) ? plan.find(item => String(item?.asset_id || item?.id) === id) : undefined;
             title = String(item?.asset_name || item?.name || title);
         }
     }
-    const clipIndex = presentation.targetKind === "segment" && production ? production.draft.clipGroups.findIndex(group => group.id === id) + 1 : 0;
+    const clipIndex = presentation.targetKind === "segment" && production ? productionSegments(production).findIndex(segment => String(segment.id) === id) + 1 : 0;
     return { owner: presentation.owner, canvasId: presentation.canvasId, workspace: presentation.workspace === "advanced" ? "overview" : presentation.workspace,
         targetKind: presentation.targetKind, targetId: id, nodeId: presentation.nodeId, segmentId: presentation.segmentId, ...(clipIndex > 0 ? { clipIndex } : {}), title };
 }
@@ -71,27 +93,24 @@ export function productionObjectPath(object: ProductionObject) {
     return `/canvas/${encodeURIComponent(object.canvasId)}?${query}`;
 }
 
-/** Review state belongs to the formal record; H3 runtime state belongs to the selected Clip. */
+/** Unchanged generated image media is accepted; H3 runtime state belongs to the selected Clip. */
 export function productionObjectState(production: EpisodeProduction, object: ProductionObject, node: { metadata?: Record<string, unknown> }) {
     const director = production.draft.director;
     const assetId = object.targetKind === "shot" ? director?.shotInputs[object.targetId || ""]?.keyframeAssetId : object.targetId;
     const asset = assetId ? director?.assets[assetId] : undefined;
     const frame = object.targetKind === "shot" ? production.draft.keyframes[object.targetId || ""] : undefined;
     const review = object.targetKind === "shot" ? production.draft.keyframeReviews[object.targetId || ""] : undefined;
-    const group = object.targetKind === "segment" ? production.draft.clipGroups.find(group => group.id === object.targetId) : undefined;
     const segments = Array.isArray(node.metadata?.segments) ? node.metadata.segments as Record<string, unknown>[] : [];
     const runtime = object.targetKind === "segment" ? segments.find(segment => segment.id === object.segmentId) : node.metadata;
+    const sourceSegment = object.targetKind === "segment" ? productionSegments(production).find(segment => String(segment.id) === object.targetId) : undefined;
     const working = ["queued", "loading", "running", "pending", "awaiting_confirmation"].includes(String(runtime?.status));
     const failed = ["error", "failed"].includes(String(runtime?.status));
     const storageKey = object.targetKind === "segment" ? runtime?.resultStorageKey : frame?.storageKey || asset?.storageKey;
     const verdict = review?.verdict;
-    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || group?.inputOutdated ? "outdated" : verdict === "approved" || verdict === "auto-accepted" ? "approved" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "approved" ? "approved" : asset?.status === "rejected" ? "rejected" : storageKey ? object.targetKind === "segment" ? "complete" : "needs_review" : "planned";
-    const publishedAsset = assetId ? production.published?.director?.assets[assetId] : undefined;
-    const publishedFrame = object.targetKind === "shot" ? production.published?.keyframes[object.targetId || ""] : undefined;
-    const canReview = Boolean(!working && !asset?.sharedSource && assetId && production.publishedVersion && storageKey && storageKey === node.metadata?.storageKey && storageKey === (publishedFrame?.storageKey || publishedAsset?.storageKey) && object.nodeId === (publishedFrame?.nodeId || publishedAsset?.nodeId));
-    return { status, working, canReview, assetId, storageKey };
+    const status = working ? "working" : failed ? "failed" : asset?.inputOutdated || sourceSegment?.inputOutdated || runtime?.inputOutdated ? "outdated" : verdict === "rejected" || verdict === "needs-redo" ? "rejected" : asset?.status === "rejected" ? "rejected" : verdict === "approved" || verdict === "auto-accepted" || asset?.status === "approved" || Boolean(storageKey && object.targetKind !== "segment") ? "approved" : storageKey ? "complete" : "planned";
+    return { status, working, assetId, storageKey };
 }
 
 export function productionObjectPrompt(object: ProductionObject) {
-    return `【当前画布制作对象】\n制作归属：${object.owner.kind}:${object.owner.id}\n画布：${object.canvasId}\n对象：${object.targetKind || "production"}:${object.targetId || ""}（${object.title}）\n${object.nodeId ? `节点：${object.nodeId}\n` : ""}${object.segmentId ? `H3 Clip：${object.segmentId}\n` : ""}本条用户请求关联上述对象。先核验正式制作记录及节点／Clip 映射，再按用户要求处理；参考选择、生成和审核沿用正式制作链路。`;
+    return `【当前画布制作对象】\n制作归属：${object.owner.kind}:${object.owner.id}\n画布：${object.canvasId}\n对象：${object.targetKind || "production"}:${object.targetId || ""}（${object.title}）\n${object.nodeId ? `节点：${object.nodeId}\n` : ""}${object.segmentId ? `H3 Clip：${object.segmentId}\n` : ""}本条用户请求关联上述对象。先核验正式制作记录及节点／Clip 映射，再按用户要求处理；参考选择和生成沿用正式制作链路。`;
 }

@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
+import { episodeCanvasRead } from "./drama/episode-read.js";
 
 import {
   type ResolvedConfig,
@@ -56,13 +57,15 @@ import {
   isLocalConnection,
   registerConnectionRoutes,
 } from "./server/connection-routes.js";
+import { effectiveClientAddress, isLanAuthBypassed } from "./server/lan-access-policy.js";
 import { registerLocalModelProxyRoutes } from "./server/local-model-proxy.js";
 import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
 import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
-import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, type CanvasTranslationTarget } from "./canvas/translation.js";
+import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
+import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
 
 const logger = createLogger("backend");
 
@@ -102,7 +105,7 @@ export function startServer(
       if (source?.sourceProjectId === commit.projectId) events.publish({ type: "asset.updated", entityId: asset.id, payload: db.getAsset(asset.id) });
     }
     for (const assetId of commit.deletedAssetIds || []) events.publish({ type: "asset.updated", entityId: assetId, payload: { deleted: 1 } });
-    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision } });
+    for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision, ...(update.reason ? { reason: update.reason } : {}) } });
   });
   const app = express();
   if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
@@ -166,14 +169,18 @@ export function startServer(
   app.use((req: Request, res: Response, next: NextFunction) => {
     const url = req.url!.split("?")[0];
     if (url === "/health" || url === "/config") return next();
+    const clientAddress = effectiveClientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"], process.env.INFINITE_CANVAS_DEV_WATCH === "1");
+    if (isLanAuthBypassed(clientAddress, config.listenHost)) return next();
     // Codex 插件连接本机共享 MCP 时使用 loopback；该豁免只覆盖 MCP 路由，
     // 并同时校验 socket、Host 与 Origin，不能被远端请求或本机代理头伪造。
     if (url === "/mcp" && isLocalConnection(req)) return next();
     // 只读媒体端点免 token：浏览器来源已由上方 CORS 白名单限制，且媒体 URL 内嵌的
     // token 会在 backend 重启后失效，豁免后可避免历史产物在 token 轮换后 401 而“消失”。
-    // 仅豁免 GET 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护。
+    // 仅豁免 GET/HEAD 读取类端点，写入类（如 POST /runtime/media）仍受 token 保护；
+    // HEAD 必须一起豁免：跨域下载方（FileSaver 的 corsEnabled）先用 HEAD 探测可用性，
+    // 401 会让浏览器退化成新标签页打开，视频节点下载因此拿不到文件。
     if (
-      req.method === "GET" &&
+      (req.method === "GET" || req.method === "HEAD") &&
       (url === "/media" ||
         url.startsWith("/media/") ||
         url.startsWith("/runtime/media-file"))
@@ -188,17 +195,22 @@ export function startServer(
     next();
   });
 
-  // ── 请求日志 ─────────────────────────────────────────────────────────
+  // ── 慢请求本地遥测 ───────────────────────────────────────────────────
+  // SSE（/mcp、/events）与媒体下载的连接存活时间不是请求耗时：按首字节计时，
+  // 否则一条挂着的长连接会长期占满统计，把真实慢请求挤出去。
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const startedAt = Date.now();
-    res.on("finish", () => {
-      if (req.method === "OPTIONS" || res.statusCode < 400) return;
-      // 查询参数可能携带 Backend token；日志只记录路由路径，禁止把凭据写进终端或日志文件。
-      logger.warn(`${req.method} ${req.path}`, {
-        status: res.statusCode,
-        durationMs: Date.now() - startedAt,
-      });
-    });
+    if (req.method === "OPTIONS") return next();
+    const watch = watchHttpOperation(logger, `${req.method} ${safeOperationPath(req.path)}`, {}, () => String(res.getHeader("content-type") ?? ""));
+    const originalWriteHead = res.writeHead;
+    res.writeHead = function writeHead(this: Response, ...args: unknown[]) {
+      const result = (originalWriteHead as (...rest: unknown[]) => Response).apply(this, args);
+      watch.markFirstByte(String(this.getHeader("content-type") ?? ""));
+      return result;
+    } as Response["writeHead"];
+    const finish = (outcome: string) =>
+      watch.finish(outcome, String(res.getHeader("content-type") ?? ""));
+    res.once("finish", () => finish(`http-${res.statusCode}`));
+    res.once("close", () => finish("connection-closed"));
     next();
   });
 
@@ -213,8 +225,16 @@ export function startServer(
   });
   app.get("/config", (req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    // 本机来源始终可读 /config：判断依据是「客户端确实是本机」（isLocalConnection 已要求
+    // 真实回环 socket 对端 + 回环 Host + 非外部 Origin），与后端绑定在 127.0.0.1 还是
+    // 0.0.0.0 无关。原先把披露绑到 listenHost!=="0.0.0.0"，一旦开启局域网绑定就会让本机
+    // 浏览器也丢掉回环自动披露——轮换密钥后旧客户端既过不了业务接口、又打不开 /config
+    // 取新值，永久静默卡在 invalid token，无人自愈。远端调用方不受影响（其真实对端非回环）。
+    const localDiscoveryAllowed = isLocalConnection(req);
+    const clientAddress = effectiveClientAddress(req.socket.remoteAddress, req.headers["x-forwarded-for"], process.env.INFINITE_CANVAS_DEV_WATCH === "1");
     if (
-      (config.listenHost === "0.0.0.0" || !isLocalConnection(req)) &&
+      !localDiscoveryAllowed &&
+      !isLanAuthBypassed(clientAddress, config.listenHost) &&
       token !== config.token
     )
       return void res
@@ -376,14 +396,24 @@ export function startServer(
 
   // 画布右键翻译：走设置里选定的文本模型（ai.config.translationModel），不再依赖第三方翻译 API。
   app.post("/translation/text", async (req, res) => {
+    const controller = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) controller.abort(); });
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const target = typeof req.body?.target === "string" ? req.body.target.trim() : "";
-    if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
     if (!CANVAS_TRANSLATION_TARGETS.includes(target as CanvasTranslationTarget)) return void res.status(400).json({ ok: false, error: "target 仅支持 zh-CN 或 en" });
     try {
-      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget });
+      const mode = typeof req.body?.mode === "string" ? req.body.mode.trim() : "default";
+      if (Array.isArray(req.body?.items)) {
+        if (mode !== "h3-prompt" || target !== "en") return void res.status(400).json({ ok: false, error: "批量翻译只支持 H3 英文提示词" });
+        const items = req.body.items.map((item: any) => ({ id: String(item?.id || ""), text: String(item?.text || "") }));
+        const translations = await translateH3PromptBatch(stores, items, controller.signal);
+        return void res.json({ ok: true, translations });
+      }
+      if (!text.trim()) return void res.status(400).json({ ok: false, error: "text 必填" });
+      const translatedText = await translateCanvasText(stores, { text, target: target as CanvasTranslationTarget, mode: mode as "default" | "h3-prompt", signal: controller.signal });
       res.json({ ok: true, translatedText });
     } catch (error) {
+      if (controller.signal.aborted) return;
       res.status(502).json({ ok: false, error: error instanceof Error ? error.message : "翻译失败" });
     }
   });
@@ -411,6 +441,15 @@ export function startServer(
       const previous = stores.settings.get(H3_DEFAULTS_KEY) as { layout?: unknown } | null;
       if (previous && typeof previous === "object" && previous.layout !== undefined)
         settings.layout = previous.layout;
+    }
+    // 生成参数保存是局部更新；保留由模板管理器维护、但普通参数表单不会提交的字段。
+    // 显式传入 [] 仍可清空，避免保存默认参数或 MCP 更新时静默丢失自定义模板。
+    const previous = stores.settings.get(H3_DEFAULTS_KEY) as Record<string, unknown> | null;
+    if (previous && typeof previous === "object") {
+      for (const key of ["styleTemplates", "deletedStyleTemplateIds"] as const) {
+        if (settings[key] === undefined && previous[key] !== undefined)
+          settings[key] = previous[key];
+      }
     }
     stores.settings.set(H3_DEFAULTS_KEY, settings);
     events.publish({
@@ -912,12 +951,23 @@ export function startServer(
     const dramaId = String(req.params.dramaId || "");
     if (!db.isDramaProject(dramaId))
       return void res.status(404).json({ ok: false, error: "剧目不存在" });
-    for (const asset of stores.assets.list({ kind: "drama-file", dramaId })) {
+    const freeCanvasIds: string[] = Array.isArray(req.body?.freeCanvasIds)
+      ? [...new Set<string>((req.body.freeCanvasIds as unknown[]).filter((id): id is string => typeof id === "string" && id.length > 0))]
+      : [];
+    const deletedCanvasIds: string[] = [...new Set([...db.listDramaCanvasIds(dramaId), ...freeCanvasIds])];
+    const dramaFiles = stores.assets.list({ kind: "drama-file", dramaId });
+    let deleted: number;
+    try {
+      deleted = db.deleteDramaProject(dramaId, freeCanvasIds);
+    } catch (error) {
+      return void res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+    for (const asset of dramaFiles) {
       const storageKey = typeof asset.data.storageKey === "string" ? asset.data.storageKey : "";
       stores.assets.delete(asset.id);
       if (storageKey) stores.media.delete(storageKey);
     }
-    const deleted = stores.canvasFolders.deleteDrama(dramaId);
+    for (const canvasId of deletedCanvasIds) events.publishCanvasSnapshot({ entityId: canvasId, payload: { deleted: 1 } });
     events.publishCanvasFolder({ entityId: dramaId, payload: { deleted } });
     res.json({ ok: true, deleted });
   });
@@ -925,6 +975,15 @@ export function startServer(
   app.get("/drama/projects/:dramaId", (req, res) => {
     const drama = db.listCanvasFolders(String(req.params.dramaId))[0];
     if (!drama?.isDrama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    if (req.query.view === "summary") {
+      const description = String(drama.description || ""), outline = String(drama.outline || "");
+      return void res.json({ ok: true, drama: {
+        id: drama.id, name: drama.name, updatedAt: drama.updatedAt,
+        ...(Array.isArray(drama.tags) ? { tags: drama.tags } : {}),
+        descriptionPreview: description.slice(0, 240), descriptionLength: description.length,
+        outlinePreview: outline.slice(0, 360), outlineLength: outline.length,
+      } });
+    }
     res.json({ ok: true, drama });
   });
   app.get("/drama/projects/:dramaId/episodes", (req, res) => {
@@ -934,8 +993,51 @@ export function startServer(
       .find((item) => item.id === dramaId);
     if (!drama)
       return void res.status(404).json({ ok: false, error: "剧目不存在" });
+    if (req.query.view === "summary") {
+      const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+      const pageSize = Math.max(1, Math.min(100, Math.floor(Number(req.query.pageSize) || 20)));
+      return void res.json({ ok: true, dramaId, ...db.listDramaEpisodeSummaries(dramaId, page, pageSize) });
+    }
     const episodes = db.listDramaEpisodes(dramaId);
     res.json({ ok: true, dramaId, episodes });
+  });
+  app.get("/dramas/:dramaId/scenes", (req, res) => {
+    const dramaId = String(req.params.dramaId || "");
+    const drama = stores.canvasFolders.list().find((item) => item.id === dramaId && item.isDrama);
+    if (!drama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    const episodeId = typeof req.query.episodeId === "string" ? req.query.episodeId.trim() : "";
+    const includeOrphaned = req.query.includeOrphaned === "true";
+    const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(req.query.pageSize) || 20)));
+    const where = ["s.drama_id = ?", ...(!includeOrphaned ? ["s.episode_id IS NOT NULL"] : []), ...(episodeId ? ["s.episode_id = ?"] : [])].join(" AND ");
+    const params = [dramaId, ...(episodeId ? [episodeId] : [])];
+    const total = Number((db.db.prepare(`SELECT COUNT(*) AS count FROM drama_scene_instances s WHERE ${where}`).get(...params) as { count?: number } | undefined)?.count || 0);
+    const rows = db.db.prepare(`SELECT s.id, s.episode_id, s.source_scene_key, s.environment_id, s.scene_order, s.title, s.source_hash, s.status, s.created_at, s.updated_at, c.canvas_id
+      FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id
+      WHERE ${where} ORDER BY s.scene_order, s.id LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize) as Array<Record<string, unknown>>;
+    const scenes = rows.map((row) => ({
+      id: String(row.id), dramaId, episodeId: row.episode_id ?? null, sourceSceneKey: row.source_scene_key,
+      environmentId: row.environment_id ?? null, order: Number(row.scene_order || 0), title: row.title,
+      sourceHash: row.source_hash, status: row.status, canvasId: row.canvas_id ?? null,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }));
+    res.json({ ok: true, dramaId, scenes, page, pageSize, total, nextPage: page * pageSize < total ? page + 1 : null });
+  });
+  app.get("/drama/scenes/:sceneId", (req, res) => {
+    const row = db.db.prepare(`SELECT s.id, s.drama_id, s.episode_id, s.source_scene_key, s.environment_id, s.scene_order, s.title, s.source_hash, s.status, s.created_at, s.updated_at, c.canvas_id
+      FROM drama_scene_instances s LEFT JOIN drama_scene_canvases c ON c.scene_id = s.id WHERE s.id = ?`).get(String(req.params.sceneId || "")) as Record<string, unknown> | undefined;
+    if (!row) return void res.status(404).json({ ok: false, code: "SCENE_NOT_FOUND", error: "制作场次不存在" });
+    const dramaId = String(row.drama_id || "");
+    const drama = stores.canvasFolders.list().find((item) => item.id === dramaId && item.isDrama);
+    const episodeId = row.episode_id == null ? null : String(row.episode_id);
+    const episode = episodeId ? db.getDramaEpisode(episodeId) : null;
+    res.json({ ok: true, scene: {
+      id: String(row.id), dramaId, dramaName: drama?.name || null, episodeId,
+      episodeTitle: episode?.title || null, sourceSceneKey: row.source_scene_key,
+      environmentId: row.environment_id ?? null, order: Number(row.scene_order || 0),
+      title: row.title, sourceHash: row.source_hash, status: row.status,
+      canvasId: row.canvas_id ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
+    } });
   });
   // 剧目级自定义资产：LUT、字体、参考文档、压缩包等任意二进制文件。
   app.get("/drama/projects/:dramaId/assets", (req, res) => {
@@ -1073,13 +1175,51 @@ export function startServer(
     }
   });
   app.get("/drama/episodes/:episodeId", (req, res) => {
+    const view = req.query.view === undefined ? "full" : String(req.query.view);
+    if (view !== "summary" && view !== "full")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "view 必须是 summary 或 full" });
+    // 网页不传 canvasView，保持整张画布的既有行为；Agent/MCP 显式传 ref 只取引用。
+    const canvasView = req.query.canvasView === undefined ? "full" : String(req.query.canvasView);
+    if (canvasView !== "ref" && canvasView !== "full")
+      return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "canvasView 必须是 ref 或 full" });
     const episode = db.getDramaEpisode(req.params.episodeId);
     if (!episode)
       return void res.status(404).json({ ok: false, error: "分集不存在" });
+    if (view === "summary") {
+      const { fullPlot: _fullPlot, ...summary } = episode;
+      return void res.json({ ok: true, episode: summary });
+    }
+    if (req.query.plotChunkBytes !== undefined) {
+      const chunkBytes = Number(req.query.plotChunkBytes);
+      if (!Number.isInteger(chunkBytes) || chunkBytes < 1 || chunkBytes > 65536)
+        return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "plotChunkBytes 必须为 1 到 65536 之间的整数" });
+      const fullPlot = String(episode.fullPlot || ""), bytes = new TextEncoder().encode(fullPlot);
+      const sha256 = crypto.createHash("sha256").update(fullPlot, "utf8").digest("hex");
+      const selection = JSON.stringify({ episodeId: episode.id, updatedAt: episode.updatedAt, sha256, chunkBytes });
+      let offset = 0;
+      if (typeof req.query.plotCursor === "string") {
+        let cursor: Record<string, unknown>;
+        try { cursor = JSON.parse(decodeURIComponent(req.query.plotCursor)); } catch { return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标格式无效" }); }
+        if (cursor.selection !== selection) return void res.status(409).json({ ok: false, code: "READ_CURSOR_EXPIRED", error: "分集正文或版本已变化，请重新读取" });
+        offset = Number(cursor.offset);
+        if (!Number.isSafeInteger(offset) || offset < 0) return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标偏移无效" });
+      }
+      if (offset > bytes.length || (offset < bytes.length && (bytes[offset] & 0xc0) === 0x80))
+        return void res.status(400).json({ ok: false, code: "INVALID_CURSOR", error: "剧情游标不是 UTF-8 边界" });
+      let end = Math.min(bytes.length, offset + chunkBytes);
+      while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+      if (end === offset && offset < bytes.length) return void res.status(400).json({ ok: false, code: "CHUNK_TOO_SMALL", error: "plotChunkBytes 无法容纳下一个字符" });
+      const { fullPlot: _fullPlot, ...episodeSummary } = episode;
+      const nextCursor = end < bytes.length ? encodeURIComponent(JSON.stringify({ selection, offset: end })) : null;
+      return void res.json({ ok: true, episode: episodeSummary, fullPlotChunk: {
+        sha256, bytes: bytes.length, offset,
+        text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor,
+      }, ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView) });
+    }
     res.json({
       ok: true,
       episode,
-      canvas: episode.canvasId ? db.getCanvasProject(episode.canvasId) : null,
+      ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView),
     });
   });
   app.patch("/drama/episodes/:episodeId", (req, res) => {
@@ -1718,9 +1858,7 @@ export function startServer(
       ? (req.query.status as GenerationLogStatus)
       : undefined;
     const limit = Number(req.query.limit || 500);
-    res.json({
-      ok: true,
-      logs: stores.logs.list({
+    const logs = stores.logs.list({
         projectId,
         nodeId,
         status,
@@ -1742,8 +1880,13 @@ export function startServer(
           typeof req.query.model === "string" ? req.query.model : undefined,
         from: typeof req.query.from === "string" ? req.query.from : undefined,
         to: typeof req.query.to === "string" ? req.query.to : undefined,
-      }),
-    });
+      });
+    // summary=true：纯展示场景裁掉 params/references/inputCounts 三大列（占响应体约八成，首页网格不读）；
+    // prompt/outputs 保留（缩略图与预览需要）。详情弹窗、导出等按 projectId 取列表的路径仍走全量。
+    const responseLogs = req.query.summary === "true"
+      ? logs.map((log) => ({ ...log, references: [], inputCounts: {}, params: {} }))
+      : logs;
+    res.json({ ok: true, logs: responseLogs });
   });
   app.post("/generation-logs", (req, res) => {
     const body = req.body as GenerationLogInput;
@@ -1791,6 +1934,9 @@ export function startServer(
 
   // ── Tasks ────────────────────────────────────────────────────────────
   app.get(CANVAS_TASKS_PATH, (req, res) => {
+    if (req.query.modelUsage === "true") {
+      return void res.json({ ok: true, modelUsage: stores.tasks.modelUsage() });
+    }
     const status =
       typeof req.query.status === "string" ? req.query.status : undefined;
     const kind =
@@ -1810,6 +1956,9 @@ export function startServer(
             .filter(Boolean)
         : [];
     const taskId = typeof req.query.taskId === "string" ? req.query.taskId : "";
+    // summary=true：纯展示场景（首页、全局任务按钮）只要标量 + 输出媒体引用，不吐多 MB 的提示词大列。
+    // 过滤条件与全量列表共用同一构造器，两条路径行为一致。
+    const useSummary = req.query.summary === "true";
     const taskIds = list(req.query.taskIds);
     const tasks = taskId
       ? stores.tasks.get(taskId)
@@ -1820,7 +1969,22 @@ export function startServer(
             const task = stores.tasks.get(id);
             return task ? [task] : [];
           })
-        : stores.tasks.list({
+        : useSummary
+          ? stores.tasks.listSummaries({
+              status: status as RuntimeTaskStatus | undefined,
+              kind,
+              model,
+              scope,
+              projectId:
+                typeof req.query.projectId === "string"
+                  ? req.query.projectId
+                  : undefined,
+              nodeIds: list(req.query.nodeIds),
+              segmentIds: list(req.query.segmentIds),
+              limit: Number(req.query.limit || 500),
+              offset: Number(req.query.offset || 0),
+            })
+          : stores.tasks.list({
           status: status as RuntimeTaskStatus | undefined,
           kind,
           model,

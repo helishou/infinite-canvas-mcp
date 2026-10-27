@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
 import { appendContinuityHold, appendContinuityExemption, normalizedContinuityValues } from './continuity-ledger-evidence';
-import { analyzeContinuityDeletion, applyContinuityDeletion, continuityLedgerEntryId, restoreContinuityDeletion } from './continuity-ledger-mutations';
+import { analyzeContinuityDeletion, applyContinuityDeletion, continuityLedgerEntryId, continuityLedgerFactDescriptions, restoreContinuityDeletion } from './continuity-ledger-mutations';
 const sourceText = readFileSync(new URL('./continuity-panel.tsx', import.meta.url), 'utf8');
 const ast = ts.createSourceFile('panel.tsx', sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 function handler(name: string, context: Record<string, any>): (...args: any[]) => any {
@@ -20,12 +20,12 @@ function harness() {
  const c:any={shots, timelineId:'T',shotId:'S',factId:'F',sourceBlockId:'B',exemptionReason:'Documented review reason',reviewRef:'review',subjectAssembly:true,
  source:{shots,script_scenes:[{id:'scene',blocks:[{id:'B'}]}]},blocksForShot:[{id:'B',sceneId:'scene',sourceBlock:{id:'B'}}],
  activeEditContext:{current:{key:'source',alive:true,editable:true,busy:false}},latestLedger:{current:fixture()},
- appendContinuityHold,appendContinuityExemption,analyzeContinuityDeletion,applyContinuityDeletion,continuityLedgerEntryId,restoreContinuityDeletion,
+ appendContinuityHold,appendContinuityExemption,analyzeContinuityDeletion,applyContinuityDeletion,continuityLedgerEntryId,continuityLedgerFactDescriptions,restoreContinuityDeletion,
  id:()=>`new${++sequence}`,sourceDigest:async()=> 'digest',setLedger:(value:any)=>{writes.push(value);c.latestLedger.current=value;},setLastDeletion:(value:any)=>{c.lastDeletion=value;},
  message:{warning:(s:any)=>notices.push(s),error:(s:any)=>notices.push(s)},t:(s:string)=>s,records:(value:any)=>Array.isArray(value)?value:[],stable:JSON.stringify,
  React:{createElement: (...args:any[])=>args},Button:'button', display:{fact:(s:string)=>s,timeline:(s:string)=>s,target:(s:string)=>s,source:(s:string)=>s},
  modal:{confirm:(options:any)=>{c.dialog=options;return {destroy(){}};},info:(options:any)=>{c.blocked=options;return {destroy(){}};}},
- ledger:fixture(),editable:true,legacy:false,changeDraft:undefined,snapshotLoading:false,busy:false,sourceConflict:false,invalidLedgerDraft:false,invalidEventPositions:[],onSave:async()=>true};
+ ledger:fixture(),editable:true,ledgerUnsupported:false,changeDraft:undefined,snapshotLoading:false,busy:false,sourceConflict:false,invalidLedgerDraft:false,invalidEventPositions:[],onSave:async()=>true};
  return {c,writes,notices};
 }
 for (const name of ['addHold','addExemption']) {
@@ -63,9 +63,16 @@ test('actual delete and undo preserve unrelated edits and remove only the confir
  const {c,writes}=eventHarness();handler('removeEntry',c)('events',c.latestLedger.current.events[0]);c.dialog.onOk();assert.equal(writes.length,1);assert.equal(c.latestLedger.current.events.length,0);assert.ok(c.lastDeletion);
  c.latestLedger.current.facts[0].display_name='Unrelated edit';handler('undoDeletion',c)();assert.equal(c.latestLedger.current.events[0].id,'E');assert.equal(c.latestLedger.current.facts[0].display_name,'Unrelated edit');assert.equal(c.lastDeletion,undefined);
 });
-test('save rejects readonly, legacy, snapshot-loading and invalid drafts without a request; only receipt success clears undo',async()=>{
- for(const patch of [{editable:false},{legacy:true},{changeDraft:{}},{snapshotLoading:true},{busy:true},{sourceConflict:true},{invalidLedgerDraft:true},{invalidEventPositions:[{}]}]){
+test('save rejects readonly, unsupported ledger, snapshot-loading and invalid drafts without a request; only receipt success clears undo',async()=>{
+ for(const patch of [{editable:false},{ledgerUnsupported:true},{changeDraft:{}},{snapshotLoading:true},{busy:true},{sourceConflict:true},{invalidLedgerDraft:true},{invalidEventPositions:[{}]}]){
   const {c}=harness();let calls=0;Object.assign(c,patch);c.onSave=async()=>{calls++;return true;};await handler('saveLedger',c)();assert.equal(calls,0);
  }
  const {c}=harness();c.lastDeletion={rows:[]};c.onSave=async()=>false;await handler('saveLedger',c)();assert.ok(c.lastDeletion);c.onSave=async()=>true;await handler('saveLedger',c)();assert.equal(c.lastDeletion,undefined);
+});
+
+test('saving completes a missing state description so the ledger can satisfy the save contract', async () => {
+ const {c,writes}=harness();
+ await handler('saveLedger',c)();
+ assert.equal(writes.length,1,'the repaired ledger is written before saving');
+ assert.deepEqual(writes[0].facts[0].value_descriptions,{a:'a',b:'b'});
 });

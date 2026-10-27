@@ -6,6 +6,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
+import { PageHeader } from "@/components/layout/page-header";
 import { MediaImage } from "@/components/media/media-image";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
@@ -603,12 +604,29 @@ export default function ImagePage() {
     };
 
     const unknownResult = results.some(result => result.status === "unknown");
+    const fitResultsToViewport = results.length > 0 && results.every(result => result.status === "success" && result.image);
     const deliveryIndex = results.findIndex((result,index) => result.status === "failed" && deliveryResultsRef.current.has(index));
     const confirmNewGeneration = () => Modal.confirm({ title:t("videoRecovery.newGeneration"), content:t("videoRecovery.confirmNew"), okText:t("videoRecovery.newGeneration"), onOk:()=>{ void generate(); } });
 
     return (
         <div className="ui-controls flex h-full min-w-0 flex-col overflow-hidden bg-background text-foreground">
-            <main className="grid min-h-0 flex-1 grid-cols-1 gap-5 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:p-6 xl:grid-cols-[260px_minmax(0,1fr)]">
+            <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3 sm:p-5 lg:overflow-hidden lg:px-8 lg:py-6">
+            <PageHeader
+                className="shrink-0"
+                width="gallery"
+                title={t("imageWorkbench.title")}
+                actions={
+                    <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
+                        <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
+                            {t("workbench.logs")}
+                        </Button>
+                        <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
+                            {t("workbench.settings")}
+                        </Button>
+                    </div>
+                }
+            />
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-5 lg:overflow-hidden lg:grid-rows-[minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 min-w-0 overflow-y-auto border-r border-border pr-5 xl:block">
                     <LogPanel
                         logs={logs}
@@ -621,25 +639,9 @@ export default function ImagePage() {
                     />
                 </aside>
 
-                <section className="grid min-w-0 gap-5 lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
+                <section className="grid min-w-0 gap-5 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] lg:overflow-hidden">
                     <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
-                        <div>
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                    <h1 className="ui-page-title text-foreground">{t("imageWorkbench.title")}</h1>
-                                </div>
-                                <div className="flex shrink-0 flex-wrap gap-1.5 xl:hidden">
-                                    <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
-                                        {t("workbench.logs")}
-                                    </Button>
-                                    <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
-                                        {t("workbench.settings")}
-                                    </Button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="mt-6 space-y-6">
+                        <div className="space-y-6">
                             <section aria-label={t("workbench.groups.input")}>
                                 <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
                                     <label htmlFor="image-workbench-prompt" className="ui-group-title">
@@ -710,7 +712,7 @@ export default function ImagePage() {
                                     {references.map((item, index) => (
                                         <div key={item.id} className="group relative h-32 w-24 shrink-0 overflow-hidden rounded-md border border-border sm:h-28 sm:w-20">
                                             <img src={item.dataUrl} alt={item.name} className="h-20 w-full object-cover" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{imageReferenceLabel(index)}</span>
+                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-white">{imageReferenceLabel(index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
                                             <button
                                                 type="button"
@@ -770,8 +772,8 @@ export default function ImagePage() {
                         </section>
                     </div>
 
-                    <div className="thin-scrollbar flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:min-h-0 lg:overflow-y-auto">
-                        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                    <div className={`flex min-w-0 flex-col ui-card border border-border bg-card p-4 sm:p-5 lg:h-full lg:min-h-0 ${fitResultsToViewport ? "lg:overflow-hidden" : "lg:overflow-y-auto"}`}>
+                        <div className="mb-5 flex shrink-0 flex-wrap items-center justify-between gap-3">
                             <div>
                                 <h2 className="ui-panel-title">{t("workbench.results")}</h2>
                             </div>
@@ -782,7 +784,7 @@ export default function ImagePage() {
                             ) : null}
                         </div>
                         {results.length ? (
-                            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] items-start gap-4">
+                            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] items-stretch gap-4 lg:min-h-0 lg:flex-1 lg:auto-rows-fr">
                                 {results.map((result, index) =>
                                     result.status === "success" && result.image ? (
                                         <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
@@ -791,18 +793,22 @@ export default function ImagePage() {
                                     ) : result.status === "failed" ? (
                                         <FailedImageCard deliveryOnly={deliveryResultsRef.current.has(index)} key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
                                     ) : (
-                                        <PendingImageCard key={result.id} />
+                                        <PendingImageCard key={result.id} className="lg:h-full lg:aspect-auto" />
                                     ),
                                 )}
                             </div>
                         ) : (
-                            <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center rounded-lg bg-muted/45 px-6 py-12 text-center lg:min-h-[360px]">
-                                <ImagePlus className="mb-4 size-8 text-muted-foreground/65" />
-                                <Empty image={false} description={t("imageWorkbench.empty")} />
+                            <div data-testid="workbench-empty" className="flex items-center gap-3 rounded-lg bg-muted/45 px-4 py-4">
+                                <ImagePlus className="size-5 shrink-0 text-muted-foreground/65" aria-hidden="true" />
+                                <p className="min-w-0 text-sm text-muted-foreground">
+                                    {t("imageWorkbench.empty")}
+                                    <span className="ml-1 text-xs opacity-80">{t("workbench.emptyHint")}</span>
+                                </p>
                             </div>
                         )}
                     </div>
                 </section>
+            </div>
             </main>
             <input
                 ref={fileInputRef}
@@ -910,9 +916,9 @@ function ResultImageCard({
 }) {
     const { t } = useTranslation();
     return (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain" />
-            <div className="space-y-2 border-t border-border px-3 py-3">
+        <div className="overflow-hidden rounded-lg border border-border bg-card lg:flex lg:h-full lg:min-h-0 lg:flex-col">
+            <MediaImage src={image.storageKey ? backendMediaUrl(image.storageKey) : image.dataUrl} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square w-full bg-muted/40 object-contain lg:aspect-auto lg:h-full lg:min-h-0 lg:flex-1" />
+            <div className="space-y-2 border-t border-border px-3 py-3 lg:shrink-0">
                 <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs tabular-nums text-muted-foreground">
                     <span>
                         {image.width}x{image.height}
@@ -942,10 +948,10 @@ function ResultImageCard({
     );
 }
 
-function PendingImageCard() {
+function PendingImageCard({ className = "" }: { className?: string } = {}) {
     const { t } = useTranslation();
     return (
-        <div className="relative aspect-square overflow-hidden rounded-lg border border-dashed border-border bg-muted/40">
+        <div className={`relative aspect-square overflow-hidden rounded-lg border border-dashed border-border bg-muted/40 ${className}`}>
             <div
                 className="absolute inset-0 opacity-60"
                 style={{

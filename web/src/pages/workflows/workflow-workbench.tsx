@@ -46,7 +46,7 @@ export function WorkflowWorkbench({
             <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-border px-1 py-3">
                 <div className="min-w-0">
                     <div className="truncate text-base font-semibold">{title}</div>
-                    {subtitle ? <p className="mt-0.5 truncate text-xs text-stone-500">{subtitle}</p> : null}
+                    {subtitle ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle}</p> : null}
                 </div>
                 {actions ? <div aria-label={t("microTools.workflow.manage")} className="flex flex-wrap gap-2">{actions}</div> : null}
             </div>

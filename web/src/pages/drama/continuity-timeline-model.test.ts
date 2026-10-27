@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { continuityReadProjection, continuityEventPositionIssues, continuityBlocksForShot, continuitySourceBlocks, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityPreviewStatus, continuityPriorState, continuityTimelineShots, continuityUsage, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack } from "./continuity-timeline-model";
-import { continuityEventAnchor } from "./continuity-event-anchor";
+import { continuityReadProjection, continuityEventPositionIssues, continuityBlocksForShot, continuityDefaultEvidenceBlockId, continuitySourceBlocks, continuityEntityKey, continuityLocalFrame, continuityMarkerLanes, continuityPreviewStatus, continuityPriorState, continuityTimelineShots, continuityUsage, continuityWorkbenchSource, orderedContinuityShots, replayContinuityFact, visibleContinuityTrack } from "./continuity-timeline-model";
+import { continuityEventAnchor, continuityEventFrame, continuityEventPositionPatch } from "./continuity-event-anchor";
+import { appendContinuityChange } from "./continuity-event-draft";
 
-const fixture = () => ({ prompt_assembly: { version: 2 }, subject_registry: [{ id: "SUB", entityRef: { kind: "asset", id: "KEY" } }],
+const fixture = () => ({ version: 2, prompt_assembly: { version: 2 }, subject_registry: [{ id: "SUB", entityRef: { kind: "asset", id: "KEY" } }],
     shots: [{ id: "S2", timeline_id: "main", story_order: 2, duration_frames: 72, source_scene_id: "return", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible", localStartFrame: 12, localEndFrame: 60 }] },
         { id: "S1", timeline_id: "main", story_order: 1, duration_frames: 72, source_scene_id: "first", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible" }] },
         { id: "S3", timeline_id: "main", story_order: 3, duration_frames: 96, source_scene_id: "return", scene_id: "room", subject_usages: [{ subjectId: "SUB", presentation: "visible" }] },
@@ -105,6 +106,8 @@ test("evidence selection respects explicit scene occurrences sharing one environ
     const blocks = continuitySourceBlocks(scenes);
     assert.deepEqual(continuityBlocksForShot(source, blocks, source.shots[0]).map(block => block.id), ["B1"]);
     assert.deepEqual(continuityBlocksForShot(source, blocks, source.shots[1]).map(block => block.id), ["B2"]);
+    assert.equal(continuityDefaultEvidenceBlockId(continuityBlocksForShot(source, blocks, source.shots[0])), "B1");
+    assert.equal(continuityDefaultEvidenceBlockId(blocks), "", "multiple candidate blocks require the user to choose");
     assert.deepEqual(continuitySourceBlocks([{ id: "flat", scene_id: "ROOM", text: "not a nested evidence block" }]), []);
 });
 
@@ -131,4 +134,58 @@ test("all v2 read views share conflict and explicit unknown recovery with the tr
  const view = continuityReadProjection(source, ledger, shots), tracks = replayContinuityFact(ledger, shots, "main", "F");
  assert.equal(view.eventStates.E, "unknown"); assert.equal(view.eventStates.RECOVER, "a");
  for (const track of tracks) { assert.equal(view.trajectories[track.shot.id].start.F, track.before); assert.equal(view.trajectories[track.shot.id].end.F, track.after); }
+});
+
+test("legacy v1 Shots project v2 ledger facts into explicit unknown-presence context without changing source", () => {
+ const source: any = { prompt_assembly: { version: 1 }, character_registry: [{ id: "CHAR_A", name: "Ari" }], scene_registry: [{ id: "ROOM", name: "Room" }], asset_plan: [],
+  shots: [
+   { id: "S1", timeline_id: "main", start_frame: 148, end_frame: 220, duration_frames: 72, scene_id: "ROOM", characters: [{ id: "CHAR_A" }], required_assets: [] },
+   { id: "S2", timeline_id: "main", start_frame: 220, end_frame: 300, duration_frames: 80, scene_id: "OTHER", characters: [], required_assets: [] },
+   { id: "S3", timeline_id: "main", start_frame: 300, end_frame: 360, duration_frames: 60, scene_id: "OTHER", characters: [], required_assets: [] },
+  ] };
+ const ledger: any = { contract_version: 2,
+  facts: [
+   { id: "F_CHAR", object_kind: "character", object_id: "CHAR_A", allowed_values: ["a", "b"] },
+   { id: "F_SCENE", object_kind: "scene", object_id: "ROOM", allowed_values: ["a", "b"] },
+   { id: "F_MISSING", object_kind: "asset", object_id: "ORPHAN", allowed_values: ["a", "b"] },
+   { id: "F_UNREFERENCED", object_kind: "character", object_id: "NO_SHOT_REF", allowed_values: ["a", "b"] },
+  ], timelines: [{ id: "main", start_frame: 148 }],
+  initial: ["F_CHAR", "F_SCENE", "F_MISSING", "F_UNREFERENCED"].map(fact_id => ({ timeline_id: "main", fact_id, value: "a" })),
+  events: [{ id: "E_CHAR", timeline_id: "main", shot_id: "S2", fact_id: "F_CHAR", frame: 230, before: "a", after: "b" },
+   { id: "E_MISSING", timeline_id: "main", shot_id: "S2", fact_id: "F_MISSING", frame: 240, before: "a", after: "b" }], requirements: [], coverage: [] };
+ const original = structuredClone(source), projected = continuityWorkbenchSource(source, ledger), shots = continuityTimelineShots(projected, ledger);
+ const charSubject = projected.subject_registry.find((row: any) => row.entityRef.id === "CHAR_A"), missingSubject = projected.subject_registry.find((row: any) => row.entityRef.id === "ORPHAN"), unreferencedSubject = projected.subject_registry.find((row: any) => row.entityRef.id === "NO_SHOT_REF");
+ assert.equal(charSubject.display_name, "Ari"); assert.equal(charSubject.legacyUnregistered, false);
+ assert.equal(missingSubject.legacyUnregistered, true); assert.equal(unreferencedSubject.legacyUnregistered, true);
+ assert.equal(continuityUsage(shots.find(row => row.id === "S1")!, charSubject.id).windows.length, 0);
+ assert.equal(continuityUsage(shots.find(row => row.id === "S1")!, charSubject.id).contextual.length, 1);
+ assert.equal(continuityUsage(shots.find(row => row.id === "S3")!, charSubject.id).contextual.length, 0);
+ assert.equal(continuityUsage(shots.find(row => row.id === "S2")!, missingSubject.id).contextual.length, 1);
+ assert.equal(continuityUsage(shots.find(row => row.id === "S3")!, unreferencedSubject.id).contextual.length, 0);
+ const charTracks = replayContinuityFact(ledger, shots, "main", "F_CHAR"), view = visibleContinuityTrack(charTracks[1], charSubject.id, charTracks[0], true);
+ assert.equal(view.contextOnly, true); assert.equal(view.markers[0].frame, 10); assert.equal(view.markers[0].position, .125);
+ assert.deepEqual(source, original); assert.equal(source.subject_registry, undefined); assert.equal(source.shots[0].subject_usages, undefined);
+});
+
+test("legacy absolute event frames edit in local coordinates and remain within half-open Shot boundaries", () => {
+ const source: any = { prompt_assembly: { version: 1 }, shots: [
+  { id: "S1", timeline_id: "main", start_frame: 148, end_frame: 220, duration_frames: 72 },
+  { id: "S2", timeline_id: "main", start_frame: 220, end_frame: 300, duration_frames: 80 },
+ ] };
+ const shots = source.shots, ledger: any = { contract_version: 2, facts: [{ id: "F", object_kind: "character", object_id: "C", allowed_values: ["a", "b"] }], timelines: [{ id: "main" }],
+  initial: [{ timeline_id: "main", fact_id: "F", value: "a" }],
+  events: [{ id: "E", timeline_id: "main", shot_id: "S2", fact_id: "F", frame: 230, before: "a", after: "b" }], requirements: [], coverage: [] };
+ assert.equal(continuityLocalFrame(ledger.events[0], shots[1]), 10);
+ assert.equal(continuityEventFrame(ledger.events[0], shots), 230);
+ assert.deepEqual(continuityEventPositionPatch(ledger.events[0], shots[1], 20, false), { frame: 240, local_frame: undefined });
+ assert.deepEqual(continuityEventPositionPatch(ledger.events[0], shots[1], 20, true), { local_frame: 20 });
+ assert.deepEqual(continuityEventAnchor(ledger, shots, "S2", "F", 20, true, false).anchor, { frame: 240 });
+ const next = appendContinuityChange(ledger, shots, { shotId: "S2", factId: "F", frame: "20", after: "a", reason: "Returns to baseline", sourceBlockId: "B" }, "digest", () => "E2", true, false);
+ assert.equal(next.ledger.events[1].frame, 240); assert.equal("local_frame" in next.ledger.events[1], false);
+ assert.equal(next.ledger.events[1].before, "b"); assert.equal(continuityLocalFrame(next.ledger.events[1], shots[1]), 20);
+ ledger.events.push({ id: "AT_BOUNDARY", timeline_id: "main", shot_id: "S1", fact_id: "F", frame: 220, before: "b", after: "a" });
+ assert.equal(continuityEventPositionIssues(source, ledger).some(issue => issue.path.at(-1) === "frame"), true);
+ ledger.events.at(-1).shot_id = "S2"; ledger.events.at(-1).frame = 220;
+ assert.equal(continuityLocalFrame(ledger.events.at(-1), shots[1]), 0);
+ assert.equal(continuityEventPositionIssues(source, ledger).length, 0);
 });

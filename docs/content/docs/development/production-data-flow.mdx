@@ -1,0 +1,70 @@
+---
+title: Production Data Flow
+description: Where canvas, workbench, H3 clips, and compilation each own their data
+---
+
+# Production Data Flow
+
+The canvas and the production workbench look like two places, but they maintain a single production source. Three facts explain the whole chain:
+
+- One source: scenes, shots, clips, subjects, and continuity are edited in one place.
+- One canvas, two mounts: the canvas page and the in-workbench canvas are the same project.
+- Four stages of effect: save, compile, publish, and generate are different actions. Compilation itself has two steps: producing prompts, then applying them to the canvas.
+
+## Three data layers
+
+| Layer | Content | Stored in | Written by |
+| --- | --- | --- | --- |
+| Production source | Scenes, script text, shots, clip groups, subjects, continuity, asset definitions | Backend SQLite `episode_productions` (episodes) or `canvas_productions` (standalone and shared-asset canvases) | Workbench edits and production MCP tools |
+| Canvas | Script text nodes, character/scene/prop nodes, one H3 node per scene, image/video/audio nodes | A Backend canvas project, fixed to the episode through `drama_episodes.canvas_id` | Canvas operations from the web app, MCP, and the agent |
+| Compilation artifacts | Per-target prompts, reference lists, reviews, and receipts | `director.artifacts` on the source plus compilation job records | The compiler, written into canvas clips when applied |
+
+The canvas is not a copy of the source. It is a projection of the source plus a media container. Scenes, shots, clip membership, and subject references come from the source; node positions, canvas grouping, and extra media belong to the canvas.
+
+## What lives on the canvas
+
+- Script nodes: one text node per scene, kept in sync with the scene projection. Editing the text on the canvas writes back to the same source.
+- Asset nodes: one stable node each for characters, scenes, and props, with names and descriptions saved both ways.
+- H3 video nodes: one per formal scene, plus the production object's default node for clips that belong to no scene. The clip list lives in `metadata.segments`. A formal clip carries `productionClipProjection`, which points at the source clip (`targetId`) and the compilation baseline (`sourceHash`, `artifactId`, `promptHash`).
+- Media nodes: the real sources for images, video, and audio. Compilation, references, and generation all read archived media from here.
+
+The canvas opens as a full page in the canvas route and as a collapsible overlay inside the workbench. Both mount the same canvas project.
+
+## Four stages of effect
+
+| Stage | What it does | What it does not do |
+| --- | --- | --- |
+| Save | Writes the source and projects scenes, shots, clip groups, and subject references onto canvas nodes | Generate prompts or submit media tasks |
+| Compile | Validates target inputs and produces per-target prompts and reference lists | Change media files or shot design |
+| Apply | Writes compilation results into H3 clips and syncs references | Overwrite manual edits; conflicts keep the manual text |
+| Publish | Freezes a traceable version snapshot | Act as a prerequisite for generation |
+| Generate | Submits media tasks from the currently saved source | Wait for a published version |
+
+The single "validate and compile" action covers compile and apply. If apply fails or a target is not ready, the compilation itself may have succeeded while the UI reports "compiled, canvas not ready". Handle the target diagnostics and compile again rather than treating it as a compilation failure.
+
+Saving never changes a prompt directly. Saving a shot, a storyboard track, or a continuation boundary appends a clip refresh to the same submission; the Backend runs continuity check, compile, and apply only for clips whose inputs actually changed, and the prompt is written by the apply step. Progress shows on that clip's compilation status, with no second manual compile. Structural changes such as split, merge, and regrouping still need "validate and compile", and clips not yet projected onto the canvas are not refreshed automatically.
+
+## Which edits write back to the source
+
+- Script text and asset names and descriptions sync both ways: canvas and workbench edit the same source.
+- Scene membership is maintained in the workbench; script nodes on the canvas only show the scene a block belongs to.
+- Clip storyboard tracks and continuation boundaries: edits in the H3 clip panel write back to the source, equivalent to a workbench action.
+- Manually rewritten clip prompts are kept as manual text and never presented as reverse-synced. The next compilation three-way merges against the old baseline and keeps manual edits on conflict.
+- Reference bindings and reference order are saved inside canvas transactions and do not rewrite director reference cards.
+
+Fields derived from the source, such as duration, clip membership, and reference order, cannot be edited independently on the canvas. Change the shot or clip source instead.
+
+## A typical run
+
+1. Edit a shot in the workbench and save.
+2. The Backend writes the source and projects the shot and clip titles and grouping onto canvas nodes.
+3. Saving appends a background validation and compile for the affected clip; structural changes use "validate and compile" in the storyboard bench.
+4. The compilation job produces prompts; apply writes them into the matching H3 clip. A failed reference sync leaves the not-ready state described above.
+5. Confirm prompts and references on the canvas, then start generation separately.
+
+## Common misreadings
+
+- Prompts do not change after saving; they change after compile and apply.
+- The canvas is not a second copy. The canvas route and the workbench overlay show the same project.
+- A successful compilation does not mean generation is ready. It proves prompts and references are valid; media is still generated separately.
+- A prompt edited on the canvas is not silently overwritten by the next compilation, and it is not treated as an updated source.

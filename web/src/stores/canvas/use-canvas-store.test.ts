@@ -19,15 +19,19 @@ import { test } from "node:test";
 import { applyBackendCanvasDelta, diffCanvasProject, detectCanvasConflicts, isLocalProjectNewer, type CanvasProject } from "./use-canvas-store";
 import { reorderCanvasReferenceConnections } from "@/lib/canvas/canvas-resource-references";
 
-test("角色主图差量更新下游选择且不改旧基线或历史参考", () => {
+test("角色主图差量更新不改动仍在目录中的显式选择，失效键才回落到新主图", () => {
     const base = makeProject([
         { id: "char", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [{ storageKey: "image:a" }, { storageKey: "image:b" }] } } as any,
         { id: "target", type: "config", metadata: { characterReferences: { char: { imageKeys: ["image:a"], voiceEnabled: false } }, images: [{ id: "old", generationSnapshot: { references: [{ storageKey: "image:a" }] } }] } } as any,
     ]);
-    const next = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
-    assert.deepEqual(next.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
+    // 主图翻转但所选键仍在源目录中：显式媒体选择独立于封面（46e6330a 契约），历史快照不动。
+    const flipped = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1 } }], 2);
+    assert.deepEqual(flipped.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
+    assert.deepEqual(flipped.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
+    // 所选键从源目录消失时才回落到新主图；原始基线始终不被修改。
+    const removed = applyBackendCanvasDelta(base, [{ type: "update_node", id: "char", metadata: { characterPrimaryIndex: 1, characterImages: [{ storageKey: "image:b" }] } }], 3);
+    assert.deepEqual(removed.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:b"]);
     assert.deepEqual(base.nodes[1].metadata?.characterReferences?.char?.imageKeys, ["image:a"]);
-    assert.deepEqual(next.nodes[1].metadata?.images, base.nodes[1].metadata?.images);
 });
 
 test("列表摘要只提交列表字段，不把未加载的空节点解释成删除", () => {
@@ -107,6 +111,19 @@ test("拖出有序组后撤销和重做不覆盖同批次恢复的其他成员�
 });
 
 const VIEWPORT = { x: 0, y: 0, k: 1 };
+
+test("撤销删除和中间插入都按 next 顺序回放，节点不会掉到最上层", () => {
+    const node = (id: string) => ({ id, type: "image", title: id, position: { x: 0, y: 0 }, width: 340, height: 240, metadata: {} });
+    const before = makeProject([node("a"), node("b"), node("c")]);
+    // 撤销删除 b：add_node 必须带回原位置，而不是追加到 c 之后。
+    const afterDelete = makeProject([node("a"), node("c")]);
+    const restored = applyBackendCanvasDelta(afterDelete, diffCanvasProject(afterDelete, before), 2);
+    assert.deepEqual(restored.nodes.map((item) => item.id), ["a", "b", "c"]);
+    // 同一批里既有删除又有中间插入：被删节点此刻仍在回放数组中，插入位置要按锚点算。
+    const next = makeProject([node("b"), node("x"), node("c")]);
+    const replayed = applyBackendCanvasDelta(before, diffCanvasProject(before, next), 2);
+    assert.deepEqual(replayed.nodes.map((item) => item.id), ["b", "x", "c"]);
+});
 
 function makeH3Node(id: string, segments: Array<Record<string, unknown>>, extras: Record<string, unknown> = {}): Record<string, unknown> {
     return {
@@ -264,7 +281,7 @@ test("H3：本地不能删除 Backend 所有的运行字段", () => {
     assert.deepEqual(diffCanvasProject(base, next), []);
 });
 
-test("冲突检测：远端改了同段同字段 → 报冲突；远端改了同段不同字段 → 不报", () => {
+test("冲突检测：同段同字段按后提交者获胜，不同字段自然合并", () => {
     const base = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A", status: "idle" },
     ])]);
@@ -274,13 +291,12 @@ test("冲突检测：远端改了同段同字段 → 报冲突；远端改了同
     const pendingOps = [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "A-new" } }];
     // 远端改了 status，本地改 prompt：字段不同，不应冲突
     assert.deepEqual(detectCanvasConflicts(pendingOps, remote, base), []);
-    // 远端也改了 prompt：同字段冲突
+    // 远端也改了 prompt：留给服务端按事务提交顺序解决
     const remote2 = makeProject([makeH3Node("h3-1", [
         { id: "s1", prompt: "A-from-remote", status: "idle" },
     ])]);
     const conflicts = detectCanvasConflicts(pendingOps, remote2, base);
-    assert.equal(conflicts.length, 1);
-    assert.match(conflicts[0].detail, /prompt/);
+    assert.deepEqual(conflicts, []);
 });
 
 test("冲突检测：远端改了别的段，本地改本段：不应误报本段冲突", () => {

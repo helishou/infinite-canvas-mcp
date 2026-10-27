@@ -16,7 +16,7 @@ type BuiltCharacterGroup = {
     characterNodeId: string;
     subjectId: string;
     voice?: { url: string; name: string; description?: string; storageKey?: string; assetId?: string };
-    outfits: Array<{ id: string; url: string; name: string; storageKey?: string; mimeType?: string; role: ReferenceRole; enabled: boolean }>;
+    outfits: Array<{ id: string; url: string; name: string; storageKey?: string; mimeType?: string; role: ReferenceRole; enabled: boolean; picturePurpose?: string[] }>;
     voiceEnabled: boolean;
 };
 
@@ -87,7 +87,8 @@ export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: C
     const outfits = images.map(({ image, key, url }) => {
         const previous = previousByKey.get(key);
         const id = stringOf(previous?.id) || outfitId(nodeId, key);
-        return { id, url, name: imageName(image), storageKey: stringOf(image.storageKey) || undefined, mimeType: stringOf(image.mimeType) || undefined, role: imageRole(image), enabled: selectedKeys.has(key) };
+        return { id, url, name: imageName(image), storageKey: stringOf(image.storageKey) || undefined, mimeType: stringOf(image.mimeType) || undefined, role: imageRole(image), enabled: selectedKeys.has(key),
+            ...(Array.isArray(previous?.picturePurpose) && previous.picturePurpose.length ? { picturePurpose: previous.picturePurpose.map(String) } : {}) };
     });
     const voiceUrl = stringOf(metadata.characterVoiceUrl);
     const voice = voiceUrl ? {
@@ -113,7 +114,8 @@ export function buildCharacterGroupFromExistingNode(node: JsonRecord, request: C
         assetId: stableReferenceId("asset", `${nodeId}:${outfit.storageKey || outfit.url}`),
         label: `${characterName} · ${outfit.name}`,
         role: outfit.role,
-        tags: ["character-group", outfit.role],
+        tags: ["character-group", outfit.role, ...(outfit.picturePurpose || [])],
+        ...(outfit.picturePurpose?.length ? { picturePurpose: outfit.picturePurpose } : {}),
         enabled: true,
         usage: "reference",
         subjectId,

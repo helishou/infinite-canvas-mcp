@@ -50,7 +50,7 @@ import { buildPlugin } from "@infinite-canvas/plugin-sdk/build";
 await buildPlugin(import.meta.url);
 ```
 
-`npm run build` 产出 `dist/<目录名>.js`，并在本地开发时同步到 `web/public/plugins/`，供手动 URL 安装或 `VITE_DEV_PLUGINS` 热刷新。
+`npm run build` 产出 `dist/<目录名>.js`，并在本地开发时同步到 `web/public/plugins/`，供手动 URL 安装或 `VITE_DEV_PLUGINS` 热刷新。宿主内置插件（Web 直接 import 源码，不需要 URL 安装）传 `publicDir: null` 跳过该同步，避免留下无人消费的副本。
 
 ## 依赖接入
 

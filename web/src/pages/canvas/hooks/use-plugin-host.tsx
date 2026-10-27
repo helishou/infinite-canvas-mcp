@@ -3,6 +3,7 @@ import { previewH3Generation, fetchBackendH3Defaults, saveBackendH3Defaults, res
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
+import { translateCompiledH3Prompt } from "@/services/api/translation";
 import { fetchWorkflowDetail } from "@/services/api/workflows";
 import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
@@ -10,10 +11,11 @@ import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationL
 import { observeCanvasGenerationTask } from "@/services/api/canvas-generation-task";
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { canvasTaskActionPath, canvasTaskPath } from "@basketikun/canvas-agent/generation-api";
-import { decodeChannelModel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { decodeChannelModel, modelOptionLabel, resolveModelWorkflow, resolveModelWorkflowParams, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-generation-helpers";
 import { createCanvasReferenceService } from "@/lib/canvas/reference-service";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
+import { uploadImage as uploadCanvasImage } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -165,6 +167,7 @@ export function usePluginHost(params: PluginHostParams) {
                     throw error;
                 }
             },
+            translateH3Prompt: (prompt, options) => translateCompiledH3Prompt(prompt, options),
             previewH3Generation,
             runCanvasGeneration: async (command: CanvasGenerationCommand) => {
                 if (command.operation === 'h3-run') {
@@ -207,7 +210,7 @@ export function usePluginHost(params: PluginHostParams) {
                 if (!project) throw new Error("画布已关闭，无法还原历史输出");
                 const node = project.nodes.find(node => node.id === input.nodeId);
                 if (!node) throw new Error("目标 H3 节点已不存在，请刷新后重新选择");
-                if (requestFormalH3OutputSelection(projectId, node, input)) return;
+                if (await requestFormalH3OutputSelection(projectId, node, input)) return;
                 await applyBackendCanvasOperations(projectId, [{ type: "restore_h3_output", ...input }], Number(project.revision || 0));
             },
             runVideoConcat: async (videos, options) => {
@@ -218,8 +221,8 @@ export function usePluginHost(params: PluginHostParams) {
                 const result = await fetchComfyModels(getBackendUrl(), getBackendTokenShared());
                 return { models: result.data?.models || [], loras: result.data?.loras || [], textEncoders: result.data?.textEncoders || [], videoVaes: result.data?.videoVaes || [], audioVaes: result.data?.audioVaes || [], latentUpscaleModels: result.data?.latentUpscaleModels || [], nanfeng: result.data?.nanfeng || {} };
             },
-            // List configured models for a capability; labels use the model name without the channel prefix.
-            listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: decodeChannelModel(value)?.model || value })),
+            // Keep H3 model labels consistent with the rest of the canvas, including their channel or actual workflow provider.
+            listModels: (capability) => selectableModelsByCapability(effectiveConfig, capability as ModelCapability | undefined).map((value) => ({ value, label: modelOptionLabel(effectiveConfig, value) })),
             defaultModel: (capability) => buildGenerationConfig(effectiveConfig, undefined, capability).model,
             describeVideoModel: async (model: string, referenceCount: number): Promise<CanvasVideoModelSchema> => {
                 const resolved = resolveModelWorkflow(effectiveConfig, model, referenceCount);
@@ -252,6 +255,10 @@ export function usePluginHost(params: PluginHostParams) {
         () => ({
             projectId,
             mediaUrl: backendMediaUrl,
+            uploadImage: async (blob) => {
+                const uploaded = await uploadCanvasImage(blob, { category: "input" });
+                return { url: uploaded.url, storageKey: uploaded.storageKey, mimeType: uploaded.mimeType };
+            },
             ...graphAccess,
             updateNode: (nodeId, patch) => {
                 setNodes((nodes) => {

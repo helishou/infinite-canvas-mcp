@@ -10,8 +10,8 @@ test('startup reuses unchanged builds and rebuilds for source edits, dependencie
     t.after(() => fs.rm(root, { recursive: true, force: true }));
     await fs.mkdir(path.join(root, 'src'));
     await fs.writeFile(path.join(root, 'src', 'index.ts'), 'version one');
-    await fs.writeFile(path.join(root, 'package-lock.json'), 'dependencies one');
-    const groups = [{ name: 'agent', inputs: ['src', 'package-lock.json'], outputs: ['dist'] }];
+    await fs.writeFile(path.join(root, 'pnpm-lock.yaml'), 'dependencies one');
+    const groups = [{ name: 'agent', inputs: ['src', 'pnpm-lock.yaml'], outputs: ['dist'] }];
     let builds = 0;
     const build = async () => {
         builds++;
@@ -23,7 +23,7 @@ test('startup reuses unchanged builds and rebuilds for source edits, dependencie
     assert.equal(builds, 1);
     await fs.writeFile(path.join(root, 'src', 'index.ts'), 'version two');
     await run(); assert.equal(builds, 2);
-    await fs.writeFile(path.join(root, 'package-lock.json'), 'dependencies two');
+    await fs.writeFile(path.join(root, 'pnpm-lock.yaml'), 'dependencies two');
     await run(); assert.equal(builds, 3);
     await fs.unlink(path.join(root, 'dist', 'index.js'));
     await run(); assert.equal(builds, 4);

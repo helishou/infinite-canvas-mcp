@@ -22,8 +22,11 @@ function latent(bytes: string) {
 }
 
 test("续写目录与 V15 json.dumps 命名空间一致", () => {
+    // 必须是正斜杠字面量：这个字符串会当 latent_path/folder 交给南风 V15 的
+    // NanFengV15CommitContinuation，它用 re.fullmatch(r"nanfeng_v15_context/[0-9a-f]{64}", folder)
+    // 校验，Windows 的 path.join 反斜杠形式会被直接拒绝。
     assert.equal(h3ContinuationFolder({ workflow, group, run: "d9cb803c-5cac-458b-a793-91449249f9c9" }),
-        path.join("nanfeng_v15_context", "46d69df1ec6e86b9f5aac04a64864c7a691f80c8a9498e90ec603056b444d333"));
+        "nanfeng_v15_context/46d69df1ec6e86b9f5aac04a64864c7a691f80c8a9498e90ec603056b444d333");
 });
 
 test("仅复制已完成上一段潜变量到新任务目录，重放幂等且不覆盖来源", async (t) => {

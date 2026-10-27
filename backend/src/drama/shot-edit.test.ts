@@ -13,7 +13,7 @@ import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService } from "./production.js";
 
 function fixture(): DirectorProduction {
-    const source = { prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+    const source = { version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
         character_registry: [{ id: "P", name: "栓子" }], subject_registry: [{ id: "SUB", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "P" }, pictureBindings: [{ id: "PB", assetId: "A", sourceNode: { projectId: "project", nodeId: "node" }, selection: { mode: "node_selection" }, provides: ["identity"], retain: [], exclude: [], defaultFor: ["identity"], applicableState: {} }] }],
         shots: [{ id: "S1", timeline_id: "T", scene_id: "SC", story_order: 0, title: "问蛋", duration_frames: 48, visual: "孩子发问。", camera: { framing: "CU", attention_subject_ids: ["SUB"], editorial_reason: "看清孩子发问" }, subject_usages: [{ subjectId: "SUB", presentation: "visible" }],
             performance: { source_beat_id: "B", events: [{ phase: "action", start: 0, end: 40, cue: "孩子抬头" }] }, audio: { description: "风声", events: [{ start: 30, end: 38, cue: "脚步" }] }, keyframes: [{ id: "K", assetId: "A", sourceNode: { projectId: "project", nodeId: "node" }, selection: { mode: "node_selection" }, anchor: "at_frame", localFrame: 36, subjectIds: ["SUB"], retain: [], exclude: [], requiredForSubmission: false }], utterance_refs: [{ utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 5 }] },
@@ -35,8 +35,65 @@ test("split and merge preserve original dialogue, event frame, keyframe and time
     editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "N" });
     const merged = (d.source as any).shots[0];
     assert.equal(merged.duration_frames, 48); assert.equal(merged.keyframes[0].localFrame, 36); assert.equal(merged.audio.events[0].start, 30);
+    assert.equal(merged.audio.description, "风声"); assert.doesNotMatch(merged.audio.description, /\[\d+[–-]\d+帧\]/);
     assert.equal(merged.subject_usages.length, 1);
     assert.deepEqual((d.source as any).utterances[0].end, { shotId: "S1", localFrame: 48 }); assert.equal((d.source as any).ledger.events[0].local_frame, 36);
+});
+test("merge automatically combines camera fields and preserves omitted nested patch fields", () => {
+    const d = fixture(), source = d.source as any;
+    const secondSubject = structuredClone(source.subject_registry[0]);
+    secondSubject.id = "SUB2"; secondSubject.entityRef = { ...secondSubject.entityRef, id: "P2" };
+    secondSubject.pictureBindings = secondSubject.pictureBindings.map((binding: any) => ({ ...binding, id: "PB2" }));
+    source.character_registry.push({ id: "P2", name: "同框人物" }); source.subject_registry.push(secondSubject);
+    source.shots[0].camera = {
+        framing: "CU", attention_subject_ids: ["SUB"], editorial_reason: "保持左镜的观看重点",
+        previs_id: "004", sensor_basis: "full_frame", shutter_angle: 180, angle: "床侧机位",
+    };
+    source.shots[1].camera = {
+        framing: "CU", attention_subject_ids: ["SUB2", "SUB"], editorial_reason: "保持左镜的观看重点",
+        lens_mm: 75, height_m: 0.85,
+    };
+
+    editDirectorShot(d, {
+        type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2",
+        firstShotPatch: {
+            camera: { attention_subject_ids: ["SUB"], path: "沿腿外侧上移至大腿。" },
+            performance: { tracks: { body_hands: { cue: "指腹轻轻滑过一次。" } } },
+        },
+    });
+
+    const merged = (d.source as any).shots[0];
+    assert.deepEqual(merged.camera, {
+        framing: "CU", attention_subject_ids: ["SUB", "SUB2"], editorial_reason: "保持左镜的观看重点",
+        previs_id: "004", sensor_basis: "full_frame", shutter_angle: 180, angle: "床侧机位",
+        lens_mm: 75, height_m: 0.85, path: "沿腿外侧上移至大腿。",
+    });
+    assert.equal(merged.performance.source_beat_id, "B");
+    assert.equal(merged.performance.events[0].cue, "孩子抬头");
+    assert.equal(merged.performance.tracks.body_hands.cue, "指腹轻轻滑过一次。");
+});
+
+test("merging adjacent Shots coalesces contiguous pieces of the same utterance", () => {
+    const d = fixture(), source = d.source as any;
+    source.utterances[0].text = "回来先问蛋你";
+    source.utterances[0].end = { shotId: "S2", localFrame: 24 };
+    source.shots[0].utterance_refs = [
+        { utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 24, textStart: 0, textEnd: 2 },
+        { utteranceId: "U", role: "speaker", localStartFrame: 24, localEndFrame: 48, textStart: 2, textEnd: 4 },
+    ];
+    source.shots[1].utterance_refs = [{ utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 24, textStart: 4, textEnd: 6 }];
+    editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2" });
+    assert.deepEqual((d.source as any).shots[0].utterance_refs, [
+        { utteranceId: "U", role: "speaker", localStartFrame: 0, localEndFrame: 72, textStart: 0, textEnd: 6 },
+    ]);
+    assert.deepEqual((d.source as any).utterances[0].end, { shotId: "S1", localFrame: 72 });
+});
+test("merging Shots with no sound description keeps the description empty", () => {
+    const d = fixture(), source = d.source as any;
+    source.shots[0].audio.description = "";
+    source.shots[1].audio = { description: "" };
+    editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "S1", targetShotId: "S2" });
+    assert.equal((d.source as any).shots[0].audio.description, "");
 });
 test("copy is a new design, and deletion cleans only its own dialogue and ledger records", () => {
     const deleted = fixture();
@@ -112,7 +169,8 @@ test("automatic split allocation and split/merge event and dependency mappings s
     assert.equal(splitSource.utterances[0].text, "回来先问蛋");
     editDirectorShot(d, { type: "edit_director_shot", action: "merge", shotId: "N", targetShotId: "S2", cameraShotId: "N" });
     assert.deepEqual(d.shotInputs.N.assetIds, ["RIGHT"]);
-    assert.equal(d.shotInputs.N.keyframeAssetId, "RIGHT");
+    assert.equal(d.shotInputs.N.keyframePolicy, "none", "v2 关键帧真值保存在 source.shots[].keyframes，shotInputs 不保留旧槽位");
+    assert.equal((d.source as any).shots.find((shot: any) => shot.id === "N").keyframes[0].localFrame, 12);
     assert.deepEqual((d.source as any).shots[1].outcome_events, ["E"]);
 });
 test("whole-Clip cleanup keeps shared coverage and unrelated ledger facts, then creates a safe new boundary", () => {
@@ -130,7 +188,7 @@ test("whole-Clip cleanup keeps shared coverage and unrelated ledger facts, then 
     reconcileShotClipBoundaries(d, ["A", "B", "C"]);
     assert.equal(d.boundaries.length, 1);
     assert.equal(d.boundaries[0].from, "A"); assert.equal(d.boundaries[0].to, "C");
-    assert.equal(d.boundaries[0].tailFrame, false); assert.equal(d.boundaries[0].motionContext, false);
+    assert.equal(d.boundaries[0].tailFrame, true); assert.equal(d.boundaries[0].motionContext, false);
 });
 test("insert and reorder keep Clip and existing Shot IDs stable", () => {
     const d = fixture();
@@ -138,7 +196,41 @@ test("insert and reorder keep Clip and existing Shot IDs stable", () => {
     editDirectorShot(d, { type: "edit_director_shot", action: "move", shotId: "N", targetShotId: "S2", position: "before" });
     assert.deepEqual((d.source as any).segments[0].shot_ids, ["S1", "N", "S2"]); assert.deepEqual((d.source as any).shots.map((shot: any) => shot.story_order), [0, 1, 2]);
 });
-test("production transaction replays structural edits once, keeps other episodes and rejects stale revisions", t => {
+test("anchor insert creates a new Clip at the boundary with its first Shot and reconciles boundaries", () => {
+    const d = fixture();
+    (d.source as any).segments = [{ id: "C", mode: "T2VA", shot_ids: ["S1"] }, { id: "C2", mode: "T2VA", shot_ids: ["S2"] }];
+    editDirectorShot(d, { type: "edit_director_shot", action: "insert", anchorShotId: "S1", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", scene_id: "SC", timeline_id: "T", duration_frames: 96, title: "新片段首镜", visual: "边界处插入的新镜头。", camera: { framing: "CU", editorial_reason: "补一拍" }, subject_usages: [], utterance_refs: [], keyframes: [] } });
+    const source = d.source as any;
+    assert.deepEqual(source.segments.map((segment: any) => segment.id), ["C", "NEW", "C2"]);
+    assert.deepEqual(source.segments[1].shot_ids, ["N"]);
+    assert.deepEqual(source.shots.map((shot: any) => shot.id), ["S1", "N", "S2"]);
+    assert.deepEqual(source.shots.map((shot: any) => shot.story_order), [0, 1, 2]);
+    assert.deepEqual(d.boundaries.map((edge: any) => [edge.from, edge.to]), [["C", "NEW"], ["NEW", "C2"]]);
+    assert.ok(d.shotInputs.N, "新镜头须有 shotInputs 占位");
+});
+test("anchor insert rejects out-of-window duration, unknown anchor and scope mismatch", () => {
+    const short = fixture();
+    assert.throws(() => editDirectorShot(short, { type: "edit_director_shot", action: "insert", anchorShotId: "S2", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", duration_frames: 24, title: "太短", visual: "不足四秒。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /4–15 秒/);
+    const missing = fixture();
+    assert.throws(() => editDirectorShot(missing, { type: "edit_director_shot", action: "insert", anchorShotId: "NOPE", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", duration_frames: 96, title: "锚缺失", visual: "锚点不存在。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /锚点镜头不存在/);
+    const scope = fixture();
+    (scope.source as any).segments = [{ id: "C", mode: "T2VA", shot_ids: ["S1"] }, { id: "C2", mode: "T2VA", shot_ids: ["S2"] }];
+    const foreign = structuredClone(scope);
+    assert.throws(() => editDirectorShot(foreign, { type: "edit_director_shot", action: "insert", anchorShotId: "S1", segment: { id: "NEW", mode: "T2VA" }, shot: { id: "N", scene_id: "OTHER", timeline_id: "T", duration_frames: 96, title: "跨场次", visual: "场次不符。", camera: { framing: "CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /场次和时间线/);
+});
+
+test("insert and split reject transition labels in camera.framing and leave the source untouched", () => {
+    const insert = fixture();
+    assert.throws(() => editDirectorShot(insert, { type: "edit_director_shot", action: "insert", shotId: "S1", shot: { id: "N", duration_frames: 24, title: "推近", visual: "起幅中景，随后推近至指尖占满画框的特写。", camera: { framing: "MS转CU" }, subject_usages: [], utterance_refs: [], keyframes: [] } }), /不在有效词表/);
+    assert.equal((insert.source as any).shots.length, 2, "失败的插入不得改写源稿");
+    const split = fixture();
+    assert.throws(() => editDirectorShot(split, { type: "edit_director_shot", action: "split", shotId: "S1", newShotId: "N", splitFrame: 24, textOffsets: { U: 2 }, firstShotPatch: { camera: { framing: "中景转特写" } } }), /不在有效词表/);
+    assert.equal((split.source as any).shots.length, 2, "失败的拆分不得改写源稿");
+    const valid = fixture();
+    editDirectorShot(valid, { type: "edit_director_shot", action: "insert", shotId: "S2", shot: { id: "N", duration_frames: 24, title: "新镜头", visual: "听者反应", camera: { framing: "MCU" }, subject_usages: [], utterance_refs: [], keyframes: [] } });
+    assert.equal((valid.source as any).shots.find((shot: any) => shot.id === "N").camera.framing, "MCU");
+});
+test("production transaction replays structural edits once, keeps other episodes and refuses future revisions", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shot-edit-")), db = new BackendDatabase(path.join(directory, "db.sqlite"));
     t.after(() => { db.close(); for (const entry of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, entry)); fs.rmdirSync(directory); });
     db.upsertCanvasFolder({ id: "drama", name: "测试剧目", isDrama: true, createdAt: new Date().toISOString() });
@@ -151,9 +243,9 @@ test("production transaction replays structural edits once, keeps other episodes
     assert.equal(replay.revision, saved.revision); assert.equal((service.get("ep").draft.director!.source.shots as any[]).length, 3);
     assert.equal(directorHash(service.get("ep").draft.director!.source), service.get("ep").draft.director!.sourceHash);
     assert.deepEqual(service.get("other"), other);
-    assert.throws(() => service.edit("ep", { ...request, operationId: "stale", ops: [{ type: "edit_director_shot", action: "duplicate", shotId: "S1", newShotId: "COPY" }] }), /版本|REVISION/);
+    assert.throws(() => service.edit("ep", { ...request, operationId: "future", expectedRevision: saved.revision + 1, ops: [{ type: "edit_director_shot", action: "duplicate", shotId: "S1", newShotId: "COPY" }] }), /版本|REVISION/);
     const receipts = service.clipRefreshStore("ep").byEditAll("split-once");
-    assert.equal(receipts.length, 1); assert.equal(receipts[0].segmentId, "C");
+    assert.equal(receipts.length, 0, "结构镜头编辑不隐式登记 Clip 刷新；需要刷新时在同批 ops 显式登记 request_director_clip_refresh");
     let current = saved;
     for (const shotId of ["S1", "N", "S2"]) {
         const deleting = { operationId: `delete-${shotId}`, expectedRevision: current.revision, ops: [{ type: "edit_director_shot" as const, action: "delete" as const, shotId }] };

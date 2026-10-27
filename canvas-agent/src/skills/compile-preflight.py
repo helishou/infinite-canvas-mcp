@@ -98,7 +98,7 @@ def diagnose(runtime, source):
             if not isinstance(node.get("version"), str) or not node["version"].strip():
                 add("资产版本不能为空", f"asset_plan.{index}.version", target)
             if not asset_plan.prose(node.get("purpose")):
-                add("资产用途缺失或不完整", f"asset_plan.{index}.purpose", target,
+                add("资产用途缺失或不完整", f"asset_plan.{index}.purpose", target, severity="warning", code="ASSET_PURPOSE_QUALITY",
                     example={"purpose": "锁定此资产的身份、形态与材质，为后续镜头提供一致参考。"})
         if plans:
             check(lambda: asset_plan.check_asset_plan(source, base), "asset_plan", severity="warning", code="ASSET_PLAN_QUALITY")
@@ -150,8 +150,10 @@ def diagnose(runtime, source):
                             repaired[slot - 1][field] = value
                             return {"references": repaired}
             return None
-        check(lambda: asset_plan.resolve_card(card, source, base, True), f"asset_cards.{index}.references", target)
-        check(lambda: render_asset_prompt(card, source.get("prompt_bindings"), source.get("style_lock")), f"asset_cards.{index}.prompt", target, prompt_example)
+        check(lambda: asset_plan.resolve_card(card, source, base, True), f"asset_cards.{index}.references", target,
+              severity="warning", code="ASSET_REFERENCE_QUALITY")
+        check(lambda: render_asset_prompt(card, source.get("prompt_bindings"), source.get("style_lock")), f"asset_cards.{index}.prompt", target,
+              prompt_example, severity="warning", code="ASSET_PROMPT_QUALITY")
         if anchor_id and isinstance(plans, list):
             scoped = copy.deepcopy(source)
             scoped["asset_plan"] = [node for node in plans if isinstance(node, dict) and node.get("id") in (anchor_id, target)]

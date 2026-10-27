@@ -132,7 +132,7 @@ test("MCP 任务统计按 taskId 去重并保留批量与等待口径", async ()
     const partialBatchTask = stores.tasks.create("task-partial", "canvas-image", { projectId: "canvas-1" }, {});
     stores.tasks.update(succeededTask.id, { status: "succeeded", progress: 1 });
     stores.tasks.update(failedTask.id, { status: "succeeded", progress: 1 });
-    stores.tasks.update(partialBatchTask.id, { status: "failed", progress: 1, error: "provider failed" });
+    stores.tasks.update(partialBatchTask.id, { status: "failed", progress: 1, error: JSON.stringify({ code: "PROVIDER_TIMEOUT", message: "private raw provider response" }) });
     const { app } = startServer(database, { url: "http://127.0.0.1", token: "test-token", port: 0, origins: [] }, { stores });
     const server = app.listen(0, "127.0.0.1");
     await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -145,21 +145,31 @@ test("MCP 任务统计按 taskId 去重并保留批量与等待口径", async ()
 
     try {
         await record({ sessionId: "session-batch", traceId: "trace-generation", event: "tool.succeeded", tool: "canvas_generate_image", durationMs: 20, taskId: succeededTask.id, outputSummary: { taskCount: 2, createdTaskIds: [succeededTask.id, failedTask.id] } });
-        await record({ sessionId: "session-batch", traceId: "trace-status", event: "tool.succeeded", tool: "canvas_task_status", durationMs: 10, outputSummary: { taskCount: 2 } });
+        await record({ sessionId: "session-batch", traceId: "trace-status", event: "tool.succeeded", tool: "canvas_task_status", durationMs: 10, taskId: failedTask.id, outputSummary: { taskCount: 1, createdTaskIds: [failedTask.id] } });
+        await record({ sessionId: "session-batch", traceId: "trace-cancel", event: "tool.succeeded", tool: "canvas_task_cancel", durationMs: 10, taskId: failedTask.id, outputSummary: { taskCount: 1, createdTaskIds: [failedTask.id] } });
+        await record({ sessionId: "session-batch", traceId: "trace-comfy-status", event: "tool.succeeded", tool: "comfyui_get_task", durationMs: 10, taskId: partialBatchTask.id, outputSummary: { taskCount: 1, createdTaskIds: [partialBatchTask.id] } });
         await record({ sessionId: "session-batch", traceId: "trace-wait", event: "tool.succeeded", tool: "canvas_wait_tasks", durationMs: 9000, outputSummary: { waitsForTasks: true } });
         await record({ sessionId: "session-batch", traceId: "trace-partial", event: "tool.failed", tool: "canvas_generate_image_batch", durationMs: 30, taskId: partialBatchTask.id, outputSummary: { taskCount: 1, createdTaskIds: [partialBatchTask.id], errorCode: "BACKEND_HTTP_500" } });
+        await record({ sessionId: "session-batch", traceId: "trace-missing", event: "tool.succeeded", tool: "canvas_generate_video", durationMs: 15, taskId: "missing-created-task", outputSummary: { taskCount: 1, createdTaskIds: ["missing-created-task"] } });
 
         const reportResponse = await request("/mcp/observability/report");
         const report = (await reportResponse.json() as { report: Record<string, any> }).report;
         assert.deepEqual(report.taskStatuses, [
             { status: "succeeded", count: 2 },
             { status: "failed", count: 1 },
+            { status: "missing", count: 1 },
         ]);
         assert.deepEqual(report.taskOutcomesByTool, [
             { tool: "canvas_generate_image", status: "succeeded", count: 2 },
             { tool: "canvas_generate_image_batch", status: "failed", count: 1 },
+            { tool: "canvas_generate_video", status: "missing", count: 1 },
         ]);
-        assert.equal(report.taskAssociation.incomplete, true);
+        assert.deepEqual(report.taskFailureCategories, [
+            { tool: "canvas_generate_image_batch", category: "PROVIDER_TIMEOUT", count: 1 },
+            { tool: "canvas_generate_video", category: "TASK_MISSING", count: 1 },
+        ]);
+        assert.ok(!JSON.stringify(report).includes("private raw provider response"));
+        assert.equal(report.taskAssociation.incomplete, false, "query/cancel events must not become missing creator associations");
         assert.equal(report.latency.waiting.calls, 1);
         assert.equal(report.latency.waiting.p95DurationMs, 9000);
         assert.equal(report.failuresByTool[0].latestTraceId, "trace-partial");

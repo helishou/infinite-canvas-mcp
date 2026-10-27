@@ -26,6 +26,21 @@ test("a Shot draft survives a source refresh and locates a conflicting update wi
     assert.equal(shotDraftSourceChanged(restored.draft, shot), false);
     assert.equal(readShotFormDraft(JSON.stringify(draft), { ...shot, id: "S2" }).invalid, true);
 });
+test("temporary dialogue speakers persist by name without a registered Subject", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.utterances = [{ utteranceId: "", speakerSubjectId: "", speakerName: "窗外的守卫", text: "站住！", delivery: "急促", voiceover: true, localStartFrame: 1, localEndFrame: 12 }];
+    const changes = shotFormChanges(draft);
+    assert.equal(changes.utterances?.[0].speakerSubjectId, undefined);
+    assert.equal(changes.utterances?.[0].speakerName, "窗外的守卫");
+    assert.equal(changes.utterances?.[0].voiceover, true);
+});
+test("an empty viewing-object selection remains a valid saved camera field", () => {
+    const { draft } = readShotFormDraft(undefined, shot);
+    draft.value.camera.attention_subject_ids = [];
+    const restored = readShotFormDraft(JSON.stringify(draft), shot);
+    assert.equal(restored.invalid, false);
+    assert.deepEqual(shotFormChanges(restored.draft).patch?.camera, { ...shot.camera, attention_subject_ids: [] });
+});
 test("Subject names use the registered entity and workbenches consume the Backend wire projection", () => {
     const source = { subject_registry: [{ id: "stable-subject", entityRef: { kind: "character", id: "actor" } }], character_registry: [{ id: "actor", name: "栓子" }] };
     assert.equal(subjectDisplayName(source, "stable-subject"), "栓子");
@@ -67,6 +82,16 @@ test("unrelated source updates merge automatically without making Shot editing a
     assert.deepEqual(shotFormChanges(restored.draft).patch, { visual: "听窗内动静。", camera: { ...remote.camera, path: "缓推" } });
 });
 
+
+test("voiceover derives from subject presentation when the source tracks usages and honors stored flags otherwise", () => {
+    const tracked = { ...shot, subject_usages: [{ subjectId: "SUB", presentation: "state_context" }], utterance_refs: [{ utteranceId: "U", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 2 }] };
+    const source = { utterances: [{ id: "U", speakerSubjectId: "SUB", text: "回来", start: { shotId: "S1", localFrame: 0 }, end: { shotId: "S1", localFrame: 48 } }] };
+    assert.equal(readShotFormDraft(undefined, tracked, source).draft.value.utterances![0].voiceover, true);
+    assert.equal(shotDraftChanged(readShotFormDraft(undefined, tracked, source).draft), true);
+    assert.equal(readShotFormDraft(undefined, { ...tracked, subject_usages: [{ subjectId: "SUB", presentation: "visible" }] }, source).draft.value.utterances![0].voiceover, false);
+    const speakingLegacy = { ...shot, subject_usages: [], utterance_refs: [{ utteranceId: "U", localStartFrame: 0, localEndFrame: 48, textStart: 0, textEnd: 2 }] };
+    assert.equal(readShotFormDraft(undefined, speakingLegacy, { ...source, utterances: [{ ...source.utterances[0], voiceover: false }] }).draft.value.utterances![0].voiceover, false);
+});
 
 test("machine Subject editing uses its original prompt_description without making a blank appearance copy", async () => {
     const { subjectDescriptionField } = await import("./subject-shot-draft");

@@ -6,9 +6,17 @@ import { mergeSubjectDefinitions, subjectVisualSourceDetails, type H3SubjectDefi
 import { deriveStoryboardDurations, formatShotTimestamp, isReferenceNameEcho, normalizeRef2vaSummary, promptDetails, stripDuplicateTransition, stripStoryboardCues, validateDefinitionCoverage, validatePromptReferences, validateShotTimeline, validateStoryboardShotDescriptions, visualReferenceTags } from "./prompt-rules.js";
 
 type RecordValue = Record<string, unknown>;
-type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
-type StoryboardShotInput = { id?: string; description: string; duration?: number; switchTime?: string; transitionType?: Transition; pictureBindingId?: string };
-type StoryboardInput = { summary?: string; openingDescription: string; shots: StoryboardShotInput[]; overallSoundscape: string; nonDiegeticMusic: string; referenceBindings?: RecordValue[] };
+export type Transition = "continuous" | "cut" | "dissolve" | "fade_black";
+export type StoryboardShotInput = { id?: string; description: string; duration?: number; switchTime?: string; transitionType?: Transition; pictureBindingId?: string };
+export type StoryboardInput = { summary?: string; openingDescription: string; shots: StoryboardShotInput[]; overallSoundscape: string; nonDiegeticMusic: string; referenceBindings?: RecordValue[] };
+/** 写入后持久化在 segment.storyboardInput 的结构化基线；后续增量修改以它为合并源。 */
+export type StoryboardInputSnapshot = {
+    summary: string;
+    openingDescription: string;
+    shots: Array<{ id: string; description: string; duration?: number; switchTime: string; transitionType: Transition; pictureBindingId?: string }>;
+    overallSoundscape: string;
+    nonDiegeticMusic: string;
+};
 type PromptSubject = StoryboardPromptSubject;
 type PromptReference = { tag: string; bindingId: string; type: "image" | "video" | "audio"; role: string; label: string; description: string; subjectId?: string; subjectIds?: string[]; subjectName?: string; speakerId?: string; usage?: string; retentionLevel?: "fully_preserved" | "partially_preserved" | "attribute_transfer" | "weak_reference"; shotNumbers: number[]; compositePanels?: Array<{ index: number; row: number; column: number; shotNumbers: number[] }> };
 type PromptShot = { description: string; referenceIds?: string[] };
@@ -67,7 +75,7 @@ function storyboardCompositePlan(enabled: boolean, shots: StoryboardShotInput[],
     return { ...layout, panels: bindingIds.map((bindingId, index) => ({ bindingId, index: index + 1, row: Math.floor(index / layout.columns) + 1, column: index % layout.columns + 1, shotNumbers: [...new Set(uses.get(bindingId) || [])] })) };
 }
 function promptModeOf(segment: RecordValue) {
-    const mode = string(segment.mode || segment.taskMode || "ref2va");
+    const mode = string(segment.taskMode || segment.mode || "ref2va");
     return ["ref2va", "t2v", "i2v", "fl2v"].includes(mode) ? mode : "ref2va";
 }
 
@@ -178,10 +186,11 @@ function buildPromptText(subjects: PromptSubject[], references: PromptReference[
         const details = [...promptDetails([subject.profile, ...subject.outfits]), ...subjectVisualSourceDetails(subject, references)];
         const identityPictures = subject.pictures.filter((tag) => !blockingTags.has(tag));
         const blockingPictures = subject.pictures.filter((tag) => blockingTags.has(tag));
-        if (identityPictures.length) details.unshift(`visual identity defined by reference(s) ${identityPictures.join(", ")}`);
-        if (blockingPictures.length) details.push(`spatial blocking guided by ${blockingPictures.join(", ")}`);
-        if (!details.length) details.push("visual features follow the linked reference");
-        return `${subjectMarker(subject)} is ${identity || subject.id}. ${details.join("; ")}.`;
+        const pictureLinks = [
+            ...(identityPictures.length ? [`identity: ${identityPictures.join(", ")}`] : []),
+            ...(blockingPictures.length ? [`blocking: ${blockingPictures.join(", ")}`] : []),
+        ];
+        return `${subjectMarker(subject)} is ${identity || subject.id}${pictureLinks.length ? `; ${pictureLinks.join("; ")}` : ""}${details.length ? `. ${details.join("; ")}` : "."}`;
     }).join("\n");
 
     const isPictureAnchor = (reference: PromptReference) => reference.type === "image" && (
@@ -603,6 +612,97 @@ function buildPromptSections(project: RecordValue, segment: RecordValue, input: 
     return { prompt, fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis, subjectCount: subjectManifest.length, shotCount: input.shots.length, storyboardDurations, content };
 }
 
+/**
+ * 把一次写入合并到已持久化的分镜基线上：省略的字段沿用基线，shots 按稳定 id 逐镜合并。
+ *
+ * 没有基线时仍要求完整 shots——凭空补半套分镜会让未提及的镜头丢失。
+ */
+export function mergeStoryboardInput(previous: unknown, patch: RecordValue, options?: { existingShotCount?: number }): { input: StoryboardInput; shotIds: string[]; changedShotIds: string[]; established: boolean } {
+    const baseline = record(previous);
+    const baselineShots = Array.isArray(baseline.shots) ? baseline.shots.map(record) : [];
+    const patchShots = Array.isArray(patch.shots) ? patch.shots.map(record) : undefined;
+    const established = baselineShots.length === 0;
+    if (established) {
+        if (!patchShots?.length) throw Object.assign(new Error("STORYBOARD_SHOTS_REQUIRED: 该 Clip 还没有结构化分镜基线，首次写入需提供完整 shots；建立基线后可以只传要改的镜头"), { code: "STORYBOARD_SHOTS_REQUIRED" });
+        // 老 Clip 只有瘦镜头轨（storyboardShots）没有结构化基线时，"只改一镜"无法扩展成全文，
+        // 静默接受会把其余镜头从分镜里抹掉，这里必须拒绝并给出提示。
+        const existingShotCount = Number(options?.existingShotCount) || 0;
+        if (existingShotCount > patchShots.length) throw Object.assign(new Error(`STORYBOARD_BASELINE_PARTIAL: 该 Clip 现有 ${existingShotCount} 个镜头，但本次只提供 ${patchShots.length} 个且没有结构化分镜基线；首次写入需提供完整 shots，否则会丢弃其余镜头`), { code: "STORYBOARD_BASELINE_PARTIAL" });
+        const shots = patchShots.map((shot, index) => ({
+            ...(string(shot.id) ? { id: string(shot.id) } : {}),
+            description: string(shot.description),
+            ...(Number.isFinite(Number(shot.duration)) && Number(shot.duration) > 0 ? { duration: Number(shot.duration) } : {}),
+            ...(string(shot.switchTime) ? { switchTime: string(shot.switchTime) } : {}),
+            ...(shot.transitionType ? { transitionType: shot.transitionType as Transition } : {}),
+            ...(string(shot.pictureBindingId) ? { pictureBindingId: string(shot.pictureBindingId) } : {}),
+        }));
+        return {
+            established,
+            shotIds: shots.map((shot, index) => shot.id || `shot-${index + 1}`),
+            changedShotIds: shots.map((shot, index) => shot.id || `shot-${index + 1}`),
+            input: {
+                ...(string(patch.summary) ? { summary: string(patch.summary) } : {}),
+                openingDescription: string(patch.openingDescription),
+                shots,
+                overallSoundscape: string(patch.overallSoundscape),
+                nonDiegeticMusic: string(patch.nonDiegeticMusic),
+            },
+        };
+    }
+
+    const baselineIds = baselineShots.map((shot, index) => string(shot.id) || `shot-${index + 1}`);
+    const byId = new Map<string, RecordValue>();
+    if (patchShots?.length) {
+        const missingId = patchShots.some((shot) => !string(shot.id));
+        // 兼容老式全量写法：整组都不带 id 且镜头数量一致时按位置合并。
+        if (missingId) {
+            if (patchShots.length !== baselineShots.length) throw Object.assign(new Error(`STORYBOARD_SHOT_ID_REQUIRED: 增量修改需为每个镜头提供稳定 id（现有 ${baselineIds.join("、")}）`), { code: "STORYBOARD_SHOT_ID_REQUIRED" });
+            patchShots.forEach((shot, index) => byId.set(baselineIds[index], shot));
+        } else {
+            for (const shot of patchShots) {
+                const id = string(shot.id);
+                if (!baselineIds.includes(id)) throw Object.assign(new Error(`STORYBOARD_SHOT_UNKNOWN: 镜头 ${id} 不在当前分镜（现有 ${baselineIds.join("、")}）；新增或删除镜头请在分镜编辑器操作`), { code: "STORYBOARD_SHOT_UNKNOWN" });
+                byId.set(id, shot);
+            }
+        }
+    }
+
+    const changedShotIds: string[] = [];
+    const shots = baselineShots.map((shot, index) => {
+        const id = baselineIds[index];
+        const override = byId.get(id) || {};
+        const next: StoryboardShotInput = {
+            id,
+            description: Object.hasOwn(override, "description") ? string(override.description) : string(shot.description),
+            ...(Object.hasOwn(override, "duration")
+                ? (Number.isFinite(Number(override.duration)) && Number(override.duration) > 0 ? { duration: Number(override.duration) } : {})
+                : (Number.isFinite(Number(shot.duration)) && Number(shot.duration) > 0 ? { duration: Number(shot.duration) } : {})),
+            switchTime: Object.hasOwn(override, "switchTime") ? string(override.switchTime) : string(shot.switchTime),
+            transitionType: (Object.hasOwn(override, "transitionType") ? string(override.transitionType) : string(shot.transitionType) || "cut") as Transition,
+            ...(Object.hasOwn(override, "pictureBindingId")
+                ? (string(override.pictureBindingId) ? { pictureBindingId: string(override.pictureBindingId) } : {})
+                : (string(shot.pictureBindingId) ? { pictureBindingId: string(shot.pictureBindingId) } : {})),
+        };
+        const before = { description: string(shot.description), duration: Number(shot.duration) || undefined, switchTime: string(shot.switchTime), transitionType: string(shot.transitionType) || "cut", pictureBindingId: string(shot.pictureBindingId) };
+        const after = { description: next.description, duration: next.duration, switchTime: string(next.switchTime), transitionType: next.transitionType, pictureBindingId: string(next.pictureBindingId) };
+        if (JSON.stringify(before) !== JSON.stringify(after)) changedShotIds.push(id);
+        return next;
+    });
+
+    return {
+        established,
+        shotIds: baselineIds,
+        changedShotIds,
+        input: {
+            ...(Object.hasOwn(patch, "summary") ? { summary: string(patch.summary) } : string(baseline.summary) ? { summary: string(baseline.summary) } : {}),
+            openingDescription: Object.hasOwn(patch, "openingDescription") ? string(patch.openingDescription) : string(baseline.openingDescription),
+            shots,
+            overallSoundscape: Object.hasOwn(patch, "overallSoundscape") ? string(patch.overallSoundscape) : string(baseline.overallSoundscape),
+            nonDiegeticMusic: Object.hasOwn(patch, "nonDiegeticMusic") ? string(patch.nonDiegeticMusic) : string(baseline.nonDiegeticMusic),
+        },
+    };
+}
+
 export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue, rawInput: RecordValue) {
     const originalInput = rawInput as StoryboardInput;
     if (!Array.isArray(originalInput.shots) || !originalInput.shots.length) throw new Error("分镜至少需要一镜");
@@ -691,13 +791,31 @@ export function writeStoryboardPrompt(project: RecordValue, segment: RecordValue
     validateStoryboardShotDescriptions(input.shots);
     validateShotTimeline(input.shots, segment.duration === undefined ? undefined : Number(segment.duration));
     const generated = buildPromptSections(project, segment, input, bindings);
+    // 把这次真正参与生成的输入存成结构化基线：下次只改一镜时以它做合并，不必重述其余镜头。
+    const storyboardInput: StoryboardInputSnapshot = {
+        summary: string(input.summary),
+        openingDescription: string(input.openingDescription),
+        shots: input.shots.map((shot, index) => ({
+            id: string(shot.id) || `shot-${index + 1}`,
+            description: string(shot.description),
+            ...(Number.isFinite(Number(shot.duration)) && Number(shot.duration) > 0 ? { duration: Number(shot.duration) } : {}),
+            switchTime: string(shot.switchTime),
+            transitionType: (shot.transitionType || "cut") as Transition,
+            ...(string(shot.pictureBindingId) ? { pictureBindingId: string(shot.pictureBindingId) } : {}),
+        })),
+        overallSoundscape: string(input.overallSoundscape),
+        nonDiegeticMusic: string(input.nonDiegeticMusic),
+    };
     const cache = record(segment.storyboardPromptCache);
     const promptMode = promptModeOf(segment);
-    if (!storedOrderChanged && !shotOrderChanged && promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, unchanged: true as const };
-    if (!storedOrderChanged && !shotOrderChanged && promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, unchanged: true as const };
+    // 基线缺失或不同也算一次真实写入：老 Clip 的 prompt 可能与新输入等价，但仍需补上结构化基线。
+    const storyboardInputChanged = JSON.stringify(storyboardInput) !== JSON.stringify(record(segment.storyboardInput));
+    if (!storedOrderChanged && !shotOrderChanged && !storyboardInputChanged && promptMode === "ref2va" && cache.version === 13 && cache.fingerprint === generated.fingerprint && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, storyboardInput, unchanged: true as const };
+    if (!storedOrderChanged && !shotOrderChanged && !storyboardInputChanged && promptMode !== "ref2va" && string(segment.prompt) === generated.prompt) return { ...generated, referenceBindings: persistedBindings, storyboardShots: orderedShots, storyboardInput, unchanged: true as const };
     return {
         ...generated,
         unchanged: false as const,
+        ...(storyboardInputChanged ? { storyboardInput } : {}),
         ...(storedOrderChanged ? { referenceBindings: persistedBindings } : {}),
         ...(shotOrderChanged ? { storyboardShots: orderedShots } : {}),
         ...(promptMode === "ref2va" ? { cache: { version: 13, fingerprint: generated.fingerprint, subjectDefinitions: generated.subjectDefinitions, retentionAnalysis: generated.retentionAnalysis } } : {}),
