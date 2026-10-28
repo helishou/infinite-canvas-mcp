@@ -93,7 +93,13 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 
 提交前核验 H3 当前模型能接受 5 秒、9:16 和 2.0 MP 组合；用 `h3_preview_run(view:"full")` 检查每段实际生效的参数与参考映射。`h3_get_defaults` 仅用于识别当前默认值，不代表本项目已满足目标，也不要为本项目改全局默认值。每段必须保存为独立生成，不得因共享角色或场景参考而推断需要跨段续接。若目标参数组合不受支持，先报告具体冲突和最接近的支持组合，不擅自降规格、替换 LoRA 或开启上下文模式。
 
-在画布中准备 N 个正式 H3 Clip，绑定真实角色/场景参考并按顺序编译、翻译、检查和生成。自由画布可用 `h3_apply_video_plan` 建段；按 Ref2VA 规范改写完整提示词后，用 `h3_update_clips` 对目标 Clip 只更新 `prompt` / `timeline` 字段，避免覆盖已保存的运行参数。提交前把状态读取一次拿全：`h3_get_clip_references`（活动图 storageKey 与 Picture 顺序）与 `h3_get_clip`（已保存的运行参数）在同一阶段读完；随后用 `h3_preview_run` 对**同一 nodeIds 范围**预检，并与实际提交保持一致，独立片段统一 `skipCompleted:false`，把返回的 `planHash` 交给 `h3_run_all_clips`。若得到 `STALE_H3_PREVIEW`，该调用没有创建任务；保持原 `idempotencyKey`，按错误建议用完全相同的范围与标志重做预检，再用新 `planHash` 重提。各片段不得登记跨段 latent/tail-frame 出边；其提示词须自足，不依赖其他 Clip 的状态。
+在画布中准备 N 个正式 H3 Clip，绑定真实角色/场景参考并按顺序编译、翻译、检查和生成。自由画布可用 `h3_apply_video_plan` 建段；按 Ref2VA 规范改写完整提示词后，用 `h3_update_clips` 对目标 Clip 只更新 `prompt` / `timeline` 字段，避免覆盖已保存的运行参数。提交前把状态读取一次拿全：`h3_get_clip_references`（活动图 storageKey 与 Picture 顺序）与 `h3_get_clip`（已保存的运行参数）在同一阶段读完；随后用 `h3_preview_run` 对**同一 nodeIds 范围**预检，并与实际提交保持一致，独立片段统一 `skipCompleted:false`，把返回的 `planHash` 交给 `h3_run_all_clips`。若得到 `STALE_H3_PREVIEW`，该调用没有创建任务；保持原 `idempotencyKey`，用完全相同的范围与标志重做预检，再用新 `planHash` 重提。**实测该重试在当前版本会稳定失败**（2026-10-28：预检连调三次 hash 完全相同，但运行侧重算始终不等，`nodeIds`/`nodeId+runFromCurrent`/`forceRegenerate`/`skipCompleted` 等五种范围形态全部 STALE）。可用兜底：刚做完预检、确认画布无人改动时，**提交时不传 `expectedPlanHash`**——该字段省略即跳过一致性校验，任务照常创建。传之前必须自己核对预检返回的 `ready` 与参考数量，不要盲跳过。
+
+**运行参数覆盖必须预检和提交同时传**：只传其中一次时，生效值会退回节点默认（实测默认 16:9 / 0.4 MP）。两个调用都带 `params:{aspectRatio:"9:16",megapixels:2}` 后，预检的 `expectedDimensions.final` 才变成 `1088×1920`。提交后必看一眼这个数字再等结果。
+
+**参考绑定写在段落里**：`h3_apply_video_plan` 的每个 segment 可用 `references:[{nodeId,role,order,storageKey,name,type,subjectId}]`（role 取 `character_identity` / `character_turnaround` / `scene` 等，order 从 0 递增，storageKey 是已归档媒体键），配合 `subjects:[{subjectId,name,role}]`。写完用预检的 `clips[].referenceMap.length` 核验，为 0 说明没绑上，别提交。
+
+**段落已有运行状态时改计划会被拒**：`h3_apply_video_plan` 会报「字段 status 由后台任务维护」。先 `canvas_task_cancel` 掉在跑的父任务再改计划，否则沿用已有计划提交即可，不要重复写。各片段不得登记跨段 latent/tail-frame 出边；其提示词须自足，不依赖其他 Clip 的状态。
 
 任务跟踪按[原生 MCP 操作预算](../canvas-video-production-sop/references/native-mcp-operation-budget.md)的批量等待规则执行：`canvas_wait_tasks` 一次等待全部原 taskId、事件流优先、不每分钟重复轮询，等待窗口取该文档的参考值。只有等待出错、需要人工确认或用户主动询问进度时，才用 `canvas_task_status` / `h3_get_task` 定向查看。若通过 Acheng 正式制作入口提交，遵守其翻译与编译步骤。生成后按原 taskId 跟踪状态，核对 N 段都已成功归档、时间线顺序、画幅、每段 5 秒时长、实际运行参数及段间独立性。若系统有 `ffprobe`，从归档/任务输出读取实际宽高、帧率、时长和音轨；预检尺寸只是估算（2026-10-28 实测：2.0 MP 的 9:16 预检对应 1088×1920 编码，约 2.09 MP，以当次回执为准），所以逐段报告实测值。用 scene-cut 检查或剪辑时间线复核实际切点，不能只凭提示词宣称切点符合节拍；若模型偏离整秒重音，从可用镜头动作中裁出稳定段，将每段校正为 1.0 秒，再按原音频节拍拼回，且保留原 H3 输出。若任一 Clip 的 MP4 比保存时长短，且末镜已设计为定格，则保留原画布结果，另生成带末帧停留、音频垫长/淡出的准确时长交付副本后再拼接；报告交付副本长度，不覆写 H3 历史媒体。只在能力真实提供时拼接/导出最终视频；所有分段媒体存在仍不等于已得到连续播放的成片。
 
