@@ -1,6 +1,6 @@
 # 快闪 PV 快速通道与避坑（整合自 quick-flash-pv）
 
-调度纪律以 `../../canvas-video-production-sop/references/native-mcp-operation-budget.md` 为准；本文只保留快闪专属的创作简报纪律、单线快速通道和已验证的失败避坑。
+调度纪律以 `../../canvas-video-production-sop/references/native-mcp-operation-budget.md` 为准；看图次数、调用合并与批量提交的预算见 [`orchestration-budget.md`](orchestration-budget.md)。本文只保留快闪专属的创作简报纪律、单线快速通道和已验证的失败避坑。
 
 ## 创作简报纪律
 

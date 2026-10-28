@@ -10,6 +10,7 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 ## 入口与约束
 
 - 本 Skill 是自由画布短片流程，不建立剧目、分集或 Acheng 正式制作稿。画布持久编辑遵守仓库的画布数据契约；使用画布 MCP/受支持命令创建和编辑，不直写数据库。
+- 编排预算（看图次数、调用合并、批量提交）与实测耗时基线见 [`references/orchestration-budget.md`](references/orchestration-budget.md)。结论先行：MCP 工具本身 0.01–0.1 秒，墙钟大头是调用之间的 AI 回合，因此**减少调用次数优先于优化单次调用**；生成侧耗时以该文件的模型基准判断是否异常。
 - 调度纪律（标准批次、批量读写、批量等待、生成前门禁梯、恢复顺序）以 `../canvas-video-production-sop/references/native-mcp-operation-budget.md` 为准，本 Skill 只保留快闪专属参数与域内细节，不另立一套。快闪专属的创作简报纪律、单线快速通道与失败避坑（含连脚丝袜脚部解剖规则）见 [`references/flash-fastpath.md`](references/flash-fastpath.md)。
 - 成片在剪映的踩点重音剪辑、变速吸附、调色+美颜预设、穿帮打码与 BGM 选择以 [`references/jianying-beat-sync.md`](references/jianying-beat-sync.md) 为准；该文件同时收录用户对剪辑的硬规则（不裁内容、变速上限、同镜不拆速、切点必须落锤、手动改过的草稿顺序不动、结尾必淡出）。正式成片由用户在剪映手动导出，CLI render 只出代理预览。
 - 先读 `../canvas-video-production-sop/references/canvas-workspace.md` 和 `../canvas-video-production-sop/references/canvas-image-production.md` 中本次需要的小节；提交视频或恢复任务时读 `../canvas-video-production-sop/references/canvas-production-runs.md`。H3 的 Clip 参数和连续性沿用 `../canvas-video-production-sop/references/canvas-clip-production.md` 与 `.agents/rules/h3-production.md`。
@@ -37,6 +38,13 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 
 角色图是场景和视频的身份锚点。角色资产图尚未成功归档前，不提交依赖它的下游生成。
 
+角色阶段的编排纪律：
+
+- 头图 → 全身图 → 终极资产图是**有先后依赖**的三步，不得塞进一个 batch。
+- 同一步要比较 2–3 个变体时，用 `canvas_generate_image_batch` 一次提交（条目 `key` 区分，`waitForCompletion:true`，`timeoutMs` 视画幅留足），等全部终态再一次性比较；目标已确定为单一结果时用 `canvas_generate_image`，不为凑批量多生成。
+- 目视只花在正式资产图这一次，用回执的宽高、比例与状态判断中间候选；确需目视先降采样到长边 ≤1024，不逐张读原图。
+- `canvas_image_input_manifest` 对同一组输入只核一次：核完立即提交，不重复核。核验结果连同 `manifestHash` 一起留在任务上下文里，后续引用它而不是重读。
+
 ### 3. 设计快闪场景并生成氛围图
 
 围绕角色身份规划一组适合快速展示的场景与气氛节拍，例如开场剪影/登场、主体展示、收束定格。场景应有明确的色彩、光线、天气或粒子氛围，并服务角色气质；不要用无关的环境细节稀释人物主体。把场景画面提示词和氛围词分别整理，氛围词写光色、材质、运动感和情绪，不只堆泛化形容词。
@@ -51,6 +59,8 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 只有视觉检查确认是可信的真人实景电影摄影质感后，才把该 GPT 母图作为反推流程的场景输入，调用当前配置的“2.1反推”工作流；保留其实际生成结果并核验后再绑定为场景参考。不得用普通 2.1 文生图冒充反推，也不得在母图/反推未完成时提交视频。
 
 若用户未指定 GPT→反推，则按当前配置中精确匹配用户所说“2.1”的生图模型/工作流生成场景图，预先确认该工作流支持的画幅；按目标画幅规划留白、视觉中心与可见轮廓。无论哪条路径，均须将成功结果归档、绑定到对应场景参考，不得把角色身份图与场景图混成一个来源不明的参考。
+
+场景侧同样按编排预算执行：视觉核验只用在母图的实景质感判定上（那是降级链的判据），反推结果按任务回执的宽高与状态核验即可；需要多个氛围变体时用 `canvas_generate_image_batch` 一次提交。
 
 ### 4. 编排两段 H3 视频
 
@@ -71,7 +81,7 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 
 提交前核验 H3 当前模型能接受 8 秒、9:16 和 2.0 MP 组合；用 `h3_preview_run(view:"full")` 检查每段实际生效的参数与参考映射。`h3_get_defaults` 仅用于识别当前默认值，不代表本项目已满足目标，也不要为本项目改全局默认值。精确确认 Motion Context 的有效开关及可用潜空间/音频上下文；LoRA 使用目录返回的精确 `value`，并核验提交快照中名称、启用状态和强度为丝袜质感 / 0.5。连续性只能通过前段指向后段的 Motion Context / latent 续接设置实现，不能用“有两个 Clip”推断已接续。若两个目标无法同时满足，先报告具体冲突和最接近的支持组合，不擅自降规格、替换 LoRA 或改用尾帧模式。
 
-在画布中准备两个正式 H3 Clip，绑定真实角色/场景参考并按顺序编译、翻译、检查和生成。自由画布可用 `h3_apply_video_plan` 建段；按 Ref2VA 规范改写完整提示词后，用 `h3_update_clips` 对目标 Clip 只更新 `prompt` / `timeline` 字段，避免覆盖已保存的运行参数。生成前读取 `h3_get_clip_references` 核对最新活动图的 storageKey 与 Picture 顺序，再用 `h3_preview_run` 对**同一 nodeIds 范围**预检，并与实际提交保持一致：连续组从头运行时同时传 `runFromCurrent:true`、`skipCompleted:false`；把返回的 `planHash` 交给 `h3_run_all_clips`。若得到 `STALE_H3_PREVIEW`，该调用没有创建任务；保持原 `idempotencyKey`，按错误建议用完全相同的范围与标志重做预检，再用新 `planHash` 重提。Motion Context 要在首 Clip 登记到下一 Clip 的出边；独立预检第二 Clip 可能因缺少已完成前段 latent 而阻塞，整组从 Clip 1 预检与启动才是正确路径。
+在画布中准备两个正式 H3 Clip，绑定真实角色/场景参考并按顺序编译、翻译、检查和生成。自由画布可用 `h3_apply_video_plan` 建段；按 Ref2VA 规范改写完整提示词后，用 `h3_update_clips` 对目标 Clip 只更新 `prompt` / `timeline` 字段，避免覆盖已保存的运行参数。提交前把状态读取一次拿全：`h3_get_clip_references`（活动图 storageKey 与 Picture 顺序）与 `h3_get_clip`（已保存的运行参数）在同一阶段读完，不来回补读；随后用 `h3_preview_run` 对**同一 nodeIds 范围**预检，并与实际提交保持一致：连续组从头运行时同时传 `runFromCurrent:true`、`skipCompleted:false`；把返回的 `planHash` 交给 `h3_run_all_clips`。若得到 `STALE_H3_PREVIEW`，该调用没有创建任务；保持原 `idempotencyKey`，按错误建议用完全相同的范围与标志重做预检，再用新 `planHash` 重提。Motion Context 要在首 Clip 登记到下一 Clip 的出边；独立预检第二 Clip 可能因缺少已完成前段 latent 而阻塞，整组从 Clip 1 预检与启动才是正确路径。
 
 任务跟踪按[原生 MCP 操作预算](../canvas-video-production-sop/references/native-mcp-operation-budget.md)的批量等待规则执行：`canvas_wait_tasks` 一次等待全部原 taskId、事件流优先、不每分钟重复轮询，等待窗口取该文档的参考值。只有等待出错、需要人工确认或用户主动询问进度时，才用 `canvas_task_status` / `h3_get_task` 定向查看。若通过 Acheng 正式制作入口提交，遵守其翻译与编译步骤。生成后按原 taskId 跟踪状态，核对两段都已成功归档、时间线顺序、画幅、时长、实际运行参数及 Clip 1 → Clip 2 续接输入。若系统有 `ffprobe`，从归档/任务输出读取实际宽高、帧率、时长和音轨；预检尺寸只是估算（2026-10-28 实测：2.0 MP 的 9:16 预检对应 1088×1920 编码，约 2.09 MP，以当次回执为准），所以逐段报告实测值。用 scene-cut 检查或剪辑时间线复核实际切点，不能只凭提示词宣称切点符合节拍；若模型偏离整秒重音，从可用镜头动作中裁出稳定段，将每段校正为 1.0 秒，再按原音频节拍拼回，且保留原 H3 输出。若 Motion Context 续接 Clip 的 MP4 比保存时长短，且末镜已设计为定格，则保留原画布结果，另生成带末帧停留、音频垫长/淡出的准确时长交付副本后再拼接；报告交付副本长度，不覆写 H3 历史媒体。只在能力真实提供时拼接/导出最终视频；两个分段媒体存在不等于已得到连续播放的成片。
 
