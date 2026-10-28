@@ -627,6 +627,41 @@ test("MCP HTTP closes every transport and clears active sessions", async (t) => 
   await client.close();
 });
 
+async function waitForSessionCount(routes: ReturnType<typeof registerBackendMcpHttpRoutes>, expected: number) {
+  for (let attempt = 0; attempt < 100 && routes.sessionCount() !== expected; attempt++)
+    await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(routes.sessionCount(), expected);
+}
+
+test("MCP HTTP reclaims idle sessions but keeps ones still within the idle window", async (t) => {
+  let routes!: ReturnType<typeof registerBackendMcpHttpRoutes>;
+  const url = await fixture(t, await mockBackend(t), (value) => { routes = value; });
+  await mcpClient(t, url);
+  assert.equal(routes.sessionCount(), 1);
+  const now = Date.now();
+
+  assert.equal(routes.sweepSessions(now + 60_000), 0, "未到空闲阈值的会话必须保留");
+  assert.equal(routes.sessionCount(), 1);
+
+  assert.equal(routes.sweepSessions(now + 31 * 60_000), 1, "超过空闲阈值应回收，避免泄漏常驻");
+  await waitForSessionCount(routes, 0);
+});
+
+test("MCP HTTP closes the least recently used session when over the limit", async (t) => {
+  let routes!: ReturnType<typeof registerBackendMcpHttpRoutes>;
+  const url = await fixture(t, await mockBackend(t), (value) => { routes = value; });
+  await mcpClient(t, url);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const newest = await mcpClient(t, url);
+  assert.equal(routes.sessionCount(), 2);
+
+  assert.equal(routes.sweepSessions(Date.now(), 1), 1, "超限时关闭最久未使用的会话");
+  await waitForSessionCount(routes, 1);
+
+  const result = await newest.callTool({ name: "canvas_inspect", arguments: {} });
+  assert.notEqual(result.isError, true, "最近使用过的会话应保持可用");
+});
+
 test("canvas_inspect returns one actionable canvas context", async (t) => {
   const events: Array<Record<string, unknown>> = [];
   const backendUrl = await mockBackend(t, (event) => events.push(event));

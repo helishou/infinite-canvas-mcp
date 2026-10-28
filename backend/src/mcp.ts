@@ -227,8 +227,18 @@ type HttpMcpSession = {
   transport: StreamableHTTPServerTransport;
   clientInfo: { name: string; version: string } | null;
   userAgent: string;
-  closeReason: "client_delete" | "backend_shutdown" | "transport_closed";
+  closeReason: "client_delete" | "backend_shutdown" | "transport_closed" | "idle_timeout" | "session_limit";
+  lastSeenAt: number;
 };
+
+/** 会话空闲回收阈值：客户端不主动 DELETE 又不再来请求时，超过该时长关闭，避免会话与其 MCP 实例常驻。 */
+const MCP_SESSION_IDLE_MS = Math.max(60_000, Number(process.env.MCP_SESSION_IDLE_MS) || 30 * 60_000);
+/** 会话上限：超出后关闭最久未使用的会话，把泄漏压回上限内，避免被撑爆内存。 */
+const MCP_SESSION_MAX = Math.max(2, Number(process.env.MCP_SESSION_MAX) || 32);
+/** 空闲会话清扫间隔，与空闲阈值解耦，保证泄漏能被及时发现而不是等阈值时长才扫一次。 */
+const MCP_SESSION_SWEEP_MS = Math.max(1_000, Number(process.env.MCP_SESSION_SWEEP_MS) || 60_000);
+/** 插件声明同步间隔：声明变化是低频事件（装卸插件），不必每 3 秒回源一次。 */
+const MCP_DECLARATION_SYNC_MS = Math.max(1_000, Number(process.env.MCP_DECLARATION_SYNC_MS) || 10_000);
 
 /**
  * 在常驻 Backend 进程内提供共享 Streamable HTTP MCP。
@@ -261,13 +271,47 @@ export function registerBackendMcpHttpRoutes(
           error: error instanceof Error ? error.message : String(error),
         }),
       );
-    }, 3000);
+    }, MCP_DECLARATION_SYNC_MS);
     declarationSync.unref();
   };
   const sessionIdOf = (req: Request) => {
     const value = req.headers["mcp-session-id"];
     return typeof value === "string" ? value : "";
   };
+  /** 关闭会话不在此处移除，交给 transport.onclose 统一清理并记录关闭原因。 */
+  const closeSession = (sessionId: string, reason: HttpMcpSession["closeReason"]) => {
+    const session = sessions.get(sessionId);
+    if (!session) return false;
+    session.closeReason = reason;
+    void session.transport.close().catch(() => undefined);
+    return true;
+  };
+  /**
+   * 回收空闲会话与超额会话。客户端不主动 DELETE 时靠这里兜底：
+   * 否则每个废弃会话都会常驻一个 MCP 实例，并持续参与插件声明同步。
+   * 返回本次关闭的会话数。`limit` 仅用于验收与测试覆盖上限路径，产品路径始终用会话上限常量。
+   */
+  const sweepSessions = (now = Date.now(), limit = MCP_SESSION_MAX) => {
+    if (!sessions.size) return 0;
+    const closedIds = new Set<string>();
+    const ordered = [...sessions.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+    for (const [sessionId, session] of ordered) {
+      if (now - session.lastSeenAt < MCP_SESSION_IDLE_MS) continue;
+      if (closeSession(sessionId, "idle_timeout")) closedIds.add(sessionId);
+    }
+    let remaining = sessions.size - closedIds.size;
+    for (const [sessionId] of ordered) {
+      if (remaining <= limit) break;
+      if (closedIds.has(sessionId)) continue;
+      if (closeSession(sessionId, "session_limit")) { closedIds.add(sessionId); remaining--; }
+    }
+    return closedIds.size;
+  };
+  const sessionSweeper = setInterval(() => {
+    const closed = sweepSessions();
+    if (closed) logger.info("MCP 回收空闲会话", { closed, sessionCount: sessions.size, max: MCP_SESSION_MAX, idleMs: MCP_SESSION_IDLE_MS });
+  }, MCP_SESSION_SWEEP_MS);
+  sessionSweeper.unref();
   const checkProfile = (req: Request, res: Response, instance: BackendMcpInstance) => {
     if ((req.query.profile === undefined || req.query.profile === instance.profile) && (req.query.schema === undefined || req.query.schema === instance.schemaMode)) return true;
     res.status(400).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { code: -32602, message: `MCP 会话固定为 profile=${instance.profile},schema=${instance.schemaMode}；更换需要新建连接。` } });
@@ -305,6 +349,7 @@ export function registerBackendMcpHttpRoutes(
     const existing = sessionId ? sessions.get(sessionId) : undefined;
     if (existing) {
       if (!checkProfile(req, res, existing.instance)) return;
+      existing.lastSeenAt = Date.now();
       try {
         await existing.transport.handleRequest(req, res, req.body);
       } catch (error) {
@@ -344,6 +389,7 @@ export function registerBackendMcpHttpRoutes(
               : null,
             userAgent: String(req.get("user-agent") || ""),
             closeReason: "transport_closed",
+            lastSeenAt: Date.now(),
           });
           ensureDeclarationSync();
           logger.info("MCP HTTP 会话已连接", {
@@ -385,6 +431,7 @@ export function registerBackendMcpHttpRoutes(
       invalidSession(res, sessionId);
       return;
     }
+    session.lastSeenAt = Date.now();
     if (!checkProfile(req, res, session.instance)) return;
     try {
       if (req.method === "DELETE") session.closeReason = "client_delete";
@@ -402,7 +449,9 @@ export function registerBackendMcpHttpRoutes(
 
   return {
     sessionCount: () => sessions.size,
+    sweepSessions,
     closeAll: async () => {
+      clearInterval(sessionSweeper);
       if (declarationSync) clearInterval(declarationSync);
       declarationSync = null;
       const active = [...sessions.values()];
