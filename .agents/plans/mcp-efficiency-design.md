@@ -356,4 +356,12 @@ H3 结果和任务状态属于动态查询，不以源稿或画布 revision 命�
 
 P4 验收完成：19 项定向测试通过，共享包构建、Backend 类型检查和差异/编码检查通过。常驻服务的当前、历史、场次、场次历史工具均已声明 fields。真实已保存分集只读查询一条 Shot 的 id/duration_frames，返回 partialSource=true，实际键为 id/timeline_id/duration_frames；不含 canvasInputs、targetStatus 或 clipRefreshes，完整 MCP 回执 1,236 字节。没有保存制作稿或生成媒体。
 
+P6 任务等待：本轮现场统计到 canvas_wait_tasks → canvas_task_status 有 14 次相邻调用；不能据此把全部调用认定为重复。已定位并修复等待到期时丢失已观察进度的问题：回执保留初始快照及事件流中更新的进度，旧事件不覆盖新快照；取消和终态仍沿原语义。隔离 HTTP MCP 测试中，一次等待直接得到 70% 的最新观察进度，无需追加状态查询；47 项相关测试、共享包构建及 Backend 类型检查通过。本轮现场进程仍为 schema=full，尚未加载默认 compact 或此次等待修复；不得将源码验证当成现场生效。
+
 扩展 production-read 原测试中两项失败（完整读取对象引用相等、旧版 published 格式读取）已用 HEAD 版 production-read.ts 配合当前依赖复现，未通过放宽格式保护或改变旧契约处理这些基线问题。
+
+## 14. P7：编排浪费治理（指向独立文档）
+
+P0–P6 处理「单次返回多大」，本维度之外还有「读多少次、读来干什么、失败怎么处置」。2026-10-28 一次完整 PV 实测：177 次调用中 67 次是纯读取校验；16 次等待累计空转；当晚 8 个版本的 `failed` 全部由 `spawn ffprobe ENOENT` 引起（模型一次未真失败），却触发了 5 轮重做。
+
+方案见 [`orchestration-waste-p7.md`](./orchestration-waste-p7.md)：错误分级与 `doNotRetry`、阶段级唯一裁决 `canvas_next`、重复读取短路 `ifChanged`、等待折叠 `wait:'all'`。其中 `ifChanged` 正是本文档 §9.1 推迟的「目标级内容哈希条件读取」，本次实测已满足其触发条件。
