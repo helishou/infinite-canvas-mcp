@@ -1,6 +1,6 @@
 # 快闪镜头模板（8 秒 8 镜 · 势能周期 · 迷人派生）
 
-适用：竖屏快闪 PV 的单个 Clip。Ref2VA、9:16、2.0 MP、丝袜 LoRA 0.5。本模板只负责 `detailed_description` 的镜头/动作/切镜组织与迷人手法；`subject_definitions`、`summary`、`retention_analysis`、`overall_soundscape`、`non_diegetic_music` 仍按 `../acheng-director/modules/model/h3-prompt-writing/references/ref-en.txt` 的六段式与标签规范撰写，此处不重复。
+适用：竖屏快闪 PV 的单个 Clip。Ref2VA、9:16、2.0 MP、丝袜 LoRA 0.5。本模板只负责 `detailed_description` 的镜头/动作/切镜组织与迷人手法；`subject_definitions`、`summary`、`retention_analysis`、`overall_soundscape`、`non_diegetic_music` 仍按 `../../acheng-director/modules/model/h3-prompt-writing/references/ref-en.txt` 的六段式与标签规范撰写，此处不重复。
 
 ## 1. 势能周期（核心规则）
 
