@@ -10,7 +10,7 @@
 
 ## 规格确认与快速通道
 
-1. 写长提示词前先确认目标总时长（秒）与必要镜头数；缺失直接问用户，不猜、不静默继承旧项目值、不把模型上限当创作目标。**快闪 PV 固定每段 5s**：段数 = 目标总时长 ÷ 5；总时长不是 5 的整数倍时先问用户选取，不擅自取整。每段默认独立生成，关闭 Motion Context/潜变量上下文接续；仅当用户本轮明确要求同一连续摄影镜头时才开启。提示词时间码、镜头数与 5s 段长必须一致。
+1. 写长提示词前先确认目标总时长（秒）与必要镜头数；缺失直接问用户，不猜、不静默继承旧项目值、不把模型上限当创作目标。**快闪 PV 固定每段 5s**：段数 = 目标总时长 ÷ 5；总时长不是 5 的整数倍时先问用户选取，不擅自取整。每段默认独立生成，关闭 Motion Context/AV latent 与 tail-frame continuation；仅当用户本轮明确要求跨段连续动作或同一连续摄影镜头时，才按需要开启相应机制。提示词时间码、镜头数与 5s 段长必须一致。
 2. 先确认 H3 执行器/ComfyUI 在线；断连就停下报告具体阻塞，别准备注定失败的长任务。
 3. 检查现有 Canvas 项目，按标题+活节点状态找现成 PV 项目，别建重复项目；活动画布自动解析，`projectId` 只是内部覆盖项，不是向用户提问。
 4. 附件有可读本地路径就直接传入，别冗余复制；用原生 local-image 导入 MCP 工具上传原始字节建带 `storageKey` 的媒体节点——`assets_add` 不能当生成参考。更换转身图：导入新图 → 更新项目参考资产与 H3 Clip 绑定到新 storageKey/源节点 → 替换旧画布边；除非用户要求删除，保留旧媒体节点。写后做一次回读验证 storageKey 与 Clip 绑定，不重复等价读取。
@@ -36,3 +36,17 @@
 - 若是单张脚部特写或局部重绘，且确实需要辨认脚趾，可在专用提示词中谨慎说明正确大脚趾与四个较小脚趾被织物覆盖、轮廓自然；这属于局部静帧例外，不作为整段视频每镜的默认描述。适用的负面词可包括：`bad anatomy, extra toes, missing toes, fused toes, deformed foot, clubfoot, inverted toe, mutated toes, malformed limbs, barefoot, bare toes without fabric, lumpy joint, swollen toe, extra digits, weird bone structure`。
 - 负面词必须进入目标工作流实际支持的独立 negative-prompt 字段；先从 H3/生成配置确认该字段存在。字段不存在时，不要把 `Negative Prompt:` 标题或词串贴进正向正文并声称已生效；改用简短、无矛盾的正向袜尖轮廓描述。
 - 若只需修单帧脚尖且有获准的局部重绘路径，优先局部 Inpaint/ControlNet，不要为一个脚尖反复重跑整段 PV。Denoising 0.45–0.60 仅作起始试验范围，先检查目标模型的量纲与实际结果；可生成 2–3 个局部候选后对比解剖与袜料连续性。所有画布写入仍走 Canvas MCP。
+
+## 2.1 提示词增强 502：换本地 PE，不要重试
+
+二次元/写实都要注意：本地 `2.1` 系列的提示词增强节点 `TE_Qwen_Image_2_1_Prompt_Enhancer` 有一项「增强方式」，可选**本地**或走 **api_key / api_base_url**（例如 chatgpt2api、`http://localhost:8000/v1`）。走 API 那条一旦上游挂掉，节点报 `API 调用失败 HTTP 502`（`type: server_error`、`code: upstream_error`），**整条生成直接 failed，图像一张都出不来**。
+
+识别：任务 `failed`，错误里同时出现节点名 `TE_Qwen_Image_2_1_Prompt_Enhancer` 与 `HTTP 502` / `upstream_error`。
+
+处理顺序：
+
+1. 把该节点的「增强方式」改为 **本地**，并核对该节点配套的 `文生图PE模型` / `图生图PE模型` 指向本地 safetensors（形如 `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot` / `..._pe_i2i...`）；不要让请求继续依赖 api_key 与 api_base_url。
+2. 改不到工作流（画布里的工作流副本没有暴露该开关）时，**直接换模型继续**：`gpt-image-2.5`、`krea2`、`krea2 mj` 都能出竖图，别为同一个 502 反复重投。
+3. **不要原样重试**：502 来自上游，参数不变重投只会再失败一次，白等一个生成周期。
+
+同类脆点还包括 2.1 的「加速开关」工作流：它是本地 ComfyUI 的自定义图，节点参数随作者更新变化，报错后先按节点名定位，不按记忆改参数。
