@@ -2227,7 +2227,7 @@ async function waitForCanvasTasks(
     const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
     tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
     if (initial.length === taskIds.length && initial.length > 0) {
-      const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, deadlineAt, waitSignal);
+      const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, deadlineAt, waitSignal, signal);
       if (eventResult.connected) {
         tasks = eventResult.tasks;
         eventCount = eventResult.eventCount;
@@ -2237,7 +2237,7 @@ async function waitForCanvasTasks(
   } catch (error) {
     if (signal?.aborted) throw error;
     if (!deadlineController.signal.aborted) throw error;
-    tasks = taskIds.map(taskId => ({ taskId, status: "running", progress: 0, outputs: [] }));
+    if (!tasks.length) tasks = taskIds.map(taskId => ({ taskId, status: "running", progress: 0, outputs: [] }));
   }
   try {
   for (;;) {
@@ -2294,7 +2294,7 @@ async function waitForCanvasTasks(
 }
 
 async function waitForH3TaskEvents(
-  backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, deadlineAt: number, externalSignal?: AbortSignal,
+  backend: ReturnType<typeof createBackendClient>, taskIds: string[], initial: Array<Record<string, unknown>>, deadlineAt: number, externalSignal?: AbortSignal, callerSignal?: AbortSignal,
 ) {
   const terminal = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
   const tasks = new Map(initial.map((task) => [String(task.taskId || ""), task]));
@@ -2333,6 +2333,13 @@ async function waitForH3TaskEvents(
       eventCount++;
       if (!taskIds.includes(String(event.entityId || ""))) continue;
       const payload = recordOf(event.payload);
+      const current = tasks.get(String(event.entityId || ""));
+      const incomingAt = Date.parse(String(payload.updatedAt || ""));
+      const currentAt = Date.parse(String(current?.updatedAt || ""));
+      if (current && ["queued", "running"].includes(String(payload.status || "")) && typeof payload.progress === "number" && Number.isFinite(payload.progress)
+          && Number.isFinite(incomingAt) && (!Number.isFinite(currentAt) || incomingAt > currentAt)) {
+        tasks.set(String(event.entityId), { ...current, status: payload.status, progress: payload.progress, updatedAt: payload.updatedAt });
+      }
       if (!terminal.has(String(payload.status || "")) && !["task.completed", "task.failed"].includes(String(event.type))) continue;
       const snapshots = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, signal)).tasks;
       for (const task of snapshots) tasks.set(String(task.taskId || ""), task);
@@ -2341,7 +2348,8 @@ async function waitForH3TaskEvents(
     return { tasks: taskIds.map((id) => tasks.get(id) || { taskId: id, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" }), connected: true, eventCount, usedStream: true };
   } catch (error) {
     controller.abort();
-    if (externalSignal?.aborted) throw externalSignal.reason || error;
+    if (callerSignal?.aborted) throw callerSignal.reason || error;
+    if (externalSignal?.aborted && Date.now() >= deadlineAt) return { tasks: taskIds.map(id => tasks.get(id)!), connected: true, eventCount, usedStream: true };
     return { tasks: [], connected: false, eventCount };
   }
 }

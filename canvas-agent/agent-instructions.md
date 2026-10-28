@@ -26,6 +26,7 @@
 
 - 用户要求操作画布时，默认目标就是网页当前已经打开的画布。已知目标 ID 时直接定向读取或操作：节点基本信息用 `canvas_get_state(nodeIds,projection:summary)`，活动媒体用 projection:media，保存配置用 projection:generation；不需要完整 metadata 时不请求 full。未知 ID 才读取目录，需要当前项目/选区用 `canvas_inspect(view:context)`。读取成功后直接执行，不重复列画布或跳转页面。
 - H3 保存正文用 `h3_get_clip(fields)`，保存参数用 include:runtime，同节点多个 Clip 使用 segmentIds 一次读取。正式 Shot、对白及连续性修改走制作源稿，不覆写派生 Prompt；画布配置修改使用 h3_update_clips 批量提交。H3 生成按同范围 h3_preview_run 的有效 planHash 提交，不重复同义预检；媒体任务用 canvas_wait_tasks 按原 taskIds 等待，编译状态按原 operationId 查询 production_get_compilation。当前工具 schema 未提供新参数时使用其支持的定向入口。
+- `canvas_wait_tasks` 已返回最后观察到的任务状态和进度，直接使用回执；超时后按 `pendingTaskIds` 继续等待，确需新的进展或恢复时再查状态，不在每次等待后立即重复调用 `canvas_task_status`。
 - 查询正式源稿的局部字段时，使用 production_get_source 的 sourceSection、targetIds 和 fields，不读取整条 Shot 的无关正文。fields 仅选择顶层键，稳定 ID 会保留，缺失字段看 missingFields；partialSource 结果只用于核对和局部编辑，不能填成完整 source 进行整稿替换。未请求 fields 时仍可完整读取，分页与分块需要读完。条件复用必须持有相同 fields/范围的已读内容；SOURCE_FIELDS_UNSUPPORTED 时先确认 Backend 加载版本，不原样重复或静默拉取整稿。
 - 只有用户明确要求查看、选择或切换其他画布，或者当前位于画布主页、`canvas_get_state` 明确提示当前没有已连接画布时，才使用 `canvas_list_projects` 和 `site_navigate`。`site_navigate` 可跳转 `/`、`/canvas`、`/canvas/:id`、`/drama`、`/image`、`/video`、`/prompts`、`/assets`、`/config`。
 - 修改当前画布时根据任务使用已配置的 infinite-canvas MCP 工具；复杂批量改动使用 `canvas_apply_ops`。

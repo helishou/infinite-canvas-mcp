@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Task waiting: while a task reports progress through Backend events, let `canvas_wait_tasks` time out and verify that its receipt retains the latest observed progress and pending IDs; stale events must not move progress backwards. A caller can continue with the receipt without an immediate status query. Explicit cancellation still cancels only the wait, and completion/confirmation still use the authoritative task snapshot.
+
 - Repeated blocked compilations: when a compiler reports only precisely located source-context blockers and exits without artifacts, verify that a new operation ID for the same inputs reuses the original blocked receipt while retaining the no-output diagnostic. Unknown or compiler-origin failures must still run independently. No media generation is needed.
 
 - Source field reads: compare `production_get_source`/historical source reads with and without fields, including scene tools. Verify selected top-level fields plus stable IDs, explicit partial/missing markers, false/zero/null preservation, and no canvas/runtime context reads. Reordered field sets must preserve cursor scope; changed field sets/revisions must reject old cursors, and UTF-8 chunks must reconstruct the projected object/hash. Agent compatibility calls to old Backends must fail with SOURCE_FIELDS_UNSUPPORTED instead of leaking full bodies. No production edit or media generation is required.

@@ -846,7 +846,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_task_cancel:
     "取消指定 Backend 画布任务，并通过 Backend 统一取消其执行子任务。仅 queued/running 可取消；先用 canvas_task_status 按 taskId 确认状态。用于明确放弃本任务或清理已确认错误的排队任务；不取消其他任务。返回简短终态摘要。",
   canvas_wait_tasks:
-    "按原 taskId 有界等待 Backend 任务。timedOut=true 表示本轮等待结束，pendingTaskIds 和 next 给出原任务的继续查询入口；不要重新提交生成。awaiting_confirmation 表示等待人工确认，先查看一采再由用户选择操作。",
+    "按原 taskId 有界等待 Backend 任务，tasks 返回最后已观察到的状态和进度；直接使用回执，不必立即重复查状态。timedOut=true 表示本轮等待结束，pendingTaskIds 和 next 给出原任务的继续等待入口；确需新的进展时再查，不要重新提交生成。awaiting_confirmation 表示等待人工确认，先查看一采再由用户选择操作。",
   canvas_h3_confirmation:
     "处理 H3 一采暂停任务：必须先查看一采并由用户明确选择确认二采、保留一采或放弃整个运行。沿用原父 taskId。",
   generation_get_status:

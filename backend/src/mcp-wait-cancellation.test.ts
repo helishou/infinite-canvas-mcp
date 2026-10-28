@@ -57,3 +57,35 @@ test("cancelling MCP task wait aborts the in-flight Backend poll without cancell
   assert.equal(task.status, "queued");
   assert.equal(reads, 2);
 });
+
+test("timed-out SSE wait returns the latest observed progress without an extra status call", async t => {
+  const app = express(); app.use(express.json());
+  const task = { id: "progress-task", kind: "canvas:image", status: "running", progress: 0.2, input: {}, params: {}, result: null, error: null, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", outputs: [] };
+  let reads = 0;
+  app.get("/plugins/mcp", (_req, res) => res.json({ declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+  app.get("/tasks", (_req, res) => { reads++; res.json({ tasks: [task] }); });
+  app.get("/events", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream"); res.flushHeaders();
+    res.write('event: events.sync\ndata: {"type":"events.sync"}\n\n');
+    const send = (progress: number, updatedAt: string) => res.write(`event: task.updated\ndata: ${JSON.stringify({ entityId: task.id, payload: { status: "running", progress, updatedAt } })}\n\n`);
+    const first = setTimeout(() => send(0.7, "2026-01-01T00:00:02.000Z"), 100);
+    const stale = setTimeout(() => send(0.3, "2026-01-01T00:00:01.000Z"), 200);
+    res.on("close", () => { clearTimeout(first); clearTimeout(stale); });
+  });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const routes = registerBackendMcpHttpRoutes(app, { url: `http://127.0.0.1:${address.port}`, token: "fixture", port: 0, origins: [] });
+  const client = new Client({ name: "wait-progress-test", version: "1" });
+  t.after(async () => { await client.close(); await routes.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`)));
+  const result: any = await client.callTool({ name: "canvas_wait_tasks", arguments: { taskIds: [task.id], timeoutMs: 1000 } });
+  assert.notEqual(result.isError, true);
+  const body = JSON.parse(result.content[0].text);
+  assert.equal(body.timedOut, true);
+  assert.equal(body.tasks[0].status, "running");
+  assert.equal(body.tasks[0].progress, 0.7);
+  assert.deepEqual(body.pendingTaskIds, [task.id]);
+  assert.equal(body.waitMode, "sse");
+  assert.equal(reads, 2, "one initial read and one race-closing read; no follow-up status tool needed");
+});
