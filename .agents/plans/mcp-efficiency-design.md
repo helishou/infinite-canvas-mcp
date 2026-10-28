@@ -1,4 +1,7 @@
-# 画布 MCP 调用清晰度与成本优化方案
+# 画布 MCP 调用清晰度与成本优化方案（P0–P6 过程记录）
+
+> 本文是过程记录，不是总纲。P0–P7 的唯一总纲见 [`mcp-efficiency-master-plan.md`](./mcp-efficiency-master-plan.md)；P7 设计见 [`orchestration-waste-p7.md`](./orchestration-waste-p7.md)。与总纲冲突时以总纲为准。
+
 
 状态：P0、P1a、P1b、P1c、P2 已实现并通过定向验收；P3 按用户明确要求将 schema=compact 推广为新连接默认，schema=full 保留完整声明；P4 增加源稿顶层字段读取并完成受控验收。范围：工具契约、读取投影、调用指引、恢复建议和可观测性；业务编辑、生成授权、媒体归属与幂等语义继续沿用现有权威入口。
 
