@@ -16,6 +16,7 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Random } from "./mt19937.js";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 export interface MotionContextOptions {
     /** 截取尾部帧数，默认 22 */
@@ -60,7 +61,7 @@ export async function buildMotionContextClip(
 
     try {
         // ── Step 1: ffprobe 取帧数 ──────────────────────────────────
-        const probe = await run(process.env.FFPROBE_PATH || "ffprobe", [
+        const probe = await run(mediaToolPath("ffprobe"), [
             "-v", "error", "-count_frames",
             "-show_streams", "-of", "json", source,
         ]);
@@ -75,7 +76,7 @@ export async function buildMotionContextClip(
 
         // ── Step 2: ffmpeg 截取尾部帧（24fps, rgb24） ──────────────
         const framePattern = path.join(tmpDir, "frame_%05d.png");
-        await run(process.env.FFMPEG_PATH || "ffmpeg", [
+        await run(mediaToolPath("ffmpeg"), [
             "-hide_banner", "-loglevel", "error", "-y",
             "-i", source,
             "-vf", `select='gte(n,${start})',setpts=PTS-STARTPTS,fps=24`,
@@ -141,7 +142,7 @@ export async function buildMotionContextClip(
 
         // ── Step 4: ffmpeg 编码输出 ────────────────────────────────
         await fs.mkdir(path.dirname(target) || ".", { recursive: true });
-        await run(process.env.FFMPEG_PATH || "ffmpeg", [
+        await run(mediaToolPath("ffmpeg"), [
             "-hide_banner", "-loglevel", "error", "-y",
             "-framerate", "24",
             "-i", framePattern,

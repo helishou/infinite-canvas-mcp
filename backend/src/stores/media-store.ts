@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 
 import type { BackendDatabase, MediaFile } from "../db.js";
 import { MEDIA_DIR } from "../config.js";
+import { needsProbe, probeMedia } from "../runtime/media-tools.js";
 import { extensionForMime, mediaKindForMime, type MediaCategory, type MediaStore, type MediaStats, type NamedMedia } from "./types.js";
 
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
@@ -113,6 +114,16 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
                     createdAt: new Date().toISOString(),
                     sha256,
                 };
+                // 视频/音频的宽高与时长由容器决定，调用方通常不传。
+                // 在这里补一次探测，产物就自带规格，任何消费方不必再自己跑 ffprobe。
+                if (needsProbe(mimeType) && (media.width === null || media.height === null || media.durationMs === null)) {
+                    const probe = await probeMedia(filePath);
+                    if (probe) {
+                        media.width = media.width ?? probe.width;
+                        media.height = media.height ?? probe.height;
+                        media.durationMs = media.durationMs ?? probe.durationMs;
+                    }
+                }
                 db.upsertMediaFile(media);
                 return { ...media, sha256, prefix };
             } catch (error) {

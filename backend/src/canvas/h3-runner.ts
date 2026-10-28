@@ -24,6 +24,7 @@ import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCo
 import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues } from "./h3-params.js";
 import { diagnoseH3Clips } from "./h3-diagnose.js";
 import type { CanvasOperation } from "./project-ops.js";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 type H3RunInput = {
     projectId: string;
@@ -446,7 +447,9 @@ export class CanvasH3Runner {
         const previous = segments[plan.segmentIndex - 1];
         const selected = segments[plan.segmentIndex];
         const storageKey = String(previous?.resultStorageKey || "");
-        if (!previous?.id || !selected || !storageKey) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段已绑定的生成结果，需从组首运行`);
+        if (!previous?.id) throw new Error(`H3_RESUME_PREVIOUS_CLIP_MISSING: Clip ${plan.segmentIndex + 1} 找不到上一段 Clip 身份`);
+        if (!selected) throw new Error(`H3_RESUME_TARGET_CLIP_MISSING: Clip ${plan.segmentIndex + 1} 不在当前运行快照中`);
+        if (!storageKey) throw new Error(`H3_RESUME_PREVIOUS_RESULT_MISSING: 上一段 Clip ${previous.id} 缺少已归档结果 storageKey；需从组首运行`);
         const selectedParams = extractParams(selected, input.params || {}, metadata, defaults);
         for (const status of ["succeeded", "cancelled"] as const) {
             for (let offset = 0; ; offset += 500) {
@@ -1503,7 +1506,7 @@ export class CanvasH3Runner {
         return new Promise<ReturnType<Stores["media"]["store"]>>((resolve, reject) => {
             const chunks: Buffer[] = [];
             const errors: Buffer[] = [];
-            const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-sseof", "-0.05", "-i", videoPath, "-frames:v", "1", "-vf", "scale='if(gt(iw,ih),min(768,iw),-2)':'if(gt(iw,ih),-2,min(768,ih))'", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], { stdio: ["ignore", "pipe", "pipe"] });
+            const child = spawn(mediaToolPath("ffmpeg"), ["-hide_banner", "-loglevel", "error", "-sseof", "-0.05", "-i", videoPath, "-frames:v", "1", "-vf", "scale='if(gt(iw,ih),min(768,iw),-2)':'if(gt(iw,ih),-2,min(768,ih))'", "-f", "image2pipe", "-vcodec", "png", "pipe:1"], { stdio: ["ignore", "pipe", "pipe"] });
             child.stdout.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
             child.stderr.on("data", (chunk) => errors.push(Buffer.from(chunk)));
             child.once("error", reject);

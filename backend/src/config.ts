@@ -61,7 +61,22 @@ export type BackendConfig = {
     port?: number;
     /** 仅可信局域网显式设为 0.0.0.0；默认不对其他设备开放。 */
     listenHost?: "127.0.0.1" | "0.0.0.0";
+    /** 媒体工具（ffmpeg / ffprobe）所在目录；不在 PATH 时必须配这个，否则视频规格无法核验。 */
+    mediaTools?: { ffmpegDir?: string };
 };
+
+/**
+ * backend.json 里配置的媒体工具目录。
+ * 单独导出而不写 process.env：环境变量是部署方的显式选择，配置文件的默认值不应覆盖它。
+ */
+export const MEDIA_TOOLS_DIR = (() => {
+    try {
+        const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Partial<BackendConfig>;
+        return String(raw.mediaTools?.ffmpegDir || "").trim();
+    } catch {
+        return "";
+    }
+})();
 
 export type ResolvedConfig = Required<Pick<BackendConfig, "url" | "token">> & { port: number; origins: string[]; listenHost?: BackendConfig["listenHost"] };
 
@@ -114,7 +129,18 @@ export function loadConfig(create = false): ResolvedConfig {
 export function saveConfig(config: ResolvedConfig) {
     fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
     const tmp = `${CONFIG_FILE}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify({ url: config.url, token: config.token, port: config.port, origins: config.origins, listenHost: config.listenHost || "127.0.0.1" }, null, 2), { mode: 0o600 });
+    // 先合并磁盘上的现有内容：只回写已知字段会把用户自己加的配置（mediaTools 等）静默删掉。
+    let existing: Record<string, unknown> = {};
+    try { existing = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) as Record<string, unknown>; } catch { /* 首次写入或文件损坏，按空对象处理 */ }
+    const merged = {
+        ...existing,
+        url: config.url,
+        token: config.token,
+        port: config.port,
+        origins: config.origins,
+        listenHost: config.listenHost || "127.0.0.1",
+    };
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, CONFIG_FILE);
     fs.chmodSync(DATA_DIR, 0o700);
     fs.chmodSync(CONFIG_FILE, 0o600);

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 export const CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES = 512 * 1024;
 
@@ -40,7 +41,7 @@ export async function prepareCharacterVoiceUpload(
 
 function encodeCharacterVoiceMp3(input: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", [
+    const child = spawn(mediaToolPath("ffmpeg"), [
       "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-map", "0:a:0", "-vn",
       "-ac", "1", "-ar", "24000", "-c:a", "libmp3lame", "-b:a", "64k", "-f", "mp3", "pipe:1",
     ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });

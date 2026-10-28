@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { mediaToolPath } from '../runtime/media-tools.js';
 import type { MediaStore } from '../stores/types.js';
 import { canonicalH3AspectRatio, estimateH3Dimensions } from './h3-params.js';
 
@@ -97,7 +98,7 @@ export function assertH3WorkflowContract(workflow: Record<string, any>, expected
 }
 
 export async function probeH3Video(file: string) {
-    const binary = process.env.FFPROBE_PATH || (process.env.FFMPEG_PATH ? process.env.FFMPEG_PATH.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1') : 'ffprobe');
+    const binary = mediaToolPath('ffprobe');
     return new Promise<{ width: number; height: number; rotation: number; sampleAspectRatio: string }>((resolve, reject) => {
         const child = spawn(binary, ['-v', 'error', '-select_streams', 'v:0', '-show_streams', '-of', 'json', file], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         let output = '', errors = '';
@@ -106,7 +107,7 @@ export async function probeH3Video(file: string) {
         child.once('error', reject);
         child.once('close', code => {
             try {
-                if (code !== 0) throw new Error(`ffprobe 无法核对 H3 媒体：${errors.trim()}`);
+                if (code !== 0) throw new Error(`ffprobe 无法核对 H3 媒体：${errors.trim() || `退出码 ${code}`}`);
                 const stream = JSON.parse(output).streams?.[0];
                 if (!(stream?.width > 0 && stream?.height > 0)) throw new Error('H3 媒体缺少有效视频尺寸');
                 resolve({ width: stream.width, height: stream.height, rotation: Number(stream.side_data_list?.find((item: any) => item.rotation !== undefined)?.rotation || stream.tags?.rotate || 0), sampleAspectRatio: stream.sample_aspect_ratio || '1:1' });
@@ -138,6 +139,8 @@ export async function inspectH3Result(result: Record<string, any>, params: Recor
         const measured = await probeH3Video(stored.filePath);
         return { ...result, specification: compareH3MediaSpecification(measured, params) };
     } catch (error) {
-        return { ...result, specification: { status: 'mismatch', measured: null, issues: [(error as Error).message] } };
+        // `unverified` 与 `mismatch` 必须分开：探测工具缺失、文件暂时读不到属于「无法核验」，
+        // 视频本身可能完全正常。若一律记成 mismatch，会把已生成的成片判为失败。
+        return { ...result, specification: { status: 'unverified', measured: null, issues: [(error as Error).message] } };
     }
 }

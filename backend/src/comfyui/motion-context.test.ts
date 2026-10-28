@@ -7,6 +7,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { Random } from "./mt19937.js";
 import { buildMotionContextClip } from "./motion-context.js";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 /** palette 是 6 个 RGB 元组，必须与 Python 原版硬编码一致。 */
 const PALETTE: [number, number, number][] = [
@@ -45,7 +46,8 @@ async function makeTestVideo(frameCount = 25, width = 64, height = 64): Promise<
                 .toFile(path.join(dir, `f${String(i).padStart(4, "0")}.png`));
         }
         const pattern = path.join(dir, "f%04d.png");
-        await execP(`ffmpeg -hide_banner -loglevel error -y -framerate 24 -i "${pattern.replace(/\\/g, "/")}" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${tmp.replace(/\\/g, "/")}"`);
+        // 用与生产同一套定位，避免测试依赖 ffmpeg 恰好在 PATH 里。
+        await execP(`"${mediaToolPath("ffmpeg")}" -hide_banner -loglevel error -y -framerate 24 -i "${pattern.replace(/\\/g, "/")}" -c:v libx264 -preset ultrafast -pix_fmt yuv420p "${tmp.replace(/\\/g, "/")}"`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }
@@ -118,7 +120,7 @@ test("buildMotionContextClip 输出一段 .mp4，长度=frames，帧数正确", 
         assert(stats.size > 1000, `输出文件太小: ${stats.size}`);
 
         // 验证帧数 = 22
-        const probe = await execP(`ffprobe -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of json "${out.replace(/\\/g, "/")}"`);
+        const probe = await execP(`"${mediaToolPath("ffprobe")}" -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames -of json "${out.replace(/\\/g, "/")}"`);
         const nb = parseInt(JSON.parse(probe.stdout).streams?.[0]?.nb_read_frames ?? "0", 10);
         assert.equal(nb, 22, `帧数不对: expect 22, got ${nb}`);
     } finally {

@@ -9,6 +9,7 @@ import type { RuntimeTask } from "../db.js";
 import type { TaskStore } from "../stores/types.js";
 import type { MediaStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
+import { mediaToolPath } from "./media-tools.js";
 
 export function validateVideoTrimRange(start: unknown, end: unknown) {
     if (typeof start !== "number" || typeof end !== "number" || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
@@ -21,7 +22,7 @@ export function validateVideoTrimRange(start: unknown, end: unknown) {
 export class VideoConcatBackend {
     private readonly processes = new Map<string, ChildProcess>();
     private readonly executing = new Set<string>();
-    constructor(private readonly tasks: TaskStore, private readonly ffmpeg = process.env.FFMPEG_PATH || "ffmpeg", private readonly events?: BackendEventBus, private readonly media?: MediaStore) {}
+    constructor(private readonly tasks: TaskStore, private readonly ffmpeg = mediaToolPath("ffmpeg"), private readonly events?: BackendEventBus, private readonly media?: MediaStore) {}
     /** 拼接布局：sequence = 首尾相接；adaptive 根据首路视频方向选用横向或纵向并排。 */
     private static layout(value: unknown): "sequence" | "hstack" | "vstack" | "adaptive" { return value === "hstack" || value === "vstack" || value === "adaptive" ? value : "sequence"; }
     status() { return new Promise<{ available: boolean; path: string; error?: string }>((resolve) => { const child = spawn(this.ffmpeg, ["-version"], { stdio: "ignore" }); child.once("error", (error) => resolve({ available: false, path: this.ffmpeg, error: error.message })); child.once("exit", (code) => resolve({ available: code === 0, path: this.ffmpeg, ...(code === 0 ? {} : { error: `ffmpeg exited with ${code}` }) })); }); }
@@ -219,7 +220,7 @@ export class VideoConcatBackend {
     }
     /** 读视频宽高与时长；ffprobe 缺失或解析失败时返回 0，由调用方走安全默认。 */
     private probe(file: string): Promise<{ width: number; height: number; duration: number; hasAudio: boolean }> {
-        const binary = process.env.FFPROBE_PATH || this.ffmpeg.replace(/ffmpeg(\.exe)?$/i, "ffprobe$1");
+        const binary = mediaToolPath("ffprobe");
         const args = ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", file];
         return new Promise((resolve) => {
             const child = spawn(binary, args, { stdio: ["ignore", "pipe", "ignore"] });

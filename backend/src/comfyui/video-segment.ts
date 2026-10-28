@@ -3,12 +3,13 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 
 import { MEDIA_DIR } from "../config.js";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 type Probe = { format?: { duration?: string }; streams?: Array<{ codec_type?: string; duration?: string }> };
 
 export async function splitVideo(source: string, seconds: number, maxSegments: number) {
-    const ffmpeg = process.env.FFMPEG_PATH || "ffmpeg";
-    const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
+    const ffmpeg = mediaToolPath("ffmpeg");
+    const ffprobe = mediaToolPath("ffprobe");
     const probe = await run(ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", source]);
     const data = JSON.parse(probe.stdout) as Probe;
     const duration = Number(data.format?.duration || data.streams?.find((item) => item.codec_type === "video")?.duration || 0);

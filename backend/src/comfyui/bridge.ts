@@ -21,6 +21,7 @@ import { H3_CONTINUATION_NODE_ID, h3ContinuationFolder, stageH3ContinuationSeed,
 import { listLocalLoras } from "./local-lora-catalog.js";
 import { createLogger } from "../logger.js";
 import { watchSlowOperation } from "../slow-operation.js";
+import { mediaToolPath } from "../runtime/media-tools.js";
 
 const slowOperationLogger = createLogger("comfyui");
 
@@ -889,9 +890,9 @@ async function concatLocalVideos(files: string[]) {
     let succeeded = false;
     try {
         try {
-            await runProcess(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c", "copy", output]);
+            await runProcess(mediaToolPath("ffmpeg"), ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c", "copy", output]);
         } catch {
-            await runProcess(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", output]);
+            await runProcess(mediaToolPath("ffmpeg"), ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", output]);
         }
         succeeded = true;
         return output;

@@ -318,3 +318,15 @@ test('确认阶段的展开流合同：快照承载的字段不再误报，sigma
     assert.throws(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second', latentUpscaleModel: 'other.safetensors' }), /latentUpscale/);
     assert.throws(() => assertH3WorkflowContract(second, { ...expected, latentConfirmationPhase: 'second', sampler: 'euler' }), /sampler/);
 });
+
+test('媒体核验拿不到 ffprobe 时记为 unverified，不能把已产出的成片判成失败', async () => {
+    const { inspectH3Result } = await import('./h3-execution-contract.js');
+    // 文件不存在 / 探测工具缺失，都属于「无法核验」而不是「规格不符」。
+    const media = { meta: () => ({ filePath: '/nonexistent/does-not-exist.mp4' }) } as never;
+    const result = await inspectH3Result({ media: [{ storageKey: 'video:x', mimeType: 'video/mp4' }] }, { h3ExecutionContract: {} }, media);
+    const specification = (result as { specification?: { status?: string; issues?: string[] } }).specification;
+    assert.equal(specification?.status, 'unverified');
+    assert.ok(specification?.issues?.length, '必须保留原因，便于排查是工具缺失还是文件不可读');
+    // 产物本身不能被丢掉：这是「已生成但未核验」，下游仍要能拿到视频。
+    assert.deepEqual((result as { media?: unknown[] }).media, [{ storageKey: 'video:x', mimeType: 'video/mp4' }]);
+});
