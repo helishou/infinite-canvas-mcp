@@ -58,3 +58,17 @@ detailed_description:
 overall_soundscape: Wet urban night, layered rain on pavement, distant traffic hum, a low neon buzz, her slow heels clicking once.
 non_diegetic_music: A dark electronic pulse at 120 BPM, 2/4, one hard accent per bar; the final bar sustains into the freeze.
 ```
+
+## 5. 提交前自检（漏了就白跑）
+
+写完 `detailed_description` 后逐条核，缺一项就回改，不要提交：
+
+- [ ] 5 镜各是一个完整的**蓄力→释放**周期，释放点落在整秒重音（00:01 / 00:02 / 00:03 / 00:04 → 00:05 收束）。
+- [ ] 四手法**至少覆盖三种**，且每个手法都能指到具体镜号：近而不露（局部框选，不平铺全身）、慢放蓄势、近失/peekaboo、定格收束。
+- [ ] 框选项来自**角色资产图**（颈线/锁骨/腰胯/腿与纹身/黑纱贴肤/眼神/配饰），不是通用形容词。
+- [ ] 慢放的介质来自**场景**（雨丝、发丝、披风布料、水雾），近失对象写清了"被什么挡住又移开"。
+- [ ] 末镜是带掌控感的定格，且不承担下一段必须继承的姿态。
+- [ ] 六段齐全，`subject_definitions` 里 `<Subject 1>` 引 `<Picture 1>`、`<Subject 2>` 引 `<Picture 2>`，标签在五段中含义一致。
+- [ ] `detailed_description` 350–500 词，`[Shot 1]` 无时间戳，其余用 `At 00:0N.000`。
+
+反例（2026-10-28 锁瞑首版）：只写了"帅"的动作——伞骨水珠、红瞳收光、拨伞、披风落定、定格。有切点，但**没有慢放蓄势、没有近失、没有从形象派生的框选**，等于五个空切，被迫重写重跑。
