@@ -121,7 +121,10 @@ export function compareH3MediaSpecification(measured: { width: number; height: n
     const issues: string[] = [];
     if (measured.rotation && measured.rotation % 360 !== 0) issues.push('视频带旋转元数据，显示画幅与编码画幅不同');
     if (measured.sampleAspectRatio && !['1:1', 'N/A', '0:1'].includes(measured.sampleAspectRatio)) issues.push('视频像素不是方形，显示画幅需要核对');
-    if (dimensions && expected.rtxEnabled !== true && (!expected.dlssUpscaleMode || expected.dlssUpscaleMode === '关闭') && (Math.abs(dimensions.width - measured.width) > dimensions.grid || Math.abs(dimensions.height - measured.height) > dimensions.grid)) issues.push(`媒体尺寸不符合${second ? '二采' : '一采'}规格 ${dimensions.width}×${dimensions.height}`);
+    // 尺寸必须逐像素等于预估：预估与原生节点使用同一套网格规则，任何偏差都是真实分歧。
+    // 只有像素域后处理（RTX 超分、DLSS 超分/补帧）会合法改变成片尺寸。
+    const postProcessed = expected.rtxEnabled === true || (!!expected.dlssUpscaleMode && expected.dlssUpscaleMode !== '关闭');
+    if (dimensions && !postProcessed && (dimensions.width !== measured.width || dimensions.height !== measured.height)) issues.push(`媒体尺寸不符合${second ? '二采' : '一采'}规格 ${dimensions.width}×${dimensions.height}`);
     return { status: issues.length ? 'mismatch' : 'passed', measured: { ...measured, kind: 'media-probe' }, expected: dimensions, issues };
 }
 

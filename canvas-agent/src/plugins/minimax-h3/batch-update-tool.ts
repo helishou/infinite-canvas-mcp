@@ -5,7 +5,7 @@ export const H3_UPDATE_CLIPS_TOOL = {
     id: "h3_update_clips",
     version: "1.3.0",
     name: "H3 批量更新片段配置",
-    description: "一次原子事务更新同一 H3 节点的多个已有 Clip 保存稿。内联模式必填稳定 operationId 和 expectedRevision；响应未知时用相同 ID、基线和内容恢复回执，冲突不自动 rebase。已有修改稿文件继续用冻结 preparedId，不能覆盖其操作 ID。内联 updates 兼容完整 patch/精确 edits+expectedMatches；dryRun=true 不写入。只改保存稿，不生成或改运行历史。成功只返回目标 ID、变更字段和摘要。",
+    description: "一次原子事务更新同一 H3 节点的多个已有 Clip 保存稿。纯提示词局部增补/替换优先用内联精确 edits（field=prompt）并设 expectedMatches，避免重发整篇提示词；完整创意重写才传 patch.prompt。内联模式必填稳定 operationId 和 expectedRevision；响应未知时用相同 ID、基线和内容恢复回执，冲突不自动 rebase。已有修改稿文件继续用冻结 preparedId，不能覆盖其操作 ID。内联 updates 兼容完整 patch/精确 edits+expectedMatches；dryRun=true 不写入。只改保存稿，不生成或改运行历史。成功只返回目标 ID、变更字段和摘要。",
     inputJsonSchema: {
         type: "object",
         properties: {
@@ -74,27 +74,38 @@ export const H3_DISCARD_CLIP_UPDATES_TOOL = {
 } as const;
 
 export const H3_GET_CLIP_TOOL = {
-    id: "h3_get_clip", version: "1.6.0", name: "H3 读取片段总览",
-    description: "按稳定 segmentId 读取 H3 Clip 轻量状态。默认只读保存字段摘要，不编译提示词或参考；需要编译结果/引用校验时显式 include:prompt 或 include:references。fields 只读指定叙事字段；include 可合并读取提示词、参考、运行参数或结果。已读正文可传 ifRevision；版本相同返回 unchanged 短回执并复用此前正文。include:result 始终读取动态结果。",
+    id: "h3_get_clip", version: "1.7.0", name: "H3 读取片段总览",
+    description: "按 segmentId 读取单段，或用 segmentIds 一次读取同节点多段保存摘要、fields 和 include:runtime；两者二选一。默认只读保存字段摘要，不编译提示词或参考；需要编译结果/引用校验时显式 include:prompt 或 include:references。fields 只读指定叙事字段；include 可合并读取提示词、参考、运行参数或结果。已读正文可传 ifRevision；版本相同返回 unchanged 短回执并复用此前正文。include:result 始终读取动态结果。",
     inputJsonSchema: {
         type: "object",
         properties: {
-            projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" },
+            projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string", minLength: 1 },
+            segmentIds: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "与 segmentId 二选一；同一快照批量读取保存摘要、fields 和 include:runtime，去重并保持请求顺序" },
             include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime", "result"] }, uniqueItems: true },
             ifRevision: { type: "integer", minimum: 0, description: "正文已完整读取时传入其画布 revision；未变化时只返回当前状态摘要和 unchanged:true，不重复返回正文。include:result 时忽略此条件。" },
             taskId: { type: "string", minLength: 1, description: "include:result 时核对的精确历史/当前任务 ID；省略从 Clip 的结果记录解析" },
             storageKey: { type: "string", minLength: 1, description: "include:result 时核对的精确归档视频；必须属于此 Clip 和任务，不按目录最新文件猜测" },
             fields: { type: "array", minItems: 1, maxItems: H3_NARRATIVE_FIELDS.length, items: { type: "string", enum: H3_NARRATIVE_FIELDS }, uniqueItems: true },
-        }, required: ["projectId", "nodeId", "segmentId"],
+        }, required: ["projectId", "nodeId"],
+        oneOf: [{ required: ["segmentId"] }, { required: ["segmentIds"] }],
+        if: { required: ["segmentIds"] },
+        then: { properties: { include: { type: "array", items: { enum: ["runtime"] } }, taskId: false, storageKey: false } },
     },
     annotations: { title: "H3 读取片段总览", readOnlyHint: true },
+} as const;
+
+export const H3_GET_CLIP_RUNTIME_TOOL = {
+    id: "h3_get_clip_runtime", version: "1.2.0", name: "H3 读取片段运行参数",
+    description: "读取 Clip 参数。view=saved 只读保存值，不预览；省略或 effective 保持旧行为并预览实际运行输入。常规保存值也可用 h3_get_clip(include:runtime)。预览计划只能用于同一范围与参数。",
+    inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, view: { type: "string", enum: ["saved", "effective"] } }, required: ["projectId", "nodeId", "segmentId"] },
+    annotations: { title: "H3 读取片段运行参数", readOnlyHint: true },
 } as const;
 
 
 /** Jointly prepare the final candidate, avoiding transient broken prompt/reference numbering. */
 export const H3_PREPARE_CLIP_TOOL = {
     id: "h3_prepare_clip", version: "1.0.0", name: "H3 原子准备片段",
-    description: "一次准备同一 Clip 的正文配置、角色选择与参考绑定；只编译最终候选，全部通过才在现有 ops 事务保存，失败不留中间状态、不生成。dryRun=true 返回预览且零写入；expectedRevision 防过期基线，提交期间 revision 变化整笔拒绝、不自动 rebase。可明确 inheritFromSegmentId 沿用已完成片段参数；省略兼容现有最近已完成段继承行为，正文和时长只按 patch 指定值修改。characters 只接受当前 character 节点中真实服装 storageKey，普通图片不能充当服装。",
+    description: "一次准备同一 Clip 的正文配置、角色选择与参考绑定；只编译最终候选，全部通过才在现有 ops 事务保存，失败不留中间状态、不生成。纯提示词局部增补/替换请改用 h3_update_clips 的精确 edits；本工具会继承并重新写入运行参数，适用于参数/参考/角色准备或完整配置、完整提示词重写。dryRun=true 返回预览且零写入；expectedRevision 防过期基线，提交期间 revision 变化整笔拒绝、不自动 rebase。可明确 inheritFromSegmentId 沿用已完成片段参数；省略兼容现有最近已完成段继承行为，正文和时长只按 patch 指定值修改。characters 只接受当前 character 节点中真实服装 storageKey，普通图片不能充当服装。",
     inputJsonSchema: {
         type: "object",
         properties: {

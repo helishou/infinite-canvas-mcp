@@ -21,7 +21,7 @@ export type GenerateVideoResult = { url: string; mimeType: string; width?: numbe
 export type GenerateTextLogMeta = { taskMode: string; prompt?: string; nodeId?: string; segmentId?: string; references?: Array<Record<string, unknown>> };
 export type GenerateTextOptions = { signal?: AbortSignal; model?: string; system?: string; references?: Array<{ url: string; name?: string; storageKey?: string; mimeType?: string }>; onDelta?: (text: string) => void; log?: GenerateTextLogMeta };
 export type GenerateTextResult = { text: string; taskId?: string };
-export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; teAccel?: boolean; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
+export type LocalH3ActualSubmission = { promptId: string; seed?: number; seedMode?: "random" | "fixed"; frames?: number; width?: number; height?: number; steps?: number; sampler?: string; scheduler?: string; loras?: Array<{ name: string; strength: number }>; attention?: string; sigma?: string; mediaInputs?: { images: string[]; videos: string[]; audios: string[] } };
 export type LocalH3Result = { url: string; mimeType: string; taskId?: string; width?: number; height?: number; durationMs?: number; actualSubmission?: LocalH3ActualSubmission; segments?: Array<{ media?: Array<{ url: string; mimeType: string }> }> };
 export type LocalH3Options = { signal?: AbortSignal; onTaskId?: (taskId: string) => void };
 export type LocalH3Preview = { dataUrl: string; mime?: string; promptId?: string; step?: number; total?: number };

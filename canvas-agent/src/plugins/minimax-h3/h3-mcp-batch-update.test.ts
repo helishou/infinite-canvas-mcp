@@ -73,6 +73,16 @@ test("native batch declaration is shared by server and manifest", () => {
     assert.ok(server, "native batch tool must be declared");
     assert.ok(client);
     assert.deepEqual(server.inputJsonSchema, client.inputJsonSchema);
+    assert.equal(server.description, client.description);
+    const prepareServer = pluginMcp.tools.find((tool) => tool.id === "h3_prepare_clip");
+    const prepareClient = h3PluginManifest.mcp.tools.find((tool) => tool.id === "h3_prepare_clip");
+    assert.ok(prepareServer, "native prepare tool must be declared");
+    assert.ok(prepareClient);
+    assert.equal(prepareServer.description, prepareClient.description);
+    assert.match(prepareServer.description || "", /prompt-only|纯提示词|提示词局部/i);
+    assert.match(prepareServer.description || "", /h3_update_clips/);
+    assert.match(server.description || "", /edits/);
+    assert.match(server.description || "", /prompt-only|纯提示词|提示词局部/i);
 });
 
 test("six updates use one read, one atomic writer and a compact replayable receipt", async () => {

@@ -23,6 +23,17 @@ export type BackendMediaResult = {
     compression?: { originalBytes: number; originalStorageKey: string; thresholdBytes: number };
 };
 
+export type BackendDetectedSceneCut = { frame: number; time: number };
+
+export function detectVideoSceneCuts(projectId: string, nodeId: string, signal?: AbortSignal) {
+    return request<{ ok: boolean; cuts: BackendDetectedSceneCut[] }>(
+        "GET",
+        `/canvas/projects/${encodeURIComponent(projectId)}/video/${encodeURIComponent(nodeId)}/scene-cuts`,
+        undefined,
+        { signal },
+    );
+}
+
 export type BackendTokenResponse = { ok: boolean; token: string; reloading?: boolean };
 
 /** 稳定代理在 Backend 开发重载期回 503 + code=BACKEND_RELOADING：这是短暂状态，不是配置错误。 */

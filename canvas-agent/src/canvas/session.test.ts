@@ -79,6 +79,25 @@ test("按精确 clientId 读取画布快照，不受当前焦点影响", (t) => 
     assert.equal(session.canvasStateForClient("first"), null);
 });
 
+test("Agent 节点投影与 HTTP MCP 共用轻量读取契约", async t => {
+    const session = new CanvasSession();
+    const client = connect(session, "projection");
+    t.after(() => client.close());
+    session.updateState({ ...snapshot("projected"), selectedNodeIds: ["actor"], nodes: [
+        { id: "actor", type: "character", title: "角色", position: { x: 0, y: 0 }, width: 100, height: 100,
+            metadata: { storageKey: "old", characterPrimaryIndex: 0, characterImages: [{ storageKey: "selected" }], prompt: "private".repeat(5000) } },
+    ] }, "projection");
+    const result = await session.callTool("canvas_get_state", { projectId: "projected", nodeIds: ["actor", "missing"], projection: "media" }) as any;
+    assert.equal(result.nodes[0].media.storageKey, "selected");
+    assert.deepEqual(result.missingNodeIds, ["missing"]);
+    assert.equal(result.connections, undefined);
+    assert.ok(!JSON.stringify(result).includes("private"));
+    const context = await session.callTool("canvas_inspect", { projectId: "projected", view: "context" }) as any;
+    assert.deepEqual(context.selection.map((node: any) => node.id), ["actor"]);
+    assert.equal(context.capabilities, undefined);
+    await assert.rejects(session.callTool("canvas_get_state", { projection: "summary" }), /nodeIds/);
+});
+
 test("重连握手完成前的焦点上报被忽略且不丢失原焦点，重连后补发生效", (t) => {
     const session = new CanvasSession();
     const first = connect(session, "first");

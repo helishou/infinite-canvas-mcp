@@ -1,0 +1,33 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
+import express from "express";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+test("stdio MCP defaults to compact disclosure while retaining authoritative validation", async t => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-stdio-default-"));
+    const app = express(); app.use(express.json()); let writes = 0;
+    app.get("/plugins/mcp", (_req, res) => res.json({ declarations: [] }));
+    app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+    app.post("/drama/episodes/:id/production/ops", (_req, res) => { writes++; res.json({ ok: true }); });
+    const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    await fs.writeFile(path.join(root, "backend.json"), JSON.stringify({ url, token: "fixture", port: 0, origins: [] }));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => key !== "PORT" && value !== undefined)) as Record<string, string>;
+    env.INFINITE_CANVAS_DATA_DIR = root; env.INFINITE_CANVAS_BACKEND_TOKEN = "fixture";
+    const client = new Client({ name: "stdio-default-test", version: "1" });
+    const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", "tsx", "--input-type=module", "-e", "import { startBackendMcpServer } from './src/mcp.ts'; await startBackendMcpServer();"], cwd: process.cwd(), env, stderr: "pipe" });
+    t.after(async () => { await client.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error("Invalid temporary root"); await fs.rm(root, { recursive: true, force: true }); });
+    await client.connect(transport);
+    const edit = (await client.listTools()).tools.find(tool => tool.name === "production_edit")!;
+    assert.match(edit.description || "", /精简声明/);
+    assert.ok(!JSON.stringify(edit.inputSchema).includes('"committed"'));
+    const invalid = await client.callTool({ name: "production_edit", arguments: { kind: "episode", id: "e", operationId: "invalid", expectedRevision: 0, ops: [{ type: "set_settings", patch: { parallelScenes: "wrong" } }] } });
+    assert.equal(invalid.isError, true);
+    assert.equal(writes, 0);
+});

@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { mcpEfficiencyReport } from "./mcp-efficiency-report.js";
 import { decodeStoredJson, encodeStoredJson, storedJsonText, type StoredJson } from "./json-storage.js";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
@@ -1880,21 +1881,21 @@ export class BackendDatabase {
         };
     }
 
-    getCanvasProjectNodeSnapshot(id: string, nodeIds?: string[], selection = false): Record<string, unknown> | null {
+    getCanvasProjectNodeSnapshot(id: string, nodeIds?: string[], selection = false, options: { includeConnections?: boolean } = {}): Record<string, unknown> | null {
         this.db.exec("BEGIN DEFERRED");
         try {
-            const header = this.db.prepare("SELECT id, updated_at AS updatedAt, json_extract(data_json, '$.title') AS title, COALESCE(json_extract(data_json, '$.revision'),0) AS revision, json_extract(data_json, '$.selectedNodeIds') AS selectedNodeIds FROM canvas_projects WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+            const header = this.db.prepare("SELECT id, updated_at AS updatedAt, json_extract(data_json, '$.title') AS title, COALESCE(json_extract(data_json, '$.revision'),0) AS revision, json_extract(data_json, '$.selectedNodeIds') AS selectedNodeIds, json_array_length(data_json, '$.nodes') AS nodeCount, json_array_length(data_json, '$.connections') AS connectionCount FROM canvas_projects WHERE id = ?").get(id) as Record<string, unknown> | undefined;
             if (!header) { this.db.exec("COMMIT"); return null; }
             const ids = selection
                 ? (Array.isArray(JSON.parse(String(header.selectedNodeIds || "[]"))) ? JSON.parse(String(header.selectedNodeIds || "[]")) as unknown[] : []).map(String)
                 : [...new Set((nodeIds || []).map(String).filter(Boolean))];
             const idJson = JSON.stringify(ids);
             const nodes = ids.length ? this.db.prepare("SELECT n.value AS value FROM canvas_projects p, json_each(p.data_json, '$.nodes') n WHERE p.id = ? AND json_extract(n.value, '$.id') IN (SELECT value FROM json_each(?)) ORDER BY CAST(n.key AS INTEGER)").all(id, idJson) as Array<{ value: string }> : [];
-            const connections = ids.length ? this.db.prepare("SELECT c.value AS value FROM canvas_projects p, json_each(p.data_json, '$.connections') c WHERE p.id = ? AND (json_extract(c.value, '$.fromNodeId') IN (SELECT value FROM json_each(?)) OR json_extract(c.value, '$.toNodeId') IN (SELECT value FROM json_each(?))) ORDER BY CAST(c.key AS INTEGER)").all(id, idJson, idJson) as Array<{ value: string }> : [];
+            const connections = ids.length && options.includeConnections !== false ? this.db.prepare("SELECT c.value AS value FROM canvas_projects p, json_each(p.data_json, '$.connections') c WHERE p.id = ? AND (json_extract(c.value, '$.fromNodeId') IN (SELECT value FROM json_each(?)) OR json_extract(c.value, '$.toNodeId') IN (SELECT value FROM json_each(?))) ORDER BY CAST(c.key AS INTEGER)").all(id, idJson, idJson) as Array<{ value: string }> : [];
             const nodeValues = nodes.map(row => JSON.parse(row.value));
             const connectionValues = connections.map(row => JSON.parse(row.value));
             this.db.exec("COMMIT");
-            return { id, title: String(header.title || ""), updatedAt: String(header.updatedAt || ""), revision: Number(header.revision || 0), nodes: resolveProjectAssets(this, { id, nodes: nodeValues }).nodes, connections: connectionValues };
+            return { id, title: String(header.title || ""), updatedAt: String(header.updatedAt || ""), revision: Number(header.revision || 0), nodeCount: Number(header.nodeCount || 0), connectionCount: Number(header.connectionCount || 0), nodes: resolveProjectAssets(this, { id, nodes: nodeValues }).nodes, connections: connectionValues };
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     }
 
@@ -1907,7 +1908,7 @@ export class BackendDatabase {
         return { id: first.id, title: first.projectTitle || "", updatedAt: first.updatedAt, revision: Number(first.revision || 0), nodes };
     }
 
-    getCanvasProjectH3Context(id: string, nodeId: string, segmentId?: string, requestedDependencies: { sourceNodeIds?: string[]; assetIds?: string[] } = {}): Record<string, unknown> | null {
+    getCanvasProjectH3Context(id: string, nodeId: string, segmentId?: string, requestedDependencies: { sourceNodeIds?: string[]; assetIds?: string[]; segmentIds?: string[]; savedOnly?: boolean } = {}): Record<string, unknown> | null {
         this.db.exec("BEGIN DEFERRED");
         try {
             const header = this.db.prepare("SELECT id, updated_at AS updatedAt, json_extract(data_json, '$.title') AS title, COALESCE(json_extract(data_json, '$.revision'),0) AS revision FROM canvas_projects WHERE id = ?").get(id) as Record<string, unknown> | undefined;
@@ -1917,7 +1918,12 @@ export class BackendDatabase {
             const target = JSON.parse(targetRow.value) as Record<string, unknown>;
             const metadata = target.metadata && typeof target.metadata === "object" ? target.metadata as Record<string, unknown> : {};
             const allSegments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
-            const segments = segmentId ? allSegments.filter(segment => String(segment.id || "") === segmentId) : allSegments;
+            const requested = requestedDependencies.segmentIds ? new Set(requestedDependencies.segmentIds) : undefined;
+            const segments = segmentId ? allSegments.filter(segment => String(segment.id || "") === segmentId) : requested ? allSegments.filter(segment => requested.has(String(segment.id))) : allSegments;
+            if (requestedDependencies.savedOnly) {
+                this.db.exec("COMMIT");
+                return { id, title: String(header.title || ""), revision: Number(header.revision || 0), updatedAt: String(header.updatedAt || ""), nodes: [{ id: target.id, type: target.type, title: target.title, metadata: { segments } }] };
+            }
             const assetIds = new Set((requestedDependencies.assetIds || []).map(String).map(value => value.trim()).filter(Boolean));
             const sourceNodeIds = new Set((requestedDependencies.sourceNodeIds || []).map(String).map(value => value.trim()).filter(Boolean));
             for (const segment of segments) {
@@ -3739,6 +3745,10 @@ export class BackendDatabase {
         const dateFilter = mcpObservabilityDateFilter(options);
         const totals = this.db.prepare(`
             SELECT
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') THEN json_extract(input_summary_json,'$.inputBytes') END) AS total_input_bytes,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') THEN json_extract(output_summary_json,'$.outputBytes') END) AS total_output_bytes,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') AND json_extract(input_summary_json,'$.inputBytes') IS NOT NULL THEN 1 ELSE 0 END) AS input_byte_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') AND json_extract(output_summary_json,'$.outputBytes') IS NOT NULL THEN 1 ELSE 0 END) AS output_byte_sized_calls,
                 SUM(CASE WHEN event = 'tool.started' THEN 1 ELSE 0 END) AS started,
                 SUM(CASE WHEN event IN ('tool.succeeded', 'tool.failed') THEN 1 ELSE 0 END) AS completed,
                 SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
@@ -3765,6 +3775,10 @@ export class BackendDatabase {
                   ${dateFilter.where}
             )
             SELECT tool,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') THEN json_extract(input_summary_json,'$.inputBytes') END) AS total_input_bytes,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') THEN json_extract(output_summary_json,'$.outputBytes') END) AS total_output_bytes,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') AND json_extract(input_summary_json,'$.inputBytes') IS NOT NULL THEN 1 ELSE 0 END) AS input_byte_sized_calls,
+                SUM(CASE WHEN event IN ('tool.succeeded','tool.failed') AND json_extract(output_summary_json,'$.outputBytes') IS NOT NULL THEN 1 ELSE 0 END) AS output_byte_sized_calls,
                 COUNT(*) AS calls,
                 SUM(CASE WHEN event = 'tool.succeeded' THEN 1 ELSE 0 END) AS succeeded,
                 SUM(CASE WHEN event = 'tool.failed' THEN 1 ELSE 0 END) AS failed,
@@ -3972,6 +3986,7 @@ export class BackendDatabase {
         });
         return {
             generatedAt: new Date().toISOString(),
+            efficiency: mcpEfficiencyReport(this.db, dateFilter, options.view === "full"),
             calls: {
                 started,
                 completed,
@@ -4019,6 +4034,10 @@ export class BackendDatabase {
                 inputSizedCalls: payloadTotals.inputSizedCalls,
                 totalInputChars: payloadTotals.totalInputChars,
                 totalOutputChars: payloadTotals.totalOutputChars,
+                totalInputBytes: totals.total_input_bytes == null ? null : Number(totals.total_input_bytes),
+                totalOutputBytes: totals.total_output_bytes == null ? null : Number(totals.total_output_bytes),
+                inputByteSizedCalls: Number(totals.input_byte_sized_calls || 0),
+                outputByteSizedCalls: Number(totals.output_byte_sized_calls || 0),
                 estimatedTotalInputTokens: Math.round(payloadTotals.totalInputChars / 4),
                 estimatedTotalOutputTokens: Math.round(payloadTotals.totalOutputChars / 4),
                 averageOutputChars: payloadTotals.outputSizedCalls ? Math.round(payloadTotals.totalOutputChars / payloadTotals.outputSizedCalls) : null,
@@ -4615,6 +4634,12 @@ function metricRow(row: Record<string, unknown>) {
         averageOutputChars: outputSizedCalls && totalOutputChars != null ? Math.round(totalOutputChars / outputSizedCalls) : null,
         maxOutputChars,
         estimatedOutputTokens: maxOutputChars == null ? null : Math.round(maxOutputChars / 4),
+        estimatedMaxOutputTokens: maxOutputChars == null ? null : Math.round(maxOutputChars / 4),
+        estimatedTotalOutputTokens: totalOutputChars == null ? null : Math.round(totalOutputChars / 4),
+        totalInputBytes: row.total_input_bytes == null ? null : Number(row.total_input_bytes),
+        totalOutputBytes: row.total_output_bytes == null ? null : Number(row.total_output_bytes),
+        inputByteSizedCalls: Number(row.input_byte_sized_calls || 0),
+        outputByteSizedCalls: Number(row.output_byte_sized_calls || 0),
         averageInputChars: inputSizedCalls && totalInputChars != null ? Math.round(totalInputChars / inputSizedCalls) : null,
         maxInputChars,
     };

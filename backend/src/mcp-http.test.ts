@@ -12,13 +12,15 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { registerBackendMcpHttpRoutes } from "./mcp.js";
 import type { ResolvedConfig } from "./config.js";
 
-test("HTTP MCP exposes located compilation blockers, aliases and complete diagnostic pages", async t => {
+test("HTTP MCP exposes located compilation blockers, replay and complete diagnostic pages", async t => {
   const { ProductionCompilationService } = await import("./drama/compilation.js");
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "mcp-compilation-blocker-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const director: any = { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "1" }, source: { brief: "Authored source ".repeat(10000) }, sourceHash: "b".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+  const { productionOperationContract } = await import("@basketikun/canvas-agent/drama/production-validation");
+  const director: any = structuredClone(productionOperationContract("set_director_production").operations[0].example.director);
+  director.source.brief = "Authored source ".repeat(10000);
   const service: any = { get: () => ({ revision: 1, draft: { director } }), compilationReferenceFiles: () => ({}),
-    resolveSubjectPictureInputs: (_id: string, input: unknown) => structuredClone(input) };
+    canvasStyleAnchorInput: () => null, resolveSubjectPictureInputs: (_id: string, input: unknown) => structuredClone(input) };
   let compilerCalls = 0;
   const diagnostics = ["SH1", "SH2"].map(shotId => ({ code: "PROMPT_EXTERNAL_CONTEXT", path: `director.source.shots.${shotId}.visual`, targetId: "SEG1", shotId, origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, severity: "error" as const, message: "Prompt depends on external prose: preceding segment" }));
   const jobs = new ProductionCompilationService(service, root, (input: any) => { compilerCalls++; return { director: input, exitCode: 2, diagnostics, audit: {}, sourceAdjustments: [], acceptance: {} }; });
@@ -36,18 +38,28 @@ test("HTTP MCP exposes located compilation blockers, aliases and complete diagno
   assert.match(compileDescription, /targetId\/shotId\/path/);
   let bytes = 0, calls = 0;
   const started = performance.now();
-  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); bytes += Buffer.byteLength(JSON.stringify(response)); calls++; assert.notEqual(response.isError, true, JSON.stringify(response)); return textPayload(response).compilation; };
+  const call = async (name: string, args: object) => { const response = await client.callTool({ name, arguments: args as any }); const size = Buffer.byteLength(JSON.stringify(response)); bytes += size; calls++; assert.notEqual(response.isError, true, JSON.stringify(response)); assert.ok(size < 2000, `${name} must return a compact receipt`); return textPayload(response).compilation; };
   await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "original" });
-  const status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
-  assert.equal(status.status, "blocked"); assert.equal(status.blockingDiagnostic.shotId, "SH1"); assert.equal(status.items, undefined);
-  const alias = await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "alias" });
+  let status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
+  for (let attempt = 0; attempt < 300 && ["queued", "running"].includes(status.status); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    status = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "original" });
+  }
+  assert.equal(status.status, "blocked", JSON.stringify(status)); assert.equal(status.blockingDiagnostic.shotId, "SH1"); assert.equal(status.items, undefined);
+  const replay = await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "original" });
+  assert.equal(replay.replayed, true);
+  let alias = await call("production_compile", { kind: "episode", id: "episode", expectedRevision: 1, operationId: "alias" });
+  for (let attempt = 0; attempt < 300 && ["queued", "running"].includes(alias.status); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    alias = await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "alias" });
+  }
   assert.equal(alias.reused, true); assert.equal(alias.reusedFromOperationId, "original");
   const pages = [];
-  for (const offset of [0, 1]) pages.push(await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "alias", view: "diagnostics", offset, pageSize: 1 }));
-  assert.deepEqual(pages.flatMap(page => page.items.map((item: any) => item.shotId)), ["SH1", "SH2"]);
-  assert.equal(pages[0].nextOffset, 1); assert.equal(pages[1].nextOffset, null);
+  for (const offset of [0, 1, 2]) pages.push(await call("production_get_compilation", { kind: "episode", id: "episode", operationId: "alias", view: "diagnostics", offset, pageSize: 1 }));
+  assert.deepEqual(pages.slice(0, 2).flatMap(page => page.items.map((item: any) => item.shotId)), ["SH1", "SH2"]);
+  assert.equal(pages[2].items[0].code, "COMPILER_EXITED_WITHOUT_OUTPUT");
+  assert.equal(pages[0].nextOffset, 1); assert.equal(pages[2].nextOffset, null);
   assert.equal(compilerCalls, 1);
-  assert.ok(bytes < 20000);
   console.log(JSON.stringify({ compilationRegression: { calls, bytes, compilerCalls, durationMs: Math.round(performance.now() - started) } }));
 });
 
@@ -500,7 +512,7 @@ test("production tools publish full operation schemas and forward read-only pref
   const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(() => server.close());
   const address = server.address(); assert.ok(address && typeof address !== "string");
-  const client = await mcpClient(t, await fixture(t, `http://127.0.0.1:${address.port}`));
+  const client = await mcpClient(t, `${await fixture(t, `http://127.0.0.1:${address.port}`)}?schema=full`);
   const { tools } = await client.listTools();
   for (const name of ["production_hash_source", "production_get_contract", "production_preflight", "production_preflight"]) assert.ok(tools.some(item => item.name === name));
   const hashSchema = tools.find(item => item.name === "production_hash_source")!.inputSchema;
@@ -793,7 +805,7 @@ test("existing-node tools reject stale node IDs before submitting operations", a
   assert.equal(payload.error.code, "NODE_NOT_FOUND");
   assert.deepEqual(payload.errorContext.preflight.missingNodeIds, ["stale-node"]);
   assert.deepEqual(payload.errorContext.preflight.nodes, []);
-  assert.equal(payload.suggestedAction.tool, "canvas_inspect");
+  assert.equal(payload.suggestedAction.tool, "canvas_get_state");
   assert.equal(backend.opsRequestCount(), 0);
 });
 
@@ -813,7 +825,7 @@ test("revision conflicts are returned without automatic replay", async (t) => {
 
   assert.equal(result.isError, true);
   assert.equal(payload.error.code, "REVISION_CONFLICT");
-  assert.equal(payload.suggestedAction.tool, "canvas_inspect");
+  assert.equal(payload.suggestedAction.tool, "canvas_get_state");
   assert.equal(backend.opsRequestCount(), 1);
   assert.equal((backend.project().nodes as Array<unknown>).length, 0);
 });
@@ -1075,13 +1087,14 @@ test("canvas_get_state 超过输出上限时自动分页并可取完全部节点
   assert.equal(new Set(ids).size, 1200);
 });
 
-test("单个目录项超过上限时返回可恢复的 OUTPUT_TOO_LARGE", async (t) => {
+test("超长节点标题的目录项返回可识别的截断标记", async (t) => {
   const backendUrl = await mockManyNodesBackend(t, 1, 600 * 1024);
   const client = await mcpClient(t, await fixture(t, backendUrl));
   const result = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "canvas-many" } });
   const payload = textPayload(result);
-  assert.equal(result.isError, true);
-  assert.equal(payload.error.code, "OUTPUT_TOO_LARGE");
+  assert.notEqual(result.isError, true);
+  assert.equal(payload.nodes[0].titleTruncated, true);
+  assert.equal(payload.nodes[0].titleLength, "节点 0 ".length + 600 * 1024);
 });
 
 test("canvas_get_state 显式传 nodeIds 时回完整节点", async (t) => {

@@ -322,6 +322,7 @@ export const toolInputSchemas = {
     pageSize: z.number().optional().describe("每页数量，默认 20，最大 100"),
   }),
   canvas_inspect: canvasProjectSchema.extend({
+    view: z.enum(["context", "full"]).optional().describe("context 只读项目与真实选区，不读取模型目录；省略保持完整检查"),
     nodeLimit: z
       .number()
       .int()
@@ -331,6 +332,8 @@ export const toolInputSchemas = {
       .describe("最多返回多少个节点摘要，默认 30，最大 200；节点较多时按需指定更大的 limit"),
   }),
   canvas_get_state: canvasProjectSchema.passthrough().extend({
+    projection: z.enum(["summary", "media", "generation", "full"]).optional().describe("仅配合 nodeIds；显式轻量投影不返回正文、参考或历史；省略保持旧完整节点行为"),
+    includeConnections: z.boolean().optional().describe("仅配合 nodeIds；显式 projection 默认不带连线，旧请求默认包含"),
     view: z.enum(["index", "graph"]).optional().describe("默认 index：全部节点的 ID、类型、标题及生成模式；graph：节点布局摘要和连线"),
     ifRevision: z.number().int().min(0).optional().describe("只用于指定 projectId 的默认完整节点目录；revision 相同则返回 unchanged"),
     nodeIds: z
@@ -801,9 +804,9 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。制作时返回的 id 默认配合 site_navigate 的结构化 production 目标进入统一导演工作台；只有用户明确要求画布媒体操作时才打开 /canvas/:id。",
   canvas_inspect:
-    "需要选择画布或检查已配置模型能力时使用。返回活动画布、选区、部分节点摘要、参考候选和生成目标；已知节点 ID 的操作可直接执行。",
+    "选择画布或读取选区用 view:context，仅返回项目与真实选区，不读模型目录；省略 view 保持完整检查。已知节点 ID 直接定向读取或操作。",
   canvas_get_state:
-    "读取当前画布。projectId 未指定时优先使用本会话固定画布或浏览器聚焦画布；两者都没有且全库只有一张画布时，自动将它设为本会话活动画布。多张画布时需显式指定 projectId 或先选择活动画布。默认按 100 个节点分页返回目录摘要（id/type/title/generationMode）；用 nextNodeOffset 继续读取到末页。view: graph 同样分页读取布局和相关连线。已知 nodeIds 时只取指定节点的完整数据和相关连线。完整目录读完后可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
+    "读取当前画布。projectId 未指定时优先使用本会话固定画布或浏览器聚焦画布；两者都没有且全库只有一张画布时，自动将它设为本会话活动画布。多张画布时需显式指定 projectId 或先选择活动画布。默认按 100 个节点分页返回目录摘要（id/type/title/generationMode）；用 nextNodeOffset 继续读取到末页。view: graph 同样分页读取布局和相关连线。已知 nodeIds 时用 projection:summary/media/generation 读取基本信息、活动媒体或保存配置，不含正文/历史；显式投影默认不带连线，可用 includeConnections 开启。省略 projection 保持完整节点与相关连线。完整目录读完后可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
   canvas_get_selection: "读取当前网页画布选区。默认只返回选中节点摘要；需要完整节点正文时传 view='full'，或按返回的 nodeIds 用 canvas_get_state 定向读取。",
   canvas_export_snapshot: "导出 Backend 权威画布固定快照，返回 SHA256、字节数与鉴权下载路径；布局查看使用 canvas_get_state。",
   canvas_apply_ops:

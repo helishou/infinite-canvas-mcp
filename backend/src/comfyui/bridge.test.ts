@@ -6,6 +6,7 @@ import path from "node:path";
 
 import { collectOutputMedia, ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow as buildH3Entry, exactHistoryEntry, h3WatchdogState, localComfyInputName, readComfyHistory, summarizeH3Workflow, type ComfyUiDeps } from "./bridge.js";
 import { appendTailFramePrompt, routeTailFrameInput } from "../canvas/h3-runner.js";
+import { estimateH3Dimensions } from "../canvas/h3-params.js";
 import { MEDIA_DIR } from "../config.js";
 
 const promptA = "5ef69623-4030-4f1b-a00b-09e7355303e4";
@@ -47,20 +48,19 @@ test("latent confirmation selects the native checkpoint wrapper and refuses miss
         if (name === "NanFengH3LowPeakLatentUpscalerV15") return { [name]: { input: { required: { model_name: [["upscaler.safetensors"]] } } } };
         return {};
     });
-    const params = { mode: "t2v", latentUpscaleEnabled: true, latentUpscaleModel: "upscaler.safetensors", latentCheckpointId: "a".repeat(64), h3FirstSteps: 6, h3SecondSteps: 4, teAccel: true };
+    const params = { mode: "t2v", latentUpscaleEnabled: true, latentUpscaleModel: "upscaler.safetensors", latentCheckpointId: "a".repeat(64), h3FirstSteps: 6, h3SecondSteps: 4 };
     for (const phase of ["first", "second"]) {
         const graph = await buildMergedNanFengV15Workflow({ prompt: "a shot" }, { ...params, latentConfirmationPhase: phase }, upload, "http://comfy.test", new AbortController().signal);
         assert.equal(graph.nf_v15.class_type, "InfiniteCanvasH3ConfirmedGeneratorV15");
         assert.equal(graph.nf_v15.inputs.checkpoint_phase, phase);
         assert.equal(graph.nf_v15.inputs.checkpoint_id, params.latentCheckpointId);
-        assert.equal(graph.nf_v15.inputs.checkpoint_te_accel, true);
         assert.equal(graph.nf_v15.inputs["启用H3潜空间放大二采"], true);
         assert.equal(graph.cached_first_pass, undefined);
         const summary = summarizeH3Workflow(graph, promptA);
         assert.equal(summary.steps, phase === "first" ? 6 : 4);
         assert.ok(Number.isFinite(summary.seed));
     }
-    const automatic = await buildMergedNanFengV15Workflow({ prompt: "a shot" }, { ...params, teAccel: false }, upload, "http://comfy.test", new AbortController().signal);
+    const automatic = await buildMergedNanFengV15Workflow({ prompt: "a shot" }, params, upload, "http://comfy.test", new AbortController().signal);
     assert.equal(automatic.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15");
     assert.equal(automatic.nf_v15.inputs.checkpoint_phase, undefined);
     checkpointInstalled = false;
@@ -177,7 +177,7 @@ test("H3 audit summary reads the submitted API graph instead of raw UI fields", 
     const graph = await buildMergedNanFengV15Workflow(
         { prompt: "@图片1 起舞", references: ["reference.png"] },
         {
-            mode: "ref2va", duration: 6, aspectRatio: "16:9", megapixels: 0.5, sizeMultiple: 32,
+            mode: "ref2va", duration: 6, aspectRatio: "16:9", megapixels: 0.5,
             seed: 272289703718811, realtimePreviewEnabled: false, sageAttention: "H3专用Sage加速",
             motionContextEnabled: true, continuationTask: "{\"group\":\"test\",\"index\":1}", dlssVideoOutputDetailStrength: 1.5,
             loraSlots: [{ name: "minimax/turbo.safetensors", strength: 1, enabled: true }, { name: "minimax/cinematic.safetensors", strength: 0.7, enabled: true }],
@@ -240,7 +240,7 @@ test("V15 审计尺寸使用真实潜变量对齐规则，能区分 0.8MP 与 0.
     for (const megapixels of [0.8, 0.5]) {
         const graph = await buildMergedNanFengV15Workflow(
             { prompt: "@图片1", references: ["reference.png"] },
-            { mode: "ref2va", aspectRatio: "9:16 (Portrait)", megapixels, sizeMultiple: 32, latentUpscaleAlign: 2, duration: 8 },
+            { mode: "ref2va", aspectRatio: "9:16 (Portrait)", megapixels, latentUpscaleAlign: 2, duration: 8 },
             upload, "http://comfy.local", new AbortController().signal,
         );
         summaries.push(summarizeH3Workflow(graph, promptA));
@@ -248,11 +248,33 @@ test("V15 审计尺寸使用真实潜变量对齐规则，能区分 0.8MP 与 0.
     assert.deepEqual(summaries.map(({ width, height }) => [width, height]), [[672, 1216], [544, 960]]);
 });
 
+test("展开流尺寸与原生 V15 用同一套取整规则：9:16 的 1MP 是 768×1376、0.98MP 是 768×1344", async t => {
+    mockObjectInfo(t, ["NanFengH3MultiReferenceGeneratorV15", "NanFengH3MultiReferenceGeneratorV15"]);
+    const sizes = [];
+    for (const megapixels of [0.98, 1]) {
+        const graph = await buildH3Entry(
+            { prompt: "@图片1", references: ["reference.png"] },
+            { mode: "ref2va", aspectRatio: "9:16 (Portrait)", megapixels, duration: 5, seed: 123, realtimePreviewEnabled: false },
+            upload, "http://comfy.local", new AbortController().signal,
+        );
+        const condition = graph.nf_ref_condition;
+        assert.equal(condition.class_type, "MiniMaxH3ReferenceToVideo");
+        const summary = summarizeH3Workflow(graph, promptA);
+        assert.deepEqual([summary.width, summary.height], [condition.inputs.width, condition.inputs.height], "审计尺寸必须等于实际提交的宽高");
+        assert.deepEqual([condition.inputs.width, condition.inputs.height], (() => {
+            const estimate = estimateH3Dimensions({ aspectRatio: "9:16", megapixels })!;
+            return [estimate.width, estimate.height];
+        })(), "展开流必须与预估/原生 V15 一致");
+        sizes.push([condition.inputs.width, condition.inputs.height]);
+    }
+    assert.deepEqual(sizes, [[768, 1344], [768, 1376]]);
+});
+
 test("H3 audit reports scheduler Sigma and 192-frame graph values", async t => {
     mockObjectInfo(t);
     const graph = await buildMergedNanFengV15Workflow(
         { prompt: "@图片1", references: ["reference.png"] },
-        { mode: "ref2va", duration: 8, aspectRatio: "16:9", megapixels: 0.5, sizeMultiple: 32, seed: 792393709737869, realtimePreviewEnabled: false, sageAttention: "关闭", scheduler: "simple", steps: 20 },
+        { mode: "ref2va", duration: 8, aspectRatio: "16:9", megapixels: 0.5, seed: 792393709737869, realtimePreviewEnabled: false, sageAttention: "关闭", scheduler: "simple", steps: 20 },
         upload, "http://comfy.local", new AbortController().signal,
     );
     const summary = summarizeH3Workflow(graph, promptB);
@@ -307,28 +329,6 @@ test("H3 LoRA 强度 7 原样提交 V15，仅超出新范围时夹紧", async t 
     assert.equal(graph.nf_v15.inputs["LoRA2强度"], 7);
     assert.equal(graph.nf_v15.inputs["LoRA3强度"], -4);
     assert.equal(graph.nf_v15.inputs["LoRA4强度"], 10);
-});
-
-test("H3 TE acceleration uses a graph that contains the visible TE patcher", async t => {
-    // 展开流里 TE 加速是真的插一个 TESpeedMiniMaxH3 模型节点，所以提交前会先探它的注册状态。
-    mockObjectInfo(t, ["NanFengH3MultiReferenceGeneratorV15", "TESpeedMiniMaxH3"], "http://comfy.local",
-        name => name === "TESpeedMiniMaxH3" ? { TESpeedMiniMaxH3: { input: { required: {} } } } : {});
-    const graph = await buildH3Entry(
-        { prompt: "@图片1", references: ["reference.png"] },
-        { mode: "ref2va", teAccel: true, seed: 123, realtimePreviewEnabled: false },
-        upload, "http://comfy.local", new AbortController().signal,
-    );
-    assert.equal(graph.nf_v15, undefined);
-    assert.equal(Object.values(graph).some((node: any) => node.class_type === "TESpeedMiniMaxH3"), true);
-});
-
-test("TE 加速缺少 TESpeedMiniMaxH3 时提交前明确拒绝，而不是让 ComfyUI 回 400", async t => {
-    mockObjectInfo(t, ["NanFengH3MultiReferenceGeneratorV15", "TESpeedMiniMaxH3"], "http://comfy.local", () => ({}));
-    await assert.rejects(buildH3Entry(
-        { prompt: "@图片1", references: ["reference.png"] },
-        { mode: "ref2va", teAccel: true, seed: 123 },
-        upload, "http://comfy.local", new AbortController().signal,
-    ), /未加载 TESpeedMiniMaxH3 节点/);
 });
 
 test("H3 默认提交展开流，只有 mergedWorkflow 才回到合并流", async t => {
@@ -428,6 +428,54 @@ test("展开流尚未承载的开关自动退回合并流，而不是静默丢�
     assert.equal(graph.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15");
     assert.equal(graph.face_refine.class_type, "MiniMaxH3PostGenerationFaceRefine");
     assert.deepEqual(graph.nf_output.inputs.images, ["face_refine", 0]);
+});
+
+test("展开流 ref2va 的参考图尺寸跟随用户设置，未设置时用原生默认 match", async t => {
+    mockObjectInfo(t, ["NanFengH3MultiReferenceGeneratorV15", "NanFengH3MultiReferenceGeneratorV15"]);
+    const input = { prompt: "@图片1", references: ["reference.png"] };
+    const explicit = await buildH3Entry(input, { mode: "ref2va", seed: 123, refImageSize: "max" },
+        upload, "http://comfy.local", new AbortController().signal);
+    assert.equal(explicit.nf_ref_condition.class_type, "MiniMaxH3ReferenceToVideo");
+    assert.equal(explicit.nf_ref_condition.inputs.ref_image_size, "max", "用户选 max 不能被写死值覆盖");
+    const fallback = await buildH3Entry(input, { mode: "ref2va", seed: 123 },
+        upload, "http://comfy.local", new AbortController().signal);
+    assert.equal(fallback.nf_ref_condition.inputs.ref_image_size, "match", "默认与原生节点一致");
+});
+
+test("Sol-Attn / T8 只在合并流实现：打开后真的退回合并流并落到原生输入", async t => {
+    mockObjectInfo(t, ["NanFengH3MultiReferenceGeneratorV15", "NanFengH3MultiReferenceGeneratorV15"]);
+    const input = { prompt: "@图片1", references: ["reference.png"] };
+    const sol = await buildH3Entry(input, {
+        mode: "ref2va", seed: 123, solAttnEnabled: true, solAttnTau: 1.7, solAttnThresholdType: "exact",
+        solAttnExactMode: "exact_kv_and_rows", solAttnDenseSteps: 3, solAttnStepOff: 0.25, solAttnSinkTokens: 256,
+    }, upload, "http://comfy.local", new AbortController().signal);
+    assert.equal(sol.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15", "展开流没有 Sol 节点，必须退回合并流");
+    assert.equal(sol.nf_v15.inputs["启用SolAttn"], true);
+    assert.equal(sol.nf_v15.inputs["SolAttn_tau"], 1.7);
+    assert.equal(sol.nf_v15.inputs["SolAttn阈值类型"], "exact");
+    assert.equal(sol.nf_v15.inputs["SolAttn精确模式"], "exact_kv_and_rows");
+    assert.equal(sol.nf_v15.inputs["SolAttn完整末步"], 3);
+    assert.equal(sol.nf_v15.inputs["SolAttn末段比例"], 0.25);
+    assert.equal(sol.nf_v15.inputs["SolAttn前缀Token"], 256);
+    const t8 = await buildH3Entry(input, {
+        mode: "ref2va", seed: 123, t8Enabled: true, t8ResidualThreshold: 0.2, t8StartPercent: 0.1,
+    }, upload, "http://comfy.local", new AbortController().signal);
+    assert.equal(t8.nf_v15.class_type, "NanFengH3MultiReferenceGeneratorV15");
+    assert.equal(t8.nf_v15.inputs["启用T8缓存"], true);
+    assert.equal(t8.nf_v15.inputs["T8残差阈值"], 0.2);
+    assert.equal(t8.nf_v15.inputs["T8开始比例"], 0.1);
+});
+
+test("合并流音频驱动终点留空时补到本段片尾，与展开流同义", async t => {
+    mockObjectInfo(t);
+    const graph = await buildH3Entry(
+        { prompt: "a shot", audios: ["drive.wav"] },
+        { mode: "ref2va", seed: 123, mergedWorkflow: true, lockAudio: true, audioDrive: true,
+            audioDriveFile: "drive.wav", audioDriveStart: 2, audioDriveEnd: 0, duration: 5 },
+        upload, "http://comfy.local", new AbortController().signal,
+    );
+    assert.equal(graph.nf_v15.inputs["音频驱动当前起点"], 2);
+    assert.equal(graph.nf_v15.inputs["音频驱动当前终点"], 7, "终点 0 不能再原样转发给会报错的原生节点");
 });
 
 test("H3 native realtime preview submits preview and TAEH3 flags without a model patcher", async t => {

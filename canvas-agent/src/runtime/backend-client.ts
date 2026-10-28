@@ -270,8 +270,10 @@ export class BackendClient {
     return data.project;
   }
 
-  async getCanvasH3Context(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }): Promise<Record<string, unknown>> {
+  async getCanvasH3Context(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[]; segmentIds?: string[]; savedOnly?: boolean }): Promise<Record<string, unknown>> {
     const params = new URLSearchParams({ nodeId, ...(segmentId ? { segmentId } : {}), ...(dependencies?.sourceNodeIds?.length ? { sourceNodeIds: JSON.stringify(dependencies.sourceNodeIds) } : {}), ...(dependencies?.assetIds?.length ? { assetIds: JSON.stringify(dependencies.assetIds) } : {}) });
+    if (dependencies?.savedOnly) params.set("savedOnly", "true");
+    if (dependencies?.segmentIds) params.set("segmentIds", JSON.stringify(dependencies.segmentIds));
     const path = `/canvas/projects/${encodeURIComponent(projectId)}/h3-context?${params}`;
     const data = await this.get<{ ok: boolean; project?: Record<string, unknown> }>(path, signal);
     if (!data.project) throw new BackendClientError(`Backend ${path} returned no project`, { kind: "invalid_response", method: "GET", path, code: "BACKEND_INVALID_RESPONSE" });

@@ -8,7 +8,7 @@ import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_M
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
 import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
-import { H3_VIDEO_MEGAPIXELS as megapixels, H3_VIDEO_RATIOS as videoRatios } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { H3_VIDEO_MEGAPIXELS as megapixels, H3_VIDEO_RATIOS as videoRatios, h3VideoDimensions } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
 import type { H3Ref, H3Segment } from "../types";
 import { h3Label, useH3Locale } from "../h3-locale";
@@ -164,6 +164,13 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         || ratioChoices.find((value) => String(value).startsWith("16:9"))
         || ratioChoices[0];
     const megapixelChoices = nfChoices("百万像素", megapixels);
+    // 档位换算后可能落到同一个潜空间格（如 9:16 的 0.98 与 1.0 都是 768×1344），直接标出实际分辨率避免误判。
+    const megapixelLabel = (value: string | number) => {
+        const ratio = String(selectedRatio || "");
+        if (!videoRatios[ratio]) return `${value} MP`;
+        const size = h3VideoDimensions(ratio, Number(value), Number(segment.latentUpscaleAlign ?? 2));
+        return `${value} MP · ${size.width}×${size.height}`;
+    };
     const samplerChoices = nfChoices("采样器", samplers);
     const schedulerChoices = nfChoices("调度器", schedulers);
     const seedMode = segment.noiseSeedMode === "fixed" ? "fixed" : "random";
@@ -231,13 +238,13 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const section = (key: SectionKey, title: string, summary: ReactNode, content: ReactNode, className = "") => <section key={`nfh3-sec-${key}`} className={`nfh3-section ${className}`} data-section={key}><button type="button" className="nfh3-section-head" onClick={() => setOpen(key)}><span className={`nfh3-chevron${expanded[key] === true ? " is-open" : ""}`} aria-hidden="true" /><b>{title}</b><small>{summary}</small></button>{expanded[key] === true ? <div className="nfh3-section-body">{content}</div> : null}</section>;
     const enabledSummary = (text: string) => <span className="nfh3-enabled-summary">{text}</span>;
     const choice = (label: string, values: Array<string | number>, value: unknown, onChange: (value: string | number) => void, format?: (value: string | number) => string, wide = false, searchable = false, placeholder?: string, allowClear = false) => control(label, <H3Dropdown values={values} value={value as string | number} onChange={onChange} format={format} searchable={searchable} placeholder={placeholder} allowClear={allowClear} listId={`nfh3-${label}-options`} />, wide);
-    const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 8);
+    const loraSlots = (segment.loraSlots?.length ? segment.loraSlots : [{ name: segment.loraName || "", strength: Number(segment.loraStrength ?? 1), enabled: !!segment.loraName }]).slice(0, 16);
     while (loraSlots.length < 3) loraSlots.push({ name: "", strength: 1, enabled: false });
     const patchLoraSlot = (index: number, value: Partial<{ name: string; strength: number; enabled: boolean }>) => {
         const next = loraSlots.map((slot, slotIndex) => slotIndex === index ? { ...slot, ...value } : slot);
         patch({ loraSlots: next, loraName: next[0]?.name || "", loraStrength: next[0]?.strength ?? 0.75 });
     };
-    const addLoraSlot = () => { if (loraSlots.length < 8) patch({ loraSlots: [...loraSlots, { name: "", strength: 1, enabled: false }] }); };
+    const addLoraSlot = () => { if (loraSlots.length < 16) patch({ loraSlots: [...loraSlots, { name: "", strength: 1, enabled: false }] }); };
     // 已存槽位名必须始终出现在选项里，即使 ComfyUI 暂时离线也能回显。
     const loraValues = [...new Set([...loraOptions.map((item) => item.value), ...loraSlots.map((slot) => slot.name).filter(Boolean)])];
     const loraQuery = loraSearch.trim().toLocaleLowerCase();
@@ -293,8 +300,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
                 <div style={{ flex: "0 0 auto", minWidth: 120 }}><H3Dropdown values={["random", "fixed"]} value={seedMode} onChange={(value) => setSeedMode(String(value))} format={(value) => value === "fixed" ? "固定" : "随机"} listId="nfh3-seed-mode-options" /></div>
                 <div style={{ flex: 1, display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>{seedMode === "random" ? <button type="button" className="nfh3-seed-reroll" title="重新生成随机种子" onMouseDown={(event) => event.stopPropagation()} onClick={() => { const seed = Math.max(1, Math.floor(Math.random() * Number.MAX_SAFE_INTEGER)); patch({ seed, noiseSeed: seed }); }}>🎲</button> : null}<InputNumber style={field} min={0} precision={0} value={String(segment.seed ?? segment.noiseSeed ?? "").trim() !== "" ? Number(segment.seed ?? segment.noiseSeed) : undefined} placeholder={seedMode === "fixed" ? "输入固定种子" : "随机种子"} onChange={(value) => patch({ seed: value ?? undefined, noiseSeed: value ?? undefined })} /></div>
             </div>, true)}
-            {choice("百万像素", megapixelChoices, segment.megapixels ?? 0.4, (value) => patch({ megapixels: Number(value) }), (value) => `${value} MP`)}
-            {choice("尺寸倍数", [32], segment.sizeMultiple ?? 32, (value) => patch({ sizeMultiple: Number(value) }))}
+            {choice("百万像素", megapixelChoices, segment.megapixels ?? 0.4, (value) => patch({ megapixels: Number(value) }), megapixelLabel)}
             {mode === "ref2va" ? choice("参考图尺寸", refImageSizeChoices, segment.refImageSize || "match", (value) => patch({ refImageSize: String(value) })) : null}
             {mode !== "t2v" ? choice("参考图最长边", refLongEdgeChoices, segment.referenceLongEdge ?? 1920, (value) => patch({ referenceLongEdge: Number(value) })) : null}
         </div>)}
@@ -326,9 +332,6 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             {control("降噪强度", <InputNumber style={field} min={0} max={1} step={0.01} value={segment.denoise != null ? Number(segment.denoise) : undefined} placeholder="1" onChange={(value) => patch({ denoise: value ?? undefined })} />, false, segment.motionContextEnabled && segment.denoise != null && Number(segment.denoise) < 1 ? "降噪会缩短整段采样轨迹，不只影响接缝：调低后本段整体重绘更多、细节更活，但也更容易偏离本段提示词与参考图。只想软化接缝时，优先用「续段衔接」里的接缝加噪，它只影响钉住的潜变量。" : undefined)}
             {choice("SageAttention", sageChoices, segment.sageAttention || "H3专用Sage加速", (value) => patch({ sageAttention: String(value) }), (value) => String(value).replace(/^sageattn_/, "sage "))}
             {control("允许编译", <Switch checked={segment.allowCompile === true} onChange={(checked) => patch({ allowCompile: checked })} />)}
-            {/* TE 加速：backend 在 params.teAccel===true 时往工作流注入 TESpeedMiniMaxH3 节点（standard 模式）。 */}
-            {/* 改版时开关曾被丢失，导致只能靠旧 metadata 残留值生效；按 Clip 粒度恢复并可随参数导出/还原。 */}
-            {control("TE 加速", <Switch checked={segment.teAccel === true} onChange={(checked) => patch({ teAccel: checked })} />)}
             {/* 合并流后路：默认走展开流（V15 子图摊成真实节点）。 */}
             {/* 只有需要单节点形态（例如在 ComfyUI 里直接看一个南风 V15 节点）时才切回来。 */}
             {control("使用合并流（后路）", <Switch checked={segment.mergedWorkflow === true} onChange={(checked) => patch({ mergedWorkflow: checked })} />, false, "默认走展开流：把南风 V15 内部子图摊成真实节点，便于核对与逐节点改图，功能与原生节点一致（潜空间二采的一采确认也一样，展开流会按同一套锚点把边界切在磁盘快照上）。开启后改回老的合并流（单个 NanFengH3MultiReferenceGeneratorV15 节点；确认阶段用 InfiniteCanvasH3ConfirmedGeneratorV15 包装节点）。")}
@@ -380,11 +383,12 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         {section("lora", "LoRA", loraSummary ? enabledSummary(`${loraSummary} 个已启用 `) : "未启用", <div className="nfh3-lora-stack">
             <Input className="nfh3-lora-search" size="middle" prefix={<Search size={20} aria-hidden="true" />} allowClear value={loraSearch} onChange={(event) => setLoraSearch(event.target.value)} placeholder="搜索 LoRA 文件名" aria-label="搜索 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
             {loraSlots.map((slot, index) => <div className="nfh3-lora-row" key={index}><b>LoRA {index + 1}</b><Switch checked={slot.enabled} onChange={(checked) => patchLoraSlot(index, { enabled: checked })} /><H3LoraPicker key={`${segment.id}:${index}`} values={filteredLoraValues} value={slot.name || ""} onChange={(value) => patchLoraSlot(index, { name: value, enabled: !!value })} /><InputNumber min={H3_LORA_STRENGTH_MIN} max={H3_LORA_STRENGTH_MAX} step={0.05} value={slot.strength != null ? Number(slot.strength) : undefined} placeholder="0.75" onChange={(value) => patchLoraSlot(index, { strength: value ?? undefined })} /></div>)}
-            {loraSlots.length < 8 ? <button type="button" className="nfh3-lora-add" onClick={addLoraSlot}>＋ 添加 LoRA 槽位</button> : null}
+            {loraSlots.length < 16 ? <button type="button" className="nfh3-lora-add" onClick={addLoraSlot}>＋ 添加 LoRA 槽位</button> : null}
             <button type="button" className="nfh3-lora-add" onClick={() => void refreshLoraCatalog()} disabled={refreshingLoras}>{refreshingLoras ? "读取中…" : "刷新 LoRA 列表"}</button>
+            <div className="nfh3-hint">最多可添加 16 个 LoRA；超过 8 个时自动使用展开工作流。</div>
             <div className="nfh3-hint">也可输入 ComfyUI `models/loras` 下的相对文件名，按回车应用。</div>
         </div>)}
-        {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true || segment.audioDrive === true} disabled={segment.audioDrive === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked })} />)}{segment.audioDrive ? <>{control("驱动音频", <H3Dropdown values={audioRefs.filter((ref) => ref.bindingId).map((ref) => ref.bindingId!)} value={audioRefs.some((ref) => ref.bindingId === segment.audioDriveFile) ? segment.audioDriveFile : undefined} onChange={(value) => patch({ audioDriveFile: String(value || "") })} format={(value) => audioRefs.find((ref) => ref.bindingId === value)?.name || String(value)} placeholder={audioRefs.length ? "选择参考音频" : "请先添加参考音频"} searchable allowClear />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}{control("打点数据", <textarea value={String(segment.audioDriveMarkers || "")} onChange={(event) => patch({ audioDriveMarkers: event.target.value })} placeholder="JSON" />, true)}{control("分段图片", <textarea value={String(segment.audioDriveSegmentImages || "")} onChange={(event) => patch({ audioDriveSegmentImages: event.target.value })} placeholder="JSON" />, true)}{control("分段分镜", <textarea value={String(segment.audioDriveSegmentStoryboards || "")} onChange={(event) => patch({ audioDriveSegmentStoryboards: event.target.value })} placeholder="JSON" />, true)}{control("创意描述", <textarea value={String(segment.audioDriveCreative || "")} onChange={(event) => patch({ audioDriveCreative: event.target.value })} />, true)}{control("排除范围", <textarea value={String(segment.audioDriveExclude || "")} onChange={(event) => patch({ audioDriveExclude: event.target.value })} />, true)}</> : null}</div>) : null}
+        {mode === "ref2va" ? section("audio", "数字人 · MV · 锁音频", segment.audioDrive ? enabledSummary("智能音频驱动") : segment.lockAudio ? enabledSummary("锁定音频") : "未启用", <div className="nfh3-audio-workspace">{control("开启锁音频", <Switch checked={segment.lockAudio === true || segment.audioDrive === true} disabled={segment.audioDrive === true} onChange={(checked) => patch({ lockAudio: checked })} />)}{control("开启音频驱动模式", <Switch checked={segment.audioDrive === true} onChange={(checked) => patch({ audioDrive: checked })} />)}{segment.audioDrive ? <>{control("驱动音频", <H3Dropdown values={audioRefs.filter((ref) => ref.bindingId).map((ref) => ref.bindingId!)} value={audioRefs.some((ref) => ref.bindingId === segment.audioDriveFile) ? segment.audioDriveFile : undefined} onChange={(value) => patch({ audioDriveFile: String(value || "") })} format={(value) => audioRefs.find((ref) => ref.bindingId === value)?.name || String(value)} placeholder={audioRefs.length ? "选择参考音频" : "请先添加参考音频"} searchable allowClear />, true)}{control("当前起点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveStart != null ? Number(segment.audioDriveStart) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveStart: value ?? undefined })} />)}{control("当前终点", <InputNumber style={field} min={0} step={0.001} value={segment.audioDriveEnd != null ? Number(segment.audioDriveEnd) : undefined} placeholder="0" onChange={(value) => patch({ audioDriveEnd: value ?? undefined })} />)}</> : null}</div>) : null}
         </>}
     </div>;
 }

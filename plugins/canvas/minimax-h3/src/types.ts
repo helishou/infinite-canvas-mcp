@@ -110,15 +110,8 @@ export type H3Segment = {
     t8CacheDevice?: string;
     t8MetricStride?: number;
     t8Verbose?: boolean;
-    sigmaEnabled?: boolean;
     videoSigmaShift?: number;
     audioSigmaShift?: number;
-    sigmaMode?: string;
-    lowSigmaStart?: number;
-    lowSigmaEnd?: number;
-    sigmaRefineSteps?: number;
-    sigmaCurve?: string;
-    manualSigma?: string;
     dualSampling?: boolean;
     dualSamplingRatio?: number;
     dualSampler?: string;
@@ -254,14 +247,8 @@ export type H3Segment = {
     erMaxStage?: number;
     erEta?: number;
     erSNoise?: number;
-    audioDriveMarkers?: string;
-    audioDriveSegmentImages?: string;
-    audioDriveSegmentStoryboards?: string;
-    audioDriveCreative?: string;
-    audioDriveExclude?: string;
     audioDriveStart?: number;
     audioDriveEnd?: number;
-    teAccel?: boolean;
     /** 后路开关：改用老的合并流（单个南风 V15 原生节点）。默认关闭 = 走展开流。 */
     mergedWorkflow?: boolean;
     noDub?: boolean;
@@ -322,7 +309,6 @@ export type H3Segment = {
     precision?: string;
     sageAttention?: string;
     allowCompile?: boolean;
-    sizeMultiple?: number;
     sampler?: string;
     scheduler?: string;
     steps?: number;

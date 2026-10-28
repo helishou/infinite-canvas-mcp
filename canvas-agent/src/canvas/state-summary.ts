@@ -1,6 +1,8 @@
+import { normalizeEntityPrimaryMedia } from "./shared-asset-reference.js";
+
 type Node = Record<string, unknown>;
 type Project = Record<string, unknown>;
-type StateInput = { view?: "index" | "graph"; nodeIds?: string[]; nodeOffset?: number; nodeLimit?: number; ifRevision?: number; projectId?: string };
+export type StateInput = { view?: "index" | "graph"; nodeIds?: string[]; nodeOffset?: number; nodeLimit?: number; ifRevision?: number; projectId?: string; projection?: "summary" | "media" | "generation" | "full"; includeConnections?: boolean };
 
 function record(value: unknown): Node {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Node : {};
@@ -12,14 +14,42 @@ function bytes(value: unknown) {
 
 export class CanvasStateOverflowError extends Error {
     constructor(readonly bytes: number, readonly chars: number) {
-        super("画布单个节点目录项超过 MCP 输出上限，请缩小查询范围");
+        super("画布读取超过 MCP 输出上限，请缩小 nodeIds 或使用轻量 projection；完整正文使用专用分块读取或 canvas_export_snapshot");
     }
 }
 
 export function validateCanvasStateInput(input: StateInput) {
+    if ((input.projection !== undefined || input.includeConnections !== undefined) && !Array.isArray(input.nodeIds)) {
+        throw new Error("projection/includeConnections 仅支持 nodeIds 定向读取");
+    }
+    if (input.projection !== undefined && !["summary", "media", "generation", "full"].includes(input.projection)) throw new Error("projection 必须为 summary/media/generation/full");
+    if (input.includeConnections !== undefined && typeof input.includeConnections !== "boolean") throw new Error("includeConnections 必须为 boolean");
     if (input.ifRevision !== undefined && (!input.projectId || input.nodeIds !== undefined || input.nodeOffset !== undefined || input.nodeLimit !== undefined || input.view === "graph")) {
         throw new Error("ifRevision 只适用于指定 projectId 的完整默认节点目录，不可与 nodeIds、分页或 view: graph 混用");
     }
+}
+
+/** Explicit allowlists keep prompts, references and history out of lightweight reads. */
+function projectNode(node: Node, projection: NonNullable<StateInput["projection"]>): Node {
+    if (projection === "full") return node;
+    const metadata = record(node.metadata);
+    const summary = { ...canvasNodeIndex(node), ...(typeof metadata.status === "string" ? { status: metadata.status } : {}) };
+    if (projection === "summary") return summary;
+    if (projection === "media") {
+        const type = String(node.type || "");
+        if (!["image", "video", "audio", "character", "scene", "prop"].includes(type)) return { ...summary, unsupportedProjection: "media" };
+        const media = normalizeEntityPrimaryMedia(type, metadata, type === "character" ? "gallery" : "nested");
+        const keys = ["storageKey", "mimeType", "naturalWidth", "naturalHeight", "bytes", "durationMs"];
+        const current = Object.fromEntries(keys.filter(key => typeof media[key] === "string" || typeof media[key] === "number").map(key => [key, media[key]]));
+        const source = record(metadata.sharedAssetReference);
+        const sourceIdentity = Object.fromEntries(["dramaId", "assetId", "sourceProjectId", "sourceNodeId"].filter(key => typeof source[key] === "string").map(key => [key, source[key]]));
+        return { ...summary, media: current, ...(Object.keys(sourceIdentity).length ? { source: sourceIdentity } : {}), ...(typeof current.storageKey === "string" && current.storageKey ? {} : { missingFields: ["storageKey"] }) };
+    }
+    const generationMode = summary.generationMode;
+    if (!generationMode && node.type !== "config") return { ...summary, unsupportedProjection: "generation" };
+    const keys = ["model", "modelName", "taskMode", "quality", "size", "width", "height", "seconds", "resolution", "count", "generateAudio", "watermark", "seed"];
+    const generation = Object.fromEntries(keys.filter(key => ["string", "number", "boolean"].includes(typeof metadata[key])).map(key => [key, metadata[key]]));
+    return { ...summary, generation };
 }
 
 export function canvasNodeIndex(node: Node) {
@@ -66,7 +96,17 @@ export function summarizeCanvasState(project: Project, input: StateInput, maxByt
     if (input.nodeIds) {
         const wanted = new Set(input.nodeIds);
         const selected = nodes.filter((node) => wanted.has(String(node.id || "")));
-        const related = connections.filter((edge) => wanted.has(String(edge.fromNodeId)) || wanted.has(String(edge.toNodeId)));
+        const includeConnections = input.includeConnections ?? input.projection === undefined;
+        const related = includeConnections ? connections.filter((edge) => wanted.has(String(edge.fromNodeId)) || wanted.has(String(edge.toNodeId))) : [];
+        if (input.projection !== undefined || input.includeConnections !== undefined) {
+            const projection = input.projection || "full";
+            const found = new Set(selected.map(node => String(node.id)));
+            const result = { ...base, projection, requestedCount: wanted.size, returnedCount: selected.length,
+                missingNodeIds: [...wanted].filter(id => !found.has(id)), nodes: selected.map(node => projectNode(node, projection)),
+                ...(includeConnections ? { connections: related } : {}), truncated: false };
+            if (maxBytes && bytes(result) > maxBytes) throw new CanvasStateOverflowError(bytes(result), JSON.stringify(result).length);
+            return result;
+        }
         const full = { ...base, nodes: selected, connections: related, truncated: false };
         if (!maxBytes || bytes(full) <= maxBytes) return full;
         return { ...base, nodes: selected.map(canvasNodeGraph), connections: related, truncated: false, metadataTruncated: true,

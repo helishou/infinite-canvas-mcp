@@ -1,10 +1,8 @@
 /**
  * 视频分镜首帧批量抽取。
  *
- * 浏览器端用 <video> + <canvas> 解码，不依赖 ffmpeg：先逐格采样估算帧间差分，
- * 用局部基线倍数挑出镜头切换点（cut），每个 cut 后的第一帧就是一个分镜的首帧。
- * 采样与出图复用同一个 <video> 实例：每次都新建 video 并 src 重载整段视频，
- * N 个分镜就是 N 次全量下载，慢且容易中途失败。
+ * 浏览器用一个 <video> 实例按 Backend 提供的镜头边界抽取全分辨率帧。
+ * 未提供外部边界时保留轻量 RGB 差分检测，供离线调用与回归测试使用。
  */
 
 /** 单个视频最多抽多少个分镜，避免长片把画布塞爆。 */
@@ -89,11 +87,6 @@ export function detectCuts(samples: Array<{ time: number; score: number }>, base
     return merged.map((item, index) => ({ index: index + 1, time: item.time, score: item.score }));
 }
 
-/** 在离散的候选时间里选离目标最近的一个（视频 seek 精度有限，取整更稳）。 */
-function nearestSnap(time: number, fps: number): number {
-    return Math.max(0, Math.round(time * fps) / fps);
-}
-
 /**
  * 补上第 0 秒的片头首帧，并把整组切点重新编号。
  *
@@ -119,6 +112,7 @@ export async function extractShotKeyframes(
         sampleInterval?: number;
         baseRatio?: number;
         minScore?: number;
+        sceneCuts?: Array<{ time: number }>;
         onProgress?: (ratio: number) => void;
     } = {},
 ): Promise<{ cuts: ShotCut[]; blobs: Blob[]; duration: number; width: number; height: number }> {
@@ -196,28 +190,35 @@ export async function extractShotKeyframes(
 
         // 逐样本取两帧：相邻样本之间也各隔一帧，避免只比较到解码残留。
         const times: number[] = [];
-        for (let time = 0; time < duration; time += sampleInterval) times.push(time);
-        if (times.length === 0) times.push(0);
-
-        const samples: Array<{ time: number; score: number }> = [];
-        let previousFrame: ImageData | undefined;
-        for (const time of times) {
-            const frame = await grabProbe(time).catch(() => undefined);
-            if (frame && previousFrame) {
-                let sum = 0;
-                for (let index = 0; index < frame.data.length; index += 4) {
-                    sum += Math.abs(frame.data[index] - previousFrame.data[index])
-                        + Math.abs(frame.data[index + 1] - previousFrame.data[index + 1])
-                        + Math.abs(frame.data[index + 2] - previousFrame.data[index + 2]);
-                }
-                const pixels = frame.data.length / 4;
-                samples.push({ time, score: pixels ? sum / (pixels * 3 * 255) : 0 });
-            }
-            previousFrame = frame;
-            options.onProgress?.((time / Math.max(duration, 0.001)) * 0.6);
+        if (!options.sceneCuts) {
+            for (let time = 0; time < duration; time += sampleInterval) times.push(time);
+            if (times.length === 0) times.push(0);
         }
 
-        let cuts = withOpeningShot(detectCuts(samples, options.baseRatio, options.minScore));
+        let cuts: ShotCut[];
+        if (options.sceneCuts) {
+            cuts = withOpeningShot(options.sceneCuts.map((cut, index) => ({ index: index + 1, time: cut.time, score: 0 })));
+            options.onProgress?.(0.6);
+        } else {
+            const samples: Array<{ time: number; score: number }> = [];
+            let previousFrame: ImageData | undefined;
+            for (const time of times) {
+                const frame = await grabProbe(time).catch(() => undefined);
+                if (frame && previousFrame) {
+                    let sum = 0;
+                    for (let index = 0; index < frame.data.length; index += 4) {
+                        sum += Math.abs(frame.data[index] - previousFrame.data[index])
+                            + Math.abs(frame.data[index + 1] - previousFrame.data[index + 1])
+                            + Math.abs(frame.data[index + 2] - previousFrame.data[index + 2]);
+                    }
+                    const pixels = frame.data.length / 4;
+                    samples.push({ time, score: pixels ? sum / (pixels * 3 * 255) : 0 });
+                }
+                previousFrame = frame;
+                options.onProgress?.((time / Math.max(duration, 0.001)) * 0.6);
+            }
+            cuts = withOpeningShot(detectCuts(samples, options.baseRatio, options.minScore));
+        }
         if (cuts.length > maxShots) cuts = cuts.slice(0, maxShots);
 
         const full = document.createElement("canvas");
@@ -239,7 +240,8 @@ export async function extractShotKeyframes(
         for (const [index, cut] of cuts.entries()) {
             // 复用已经解码好的 video 出全分辨率帧：captureVideoFrame 每次都会新建
             // <video> 并重新 src 加载整个视频，N 个分镜就是 N 次全量下载，慢且易中途失败。
-            const blob = await grabFullFrame(nearestSnap(cut.time, 1000)).catch(() => undefined);
+            // PySceneDetect 给的是精确帧时间；毫秒取整可能把目标推到切点前一帧（如 32/24 秒）。
+            const blob = await grabFullFrame(cut.time).catch(() => undefined);
             if (blob) {
                 blobs.push(blob);
                 captured.push({ ...cut, index: blobs.length });

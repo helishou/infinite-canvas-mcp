@@ -28,7 +28,7 @@ import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workfl
 import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
-import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, editEpisodeProduction, fetchBackendCanvasDrama, fetchBackendTask, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, retryBackendTask, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
+import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, detectVideoSceneCuts, editEpisodeProduction, fetchBackendCanvasDrama, fetchBackendTask, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, retryBackendTask, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
 import { runCanvasImageTask } from "@/services/api/canvas-image";
 import { runCanvasVideoTask } from "@/services/api/canvas-video";
@@ -3666,7 +3666,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const patchShell = (patch: Partial<CanvasNodeData["metadata"]>) =>
                     setNodes((prev) => prev.map((item) => (item.id === groupId ? { ...item, metadata: { ...item.metadata, ...patch } } : item)));
 
+                const { cuts: sceneCuts } = await detectVideoSceneCuts(projectId, node.id);
                 const result = await extractShotKeyframes(node.metadata.content, {
+                    sceneCuts,
                     onProgress: (ratio) => {
                         setKeyframeProgress(ratio);
                         // 检测阶段占前 60%，与后续抽帧上传共用同一条进度条。

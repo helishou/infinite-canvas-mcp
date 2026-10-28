@@ -398,8 +398,16 @@ export class ProductionCompilationService {
     }
     private reusableBlock(job: CompilationJob) {
         const errors = job.diagnostics.filter((item: DiagnosticLike) => diagnosticForAction(item, "compile"));
-        return job.status === "blocked" && Boolean(job.compilerInputFingerprint) && errors.length > 0
-            && errors.every(item => item.code === "PROMPT_EXTERNAL_CONTEXT" && item.origin === "source" && item.blocksCompilation === true && item.targetId && item.path && item.matchedText);
+        // A nonzero compiler exit with no artifacts also adds a generic no-output
+        // diagnostic. Keep it in the receipt, but do not let that consequence
+        // obscure otherwise fully located, deterministic source blockers.
+        const noOutput = errors.filter(item => item.code === "COMPILER_EXITED_WITHOUT_OUTPUT");
+        const generatedNoOutput = noOutput.length === 1 && noOutput[0].path === "compile.output" && !noOutput[0].origin
+            && String(noOutput[0].message || "").startsWith("编译器以退出码 ")
+            && Array.isArray(job.result?.targets) && job.result.targets.length === 0;
+        const located = generatedNoOutput ? errors.filter(item => item !== noOutput[0]) : errors;
+        return job.status === "blocked" && Boolean(job.compilerInputFingerprint) && located.length > 0
+            && located.every(item => item.code === "PROMPT_EXTERNAL_CONTEXT" && item.origin === "source" && item.blocksCompilation === true && item.targetId && item.path && item.matchedText);
     }
     private blockedInput(id: string, owner: string, fingerprint: string) {
         const db = this.database();

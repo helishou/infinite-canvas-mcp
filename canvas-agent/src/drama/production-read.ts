@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { productionSourceFieldsSchema, projectProductionSourceFields, validateProductionSourceFields } from "./production-source-fields.js";
 
 export const productionSourceSectionSchema = z.enum(["context", "script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]);
 export const productionReadSchema = z.object({
@@ -6,6 +7,7 @@ export const productionReadSchema = z.object({
     snapshot: z.enum(["draft", "published"]).default("draft"),
     targetIds: z.array(z.string().min(1)).optional(),
     sourceSection: productionSourceSectionSchema.optional(),
+    fields: z.preprocess(value => { if (typeof value !== "string") return value; try { return JSON.parse(value); } catch { return value; } }, productionSourceFieldsSchema),
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
     chunkBytes: z.coerce.number().int().positive().optional(),
@@ -15,8 +17,10 @@ export const productionReadSchema = z.object({
 });
 export function productionReadQuery(raw: unknown) {
     const input = productionReadSchema.parse(raw);
+    validateProductionSourceFields(input);
     const query = new URLSearchParams({ view: input.view, snapshot: input.snapshot });
     if (input.targetIds) query.set("targetIds", input.targetIds.join(","));
+    if (input.fields) query.set("fields", JSON.stringify(input.fields));
     for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "includeContext", "includeRuntime", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
     return `?${query}`;
 }
@@ -24,13 +28,15 @@ export function productionReadQuery(raw: unknown) {
 /** MCP reads select one complete payload instead of repeating source/prompts/history. */
 export function projectProductionRead(production: any, raw: unknown = {}, digest?: (value: string) => string, fullValue: unknown = production, artifactStaleReason?: (artifact: any) => string | undefined) {
     const input = productionReadSchema.parse(raw);
+    validateProductionSourceFields(input);
+    const fieldsReceipt = input.fields ? { sourceFields: input.fields, partialSource: true } : {};
     const header = { episodeId: production.episodeId, ...(production.sceneId ? { sceneId: production.sceneId } : {}), ...(production.projectId ? { projectId: production.projectId } : {}), revision: production.revision, publishedVersion: production.publishedVersion, updatedAt: production.updatedAt,
         ...(production.storageFormat === "v2-projection-migration-required" ? { storageFormat: production.storageFormat } : {}),
         ...(production.publishedFormatStatus ? { publishedFormatStatus: production.publishedFormatStatus } : {}) };
     const selected = production[input.snapshot];
     if (input.snapshot === "published" && selected?.director && !subjectPromptV2(selected.director.source)) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 历史发布稿是旧版 Director 格式，只能通过维护命令检查；当前 v2 草稿仍可继续编辑。");
     const d = selected?.director;
-    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes, includeContext: input.includeContext, includeRuntime: input.includeRuntime });
+    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes, ...(input.fields ? { fields: input.fields, pageSize: input.pageSize } : {}), includeContext: input.includeContext, includeRuntime: input.includeRuntime });
     let offset = 0;
     if (input.cursor) {
         let cursor: any;
@@ -40,7 +46,7 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     }
     // 续页仍须返回未读部分；不能让条件读取把同版本的下一页吞掉。
     if (!["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view) && !input.cursor && input.ifRevision !== undefined && input.ifRevision === production.revision) {
-        return { ...header, snapshot: input.snapshot, view: input.view, sourceHash: d?.sourceHash, unchanged: true };
+        return { ...header, ...fieldsReceipt, snapshot: input.snapshot, view: input.view, sourceHash: d?.sourceHash, unchanged: true };
     }
     if (input.view === "full" && !input.chunkBytes) return withoutDirectorProjection(fullValue);
     const next = (index: number) => encodeURIComponent(JSON.stringify({ selection, offset: index }));
@@ -74,7 +80,6 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, workbenchVersion: production.workbenchVersion,
             ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(selectedWorkbench)) } : { workbench: selectedWorkbench }) };
     }
-    const selectedArtifacts = (d?.artifacts || []).filter((a: any) => !input.targetIds || input.targetIds.includes(a.targetId));
     if (input.view === "source") {
         if (input.targetIds && !input.sourceSection) throw new Error("定向源稿读取必须指定 sourceSection");
         const source = d?.source || null;
@@ -91,13 +96,23 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         if (input.chunkBytes) {
             const value = Array.isArray(filtered) ? (filtered.length === 1 ? filtered[0] : undefined) : filtered;
             if (value === undefined) throw new Error("分块读取必须选定一个源稿对象");
+            if (input.fields) {
+                const projected = projectProductionSourceFields(value, input.fields);
+                return { ...header, ...fieldsReceipt, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...mappingReceipt, missingFields: projected.missingFields, chunk: chunk(JSON.stringify(projected.value)) };
+            }
             return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...mappingReceipt, chunk: chunk(JSON.stringify(value)) };
+        }
+        if (input.fields) {
+            const projected = projectProductionSourceFields(page ? page.items : filtered, input.fields, offset);
+            return { ...header, ...fieldsReceipt, snapshot: input.snapshot, sourceHash: d?.sourceHash, ...mappingReceipt,
+                missingFields: projected.missingFields, source: page ? { ...page, items: projected.value } : projected.value };
         }
         return { ...header, snapshot: input.snapshot, engine: d?.engine, sourceHash: d?.sourceHash,
             ...(input.sourceSection === "context" ? { omittedSourceSections: ["script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"], ledgerSummary: source?.ledger ? { contractVersion: source.ledger.contract_version, counts: Object.fromEntries(["facts", "timelines", "initial", "events", "requirements", "coverage"].map(key => [key, Array.isArray(source.ledger[key]) ? source.ledger[key].length : 0])) } : null } : {}),
             ...mappingReceipt, source: page || filtered };
     }
     if (input.view === "artifacts" || input.view === "artifact_index") {
+        const selectedArtifacts = (d?.artifacts || []).filter((a: any) => !input.targetIds || input.targetIds.includes(a.targetId));
         if (input.chunkBytes) {
             if (input.view !== "artifacts" || selectedArtifacts.length !== 1) throw new Error("分块读取必须选定一个产物");
             return { ...header, snapshot: input.snapshot, targetId: selectedArtifacts[0].targetId, chunk: chunk(selectedArtifacts[0].prompt) };

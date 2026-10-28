@@ -540,8 +540,18 @@ export class CanvasSession {
             if (!projectId || !this.exportSnapshot) throw new Error("无法取得 Backend 权威画布导出能力");
             return this.exportSnapshot(projectId);
         }
-        const readTool = ["canvas_get_state", "canvas_get_selection"].includes(name);
+        const readTool = ["canvas_get_state", "canvas_get_selection"].includes(name) || name === "canvas_inspect" && input.view === "context";
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
+        if (name === "canvas_inspect" && input.view === "context") {
+            const canvas = this.canvasState!;
+            if (input.projectId && input.projectId !== canvas.projectId) throw new Error(`当前未连接画布：${input.projectId}`);
+            const selected = new Set(canvas.selectedNodeIds || []);
+            const nodes = canvas.nodes || [];
+            return { ok: true, ready: true, view: "context", currentState: {
+                activeProjectId: canvas.projectId, targetProjectId: canvas.projectId, source: "browser",
+                project: { id: canvas.projectId, title: canvas.title, nodeCount: nodes.length, connectionCount: (canvas.connections || []).length },
+            }, selection: nodes.filter(node => selected.has(node.id)).map(node => canvasNodeIndex(node as unknown as Record<string, unknown>)) };
+        }
         if (name === "canvas_get_state") {
             const canvas = this.canvasState!;
             if (input.projectId && input.projectId !== canvas.projectId) throw new Error(`当前未连接画布：${input.projectId}`);

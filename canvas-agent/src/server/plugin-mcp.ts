@@ -41,7 +41,7 @@ export type PluginMcpContext = {
     backend: PluginMcpBackend;
     /** Read one authoritative canvas snapshot by id. Concurrent H3 reads share only the in-flight fetch. */
     getCanvasProject: (projectId: string) => Promise<Record<string, unknown>>;
-    getCanvasH3Context?: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }) => Promise<Record<string, unknown>>;
+    getCanvasH3Context?: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[]; segmentIds?: string[]; savedOnly?: boolean }) => Promise<Record<string, unknown>>;
     getCanvasH3NodeSummary?: (projectId: string, nodeId: string, signal?: AbortSignal) => Promise<Record<string, unknown>>;
     /** ComfyUI 能力（Backend 唯一权威；见 comfy-client.ts）。 */
     comfyUi: ComfyUiClient;
@@ -68,7 +68,7 @@ export type PluginMcpBackend = {
     };
     listCanvasProjects(): Promise<Record<string, unknown>[]>;
     getCanvasProject(projectId: string): Promise<Record<string, unknown>>;
-    getCanvasH3Context?(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }): Promise<Record<string, unknown>>;
+    getCanvasH3Context?(projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[]; segmentIds?: string[]; savedOnly?: boolean }): Promise<Record<string, unknown>>;
     getCanvasH3NodeSummary?(projectId: string, nodeId: string, signal?: AbortSignal): Promise<Record<string, unknown>>;
     prepareMcpCommand(input: { operationId: string; tool: string; targetId: string; projectId?: string; request: unknown; payload: Record<string, unknown>; receipt: Record<string, unknown> }, signal?: AbortSignal): Promise<Record<string, unknown>>;
     getMcpCommandReceipt(operationId: string, signal?: AbortSignal): Promise<{ ok: boolean; command: Record<string, unknown> | null }>;
@@ -150,7 +150,7 @@ export function buildPluginMcpContext(backend: PluginMcpBackend, comfyUi: ComfyU
     return {
         backend,
         getCanvasProject: (projectId) => readCanvasProjectOnce(backend, projectId),
-        ...(backend.getCanvasH3Context ? { getCanvasH3Context: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[] }) => backend.getCanvasH3Context!(projectId, nodeId, segmentId, signal, dependencies) } : {}),
+        ...(backend.getCanvasH3Context ? { getCanvasH3Context: (projectId: string, nodeId: string, segmentId?: string, signal?: AbortSignal, dependencies?: { sourceNodeIds?: string[]; assetIds?: string[]; segmentIds?: string[]; savedOnly?: boolean }) => backend.getCanvasH3Context!(projectId, nodeId, segmentId, signal, dependencies) } : {}),
         ...(backend.getCanvasH3NodeSummary ? { getCanvasH3NodeSummary: (projectId: string, nodeId: string, signal?: AbortSignal) => backend.getCanvasH3NodeSummary!(projectId, nodeId, signal) } : {}),
         comfyUi,
         getCanvasNodes: readNodes,
@@ -230,8 +230,10 @@ type RegisteredPluginTool = {
 export class PluginMcpRegistry {
     private plugins = new Map<string, RegisteredPlugin>();
     private registeredTools = new Map<string, RegisteredPluginTool>();
+    private revision = 0;
+    get contractRevision() { return this.revision; }
 
-    constructor(private readonly server: McpServer, private readonly context: PluginMcpContext) {}
+    constructor(private readonly server: McpServer, private readonly context: PluginMcpContext, private readonly isToolVisible: (name: string) => boolean = () => true) {}
 
     /** 浏览器启用/禁用时调用:持久化声明并在当前进程立即应用。 */
     async syncFromBrowser(declarations: PluginMcpDeclaration[]) {
@@ -279,7 +281,7 @@ export class PluginMcpRegistry {
         // hide the old working tools or leave an enabled unvalidated callback.
         const prepared = plugin.tools.flatMap((tool) => {
             const handler = plugin.handlers[tool.id];
-            if (!handler) return [];
+            if (!handler || !this.isToolVisible(tool.id)) return [];
             const entry = this.registeredTools.get(tool.id);
             if (entry && entry.ownerId !== plugin.id) throw new Error(`MCP tool id already owned: ${tool.id}`);
             const schemaKey = JSON.stringify(tool.inputJsonSchema);
@@ -296,7 +298,7 @@ export class PluginMcpRegistry {
                 // Stable dispatch updates the handler without overwriting the
                 // registration-time Backend observability wrapper.
                 entry.handler = handler;
-                entry.handle.update({ title: tool.name, description: tool.description, annotations: (tool.annotations ?? {}) as RegisteredTool["annotations"], enabled: true });
+                entry.handle.update({ title: tool.name, description: tool.description, annotations: (tool.annotations ?? {}) as RegisteredTool["annotations"], enabled: this.isToolVisible(tool.id) });
                 continue;
             }
             // SDK update(paramsSchema) only accepts a raw shape and constructs
@@ -314,8 +316,10 @@ export class PluginMcpRegistry {
                 const result = await current.handler(input, this.context, request);
                 return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
             });
+            if (!this.isToolVisible(tool.id)) current.handle.disable();
             this.registeredTools.set(tool.id, current);
         }
+        this.revision++;
     }
 
     private unregister(id: string) {
@@ -325,6 +329,7 @@ export class PluginMcpRegistry {
         for (const entry of this.registeredTools.values()) {
             if (entry.ownerId === id && entry.handle.enabled) entry.handle.disable();
         }
+        this.revision++;
     }
 
     /** 当前已注册插件与工具清单(供调试/状态查询)。 */

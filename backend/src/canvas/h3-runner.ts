@@ -467,7 +467,7 @@ export class CanvasH3Runner {
                     try { descriptor = JSON.parse(String(child.params.continuationTask || "")) as Record<string, unknown>; } catch { continue; }
                     if (descriptor.workflow !== input.projectId || descriptor.node !== "nf_v15" || descriptor.group !== continuation.group
                         || descriptor.run !== parent.id || descriptor.index !== continuation.index - 1) continue;
-                    for (const key of ["aspectRatio", "megapixels", "sizeMultiple", "latentUpscaleAlign", "modelName", "videoVae", "audioVae"] as const) {
+                    for (const key of ["aspectRatio", "megapixels", "latentUpscaleAlign", "modelName", "videoVae", "audioVae"] as const) {
                         if (JSON.stringify(child.params[key]) !== JSON.stringify(selectedParams[key])) {
                             throw new Error(`Clip ${plan.segmentIndex + 1} 的 ${key} 与上一段潜变量不匹配，请恢复参数或从组首运行`);
                         }
@@ -519,16 +519,15 @@ export class CanvasH3Runner {
                 const headParams = extractParams(head, input.params || {}, metadata, defaults);
                 const aspectRatio = String(headParams.aspectRatio || "");
                 const megapixels = Number(headParams.megapixels);
-                const sizeMultiple = Number(headParams.sizeMultiple || 32);
                 const latentUpscaleAlign = Number(headParams.latentUpscaleAlign || 2);
-                if (!aspectRatio || aspectRatio === "原图比例" || !Number.isFinite(megapixels) || megapixels <= 0 || !Number.isFinite(sizeMultiple) || sizeMultiple <= 0 || !Number.isFinite(latentUpscaleAlign) || latentUpscaleAlign <= 0) {
+                if (!aspectRatio || aspectRatio === "原图比例" || !Number.isFinite(megapixels) || megapixels <= 0 || !Number.isFinite(latentUpscaleAlign) || latentUpscaleAlign <= 0) {
                     throw new Error("潜空间续写需要组首 Clip 使用固定画幅和有效分辨率，才能让后续 Clip 继承同一潜变量尺寸");
                 }
                 if (nodePlans.some((plan) => {
                     const segment = segments.find((item) => item.id === plan.segmentId);
                     return segment && extractParams(segment, input.params || {}, metadata, defaults).latentUpscaleEnabled === true;
                 })) throw new Error("潜空间续写当前不能与 H3 潜空间放大二采混用；二采会改变保存的潜变量尺寸");
-                const inherited = { aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign };
+                const inherited = { aspectRatio, megapixels, latentUpscaleAlign };
                 return nodePlans.slice(1).flatMap((plan) => {
                     const segment = segments.find((item) => item.id === plan.segmentId);
                     if (!segment) throw new Error(`潜空间续写 Clip ${plan.segmentId} 已不存在`);

@@ -557,6 +557,7 @@ function rowsForContract(value: unknown): Array<Record<string, any>> {
     return Array.isArray(value) ? value.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, any>> : [];
 }
 export { productionReadSchema, productionReadQuery, projectProductionRead, projectProductionVersion, productionWriteReceipt } from "./production-read.js";
+export { assertProductionSourceFields, validateProductionSourceFields } from "./production-source-fields.js";
 
 /** Stable wire hashing input shared by offline adapters and Backend. */
 export function canonicalProduction(value: unknown): string {

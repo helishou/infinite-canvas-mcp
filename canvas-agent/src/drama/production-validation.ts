@@ -9,6 +9,7 @@ import { directorPatchFields, productionContractVersion, productionOperationSche
 const scene = { id: "scene-1", heading: "Interior", location: "Room", timeOfDay: "Day", blocks: [] };
 const block = { id: "block-1", kind: "action", text: "The door opens." };
 const examples: Record<string, unknown> = {
+    request_director_shot_refresh: { shotIds: ["SHOT1"] },
     set_director_production: { director: { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "example", runtimeId: "a".repeat(40) + "-" + "b".repeat(16), version: "example" }, source: { version: 2, prompt_assembly: { version: 2 }, subject_registry: [], shots: [], segments: [], utterances: [], asset_plan: [], character_registry: [], scene_registry: [], ledger: { contract_version: 2, facts: [], timelines: [], initial: [], events: [], requirements: [], coverage: [] } }, sourceHash: "0".repeat(64), modules: {}, artifacts: [], assets: {}, shotInputs: {}, boundaries: [], unresolved: [] } },
     delete_director_subject: { id: "SUBJECT1" },
     create_manual_director_asset: { assetPlan: { id: "PROP1", kind: "prop", asset_name: "Prop", version: "v1", description: "", purpose: "", depends_on: [], status: "planned" }, assetCard: { id: "PROP1", asset_id: "PROP1", asset_kind: "prop", asset_version: "v1", prompt: "", references: [] } },

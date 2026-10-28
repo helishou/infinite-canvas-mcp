@@ -13,6 +13,15 @@ import type { DirectorProduction } from "@basketikun/canvas-agent/drama/producti
 import { compilationScopeInput, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 const externalBlock = { code: "PROMPT_EXTERNAL_CONTEXT", path: "director.source.shots.SH1.visual", targetId: "SEG1", shotId: "SH1", origin: "source" as const, matchedText: "preceding segment", blocksCompilation: true, message: "Prompt depends on external prose: preceding segment", severity: "error" as const };
+test("a separate compiler-origin no-output error is not hidden by a located source blocker", async t => {
+    const { root, service } = fixture(t);
+    let calls = 0;
+    const compiler = (input: DirectorProduction) => { calls++; return { director: input, exitCode: 2, diagnostics: [externalBlock, { code: "COMPILER_EXITED_WITHOUT_OUTPUT", path: "compile.output", origin: "compiler" as const, severity: "error" as const, blocksCompilation: true, message: "Independent compiler failure" }], audit: {}, sourceAdjustments: [], acceptance: {} }; };
+    const jobs = new ProductionCompilationService(service, root, compiler);
+    jobs.enqueue("episode", "episode", "mixed-one", 1); await done(jobs, "mixed-one");
+    jobs.enqueue("episode", "episode", "mixed-two", 1); await done(jobs, "mixed-two");
+    assert.equal(calls, 2);
+});
 async function done(compilations: ProductionCompilationService, operationId: string) {
     for (let attempt = 0; attempt < 300; attempt++) {
         await new Promise<void>(resolve => setTimeout(resolve, 1));
@@ -52,6 +61,8 @@ test("located hard blockers reuse across IDs and restart without recompiling or 
     assert.equal(page.items[0].code, externalBlock.code);
     const staleBase = restored.enqueue("episode", "episode", "stale", 0);
     assert.equal(staleBase.expectedRevision, service.get("episode").revision, "a stale global cursor compiles the current saved input");
+    assert.equal((await done(restored, "stale")).status, "blocked");
+    assert.equal(calls, 1, "a reused blocked input does not re-run the compiler");
     assert.throws(() => restored.enqueue("episode", "episode", "blocked-alias", 1, director), /IDEMPOTENCY_CONFLICT/);
     assert.throws(() => restored.getCompilation("another", "episode", "blocked-alias"), /不属于/);
     assert.equal(JSON.stringify(service.get("episode")), before);
@@ -358,13 +369,14 @@ test("repeated media bindings read bytes once per verification and still reject 
     assert.throws(() => service.verifyCompilationBindings("episode", director), /reference bytes changed|内容已发生变化/);
     director.assets.B.sha256 = promptHash(bytes);
     director.assets.B.nodeId = "missing-node";
-    assert.doesNotThrow(() => service.verifyCompilationBindings("episode", director), "unreferenced cached asset metadata must not block a current compile after its source binding moves");
+    assert.throws(() => service.verifyCompilationBindings("episode", director), /不在制作画布/);
+    assert.doesNotThrow(() => service.verifyCompilationBindings("episode", director, { allowUnreferencedAssetNodes: true }), "unreferenced cached asset metadata must not block a current compile after its source binding moves");
     const prompt = "A current compiled prompt";
     const digest = promptHash(prompt);
     director.artifacts = [{ id: "h3-A", kind: "h3", targetId: "A", prompt, sha256: digest, sourceHash: director.sourceHash, status: "ready",
         references: [{ label: "<Picture 1>", nodeId: "missing-node", storageKey, sha256: promptHash(bytes), role: "environment" }],
         receipt: { sourceHash: director.sourceHash, promptHash: digest, engineRuntimeId: director.engine.runtimeId, validator: "fixture" } }];
-    assert.throws(() => service.verifyCompilationBindings("episode", director), /not bound|不在制作画布/,
+    assert.throws(() => service.verifyCompilationBindings("episode", director, { allowUnreferencedAssetNodes: true }), /not bound|不在制作画布/,
         "a current compiled reference must still belong to its recorded canvas node");
 });
 

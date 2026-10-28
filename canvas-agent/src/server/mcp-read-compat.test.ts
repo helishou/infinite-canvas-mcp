@@ -16,11 +16,22 @@ test("Agent HTTP forwards historical views and Backend export references", async
     backend.use((req, _res, next) => { if (!req.path.startsWith("/agent") && req.path.startsWith("/canvas/projects") || req.path.startsWith("/drama/")) businessRequests++; next(); });
     backend.get("/plugins/mcp", (_req, res) => res.json({ ok: true, declarations: [] }));
     backend.get("/drama/episodes/e/production", (req, res) => {
+        if (req.query.fields) {
+            assert.equal(req.query.sourceSection, "segments");
+            assert.deepEqual(JSON.parse(String(req.query.fields)), ["id"]);
+            return void res.json({ production: { revision: 7, partialSource: true, sourceFields: ["id"], source: [{ id: "seg" }] } });
+        }
         assert.equal(req.query.ifRevision, "7");
         assert.equal(req.query.view, "source");
         assert.equal(req.query.sourceSection, "segments");
         res.json({ ok: true, production: { revision: 7, unchanged: true } });
     });
+    backend.get("/drama/scenes/s/production", (req, res) => {
+        assert.equal(req.query.view, "source");
+        assert.deepEqual(JSON.parse(String(req.query.fields)), ["duration_frames"]);
+        res.json({ production: { revision: 7, partialSource: true, sourceFields: ["duration_frames"], source: [{ id: "shot", duration_frames: 96 }] } });
+    });
+    backend.get("/canvas/projects/old/production", (_req, res) => res.json({ production: { source: "private old Backend body" } }));
     backend.get(["/drama/episodes/e/production/versions/2", "/canvas/projects/c/production/versions/2", "/drama/scenes/s/production/versions/2"], (req, res) => {
         assert.equal(req.headers.authorization, "Bearer fixture");
         assert.equal(req.query.view, "summary");
@@ -49,6 +60,13 @@ test("Agent HTTP forwards historical views and Backend export references", async
         assert.equal((await call(name, input)).result.version.snapshot.view, "summary");
     }
     assert.equal((await call("production_get_source", { kind: "episode", id: "e", sourceSection: "segments", ifRevision: 7 })).result.production.unchanged, true);
+    assert.deepEqual((await call("production_get_source", { kind: "episode", id: "e", sourceSection: "segments", fields: ["id"] })).result.production.source, [{ id: "seg" }]);
+    assert.deepEqual((await call("production_get_scene_production", { sceneId: "s", view: "source", sourceSection: "shots", fields: ["duration_frames"] })).result.production.source, [{ id: "shot", duration_frames: 96 }]);
+    const oldFields = await fetch(`${url}/agent/api/tools`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "production_get_source", input: { kind: "canvas", id: "old", sourceSection: "shots", fields: ["id"] } }) });
+    assert.notEqual(oldFields.status, 200);
+    const oldError = await oldFields.text();
+    assert.match(oldError, /SOURCE_FIELDS_UNSUPPORTED/);
+    assert.ok(!oldError.includes("private old Backend body"));
     const beforeInvalidRead = businessRequests;
     const invalidRead = await fetch(`${url}/agent/api/tools`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "production_get", input: { kind: "episode", id: "e", view: "source", sourceSection: "segments", ifRevision: 7 } }) });
     assert.equal(invalidRead.status, 400);

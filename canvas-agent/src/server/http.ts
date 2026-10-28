@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import fs from "node:fs";
 import { productionWorkspaceRequest } from "../drama/production-workspace-contract.js";
+import { assertProductionSourceFields } from "../drama/production-source-fields.js";
 import { productionToolPreflight } from "../drama/production-tool-preflight.js";
 import path from "node:path";
 import express, {
@@ -695,7 +696,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       if (name === "director_subagent") return void res.json({ ok: true, result: await executeDirectorSubagentTool(backend, input) });
       if (isProductionTool(name)) return void res.json({ ok: true, result: await executeProductionTool(backend, name, input) });
       const workspaceRequest = productionWorkspaceRequest(name, input);
-      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? await backend.get(workspaceRequest.path) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input }) });
+      if (workspaceRequest) return void res.json({ ok: true, result: workspaceRequest.method === "GET" ? assertProductionSourceFields(await backend.get(workspaceRequest.path), input) : productionWriteReceipt(await backend.post(workspaceRequest.path, workspaceRequest.body), { tool: name, input }) });
       if (isCollaborationTool(name))
         return void res.json({
           ok: true,

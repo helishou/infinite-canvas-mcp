@@ -20,10 +20,13 @@
 - 剧目/导演制作中，用户使用中文时，Agent 对话、创作解释和导演工作台可读的制作源稿默认使用简体中文。Acheng 编译专用字段和最终 H3 正文继续遵循对应模型合同要求的语言；对白、歌词与画面内文字保留用户原文。不要自行翻译既有确认稿，只用中文撰写新内容及用户明确要求修改的范围。
 - 导演规划或调整视频片段时，每段 Clip（对应 Segment）的生成时长必须在 4–12 秒内，含 4 秒和 12 秒；这是本项目对上游生成窗口的收紧要求。保存源稿和提交编译前，逐段核对 `generation_clip_duration` 与帧窗换算秒数一致且都在范围内。超长段按剧情、对白或动作的安全边界拆分；不足 4 秒的短尾与同场次相邻段合并或重新分配边界，并再次检查所有段。不得通过加速对白、压缩动作或无意义填充凑时长；无法合理满足时报告具体边界问题。已有确认稿超出范围时，先说明受影响片段及调整方案，不静默改写已确认内容或重新生成媒体。
 - 制作工具统一显式传 `kind:episode/canvas` 与 `id`，不传旧 episodeId/projectId 参数。常规编辑直接保存；点击生成时调用 Backend 一次性校验、冻结当前画布输入并启动，不自动先跑 `production_preflight`、全局连续性检查或人工审核。连续性、风格、视觉与提示词质量诊断默认仅提示；缺媒体、哈希或归属不符、无效模型输入及真实冲突仍阻止受影响目标。`production_preflight` 只在用户要求检查或需要定位阻塞时主动调用。用户显式启用的 automatic/manual review 策略继续生效。用精确 runId/taskId 跟踪结果；不得把未审核媒体写成 approved。
+- MCP 的 production_edit 默认使用精简参数声明，完整校验仍在提交边界执行。已知操作字段可直接提交；嵌套对象详情不明时定向读取 `production_get_contract(operationType)`，已持有相同引擎和合同版本的内容就复用。不得将精简声明当作完整字段白名单；需要完整工具声明的客户端可新建 `schema=full` 连接。
 - 含视频的 ledger v2 可用本机当前激活 runtime 的 continuity 模块检查当前范围；报告供导演查看，不作为每次保存、编译、发布或生成的前置关卡。不要从旧 `state_in/state_out`、空事件或历史 evidence 字符串推断新事实，不修改派生快照。若缺共同事实，保留 needs_human 与未解项，不猜测事实；旧稿需要转换合同时仍使用显式 `upgrade_director_continuity` 并匹配预览 sourceHash/revision。
 - 主页没有打开的画布时，不要假定存在当前画布。创建或选择目标后使用工具真实返回的画布 ID 调用 `site_navigate` 打开 `/canvas/:id`，回读当前画布再继续节点和生成操作；返回不确定时先查对象与任务状态，避免重复创建或重复付费提交。
 
-- 用户要求操作画布时，默认目标就是网页当前已经打开的画布。需要了解内容时先使用 `canvas_get_state`；读取成功后直接在该画布执行任务，不要调用 `canvas_list_projects`，也不要用 `site_navigate` 重复进入画布。
+- 用户要求操作画布时，默认目标就是网页当前已经打开的画布。已知目标 ID 时直接定向读取或操作：节点基本信息用 `canvas_get_state(nodeIds,projection:summary)`，活动媒体用 projection:media，保存配置用 projection:generation；不需要完整 metadata 时不请求 full。未知 ID 才读取目录，需要当前项目/选区用 `canvas_inspect(view:context)`。读取成功后直接执行，不重复列画布或跳转页面。
+- H3 保存正文用 `h3_get_clip(fields)`，保存参数用 include:runtime，同节点多个 Clip 使用 segmentIds 一次读取。正式 Shot、对白及连续性修改走制作源稿，不覆写派生 Prompt；画布配置修改使用 h3_update_clips 批量提交。H3 生成按同范围 h3_preview_run 的有效 planHash 提交，不重复同义预检；媒体任务用 canvas_wait_tasks 按原 taskIds 等待，编译状态按原 operationId 查询 production_get_compilation。当前工具 schema 未提供新参数时使用其支持的定向入口。
+- 查询正式源稿的局部字段时，使用 production_get_source 的 sourceSection、targetIds 和 fields，不读取整条 Shot 的无关正文。fields 仅选择顶层键，稳定 ID 会保留，缺失字段看 missingFields；partialSource 结果只用于核对和局部编辑，不能填成完整 source 进行整稿替换。未请求 fields 时仍可完整读取，分页与分块需要读完。条件复用必须持有相同 fields/范围的已读内容；SOURCE_FIELDS_UNSUPPORTED 时先确认 Backend 加载版本，不原样重复或静默拉取整稿。
 - 只有用户明确要求查看、选择或切换其他画布，或者当前位于画布主页、`canvas_get_state` 明确提示当前没有已连接画布时，才使用 `canvas_list_projects` 和 `site_navigate`。`site_navigate` 可跳转 `/`、`/canvas`、`/canvas/:id`、`/drama`、`/image`、`/video`、`/prompts`、`/assets`、`/config`。
 - 修改当前画布时根据任务使用已配置的 infinite-canvas MCP 工具；复杂批量改动使用 `canvas_apply_ops`。
 - MCP 只创建智能生成节点和智能插件节点；普通文本、图片、视频、音频节点没有对应创建工具。不要通过 `canvas_apply_ops` 的 `add_node` 绕过此边界。

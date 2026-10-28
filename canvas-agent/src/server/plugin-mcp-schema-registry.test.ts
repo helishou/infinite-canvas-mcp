@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isToolInProfile } from "../canvas/tool-profiles.js";
 import {
     KNOWN_FIRST_PARTY, PluginMcpRegistry,
     type PluginMcpContext, type PluginMcpDeclaration, type PluginMcpModule, type PluginMcpToolWire,
@@ -15,7 +16,7 @@ function tool(id: string, inputJsonSchema: Record<string, unknown>, version = "1
 function declaration(version = "1", enabled = true): PluginMcpDeclaration {
     return { id: ID, version, name: ID, mcp: { enabled, tools: [] } };
 }
-async function fixture(t: TestContext, tools: PluginMcpToolWire[]) {
+async function fixture(t: TestContext, tools: PluginMcpToolWire[], visible: (name: string) => boolean = () => true) {
     let calls = 0;
     let loads = 0;
     let registrations = 0;
@@ -40,7 +41,7 @@ async function fixture(t: TestContext, tools: PluginMcpToolWire[]) {
             catch (error) { errors.push(error as { code?: string; issues?: unknown[] }); throw error; }
         });
     }) as typeof server.registerTool;
-    const registry = new PluginMcpRegistry(server, {} as PluginMcpContext);
+    const registry = new PluginMcpRegistry(server, {} as PluginMcpContext, visible);
     await registry.apply([declaration()]);
     const client = new Client({ name: "isolated-plugin-schema-client", version: "1" });
     const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
@@ -73,6 +74,21 @@ const constrainedSchema = {
     required: ["label", "count", "ratio", "tags", "closed", "open", "values", "choice"],
 };
 const valid = { label: "AB", count: 2, ratio: 0.5, tags: ["tag"], closed: { flag: true }, open: { untouched: { deep: 1 } }, values: { extra: 0 }, choice: "exact" };
+
+test("profile visibility survives plugin refresh and excludes unknown plugin tools", async t => {
+    const tools = [tool("h3_get_clip", { type: "object" }), tool("unknown-plugin-action", { type: "object" })];
+    const f = await fixture(t, tools, name => isToolInProfile("h3", name));
+    assert.deepEqual((await f.client.listTools()).tools.map(tool => tool.name), ["h3_get_clip"]);
+    const revision = f.registry.contractRevision;
+    f.reload({ id: ID, version: "2", tools, createHandler: () => Object.fromEntries(tools.map(tool => [tool.id, async () => ({ version: "2" })])) });
+    await f.registry.apply([declaration("2")]);
+    assert.ok(f.registry.contractRevision > revision);
+    assert.deepEqual((await f.client.listTools()).tools.map(tool => tool.name), ["h3_get_clip"]);
+    assert.equal((await f.client.callTool({ name: "unknown-plugin-action", arguments: {} })).isError, true);
+    assert.equal(resultValue(await f.client.callTool({ name: "h3_get_clip", arguments: {} })).version, "2");
+    await f.registry.apply([]);
+    assert.deepEqual((await f.client.listTools()).tools, []);
+});
 
 test("tools/list preserves declared constraints, descriptions and nested unknown-field policies", async (t) => {
     const { client } = await fixture(t, [tool("constrained", constrainedSchema)]);

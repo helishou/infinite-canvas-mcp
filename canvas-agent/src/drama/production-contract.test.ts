@@ -139,7 +139,9 @@ test("environment and asset-card patches update compiler source without changing
     assert.deepEqual(director.source.script_scenes, [{ id: "SC1", text: "The boy stands in the yard" }]);
     assert.deepEqual(director.source.asset_plan, [{ asset_id: "YARD", version: "v1" }]);
     assert.notEqual(director.sourceHash, beforeHash);
-    assert.throws(() => applyDirectorSourcePatch(director, "environment", "missing", { description: "Missing" }), /不存在/);
+    assert.throws(() => applyDirectorSourcePatch(director, "environment", "missing", { description: "Missing" }, { allowCreate: false }), /已删除/);
+    applyDirectorSourcePatch(director, "environment", "new-environment", { description: "New environment" });
+    assert.ok((director.source.scene_registry as any[]).some(item => item.id === "new-environment"));
     applyDirectorSourcePatch(director, "asset_card", "YARD", { references: [] });
     assert.deepEqual((director.source.asset_cards as any[])[0].references, []);
 });

@@ -7,7 +7,7 @@ import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionWorkspaceSchemas, productionContractQuerySchema, validateProductionContractQuery } from "@basketikun/canvas-agent/drama/production-contract";
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
-import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion, validateProductionSourceFields } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
@@ -226,6 +226,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try {
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
+            validateProductionSourceFields(query);
             let production: any;
             // Canonical reads use the saved source directly; legacy runtime projections are opt-in for execution paths.
             if (query.view === "clip_workbench") {
@@ -247,10 +248,12 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             };
             const selected = projectProductionRead(query.view === "full" ? production : { ...production, ...owner }, query,
                 value => crypto.createHash("sha256").update(value).digest("hex"), undefined, staleReason);
-            const activeClipRefreshes = service.clipRefreshStore(req.params.episodeId).currentBySegment()
-                .filter(job => job.status !== "succeeded").map(clipRefreshReceipt);
-            if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
-            if (!(selected as any).unchanged && query.targetIds?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+            if (!query.fields) {
+                const activeClipRefreshes = service.clipRefreshStore(req.params.episodeId).currentBySegment()
+                    .filter(job => job.status !== "succeeded").map(clipRefreshReceipt);
+                if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
+                if (!(selected as any).unchanged && query.targetIds?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+            }
             res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }
     });
@@ -313,6 +316,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const version = service.version(req.params.episodeId, Number(req.params.version));
             const owner = { episodeId: req.params.episodeId, ...(base.startsWith("/canvas") ? { projectId: req.params.episodeId } : base.startsWith("/drama/scenes") ? { sceneId: req.params.episodeId } : {}) };
             const query = { ...req.query, targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds };
+            if (req.query.fields !== undefined) validateProductionSourceFields(productionReadSchema.parse(query));
             res.json({ ok: true, version: req.query.view ? projectProductionVersion(owner, version, query, value => crypto.createHash("sha256").update(value).digest("hex")) : version });
         } catch (error) { handle(res, error); }
     });

@@ -39,7 +39,9 @@
     "./plugins/minimax-h3/character-groups": "./dist/plugins/minimax-h3/character-groups.js",
     "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
     "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js",
-    "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js"
+    "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js",
+    "./tool-profiles": "./dist/canvas/tool-profiles.js",
+    "./drama/production-edit-disclosure": "./dist/drama/production-edit-disclosure.js"
   },
   "types": "./dist/index.d.ts",
   "bin": {

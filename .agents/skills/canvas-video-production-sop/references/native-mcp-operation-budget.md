@@ -10,8 +10,8 @@
 
 1. 集中读取本轮实际需要的 schema；本轮已确认且未变化就复用。
 2. ID 未知先一次 h3_get_node；已知则直接定向读 Clip。
-3. h3_get_clip 用 include 一次读取本次需要的 prompt/references/runtime；实时 schema 提供 fields 时，只检查交接/timeline 等小字段用 fields，不附带两份完整 prompt。
-   多个独立 Clip 读取在同一轮通过 parallel 调度，不串行拆成 N 轮。
+3. h3_get_clip 读取保存字段时用 fields，保存参数用 include:runtime；同节点多段使用 segmentIds 合批，共用一次快照。编译正文、引用或动态结果使用单个 segmentId 按需读取，避免同时取 semantic/compiled 两份正文。h3_get_clip_runtime(view:saved) 不预览，省略 view 的旧行为会预览实际输入。
+   无法合批的独立 Clip 读取在同一轮并行调度；不能用 N 次并行调用冒充一次批量读取。
 4. 用读取结果离线准备所有 patch；完整 prompt 不用摘要或占位符代替。实时 schema 提供原生文件/句柄入口时，按 §九把完整数据留在文件，不让模型再次抄成内联参数。
 5. 同一 Clip 的关联字段合到一次写入。共享项目的提交批次串行，不要求每段各调一次。
    同一 H3 节点的多个已有 Clip 配置，实时 schema 提供 h3_update_clips 时，
@@ -156,15 +156,19 @@ canvas_get_state 默认目录与 nodeIds 定向完整 metadata 不是同一种�
 
 功能正确性、文件/HTTP协议时间、模型准备与端到端墙钟分别记录。不得拿隔离事务毫秒数宣称原生产改稿已从分钟降为秒；本节的集中复核约束仍是生产编排规则，不是模型行为的运行时硬拦截。
 
-## 十、生成前门禁梯（跨域通用）
+## 十、按实际提交入口校验
 
-付费生成前按固定顺序走完四道只读门禁，任何一道不通过都不提交任务：
+已有明确授权时，按具体入口完成必要校验；同一输入已有有效结果就复用，不将能力发现、预览和预检叠加成固定流程：
 
-1. **能力发现**：查当前引擎实际可用的模型/能力目录与参数 schema；生效默认值只用于识别现状，不代表本项目已满足目标，也不为本项目改全局默认。
-2. **输入清单核验**：参考顺序、来源身份、可用性与阻断项在提交前锁定；返回的摘要/句柄（如输入清单哈希）随生成请求提交，锁住本次实际输入。
-3. **预览与预检**：能预览的先用预览/`dryRun` 取得计划标识（如 planHash 或 prepared 句柄），并对同一目标范围预检；预检不写库、不建编译包、不提交媒体。
-4. **提交运行**：预检通过的同一范围与同一幂等键提交；预览过期标识（如 STALE 类错误）按错误建议用原范围重做预检再提交，不换 ID 赌成功。
+| 入口 | 必要校验与复用 |
+| --- | --- |
+| production_start_run | Backend 在提交边界一次性检查并冻结当前输入；不例行先调 production_preflight、全局连续性或质量检查。 |
+| h3_run_clip / h3_run_all_clips | 用与提交相同范围和参数的 h3_preview_run 获取 planHash；有效时直接提交，不额外跑同输入的 canvas_validate_generation。 |
+| 图片生成 | 沿图片生产契约核对参考清单与 manifestHash；不因 H3 要求 planHash 而追加 H3 预检。 |
+| 普通保存 | 直接通过所属源稿或画布编辑入口提交，由权威边界校验；仅首次复杂改稿或范围存疑时使用既有 dryRun。 |
 
-- 图片批次与 H3 连续组共用同一门禁梯；域内细节仍归各自参考：图片的图序/manifestHash 见[图片生产](canvas-image-production.md)，H3 的 planHash 范围与 Motion Context 连续组见[Clip 规格](canvas-clip-production.md)。
+仅在首次使用、能力不明或合同变化时发现模型/schema；生效默认值不能替代项目要求，也不因此修改全局默认。输入改变或返回过期错误时，只刷新受影响范围。确定性 blocked/failed 不轮询同输入终态，响应未知先恢复原回执/幂等请求。
+
+- 图片图序/manifestHash 见[图片生产](canvas-image-production.md)，H3 的 planHash 范围与 Motion Context 连续组见[Clip 规格](canvas-clip-production.md)；只执行对应入口要求的校验。
 - 预览通过不替代提交时的 revision、归属与幂等核验；回执未知先取原回执，不重复付费提交。
 - 门禁阶段只读；不得用「先生成再核验」代替预检，也不得为让预检通过而改全局默认或降低规格。

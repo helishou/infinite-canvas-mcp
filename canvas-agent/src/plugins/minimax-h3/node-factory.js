@@ -11,7 +11,7 @@ export const BASE_H3_NODE_METADATA = {
     videoVae: "minimax_h3_video_vae_fp16.safetensors",
     audioVae: "minimax_h3_audio_vae_fp32.safetensors",
     textEncoderType: "minimax", textEncoderDevice: "default", precision: "default",
-    sageAttention: "H3专用Sage加速", megapixels: 0.4, sizeMultiple: 32, refImageSize: "match", referenceLongEdge: 1920,
+    sageAttention: "H3专用Sage加速", megapixels: 0.4, refImageSize: "match", referenceLongEdge: 1920,
     sampler: "res_multistep", scheduler: "simple", allowCompile: false,
     slaBlockSize: "64", slaBackend: "comfy_kitchen", slaSparsity: 0.9, slaMinSequence: 4096, slaDenseLastSteps: 1,
     slaProtectAudio: true, slaDisableFp16Accum: true, slaStabilizeMotion: true,
@@ -23,7 +23,7 @@ export const BASE_H3_NODE_METADATA = {
     latentUpscalePrecision: "bf16", seed: undefined, noiseSeed: undefined, noiseSeedMode: "random", constantTriggerWord: "",
     noDub: true, noCaption: true, audioMode: "native", audioDenoiseStrength: 1, addSourceAsReference: false,
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
-    slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, teAccel: false, lockAudio: false, audioDrive: false,
+    slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, lockAudio: false, audioDrive: false,
     combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6, faceRefineEnabled: false,
     loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: true,
 };

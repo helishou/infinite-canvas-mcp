@@ -59,7 +59,7 @@ test("conditional reads reuse a complete revision and return new source after ed
     const full: any = projectProductionRead(production, { view: "full", ifRevision: production.revision });
     assert.equal(full.unchanged, true);
     assert.equal(full.draft, undefined);
-    assert.equal(projectProductionRead(production, { view: "full", ifRevision: 0 }), production);
+    assert.deepEqual(projectProductionRead(production, { view: "full", ifRevision: 0 }), production);
 });
 
 test("conditional checks never hide unread pages or bypass expired cursor validation", () => {
@@ -155,6 +155,7 @@ test("default summaries exclude growing collections and honor the selected publi
     const production: any = record();
     production.draft.keyframes = { huge: { prompt: "private".repeat(100000) } };
     production.published = { ...production.draft, director: { ...production.draft.director, sourceHash: "published" } };
+    production.published.director.source = { ...production.draft.director.source, version: 2, prompt_assembly: { version: 2 }, ledger: { contract_version: 2 } };
     const summary: any = projectProductionRead(production, { snapshot: "published" });
     assert.equal(summary.draft, undefined);
     assert.equal(summary.published.director.sourceHash, "published");

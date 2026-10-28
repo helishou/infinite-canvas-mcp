@@ -5,6 +5,7 @@ import express, {
   type Express,
 } from "express";
 import crypto from "node:crypto";
+import { summarizeCanvasState, validateCanvasStateInput, type StateInput } from "@basketikun/canvas-agent/state-summary";
 import fs from "node:fs";
 import path from "node:path";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
@@ -66,6 +67,7 @@ import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUploa
 import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
 import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
+import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
 
 const logger = createLogger("backend");
 
@@ -529,6 +531,7 @@ export function startServer(
   });
 
   // ── Canvas projects ──────────────────────────────────────────────────
+  registerVideoShotDetectionRoute(app, stores);
   app.get("/canvas/projects", (req, res) => {
     // v7: 画布表无 folder_id 列，过滤改用 ?episodeId=xxx；不传 = 返回全部。
     // 旧的 ?folderId=xxx 参数已废弃，前端通过 /drama 页面用 episodeId 过滤即可。
@@ -550,21 +553,24 @@ export function startServer(
     res.json({ ok: true, projects });
   });
   app.get("/canvas/projects/:id", (req, res) => {
-    if (req.query.view === "nodes") {
+    if ((req.query.projection !== undefined || req.query.includeConnections !== undefined) && req.query.view !== "nodes" && req.query.view !== "selection") return void res.status(400).json({ ok: false, error: "projection/includeConnections 仅支持 view=nodes/selection" });
+    if (req.query.view === "nodes" || req.query.view === "selection") {
       let nodeIds: string[] = [];
       try {
         const parsed = JSON.parse(String(req.query.nodeIds || "[]"));
         if (!Array.isArray(parsed) || parsed.some(value => typeof value !== "string")) return void res.status(400).json({ ok: false, error: "nodeIds 必须是字符串数组" });
         nodeIds = parsed;
       } catch { return void res.status(400).json({ ok: false, error: "nodeIds JSON 无效" }); }
-      const project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds);
+      const projection = req.query.projection;
+      const connections = req.query.includeConnections;
+      if (projection !== undefined && (typeof projection !== "string" || !["summary", "media", "generation", "full"].includes(projection))) return void res.status(400).json({ ok: false, error: "projection 必须为 summary/media/generation/full" });
+      if (connections !== undefined && connections !== "true" && connections !== "false") return void res.status(400).json({ ok: false, error: "includeConnections 必须为 true/false" });
+      const input: StateInput = { nodeIds, ...(projection !== undefined ? { projection: projection as StateInput["projection"] } : {}), ...(connections !== undefined ? { includeConnections: connections === "true" } : {}) };
+      validateCanvasStateInput(input);
+      const project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds, req.query.view === "selection", { includeConnections: input.includeConnections ?? projection === undefined });
       if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
-      return void res.json({ ok: true, project });
-    }
-    if (req.query.view === "selection") {
-      const project = db.getCanvasProjectNodeSnapshot(req.params.id, undefined, true);
-      if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
-      return void res.json({ ok: true, project });
+      if (req.query.view === "selection") input.nodeIds = (project.nodes as Array<{ id: string }>).map(node => node.id);
+      return void res.json({ ok: true, project: projection !== undefined || connections !== undefined ? summarizeCanvasState(project, input) : project });
     }
     if (req.query.view === "index") {
       const rawRevision = req.query.ifRevision;
@@ -586,7 +592,7 @@ export function startServer(
   app.get("/canvas/projects/:id/h3-context", (req, res) => {
     const nodeId = String(req.query.nodeId || "");
     if (!nodeId) return void res.status(400).json({ ok: false, error: "nodeId 必填" });
-    let sourceNodeIds: string[] = [], assetIds: string[] = [];
+    let sourceNodeIds: string[] = [], assetIds: string[] = [], segmentIds: string[] | undefined;
     try {
       const parseIds = (value: unknown) => {
         const parsed = JSON.parse(typeof value === "string" ? value : "[]");
@@ -595,8 +601,10 @@ export function startServer(
       };
       sourceNodeIds = parseIds(req.query.sourceNodeIds);
       assetIds = parseIds(req.query.assetIds);
+      if (req.query.segmentIds !== undefined) segmentIds = parseIds(req.query.segmentIds);
     } catch { return void res.status(400).json({ ok: false, code: "INVALID_INPUT", error: "sourceNodeIds 和 assetIds 必须是字符串数组 JSON" }); }
-    const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds });
+    if (req.query.savedOnly !== undefined && req.query.savedOnly !== "true" && req.query.savedOnly !== "false") return void res.status(400).json({ ok: false, error: "savedOnly 必须为 true/false" });
+    const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds, segmentIds, savedOnly: req.query.savedOnly === "true" });
     if (!project || !Array.isArray(project.nodes) || !project.nodes.length) return void res.status(404).json({ ok: false, error: "H3 节点不存在" });
     res.json({ ok: true, project });
   });

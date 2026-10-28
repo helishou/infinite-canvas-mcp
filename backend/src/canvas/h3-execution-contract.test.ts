@@ -148,6 +148,19 @@ test('first-pass and second-pass measured dimensions are checked separately; lan
     assert.equal(compareH3MediaSpecification({ width: 864, height: 480 }, params).status, 'mismatch');
 });
 
+test('one grid step of deviation is a specification mismatch, not a rounding tolerance', () => {
+    // 9:16 的 0.98MP 与 1MP 只差一个 32px 网格步长（768×1344 / 768×1376），
+    // 少算一档高曾是「> grid」容差吞掉的真实分歧。
+    const params = { aspectRatio: '9:16', megapixels: 0.98, latentUpscaleAlign: 2 };
+    assert.equal(compareH3MediaSpecification({ width: 768, height: 1344 }, params).status, 'passed');
+    assert.equal(compareH3MediaSpecification({ width: 768, height: 1376 }, params).status, 'mismatch');
+    assert.equal(compareH3MediaSpecification({ width: 768, height: 1360 }, params).status, 'mismatch');
+    assert.equal(compareH3MediaSpecification({ width: 768, height: 1376 }, { ...params, megapixels: 1 }).status, 'passed');
+    // 像素域后处理合法改变尺寸时不判定尺寸不符。
+    assert.equal(compareH3MediaSpecification({ width: 1152, height: 2016 }, { ...params, rtxEnabled: true }).status, 'passed');
+    assert.equal(compareH3MediaSpecification({ width: 1152, height: 2016 }, { ...params, dlssUpscaleMode: '视频超分' }).status, 'passed');
+});
+
 test('展开流合同沿释放屏障核对名字，并且仍然能抓到真实偏差', async () => {
     const { buildExpandedNanFengV10Workflow } = await import('../comfyui/bridge.js');
     const expected = {
@@ -292,8 +305,8 @@ test('确认阶段的展开流合同：快照承载的字段不再误报，sigma
         { mode: 'ref2va', seed: 1, ...expected, latentUpscaleAlign: 2 },
         async (file: string) => file, 'http://comfy.test', new AbortController().signal,
     );
-    const first = splitH3Confirmation(await build(), 'first', checkpoint, false);
-    const second = splitH3Confirmation(await build(), 'second', checkpoint, false);
+    const first = splitH3Confirmation(await build(), 'first', checkpoint);
+    const second = splitH3Confirmation(await build(), 'second', checkpoint);
     // 一采：编码器与帧尺寸节点都还在，sigma 边界钉在 SplitSigmas.step = h3FirstSteps。
     assert.doesNotThrow(() => assertH3WorkflowContract(first, { ...expected, latentConfirmationPhase: 'first' }));
     // 二采：条件张量/编码器/帧尺寸来自快照，图里没有它们属正常，不能判成偏离。

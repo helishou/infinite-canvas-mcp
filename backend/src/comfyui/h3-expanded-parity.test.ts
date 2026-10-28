@@ -24,7 +24,6 @@ const base = {
     audioVae: "H3\\minimax_h3_audio_vae_fp32.safetensors",
     aspectRatio: "16:9 (Widescreen)",
     megapixels: 0.4,
-    sizeMultiple: 32,
     referenceLongEdge: 1920,
     duration: 5,
     steps: 20,
@@ -231,8 +230,8 @@ test("@引用别名按原生规则编号，音频序号在视频音轨与音频�
  * 期望值同样是从原生展开图跑 pack 的 split_confirmation() 抄下来的（22 / 18 节点），
  * 排除展开流自己特有的节点后逐类对齐。
  * 唯一已知差异：sigma 来源。原生二采分支默认用 BasicScheduler（steps 驱动），
- * 而画布一律显式传 h3FullSigma，展开流走 ManualSigmas —— 这条差异在切换展开流之前就存在
- * （manualSigma 一直登记在 H3_MERGED_ONLY_DEFAULTS 里），不是这次切分引入的。
+ * 而画布一律显式传 h3FullSigma，展开流走 ManualSigmas —— 这条差异在切换展开流之前就存在，
+ * 不是这次切分引入的。
  */
 const CONFIRMATION_EXTRA = ["VHS_VideoCombine", "ImpactExecutionOrderController"];
 const NATIVE_CONFIRMATION_FIRST = ["BasicGuider", "BasicScheduler", "CLIPLoader", "InfiniteCanvasH3SaveCheckpoint", "KSamplerSelect", "LoadImage", "MiniMaxH3MemoryEfficientSageAttentionPatch", "MiniMaxH3ReferenceToVideo", "NanFengH3KJPreviewBridgeV15", "NanFengH3LimitImageLongEdgeV15", "NanFengH3ReleaseAtStartV15", "NanFengH3ReleaseBeforeConditionLoadersV15", "NanFengH3ReleaseBeforeSamplingV15", "NanFengH3TimedAudioVAEDecodeV15", "NanFengH3TimedVideoVAEDecodeV15", "NanFengV15DLSSOutput", "RandomNoise", "SamplerCustomAdvanced", "SplitSigmas", "UNETLoader", "VAELoader"];
@@ -243,7 +242,7 @@ const checkpointClasses = (graph: Record<string, any>) =>
     [...new Set(Object.values(graph).map((node: any) => node.class_type).filter((type: string) => !CONFIRMATION_EXTRA.includes(type)))].sort();
 
 test("一采确认阶段与原生切分同构：放大器与二采都被裁掉，只剩落盘快照", async () => {
-    const graph = splitH3Confirmation(await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS), "first", "c".repeat(64), false);
+    const graph = splitH3Confirmation(await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS), "first", "c".repeat(64));
     assert.deepEqual(checkpointClasses(graph), NATIVE_CONFIRMATION_FIRST.map(type => type === "BasicScheduler" ? "ManualSigmas" : type).sort());
     assert.equal(graph.nf_latent_upscale, undefined);
     assert.equal(graph.nf_sample_second, undefined);
@@ -252,7 +251,7 @@ test("一采确认阶段与原生切分同构：放大器与二采都被裁掉�
 });
 
 test("二采确认阶段与原生切分完全同构：一采采样与 guider 都被裁掉，快照当输入", async () => {
-    const graph = splitH3Confirmation(await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS), "second", "c".repeat(64), false);
+    const graph = splitH3Confirmation(await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS), "second", "c".repeat(64));
     assert.deepEqual(checkpointClasses(graph), NATIVE_CONFIRMATION_SECOND);
     assert.equal(graph.nf_sample_first, undefined);
     assert.equal(graph.nf_guider, undefined);
@@ -263,8 +262,8 @@ test("二采确认阶段与原生切分完全同构：一采采样与 guider 都
 test("确认阶段只认结构性锚点，锚点被改动时必须明确报错而不是切错", async () => {
     const broken = await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS);
     delete broken.nf_latent_upscale;
-    assert.throws(() => splitH3Confirmation(broken, "first", "c".repeat(64), false), /找不到唯一的确认边界/);
+    assert.throws(() => splitH3Confirmation(broken, "first", "c".repeat(64)), /找不到唯一的确认边界/);
     const noGuider = await build(["probe_ref.png"], undefined, CONFIRMATION_PARAMS);
     noGuider.nf_guider.inputs.conditioning = ["nf_condition_loaders", 0];
-    assert.throws(() => splitH3Confirmation(noGuider, "second", "c".repeat(64), false), /采样前释放边界已变化/);
+    assert.throws(() => splitH3Confirmation(noGuider, "second", "c".repeat(64)), /采样前释放边界已变化/);
 });

@@ -238,11 +238,11 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());
     db.createCanvasProject({ id: "p", nodes: [{ id: "n", type: "minimax-h3", metadata: { segments: [
-        { id: "clip-a", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2, motionContextEnabled: true, contextLength: "39", audioContextLength: 48, continuationAudioRefineEnabled: true },
-        { id: "clip-b", prompt: "B", mode: "t2v", aspectRatio: "16:9 (Widescreen)", megapixels: 0.5, sizeMultiple: 64, latentUpscaleAlign: 4, motionContextEnabled: false, contextLength: "5", audioContextLength: 0, continuationAudioRefineEnabled: false },
+        { id: "clip-a", prompt: "A", mode: "t2v", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, latentUpscaleAlign: 2, motionContextEnabled: true, contextLength: "39", audioContextLength: 48, continuationAudioRefineEnabled: true },
+        { id: "clip-b", prompt: "B", mode: "t2v", aspectRatio: "16:9 (Widescreen)", megapixels: 0.5, latentUpscaleAlign: 4, motionContextEnabled: false, contextLength: "5", audioContextLength: 0, continuationAudioRefineEnabled: false },
     ] } }], connections: [] });
     const stores = createStores(db);
-    const submitted: Array<{ segmentId: string; aspectRatio: unknown; megapixels: unknown; sizeMultiple: unknown; latentUpscaleAlign: unknown; contextLength: unknown; audioContextLength: unknown; continuationAudioRefineEnabled: unknown; continuationTask: unknown }> = [];
+    const submitted: Array<{ segmentId: string; aspectRatio: unknown; megapixels: unknown; latentUpscaleAlign: unknown; contextLength: unknown; audioContextLength: unknown; continuationAudioRefineEnabled: unknown; continuationTask: unknown }> = [];
     const staged: Array<{ sourceRun: string; targetRun: string; previousIndex: number }> = [];
     const comfy = {
         async prepareH3ContinuationSeed(source: { run: string }, target: { run: string }, previousIndex: number) {
@@ -253,7 +253,7 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
             onCreated?.(task);
             submitted.push({
                 segmentId: String((params.canvasBinding as Record<string, unknown>).segmentId),
-                aspectRatio: params.aspectRatio, megapixels: params.megapixels, sizeMultiple: params.sizeMultiple, latentUpscaleAlign: params.latentUpscaleAlign,
+                aspectRatio: params.aspectRatio, megapixels: params.megapixels, latentUpscaleAlign: params.latentUpscaleAlign,
                 contextLength: params.contextLength, audioContextLength: params.audioContextLength, continuationAudioRefineEnabled: params.continuationAudioRefineEnabled,
                 continuationTask: params.continuationTask,
             });
@@ -269,16 +269,15 @@ test("潜空间续写从组首继承画幅尺寸，并在新链中重新生成�
         assert.equal(db.getTask(id)?.status, "succeeded", db.getTask(id)?.error || "潜空间续写任务未成功");
     };
     await runChain("chain-1");
-    assert.deepEqual(submitted.map(({ segmentId, aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign }) => ({ segmentId, aspectRatio, megapixels, sizeMultiple, latentUpscaleAlign })), [
-        { segmentId: "clip-a", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2 },
-        { segmentId: "clip-b", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, sizeMultiple: 32, latentUpscaleAlign: 2 },
+    assert.deepEqual(submitted.map(({ segmentId, aspectRatio, megapixels, latentUpscaleAlign }) => ({ segmentId, aspectRatio, megapixels, latentUpscaleAlign })), [
+        { segmentId: "clip-a", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, latentUpscaleAlign: 2 },
+        { segmentId: "clip-b", aspectRatio: "9:16 (Portrait)", megapixels: 0.8, latentUpscaleAlign: 2 },
     ]);
     assert.deepEqual(submitted.map((item) => JSON.parse(String(item.continuationTask)).index), [1, 2]);
     assert.deepEqual(submitted.map(({ contextLength, audioContextLength, continuationAudioRefineEnabled }) => [contextLength, audioContextLength, continuationAudioRefineEnabled]), [["39", 48, false], ["39", 48, true]], "S01 的音频精修应作用于 S02，不应作用于自身");
     const segments = ((db.getCanvasProject("p")!.nodes as Array<{ metadata: { segments: Array<Record<string, unknown>> } }>)[0].metadata.segments);
     assert.equal(segments[1].megapixels, 0.8, "继承后的尺寸应同步写回画布 Clip");
     assert.equal(segments[1].aspectRatio, "9:16 (Portrait)");
-    assert.equal(segments[1].sizeMultiple, 32);
     assert.equal(segments[1].latentUpscaleAlign, 2);
     await runChain("chain-2");
     assert.equal(submitted.length, 4, "新链必须重新生成潜变量，不能复用旧 MP4 缓存");

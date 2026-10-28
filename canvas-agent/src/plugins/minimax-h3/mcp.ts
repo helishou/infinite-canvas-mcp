@@ -12,7 +12,7 @@ import { aspectRatioOf, buildStoryboardAsset, findStoryboardAsset, listStoryboar
 import { isReferenceNameEcho } from "./prompt-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
-import { H3_LIST_MODELS_TOOL, H3_GET_CLIP_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
+import { H3_LIST_MODELS_TOOL, H3_GET_CLIP_TOOL, H3_GET_CLIP_RUNTIME_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
 import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
 import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
 import { readClipResult } from "./clip-result.js";
@@ -29,14 +29,14 @@ type H3Segment = Record<string, unknown>;
 const H3_NODE_PROJECTION_KEYS = [
     "minimaxEngine",
     "modelName", "minimaxBaseModel", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision",
-    "megapixels", "sizeMultiple", "sampler", "scheduler", "videoSteps", "steps", "denoise", "sageAttention", "allowCompile",
+    "megapixels", "sampler", "scheduler", "videoSteps", "steps", "denoise", "sageAttention", "allowCompile",
     "loraSlots", "loraName", "loraStrength", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
     "latentUpscaleEnabled", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
-    "refImageSize", "referenceLongEdge", "teAccel", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "strictPromptTags", "referenceVideoPolicy",
+    "refImageSize", "referenceLongEdge", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "strictPromptTags", "referenceVideoPolicy",
 ] as const;
 
 function nodeProjection(patch: H3Segment): H3Segment {
@@ -140,13 +140,7 @@ const TOOLS: PluginMcpToolWire[] = [
         description: "按需读取指定 H3 Clip 编译后的参考素材、角色组和引用预检问题。",
         inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
     },
-    {
-        id: "h3_get_clip_runtime", annotations: { readOnlyHint: true },
-        version: "1.1.0",
-        name: "H3 读取片段运行参数",
-        description: "按指定 project/node/segment 的 revision 读取 H3 Clip 已保存的模型、采样、尺寸和 LoRA 参数；不会编译提示词或参考。",
-        inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" } }, required: ["projectId", "nodeId", "segmentId"] },
-    },
+    H3_GET_CLIP_RUNTIME_TOOL,
     {
         id: "h3_run_clip",
         version: "1.4.0",
@@ -478,12 +472,12 @@ function buildH3ClipSnapshot(segment: H3Segment, compilation: ReturnType<typeof 
     };
 }
 
-async function readH3Clip(context: PluginMcpContext, input: Record<string, unknown>, signal?: AbortSignal, compile = true) {
+async function readH3Clip(context: PluginMcpContext, input: Record<string, unknown>, signal?: AbortSignal, compile = true, projectSnapshot?: Record<string, unknown>) {
     const projectId = String(input.projectId || "");
     const nodeId = String(input.nodeId || "");
     const segmentId = String(input.segmentId || "");
     const readStarted = Date.now();
-    const project = context.getCanvasH3Context ? await context.getCanvasH3Context(projectId, nodeId, segmentId, signal) : await context.getCanvasProject(projectId);
+    const project = projectSnapshot ?? (context.getCanvasH3Context ? await context.getCanvasH3Context(projectId, nodeId, segmentId, signal, compile ? undefined : { savedOnly: true }) : await context.getCanvasProject(projectId));
     const node = (Array.isArray(project.nodes) ? project.nodes : []).find(value => String((value as Record<string, unknown>).id || "") === nodeId) as AgentCanvasNode | undefined;
     if (!node) throw new Error(`找不到画布节点:${nodeId}`);
     const projectReadMs = Date.now() - readStarted;
@@ -1053,41 +1047,57 @@ export const pluginMcp: PluginMcpModule = {
                 return context.comfyUi.modelCatalog(query);
             },
             h3_get_clip: async (input) => {
-                const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
-                const { projectId, nodeId, segmentId, segment, revision, timings, snapshot, unchanged } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"));
-                if ((input.taskId !== undefined || input.storageKey !== undefined) && !include.has("result")) throw Object.assign(new Error("taskId/storageKey 必须与 include:result 一起使用，不能被总览查询忽略"), { code: "INVALID_INPUT" });
-                const result = include.has("result") ? await readClipResult(context, input, segment) : undefined;
-                const projected = unchanged || input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
-                const bindings = resolveCharacterGroupBindings(referenceBindingsOf(segment).bindings, segment);
-                const runtime = runtimeValuesOf(segment);
-                const groups = recordOf(segment.h3CharacterGroups);
-                return {
-                    ok: true,
-                    ...(unchanged ? { unchanged: true } : {}),
-                    projectId,
-                    nodeId,
-                    segmentId,
-                    revision,
-                    segment: {
-                        id: String(segment.id || ""), sourceShotId: String(segment.sourceShotId || ""), title: String(segment.title || ""), duration: segment.duration, taskMode: String(segment.taskMode || ""),
-                        status: String(segment.status || "idle"),
-                        progress: Number(segment.progress || 0),
-                        runtimeTaskId: segment.runtimeTaskId,
-                        resultStorageKey: segment.resultStorageKey,
-                        hasResult: Boolean(segment.result || segment.resultStorageKey),
-                    },
-                    prompt: unchanged ? { unchanged: true } : { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
-                    runtimeFieldCount: Object.keys(runtime).length,
-                    referenceCount: snapshot ? snapshot.references.length : bindings.filter(binding => binding.enabled).length,
-                    characterGroupCount: Object.keys(groups).length,
-                    ...(unchanged ? {} : snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
-                    timings,
-                    ...projected,
-                    ...(include.has("prompt") && snapshot ? { prompt: snapshot.prompt } : {}),
-                    ...(include.has("references") && snapshot ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
-                    ...(include.has("runtime") && !unchanged ? { runtime } : {}),
-                    ...(result ? { result } : {}),
+                const batch = Array.isArray(input.segmentIds);
+                if (batch === (input.segmentId !== undefined)) throw Object.assign(new Error("segmentId 与 segmentIds 必须二选一"), { code: "INVALID_INPUT" });
+                if (batch && (!(input.segmentIds as unknown[]).length || (Array.isArray(input.include) && input.include.some(value => value !== "runtime")) || input.taskId !== undefined || input.storageKey !== undefined)) throw Object.assign(new Error("批量读取仅支持保存摘要、fields 和 include:runtime；编译正文、参考和结果请使用单个 segmentId"), { code: "INVALID_INPUT" });
+                const readOne = async (input: Record<string, unknown>, projectSnapshot?: Record<string, unknown>) => {
+                    const include = new Set(Array.isArray(input.include) ? input.include.map(String) : []);
+                    const { projectId, nodeId, segmentId, segment, revision, timings, snapshot, unchanged } = await readH3Clip(context, input, undefined, include.has("prompt") || include.has("references"), projectSnapshot);
+                    if ((input.taskId !== undefined || input.storageKey !== undefined) && !include.has("result")) throw Object.assign(new Error("taskId/storageKey 必须与 include:result 一起使用，不能被总览查询忽略"), { code: "INVALID_INPUT" });
+                    const result = include.has("result") ? await readClipResult(context, input, segment) : undefined;
+                    const projected = unchanged || input.fields === undefined ? {} : projectNarrativeFields(segment, input.fields);
+                    const bindings = resolveCharacterGroupBindings(referenceBindingsOf(segment).bindings, segment);
+                    const runtime = runtimeValuesOf(segment);
+                    const groups = recordOf(segment.h3CharacterGroups);
+                    return {
+                        ok: true,
+                        ...(unchanged ? { unchanged: true } : {}),
+                        projectId,
+                        nodeId,
+                        segmentId,
+                        revision,
+                        segment: {
+                            id: String(segment.id || ""), sourceShotId: String(segment.sourceShotId || ""), title: String(segment.title || ""), duration: segment.duration, taskMode: String(segment.taskMode || ""),
+                            status: String(segment.status || "idle"),
+                            progress: Number(segment.progress || 0),
+                            runtimeTaskId: segment.runtimeTaskId,
+                            resultStorageKey: segment.resultStorageKey,
+                            hasResult: Boolean(segment.result || segment.resultStorageKey),
+                        },
+                        prompt: unchanged ? { unchanged: true } : { semanticLength: String(segment.prompt || "").length, compiledLength: snapshot ? snapshot.prompt.compiled.length : null, compiledAvailable: Boolean(snapshot) },
+                        runtimeFieldCount: Object.keys(runtime).length,
+                        referenceCount: snapshot ? snapshot.references.length : bindings.filter(binding => binding.enabled).length,
+                        characterGroupCount: Object.keys(groups).length,
+                        ...(unchanged ? {} : snapshot ? { issueCounts: issueCountsOf(snapshot.issues) } : { validationDeferred: true }),
+                        timings,
+                        ...projected,
+                        ...(include.has("prompt") && snapshot ? { prompt: snapshot.prompt } : {}),
+                        ...(include.has("references") && snapshot ? { references: snapshot.references, characterGroups: snapshot.characterGroups } : {}),
+                        ...(include.has("runtime") && !unchanged ? { runtime } : {}),
+                        ...(result ? { result } : {}),
+                    };
                 };
+                if (!batch) return readOne(input);
+                const segmentIds = [...new Set((input.segmentIds as string[]))];
+                const projectId = String(input.projectId || ""), nodeId = String(input.nodeId || "");
+                const started = Date.now();
+                const project = context.getCanvasH3Context ? await context.getCanvasH3Context(projectId, nodeId, undefined, undefined, { segmentIds, savedOnly: true }) : await context.getCanvasProject(projectId);
+                const node = (project.nodes as AgentCanvasNode[] || []).find(node => node.id === nodeId);
+                if (!node || !isH3Node(node)) throw new Error(`找不到 H3 画布节点:${nodeId}`);
+                const available = new Set(segmentsOf(node).map(segment => String(segment.id)));
+                const items = await Promise.all(segmentIds.filter(id => available.has(id)).map(segmentId => readOne({ ...input, segmentId }, project)));
+                return { ok: true, projectId, nodeId, revision: Number(project.revision || 0), requestedCount: segmentIds.length, returnedCount: items.length,
+                    items, missingSegmentIds: segmentIds.filter(id => !available.has(id)), timings: { projectReadMs: Date.now() - started } };
             },
             h3_get_clip_prompt: async (input) => {
                 if (input.view === "storyboard") {
@@ -1151,7 +1161,7 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip_runtime: async (input) => {
                 const { projectId, nodeId, segmentId, segment, revision, timings } = await readH3Clip(context, input, undefined, false);
-                const preview = await context.backend.previewH3Generation?.({ mode: 'video', operation: 'h3-run', projectId, nodeId, segmentId, skipCompleted: false });
+                const preview = input.view === "saved" ? undefined : await context.backend.previewH3Generation?.({ mode: 'video', operation: 'h3-run', projectId, nodeId, segmentId, skipCompleted: false });
                 return { ok: true, projectId, nodeId, segmentId, revision, runtime: runtimeValuesOf(segment), ...(preview ? { ...preview.clips[0], planHash: preview.planHash, diagnostics: preview.diagnostics, ready: preview.ready } : {}), timings };
             },
             h3_get_node: async (input) => {

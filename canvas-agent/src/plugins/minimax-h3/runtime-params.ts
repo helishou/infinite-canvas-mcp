@@ -102,15 +102,23 @@ export function h3ExpectedDialogues(source: Record<string, unknown>, shotIds: st
     });
 }
 
-/** NanFeng V15 uses decimal MP and a 16px grid multiplied by latent alignment. */
+/**
+ * 一采与原生 V15 的 resolution_from_megapixels 一致：1024² 为 1MP，宽高各自按 32px 取整
+ * （9:16 的 1MP = 768×1376，0.98MP = 768×1344）。
+ * 二采由 NanFengH3LowPeakLatentUpscalerV15 按十进制 MP 换算，再把 latent 向上对齐到 16×align 网格。
+ */
 export function estimateH3Dimensions(params: Record<string, unknown>, secondPass = false) {
     const ratio = canonicalH3AspectRatio(params.aspectRatio);
     const mp = Number(secondPass ? params.latentUpscaleMegapixels : params.megapixels);
     if (!ratio || !Number.isFinite(mp) || mp <= 0) return null;
     const [rw, rh] = ratio.split(':').map(Number);
-    const grid = 16 * Math.max(1, Number(params.latentUpscaleAlign || 2));
-    const scale = Math.sqrt(mp * 1_000_000 / (rw * rh));
-    return { width: Math.ceil(rw * scale / grid) * grid, height: Math.ceil(rh * scale / grid) * grid, aspectRatio: ratio, megapixels: mp, grid, kind: 'workflow-estimate' as const };
+    const scale = Math.sqrt(mp * (secondPass ? 1_000_000 : 1024 * 1024) / (rw * rh));
+    if (secondPass) {
+        const grid = 16 * Math.max(1, Number(params.latentUpscaleAlign || 2));
+        return { width: Math.ceil(rw * scale / grid) * grid, height: Math.ceil(rh * scale / grid) * grid, aspectRatio: ratio, megapixels: mp, grid, kind: 'workflow-estimate' as const };
+    }
+    const grid = 32;
+    return { width: Math.round(rw * scale / grid) * grid, height: Math.round(rh * scale / grid) * grid, aspectRatio: ratio, megapixels: mp, grid, kind: 'workflow-estimate' as const };
 }
 
 export function h3StoryboardIssues(segment: Record<string, unknown>, expected?: Array<{ id: string; duration: number }>) {
@@ -140,11 +148,11 @@ export const H3_PARAM_KEYS = [
     "minimaxEngine",
     "selectedVideoModelEnabled", "selectedVideoModel", "selectedVideoModelFieldValues",
     "mode", "taskMode", "styleTemplateId", "duration", "aspectRatio", "megapixels", "videoSteps", "steps", "denoise", "noiseSeedMode", "noiseSeed", "seed",
-    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sizeMultiple", "sampler", "scheduler",
-    "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveMarkers", "audioDriveSegmentImages", "audioDriveSegmentStoryboards", "audioDriveCreative", "audioDriveExclude", "audioDriveStart", "audioDriveEnd",
+    "modelName", "textEncoder", "textEncoderType", "textEncoderDevice", "videoVae", "audioVae", "precision", "sageAttention", "allowCompile", "sampler", "scheduler",
+    "loraSlots", "constantTriggerWord", "lockAudio", "audioDrive", "audioDriveFile", "audioDriveStart", "audioDriveEnd",
     "solAttnEnabled", "solAttnTau", "solAttnThresholdType", "solAttnExactMode", "solAttnDenseSteps", "solAttnStepOff", "solAttnSinkTokens",
     "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
-    "sigmaEnabled", "videoSigmaShift", "audioSigmaShift", "sigmaMode", "lowSigmaStart", "lowSigmaEnd", "sigmaRefineSteps", "sigmaCurve", "manualSigma", "dualSampling", "dualSamplingRatio", "dualSampler",
+    "videoSigmaShift", "audioSigmaShift", "dualSampling", "dualSamplingRatio", "dualSampler",
     "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
     "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
     "latentUpscaleEnabled", "latentUpscaleConfirmationMode", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
@@ -152,7 +160,7 @@ export const H3_PARAM_KEYS = [
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",
     "slaEnabled", "slaSparsity", "slaBlockSize", "slaMinSequence", "slaDenseLastSteps", "slaProtectAudio", "slaDenseSteps", "slaBackend", "slaDisableFp16Accum", "slaStabilizeMotion",
     "emptyFiveMinuteTimeline", "taeh3Enabled", "contextLength", "audioContextLength", "continuationTask", "continuationAudioRefineEnabled", "continuationSeamNoiseEnabled", "continuationSeamNoiseMode", "continuationSeamNoise", "continuationSeamNoiseSeed", "continuationSeamNoiseRamp", "continuationAudioDenoise", "continuationAudioSteps", "continuationAudioSampler", "continuationAudioScheduler", "trtVideoVaeEnabled", "trtDecoderEngine", "trtEncoderEngine", "dlssUpscaleMode", "dlssFrameInterpolationEnabled", "dlssVideoUpscaleMode", "dlssVideoRequireNeuralUpscaling", "dlssVideoNrPreset", "dlssVideoNrStyle", "dlssVideoNrIntensity", "dlssVideoLocalToneStrength", "dlssVideoLocalStructureStrength", "dlssVideoSkinStructureStrength", "dlssVideoAutomaticMask", "dlssVideoModelPreset", "dlssVideoEncodingQuality", "dlssVideoCodec", "dlssVideoContainer", "dlssVideoRename", "dlssVideoCustomSuffix", "dlssVideoHdrMode", "dlssVideoOutputDetailStrength", "dlssFgOutputFps", "dlssFgEngine", "dlssFgEncodingQuality", "dlssFgVideoCodec", "dlssFgContainer", "dlssFgRename", "dlssFgCustomSuffix", "dlssFgHdrMode", "erSolverType", "erMaxStage", "erEta", "erSNoise",
-    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "teAccel", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
+    "refImageSize", "referenceLongEdge", "loraName", "loraStrength", "mergedWorkflow", "noDub", "noCaption", "audioMode", "audioDenoiseStrength", "addSourceAsReference", "promptPrimaryAudioOrdinal", "strictPromptTags",
     "referenceVideoPolicy", "trimIn", "trimOut", "motionContextEnabled", "tailFrameContinuation", "motionContextNoiseEnabled", "motionContextNoiseAlpha", "motionContextNoiseAlphaEnd", "motionContextNoiseRampFrames", "combatLoraWeight", "cinematicLoraWeight",
 ] as const;
 

@@ -154,11 +154,25 @@ test("h3_get_clip 默认只返回总览，详细内容由定向工具读取", as
     assert.equal(typeof detailed.timings.projectReadMs, "number");
 
     const prompt: any = await handlers.h3_get_clip_prompt!(input);
-    assert.equal(prompt.prompt.semantic, "旧草稿");
+    assert.equal(prompt.prompt.semantic.characters, 3);
+    assert.equal(prompt.prompt.semantic.bytes, 9);
+    assert.match(prompt.prompt.semantic.sha256, /^[a-f0-9]{64}$/);
     const runtime: any = await handlers.h3_get_clip_runtime!(input);
     assert.equal(runtime.runtime.modelName, "wrong-draft");
     const references: any = await handlers.h3_get_clip_references!(input);
     assert.deepEqual(references.references, []);
+});
+
+test("H3 保存参数读取不调用预览，默认 effective 行为保持兼容", async () => {
+    const { backend, handlers } = fixture();
+    let previews = 0;
+    (backend as any).previewH3Generation = async () => { previews++; return { clips: [{}], planHash: "preview" }; };
+    const input = { projectId: "project-1", nodeId: "h3-1", segmentId: "s2" };
+    await handlers.h3_get_clip_runtime!({ ...input, view: "saved" });
+    await handlers.h3_get_clip!({ ...input, include: ["runtime"] });
+    assert.equal(previews, 0);
+    await handlers.h3_get_clip_runtime!(input);
+    assert.equal(previews, 1);
 });
 
 test("h3_get_node 只返回当前 Clip 索引，不泄漏整段 metadata", async () => {
