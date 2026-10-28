@@ -89,3 +89,35 @@ test("timed-out SSE wait returns the latest observed progress without an extra s
   assert.equal(body.waitMode, "sse");
   assert.equal(reads, 2, "one initial read and one race-closing read; no follow-up status tool needed");
 });
+
+test("SSE wait re-reads the task snapshot instead of idling until the deadline", async t => {
+  const app = express(); app.use(express.json());
+  const base = { kind: "canvas:image", input: {}, params: {}, result: null, error: null, createdAt: "2026-01-01T00:00:00.000Z", outputs: [] };
+  const task = (status: string, updatedAt: string) => ({ ...base, id: "silent-task", status, progress: status === "succeeded" ? 1 : 0.3, updatedAt });
+  let reads = 0;
+  app.get("/plugins/mcp", (_req, res) => res.json({ declarations: [] }));
+  app.post("/mcp/observability/events", (_req, res) => res.json({ ok: true }));
+  app.get("/tasks", (_req, res) => {
+    reads++;
+    // 该任务不推 `task.*` 事件（画布图片子任务），只在快照里更新状态。
+    res.json({ tasks: [reads >= 3 ? task("succeeded", "2026-01-01T00:00:09.000Z") : task("running", "2026-01-01T00:00:01.000Z")] });
+  });
+  app.get("/events", (_req, res) => {
+    res.setHeader("Content-Type", "text/event-stream"); res.flushHeaders();
+    res.write('event: events.sync\ndata: {"type":"events.sync"}\n\n');
+  });
+  const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address !== "string");
+  const routes = registerBackendMcpHttpRoutes(app, { url: `http://127.0.0.1:${address.port}`, token: "fixture", port: 0, origins: [] });
+  const client = new Client({ name: "wait-silent-task-test", version: "1" });
+  t.after(async () => { await client.close(); await routes.closeAll(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`)));
+  const started = Date.now();
+  const result: any = await client.callTool({ name: "canvas_wait_tasks", arguments: { taskIds: ["silent-task"], timeoutMs: 60_000, pollMs: 250 } });
+  const elapsed = Date.now() - started;
+  assert.notEqual(result.isError, true);
+  const body = JSON.parse(result.content[0].text);
+  assert.equal(body.timedOut, false, "任务已完成时必须按完成返回，而不是等满窗口");
+  assert.equal(body.tasks[0].status, "succeeded");
+  assert.ok(elapsed < 30_000, `无事件任务应在快照回查后返回，实测 ${elapsed}ms`);
+});

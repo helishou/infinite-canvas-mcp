@@ -2363,8 +2363,16 @@ async function waitForH3TaskEvents(
     for (const task of fresh) tasks.set(String(task.taskId || ""), task);
     while (![...tasks.values()].every((task) => terminal.has(String(task.status))) && Date.now() < deadlineAt) {
       throwIfMcpCancelled(externalSignal);
-      const next = await withMcpTimeout(stream.next().catch(() => ({ done: true as const, value: {} as Record<string, unknown> })), Math.max(1, deadlineAt - Date.now()));
-      if (next === null) break;
+      const next = await withMcpTimeout(stream.next().catch(() => ({ done: true as const, value: {} as Record<string, unknown> })), Math.min(5_000, Math.max(1, deadlineAt - Date.now())));
+      if (next === null) {
+        if (Date.now() >= deadlineAt) break;
+        // 不在事件流覆盖范围内的任务（画布图片/视频子任务）不会推 `task.*` 事件。
+        // 此处若不主动回查，会一直挂到 deadline，表现为「任务早已完成但等待等满窗口」。
+        const snapshots = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, signal).catch(() => null))?.tasks;
+        if (snapshots) for (const task of snapshots) tasks.set(String(task.taskId || ""), task);
+        if ([...tasks.values()].every((task) => terminal.has(String(task.status)))) break;
+        continue;
+      }
       if (next.done) {
         if (reconnects++ > 0 || !cursor) throw new Error("SSE disconnected");
         stream = backend.streamEvents(signal, cursor);
