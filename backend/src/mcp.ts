@@ -671,10 +671,14 @@ async function executeDirectCanvasTool(
   }
   if (name === "generation_get_status" || name === "canvas_task_status") {
     const taskId = String(input.taskId || "");
+    const taskIds = Array.isArray(input.taskIds)
+      ? input.taskIds.map(String).filter(Boolean).slice(0, 32)
+      : [];
     const target = await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId);
     const query = {
       ...input,
-      ...(!taskId && !input.projectId && target.projectId
+      ...(taskIds.length ? { taskIds } : {}),
+      ...(!taskId && !taskIds.length && !input.projectId && target.projectId
         ? { projectId: target.projectId }
         : {}),
       ...(name === "canvas_task_status" && input.nodeId
@@ -682,8 +686,8 @@ async function executeDirectCanvasTool(
         : {}),
       ...(name === "canvas_task_status" ? { scope: "canvas" } : {}),
     };
-    if (name === "canvas_task_status" && !taskId && !query.projectId)
-      throw new Error("缺少 projectId；请先选择活动画布");
+    if (name === "canvas_task_status" && !taskId && !taskIds.length && !query.projectId)
+      throw new Error("缺少 projectId；请先选择活动画布，或用 taskId / taskIds 精确指定任务");
     const result = await listTasksFromBackend(backendApi, query);
     if (name === "generation_get_status") return result;
     if (taskId && !result.tasks.length) throw new Error(`生成任务不存在：${taskId}`);
@@ -2817,6 +2821,7 @@ function summarizeCanvasTasks(
     ok: true,
     query: {
       taskId: query.taskId || undefined,
+      taskIds: Array.isArray(query.taskIds) && query.taskIds.length ? query.taskIds : undefined,
       projectId: query.projectId || undefined,
       nodeId: query.nodeId || undefined,
     },

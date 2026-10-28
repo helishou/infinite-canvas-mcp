@@ -554,6 +554,7 @@ export const toolInputSchemas = {
   }),
   canvas_task_status: canvasProjectSchema.extend({
     taskId: z.string().optional().describe("精确查询任务 ID；传入后不再按画布过滤"),
+    taskIds: z.array(z.string()).max(32).optional().describe("批量查询多个任务的状态与产物；一次调用替代逐个轮询，收口时优先用它"),
     nodeId: z.string().optional().describe("只查询某个画布节点的生成任务"),
     limit: z.number().int().min(1).max(100).optional().describe("最多返回多少条，默认 10"),
   }),
