@@ -75,7 +75,8 @@
 | P6 | 等待保留已观察进度 | 到期回执携带最新事件进度，不丢快照 | 已实现，随 2026-10-29 重启加载，未单独复验 |
 | — | 媒体工具链修复 | `media-tools.ts`；探测失败 → `unverified` 而非 `mismatch`；`saveConfig` 保留未知键 | **已上线**（`23255bc6`） |
 | — | 批量任务查询 | `canvas_task_status(taskIds ≤ 32)` | **已上线**（`240ae707`） |
-| **P7** | 编排浪费治理 | 错误分级 / 阶段裁决 / 读取短路 / 等待折叠 | **设计稿** |
+| P7a | 错误分级与不可重试判定 | `error.scope / doNotRetry / fix`；失败任务回执带 `failure` 分级 | **已实现**（2026-10-29，源码+dist+运行进程均已生效） |
+| P7b–P7d | 等待折叠 / 读取短路 / 阶段裁决 | `wait:'all'` / `ifChanged` / `canvas_next` | **设计稿** |
 
 ## 5. 各阶段要点
 
@@ -118,13 +119,13 @@
 
 实测：同一 Shot 完整 160,634 → 字段 645 字节；额外画布运行读取 0 次。
 
-### P7 编排浪费治理（设计稿）
+### P7 编排浪费治理（P7a 已实现，其余设计稿）
 
 四项机制，全部 opt-in：
 
 | 机制 | 契约 | 解决 |
 | --- | --- | --- |
-| 错误分级 | `error.scope: environment\|input\|conflict\|transient\|content` + `fix` + `doNotRetry` | 假失败重跑（当晚 5 轮 → 0） |
+| 错误分级（已实现） | `error.scope: environment\|input\|conflict\|transient\|content` + `fix` + `doNotRetry` | 假失败重跑（当晚 5 轮 → 0） |
 | 阶段裁决 | `canvas_next` 一次返回 `stage / settled / blockers / 唯一 nextAction / humanReview / budget` | 自我确认式读取（67 → ≤10） |
 | 读取短路 | 读时传 `ifChanged`，命中回 `{unchanged:true, bytes:0}` | 重复全文返回 |
 | 等待折叠 | 提交时 `wait:'all'`，内部轮询至终态，一次返回产物与规格 | 每批 N 轮 → 1 轮 |

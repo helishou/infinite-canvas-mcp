@@ -60,6 +60,7 @@ import {
   createBackendClient,
 } from "@basketikun/canvas-agent/runtime/comfy-client";
 import { createLogger } from "./logger.js";
+import { classifyErrorDisposition, taskFailureDisposition } from "./error-taxonomy.js";
 import type { McpObservabilityStore } from "./stores/types.js";
 import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
 import { observeReadRequest, observeReadResult, observeTaskReadResult } from "./mcp-read-observation.js";
@@ -2632,9 +2633,18 @@ function toCanvasTask(task: {
           ? result.images
           : [],
     error: task.error || undefined,
+    // P7a：失败任务带上结构化分级。调用方读到 status=failed 时先看 scope，
+    // 别再把「ffprobe 缺失」当成「内容不合规」去改提示词重提。
+    ...(task.status === "failed" ? failureOfTask(task.error) : {}),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
   };
+}
+
+/** 任务失败的分级回执。识别不出原因时给 TASK_FAILED/transient，不臆断为内容问题。 */
+function failureOfTask(error: string | null | undefined) {
+  const failure = taskFailureDisposition(error);
+  return failure ? { failure } : {};
 }
 
 async function inspectCanvasContext(
@@ -3223,6 +3233,9 @@ function toolErrorResult(
             traceId,
             error: {
               code, message, recoverable: classified.recoverable,
+              scope: classified.scope,
+              doNotRetry: classified.doNotRetry,
+              ...(classified.fix ? { fix: classified.fix } : {}),
               ...(classified.retryPolicy ? { retryPolicy: classified.retryPolicy } : {}),
               ...(classified.handlerInvoked !== undefined ? { handlerInvoked: classified.handlerInvoked } : {}),
               ...(classified.issues.length ? { issues: classified.issues } : {}),
@@ -3589,10 +3602,16 @@ function classifyToolError(
   const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
   const availableAction = "tool" in suggestedAction && typeof suggestedAction.tool === "string" && !isToolInProfile(state.profile, suggestedAction.tool)
     ? { action: `恢复入口 ${suggestedAction.tool} 不在当前 ${state.profile} 工具集；需要该操作时新建 /mcp?profile=full 连接并沿原身份恢复。` } : suggestedAction;
+  // P7a：统一分级。scope/doNotRetry/fix 由 error-taxonomy 单点判定，
+  // 不在各 dispatcher 里手写「这是环境问题」这类字符串。
+  const disposition = classifyErrorDisposition({ code, message, tool: toolName });
   return {
-    code,
+    code: disposition.code,
     message,
     recoverable,
+    scope: disposition.scope,
+    doNotRetry: disposition.doNotRetry,
+    ...(disposition.fix ? { fix: disposition.fix } : {}),
     retryPolicy,
     issues,
     handlerInvoked: typeof recordOf(error).handlerInvoked === "boolean" ? recordOf(error).handlerInvoked as boolean : undefined,

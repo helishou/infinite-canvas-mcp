@@ -1,6 +1,6 @@
 # P7：编排浪费治理（调用次数、决策路径与失败语义）
 
-状态：设计稿，未实施。本文档不含已上线声明。
+状态：P7a 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7b–P7d 仍为设计稿。
 范围：MCP 工具契约与执行语义。不改业务编辑、生成参数、质量授权、并发上限与数据库格式。
 与既有关系：`mcp-efficiency-design.md` 的 P0–P6 处理「单次返回多大」，本文档处理「读多少次、读来干什么、失败怎么处置」。两者互补，不重复。
 
@@ -74,6 +74,16 @@
 ### 4.4 验收
 
 注入 ffprobe 缺失：首次失败即返回 `doNotRetry=true`，同一 run 内不出现第二次相同提交。
+
+**实施记录（2026-10-29）**
+
+- 判定表落在 `backend/src/error-taxonomy.ts`（纯函数，无状态）：`classifyErrorDisposition({code,message,tool})` 与 `taskFailureDisposition(error)`。明确错误码优先于消息识别，避免「文案里提到 ffmpeg」被误判成缺工具。
+- 工具层：`classifyToolError` 统一附加 `scope / doNotRetry / fix`；`CANVAS_TOOL_FAILED` 在消息命中缺工具时归一为 `MEDIA_TOOL_MISSING`。
+- 任务层：`toCanvasTask` 在 `status=failed` 时附加 `failure`，同时覆盖 `canvas_task_status` 与 `canvas_wait_tasks`（两者共用该投影）。原始 `error` 文本保留不替换。
+- 识别不出原因的任务失败给 `TASK_FAILED / transient / doNotRetry=false`，不臆断为内容问题。
+- 夹具：`backend/src/mcp-error-taxonomy.test.ts`（判定表 + HTTP MCP 端到端，failed 任务带 `MEDIA_TOOL_MISSING/environment/doNotRetry=true/fix.key=mediaTools.ffmpegDir`）。
+- 现场证据：运行中的后端（17370）读 2026-10-28 那批 failed 任务，全部返回 `MEDIA_TOOL_MISSING / environment / doNotRetry=true`，`fix` 指向 `backend.json → mediaTools.ffmpegDir`。此前同一批任务只显示一句 `spawn ffprobe ENOENT`。
+- 未覆盖：H3 插件自有任务读取入口（`h3_get_task`）仍直接透传 `error`，待 P7b 一并处理；此项不影响 `canvas_task_status` / `canvas_wait_tasks`。
 
 ## 5. 机制二：阶段级唯一裁决（`canvas_next`）
 
@@ -234,7 +244,7 @@
 
 | 阶段 | 工作包 | 涉及位置 | 独立交付条件 |
 | --- | --- | --- | --- |
-| P7a | 错误分级与 doNotRetry | MCP 错误映射、各 dispatcher 的抛出点、`h3-execution-contract` 的 unverified 汇总 | 场景 J 通过，旧字符串消费方不受影响 |
+| P7a | 错误分级与 doNotRetry | MCP 错误映射、各 dispatcher 的抛出点、`h3-execution-contract` 的 unverified 汇总 | 场景 J 通过，旧字符串消费方不受影响（**已完成**） |
 | P7b | 等待折叠 | `h3_run_all_clips`、`canvas_generate_image_batch`、等待实现 | 场景 M 通过，`wait:'none'` 行为逐字段不变 |
 | P7c | 重复读取短路 | 共享投影、`canvas_get_state`、`h3_get_clip`、manifest | 场景 K 通过，未传 `ifChanged` 时字节与现在一致 |
 | P7d | `canvas_next` | 新工具、阶段判定、账本、`nextAction` 构造 | 场景 L 通过，`nextAction` 全部通过目标 schema 校验 |
