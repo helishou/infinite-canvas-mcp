@@ -268,13 +268,28 @@ export function isAudioFile(file: File) {
     return file.type.startsWith("audio/") || /\.(mp3|wav)$/i.test(file.name);
 }
 
-/** 文本节点（文本类型 / 文本模式的智能生成节点）当前展示的正文；非文本节点或正文为空时返回空串。 */
+/** 取节点右键「复制内容」对应的文本；不把图片/音视频等媒体数据当作文本复制。 */
 export function nodeCopyableText(node: CanvasNodeData) {
     const metadata = node.metadata;
-    if (node.type !== CanvasNodeType.Text && metadata?.generationMode !== "text") return "";
-    const texts = metadata?.texts || [];
-    const primary = texts.find((text) => text.id === metadata?.primaryTextId) || texts[0];
-    return (primary?.content || metadata?.content || "").trim();
+    if (node.type === CanvasNodeType.Text || metadata?.generationMode === "text") {
+        const texts = metadata?.texts || [];
+        const primary = texts.find((text) => text.id === metadata?.primaryTextId) || texts[0];
+        return (primary?.content || metadata?.content || "").trim();
+    }
+
+    const description = node.type === CanvasNodeType.Character
+        ? metadata?.characterDescription
+        : node.type === CanvasNodeType.Scene
+            ? metadata?.sceneDescription
+            : node.type === CanvasNodeType.Prop
+                ? metadata?.propDescription
+                : "";
+    const segmentPrompts = metadata?.segments
+        ?.map((segment) => typeof segment.prompt === "string" ? segment.prompt.trim() : "")
+        .filter(Boolean)
+        .join("\n\n") || "";
+    const text = metadata?.composerContent || metadata?.prompt || description || metadata?.sceneColorCardPrompt || segmentPrompts;
+    return typeof text === "string" ? text.trim() : "";
 }
 
 export function buildAngleLabel(params: CanvasImageAngleParams) {

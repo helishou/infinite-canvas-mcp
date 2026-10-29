@@ -71,7 +71,7 @@ import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-spl
 import type { CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, recordLoopGenerationOutput, splitLoopPromptItems, type CanvasLoopRuntimeContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasLoopNode } from "@/components/canvas/canvas-loop-node";
-import { resolveLoopInputPlan, runLoopGenerationRounds, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
+import { loopForGenerationCommand, resolveLoopInputPlan, runLoopGenerationRounds, singleLoopOutputBinding, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import type { CanvasVideoComparison, CanvasVideoCompareItem } from "@/components/canvas/canvas-video-compare-modal";
 import type { CanvasMediaPreview } from "@/types/canvas-plugin";
@@ -1256,7 +1256,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         return () => { cancelled = true; revoke(); };
     }, [activeImageToolNode?.id, activeImageToolSource?.content, activeImageToolSource?.storageKey, message, t]);
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
-    // 只有文本节点（文本类型 / 文本模式的智能生成节点）且正文非空时，右键菜单才提供「复制内容」。
+    // 右键菜单仅在节点有可复制的文本正文、提示词或描述时提供「复制内容」。
     const contextMenuText = contextMenuNode ? nodeCopyableText(contextMenuNode) : "";
     // 右键菜单「生成组」的可用性：选中的普通节点（组不计）至少 2 个。
     const groupableSelectedCount = useMemo(
@@ -2258,6 +2258,33 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const target = viewportForCanvasNodes(nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id)), size);
         if (target) animateFocus(target);
     }, [animateFocus, size.height, size.width]);
+    const unifySelectedNodeSizes = useCallback(() => {
+        const selected = nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id));
+        if (selected.length < 2) return;
+        const reference = selected[0];
+        const selectedIds = new Set(selected.map((node) => node.id));
+        const resizedGroupMembers = new Map<string, { position: Position; width: number; height: number }>();
+        for (const node of selected) {
+            if (node.type !== CanvasNodeType.Group || !node.metadata?.orderedGroup) continue;
+            orderedGroupResizeLayout(node, { position: node.position, width: reference.width, height: reference.height }, nodesRef.current)
+                .forEach((bounds, nodeId) => resizedGroupMembers.set(nodeId, bounds));
+        }
+        setNodes((previous) => {
+            let changed = false;
+            const next = previous.map((node) => {
+                if (selectedIds.has(node.id)) {
+                    if (node.width === reference.width && node.height === reference.height) return node;
+                    changed = true;
+                    return { ...node, width: reference.width, height: reference.height };
+                }
+                const bounds = resizedGroupMembers.get(node.id);
+                if (!bounds || (node.width === bounds.width && node.height === bounds.height && node.position.x === bounds.position.x && node.position.y === bounds.position.y)) return node;
+                changed = true;
+                return { ...node, ...bounds };
+            });
+            return changed ? next : previous;
+        });
+    }, [setNodes]);
     const fitAllNodes = useCallback(() => {
         const target = viewportForCanvasNodes(nodesRef.current, size);
         if (target) animateFocus(target);
@@ -5265,6 +5292,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const runController = startGenerationRequest(requestKey, nodeId, nodeId);
             const unlinkLoopAbort = linkLoopAbort(loopContext?.signal, runController);
             try {
+                const outputBinding = loopContext?.loopOutput || singleLoopOutputBinding(sourceNode, nodesRef.current);
                 const sourceTextContent = initialNode?.type === CanvasNodeType.Text ? initialNode.metadata?.content?.trim() || "" : "";
                 const editingTextNode = !loopContext && mode === "text" && Boolean(sourceTextContent);
                 const rawGenerationContext = buildNodeGenerationContext(nodeId, generationNodes, loopContext?.initialConnections || connectionsRef.current,
@@ -5314,8 +5342,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             ...size,
                             size: `${size.width}x${size.height}`,
                             quality: generationConfig.quality,
-                            count: loopContext ? 1 : count,
-                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
+                            count: loopContext || outputBinding ? 1 : count,
+                            ...(outputBinding ? { loopOutput: outputBinding } : {}),
                             runTarget: configSource?.metadata?.imageRunTarget,
                             params: comfyParams,
                             ...(sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart ? {
@@ -5346,7 +5374,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             prompt: effectivePrompt,
                             references: generationContext.referenceImages,
                             videoReferences: generationContext.referenceVideos.map((item) => ({ id: item.id, name: item.name, url: item.url, storageKey: item.storageKey, mimeType: item.type })),
-                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
+                            ...(outputBinding ? { loopOutput: outputBinding } : {}),
                             size: generationConfig.size,
                             seconds: generationConfig.videoSeconds,
                             resolution: generationConfig.vquality,
@@ -5372,7 +5400,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             model: generationConfig.model,
                             prompt: effectivePrompt,
                             audioReferences: generationContext.referenceAudios.map((item) => ({ id: item.id, name: item.name, url: item.url, storageKey: item.storageKey, mimeType: item.type })),
-                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
+                            ...(outputBinding ? { loopOutput: outputBinding } : {}),
                             params: { voice: generationConfig.audioVoice, format: generationConfig.audioFormat, speed: generationConfig.audioSpeed, instructions: generationConfig.audioInstructions },
                             clientTaskId,
                             projectId,
@@ -5392,9 +5420,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                             mode: "text",
                             model: generationConfig.model,
                             prompt: effectivePrompt,
-                            count: loopContext ? 1 : getGenerationCount(String(sourceNode?.metadata?.textCount || 1)),
+                            count: loopContext || outputBinding ? 1 : getGenerationCount(String(sourceNode?.metadata?.textCount || 1)),
                             references: generationContext.referenceImages,
-                            ...(loopContext?.loopOutput ? { loopOutput: loopContext.loopOutput } : {}),
+                            ...(outputBinding ? { loopOutput: outputBinding } : {}),
                             params: { systemPrompt: generationConfig.systemPrompt, reasoningEffort: generationConfig.reasoningEffort, ...(sourceNode?.type === CanvasNodeType.Config && sourceNode.metadata?.smart ? { targetTextNodeId: nodeId } : {}) },
                             projectId,
                             nodeId,
@@ -5555,7 +5583,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, []);
 
     const runNodeOrLoop = useCallback(async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => {
-        const loop = upstreamLoopForGeneration(nodeId, nodesRef.current, connectionsRef.current);
+        const loop = loopForGenerationCommand(nodeId, nodesRef.current, connectionsRef.current);
         if (loop) return runLoop(loop.id);
         return handleGenerateNode(nodeId, mode, prompt);
     }, [handleGenerateNode, runLoop]);
@@ -6286,7 +6314,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (panelNode.type === CanvasNodeType.Loop) return renderLoopPanel(panelNode);
             const target = panelNode;
             if (!target) return null;
-            if (target.metadata?.loopOutputSlot === true) return null;
             const activeLoop = upstreamLoopForGeneration(target.id, nodes, connections);
             const hasBackendTask = Boolean(target.metadata?.runtimeTaskId && (target.metadata.status === NODE_STATUS_LOADING || target.metadata.status === "queued"));
             const isRunning = runningNodeId === target.id || hasBackendTask || Boolean(activeLoop && runningLoopId === activeLoop.id);
@@ -6773,6 +6800,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 <CanvasToolbar
                     onFocusSelection={focusSelection}
                     onBatchRename={openBatchRename}
+                    onUnifySize={unifySelectedNodeSizes}
                     selectedCount={selectedNodeIds.size}
                     deleteDisabled={!hasDeletableSelectedNode}
                     showSelectionActions={!screenEditorOpen}

@@ -5,6 +5,17 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Generate from an individual loop output node and verify only that node receives a task and result; running the loop node still processes all rounds.
+- For individual loop output generation, verify the existing slot binding is accepted after reordering and the panel's current prompt and references are used.
+
+- Run loops with both full and partially filled output rows and verify generated nodes stay inside their ordered-group slots, including the extra empty row and repeated runs.
+
+- Select an image or video in a loop output group and verify its floating generation panel opens below the node while the normal selection toolbar remains available.
+
+- ComfyUI workflows containing Note or MarkdownNote annotations can be imported and run without submitting those annotations as executable nodes. Verify both new imports and previously imported workflows; the original workflow remains intact.
+
+- Import a ComfyUI workflow with seed control widgets and verify that later sampler and other node parameters retain their original values. Previously imported workflows need to be synced or reimported to replace incorrectly converted values.
+
 - Task waiting: while a task reports progress through Backend events, let `canvas_wait_tasks` time out and verify that its receipt retains the latest observed progress and pending IDs; stale events must not move progress backwards. A caller can continue with the receipt without an immediate status query. Explicit cancellation still cancels only the wait, and completion/confirmation still use the authoritative task snapshot.
 
 - Repeated blocked compilations: when a compiler reports only precisely located source-context blockers and exits without artifacts, verify that a new operation ID for the same inputs reuses the original blocked receipt while retaining the no-output diagnostic. Unknown or compiler-origin failures must still run independently. No media generation is needed.

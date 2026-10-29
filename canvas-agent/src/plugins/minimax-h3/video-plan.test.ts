@@ -27,6 +27,15 @@ test("视频计划仍接受普通引用计划", () => {
     assert.doesNotThrow(() => validateVideoPlan([baseSegment]));
 });
 
+test("视频计划分别报告参考图缺少的身份字段和 storageKey", () => {
+    const reference: any = { nodeId: "image-node", role: "scene", order: 0, storageKey: "image:scene", name: "场景图", type: "image" };
+    const segment = (ref: any) => ({ ...baseSegment, references: [ref] });
+    assert.throws(() => validateVideoPlan([segment({ ...reference, nodeId: "" })]), /nodeId/);
+    assert.throws(() => validateVideoPlan([segment({ ...reference, storageKey: "" })]), /storageKey/);
+    assert.throws(() => validateVideoPlan([segment({ ...reference, name: "" })]), /name/);
+    assert.throws(() => validateVideoPlan([segment({ ...reference, type: "unknown" })]), /type/);
+});
+
 test("视频计划缺少稳定 id 或显式镜头 end 时指向具体字段", () => {
     assert.throws(() => validateVideoPlan([{ ...baseSegment, id: undefined, segmentId: "legacy" } as unknown as H3PlannedSegment]), /segments\[\]\.id.*segmentId/);
     assert.throws(() => validateVideoPlan([{ ...baseSegment, timeline: [{ start: 0, action: "hold", camera: "static" }] } as H3PlannedSegment]), /timeline\[0\]\.end/);

@@ -4,6 +4,46 @@ import test from "node:test";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { prepareCanvasGenerationTarget, prepareCanvasLoopRun } from "./generation-target.js";
+import { validateLoopGenerationCommand } from "./generation-service.js";
+
+test("单独生成已准备的循环槽通过校验并仅绑定当前槽", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "loop", type: "loop", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: { model: "m" } }], connections: [] });
+    const stores = createStores(db);
+    const prepared = prepareCanvasLoopRun(stores, { projectId: "p", loopNodeId: "loop", runId: "r", mode: "image", totalRounds: 3, roundInputNodeIds: [[], [], []] });
+    const nodeId = prepared.slotNodeIds[1];
+    const command = { mode: "image" as const, projectId: "p", nodeId, sourceNodeId: nodeId, model: "m", prompt: "single", count: 1,
+        loopOutput: { loopNodeId: "loop", outputGroupId: prepared.outputGroupId, slotNodeId: nodeId, slotIndex: 1, roundIndex: 2, totalRounds: 3 } };
+    assert.doesNotThrow(() => validateLoopGenerationCommand(command, stores.projects.get("p")));
+    const result = prepareCanvasGenerationTarget(stores, command, "single-task");
+    assert.equal(result.command.nodeId, nodeId);
+    assert.deepEqual(result.createOperations.map((op) => (op as { id?: string }).id), [nodeId]);
+    assert.equal(result.command.imageIds?.length, 1);
+});
+
+test("循环输出组为画布额外的空槽预留空间，所有结果位于各自格内", (t) => {
+    for (const rounds of [1, 3, 4, 5, 8]) {
+        const db = new BackendDatabase(":memory:");
+        t.after(() => db.close());
+        db.createCanvasProject({ id: "p", nodes: [{ id: "loop", type: "loop", position: { x: 0, y: 0 }, width: 380, height: 320, metadata: {} }], connections: [] });
+        const stores = createStores(db);
+        const input = { projectId: "p", loopNodeId: "loop", runId: `run-${rounds}`, mode: "image" as const, totalRounds: rounds, roundInputNodeIds: Array.from({ length: rounds }, () => []) };
+        const result = prepareCanvasLoopRun(stores, input);
+        const nodes = stores.projects.get("p")!.nodes as Array<Record<string, any>>;
+        const group = nodes.find((node) => node.id === result.outputGroupId)!;
+        const columns = group.metadata.orderedGroupColumns;
+        const displayRows = Math.floor(rounds / columns) + 1;
+        const cellHeight = (group.height - 76 - 14 * (displayRows - 1)) / displayRows;
+        assert.equal(cellHeight, 240);
+        for (const [index, id] of result.slotNodeIds.entries()) {
+            const slot = nodes.find((node) => node.id === id)!;
+            assert.equal(slot.position.y, group.position.y + 52 + Math.floor(index / columns) * (cellHeight + 14));
+            assert.ok(slot.height <= cellHeight);
+        }
+        assert.deepEqual(prepareCanvasLoopRun(stores, input), result);
+    }
+});
 
 test("循环运行把旧链式节点改造成单个有序输出组并为四种模式分配稳定槽位", (t) => {
     const db = new BackendDatabase(":memory:");

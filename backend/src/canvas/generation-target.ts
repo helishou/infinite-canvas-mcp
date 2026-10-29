@@ -103,7 +103,9 @@ export function prepareCanvasLoopRun(stores: Stores, input: CanvasLoopPrepare): 
         return `${base}-${suffix}`;
     });
     const columns = Math.min(4, Math.max(1, input.totalRounds));
-    const rows = Math.ceil(input.totalRounds / columns);
+    // The ordered group always displays empty slots up to the next full row,
+    // including a whole empty row when the occupied row is already full.
+    const rows = Math.floor(input.totalRounds / columns) + 1;
     const cellWidth = 340;
     const cellHeight = 240;
     const gap = 14;
@@ -670,9 +672,9 @@ export function buildLoopOutputGroupOperations(
     const startY = groupLayout?.startY ?? Number(record(source.position).y || 0);
     // 组容器要能装下全部槽位；每行最多 4 个，成员按顺序从左到右、从上到下排列。
     const columns = Math.min(4, rounds);
-    const rows = Math.ceil(rounds / columns);
-    const groupWidth = columns * (size.width + 28) + 32;
-    const groupHeight = rows * (size.height + 28) + 32;
+    const rows = Math.floor(rounds / columns) + 1;
+    const groupWidth = 48 + columns * size.width + (columns - 1) * 14;
+    const groupHeight = 76 + rows * size.height + (rows - 1) * 14;
 
     const operations: CanvasOperation[] = [{
         type: "add_node",
@@ -700,8 +702,8 @@ export function buildLoopOutputGroupOperations(
             nodeType: "config",
             title: `第 ${index + 1} 轮`,
             position: {
-                x: startX + 16 + (index % columns) * (size.width + 28),
-                y: startY + 16 + Math.floor(index / columns) * (size.height + 28),
+                x: startX + 24 + (index % columns) * (size.width + 14),
+                y: startY + 52 + Math.floor(index / columns) * (size.height + 14),
             },
             width: size.width,
             height: size.height,

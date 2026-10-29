@@ -72,9 +72,13 @@ export function validateVideoPlan(segments: H3PlannedSegment[]) {
         const orders = new Set<number>();
         const subjects = new Set((segment.subjects || []).map((subject) => subject.subjectId));
         for (const ref of refs) {
-            if (!ref.storageKey || !ref.nodeId) throw new Error(`片段 ${segment.id} 存在无 storageKey 的参考图`);
-            if (!REFERENCE_ROLES.includes(ref.role)) throw new Error(`片段 ${segment.id} 存在未知参考角色:${String(ref.role)}`);
-            if (!Number.isInteger(ref.order) || ref.order < 0 || orders.has(ref.order)) throw new Error(`片段 ${segment.id} 的参考顺序必须唯一且为非负整数`);
+            if (typeof ref.nodeId !== "string" || !ref.nodeId.trim()) throw new Error(`H3_PLAN_REFERENCE_NODE_ID_MISSING: 片段 ${segment.id} 的参考素材缺少 nodeId`);
+            if (typeof ref.storageKey !== "string" || !ref.storageKey.trim()) throw new Error(`H3_PLAN_REFERENCE_STORAGE_KEY_MISSING: 片段 ${segment.id} 的参考素材缺少 storageKey`);
+            if (typeof ref.name !== "string" || !ref.name.trim()) throw new Error(`H3_PLAN_REFERENCE_NAME_MISSING: 片段 ${segment.id} 的参考素材缺少 name`);
+            if (!["image", "video", "audio"].includes(String(ref.type))) throw new Error(`H3_PLAN_REFERENCE_TYPE_INVALID: 片段 ${segment.id} 的参考素材 type 无效:${String(ref.type)}`);
+            if (!REFERENCE_ROLES.includes(ref.role)) throw new Error(`H3_PLAN_REFERENCE_ROLE_INVALID: 片段 ${segment.id} 存在未知参考角色:${String(ref.role)}`);
+            if (!Number.isInteger(ref.order) || ref.order < 0) throw new Error(`H3_PLAN_REFERENCE_ORDER_INVALID: 片段 ${segment.id} 的参考 order 必须是非负整数`);
+            if (orders.has(ref.order)) throw new Error(`H3_PLAN_REFERENCE_ORDER_DUPLICATE: 片段 ${segment.id} 的参考 order 重复:${ref.order}`);
             orders.add(ref.order);
             if (ref.role === "character_turnaround" && (!ref.subjectId || !subjects.has(ref.subjectId))) throw new Error(`片段 ${segment.id} 的角色四视图缺少对应 subjectId`);
         }

@@ -203,6 +203,20 @@ test("替换槽位：dryRun 只预检，画幅不符给出槽位与目标画幅"
     assert.equal(vertical.targetAspectRatio, "9:16");
 });
 
+test("替换槽位预检分别指出图片存储键和尺寸错误", async () => {
+    const { project, handlers } = fixture();
+    for (const node of project.nodes) if (node.type === "image" && node.metadata.shotNumber) node.metadata.sourceVideoNodeId = "video-source";
+    project.nodes.push(imageNode("bad-storage", { storageKey: "media:bad" }));
+    project.nodes.push(imageNode("bad-dimensions", { width: 0, height: 1664 }));
+    const preview: any = await handlers.canvas_replace_storyboard_slots!({
+        projectId: "project-1", groupId: "group-1", dryRun: true,
+        slots: [{ slot: 1, nodeId: "bad-storage" }, { slot: 2, nodeId: "bad-dimensions" }],
+    });
+    assert.deepEqual(preview.blocked.map((item: any) => item.code), ["STORYBOARD_SLOT_INVALID_MEDIA", "STORYBOARD_SLOT_INVALID_DIMENSIONS"]);
+    assert.match(preview.blocked[0].message, /storageKey/);
+    assert.match(preview.blocked[1].message, /宽高/);
+});
+
 test("替换槽位：显式 assetIds 职责不是 storyboard 时拒绝", async () => {
     const { project, handlers } = fixture();
     for (const node of project.nodes) if (node.type === "image" && node.metadata.shotNumber) node.metadata.sourceVideoNodeId = "video-source";

@@ -1,5 +1,12 @@
 type Row = Record<string, any>;
 
+const UI_NOTE_TYPES = new Set(["Note", "MarkdownNote"]);
+
+/** Remove frontend-only annotations from an execution graph without changing the saved workflow. */
+export function removeUiNotes(graph: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(graph).filter(([, node]) => !UI_NOTE_TYPES.has(String(row(node)?.class_type))));
+}
+
 function row(value: unknown): Row | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Row : null;
 }
@@ -16,7 +23,7 @@ export function isComfyApiWorkflow(value: unknown): value is Record<string, unkn
 
 /** Converts the frontend graph JSON saved by ComfyUI into the API prompt graph. */
 export function convertComfyWorkflowToApi(value: unknown): Record<string, unknown> {
-  if (isComfyApiWorkflow(value)) return value;
+  if (isComfyApiWorkflow(value)) return removeUiNotes(value);
   const graph = row(value);
   if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length === 0) {
     throw new Error("文件不是 ComfyUI 工作流图或 API 工作流 JSON");
@@ -47,12 +54,13 @@ export function convertComfyWorkflowToApi(value: unknown): Record<string, unknow
   const nodes = graph.nodes.map(row);
   for (const node of nodes) {
     if (!node || node.id === undefined || typeof node.type !== "string" || !node.type) continue;
+    if (UI_NOTE_TYPES.has(node.type)) continue;
     const id = String(node.id);
     if (api[id]) throw new Error(`ComfyUI 工作流包含重复节点 ID：${id}`);
     const inputs: Record<string, unknown> = {};
     const nodeInputs = Array.isArray(node.inputs) ? node.inputs.map(row).filter((item): item is Row => Boolean(item)) : [];
     const widgetValues = Array.isArray(node.widgets_values) ? node.widgets_values : [];
-    const widgetObject = row(node.widgets_values);
+    const widgetObject = row(node.widgets_values_named) || row(node.widgets_values);
     let widgetIndex = 0;
 
     for (const input of nodeInputs) {
@@ -66,8 +74,12 @@ export function convertComfyWorkflowToApi(value: unknown): Record<string, unknow
       if (input.widget) {
         const widget = row(input.widget);
         const widgetName = typeof widget?.name === "string" ? widget.name : inputName;
-        const value = widgetObject ? widgetObject[widgetName] : widgetValues[widgetIndex];
+        const value = widgetObject && Object.hasOwn(widgetObject, widgetName) ? widgetObject[widgetName] : widgetValues[widgetIndex];
         widgetIndex += 1;
+        // The frontend stores a seed's control-after-generate widget in the array,
+        // although it is not an API input. Do not shift subsequent input values.
+        if ((widgetName === "seed" || widgetName === "noise_seed") &&
+            ["fixed", "increment", "decrement", "randomize"].includes(widgetValues[widgetIndex])) widgetIndex += 1;
         if ((input.link === null || input.link === undefined) && value !== undefined) inputs[inputName] = value;
       }
     }

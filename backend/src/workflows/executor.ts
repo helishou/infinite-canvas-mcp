@@ -5,6 +5,7 @@ import type { MediaStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
 import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
+import { removeUiNotes } from "./comfyui-workflow-conversion.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
@@ -751,7 +752,7 @@ export class WorkflowExecutor {
                     .map(([id, n]) => [id, (n as WfNode)!.inputs?.image]),
             ),
         });
-        const prepared = removeEmptyMediaNodes(full, config.fields, processedValues);
+        const prepared = removeUiNotes(removeEmptyMediaNodes(full, config.fields, processedValues));
         // 提交前静态校验：必须用「裁剪+清理后」的最终图 prepared，不能用裁剪前的 full；
         // 否则 removeEmptyMediaNodes 第 3 步已经清掉的悬空 input 会被误判为「指向已被裁剪的节点」。
         try {

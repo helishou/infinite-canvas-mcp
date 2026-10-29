@@ -4,7 +4,7 @@ import { H3_PARAM_KEYS } from "./runtime-params.js";
 import type { AgentCanvasNode, McpToolHandler, PluginMcpContext, PluginMcpModule, PluginMcpToolWire } from "../../server/plugin-mcp.js";
 import { H3_PLUGIN_VERSION } from "./version.js";
 import { normalizeH3GenerationSettings, normalizePlannedSegment, validateVideoPlan, type H3PlannedSegment } from "./video-plan.js";
-import { compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, resolveCharacterGroupBindings, assertReferenceCompilation } from "../../canvas/reference-contract.js";
+import { REFERENCE_ROLES, compileReferenceSubmission, inferReferenceMediaType, inferReferenceRole, referenceBindingsOf, referenceCatalogOf, resolveCharacterGroupBindings, assertReferenceCompilation } from "../../canvas/reference-contract.js";
 import { validateH3CharacterGroups } from "../../canvas/character-reference-contract.js";
 import { buildCharacterGroupFromExistingNode } from "./character-groups.js";
 import { mergeStoryboardInput, writeStoryboardPrompt } from "./storyboard-write.js";
@@ -111,6 +111,24 @@ function committedH3Fields(segment: H3Segment, fields: string[]) {
     return { values, fieldSummaries };
 }
 
+const h3ReferenceBindingSchema = {
+    type: "object",
+    properties: {
+        id: { type: "string", minLength: 1 }, assetId: { type: "string", minLength: 1 }, label: { type: "string", minLength: 1 },
+        role: { type: "string", enum: [...REFERENCE_ROLES] }, tags: { type: "array", items: { type: "string" } },
+        enabled: { type: "boolean" }, usage: { type: "string", enum: ["reference", "first_frame", "last_frame"] },
+        retentionLevel: { type: "string", enum: ["fully_preserved", "partially_preserved", "attribute_transfer", "weak_reference"] },
+        subjectId: { type: "string" }, storyboardSubjectIds: { type: "array", items: { type: "string" } },
+        mediaType: { type: "string", enum: ["image", "video", "audio"] }, url: { type: "string" }, storageKey: { type: "string" },
+        mimeType: { type: "string" }, sourceNodeId: { type: "string" }, pictureBindingId: { type: "string" },
+        picturePurpose: { type: "array", items: { type: "string" } }, groupId: { type: "string" }, outfitId: { type: "string" },
+        resultSelectionPolicy: { type: "object", properties: {
+            mode: { type: "string", enum: ["node_selection", "latest_success", "selected_result"] }, resultId: { type: "string" },
+        }, required: ["mode"] },
+    },
+    required: ["id", "assetId", "label", "role", "tags", "enabled", "usage"],
+};
+
 // 工具元信息(声明,供 Agent 动态注册)
 const TOOLS: PluginMcpToolWire[] = [
     H3_UPDATE_CLIPS_TOOL,
@@ -208,7 +226,16 @@ const TOOLS: PluginMcpToolWire[] = [
                         action: { type: "string" }, camera: { type: "string" }, composition: { type: "string" }, effects: { type: "string" },
                     }, required: ["start", "end"] } },
                     sourceShotId: { type: "string" }, title: { type: "string" }, openingState: { type: "string" }, endingState: { type: "string" },
-                    subjects: { type: "array", items: { type: "object" } }, references: { type: "array", items: { type: "object" } }, settings: { type: "object" },
+                    subjects: { type: "array", items: { type: "object", properties: {
+                        subjectId: { type: "string", minLength: 1 }, name: { type: "string" }, role: { type: "string" },
+                    }, required: ["subjectId"] } },
+                    references: { type: "array", items: { type: "object", properties: {
+                        id: { type: "string" }, assetId: { type: "string" }, nodeId: { type: "string", minLength: 1, description: "参考素材所在的画布节点 ID" },
+                        role: { type: "string", enum: [...REFERENCE_ROLES], description: "参考素材职责" }, picturePurpose: { type: "array", items: { type: "string" } },
+                        subjectId: { type: "string" }, order: { type: "integer", minimum: 0, description: "参考素材顺序，片段内唯一" },
+                        storageKey: { type: "string", minLength: 1, description: "已归档媒体键" }, name: { type: "string", minLength: 1, description: "提示词中使用的参考素材名称" },
+                        type: { type: "string", enum: ["image", "video", "audio"] }, url: { type: "string" }, mimeType: { type: "string" },
+                    }, required: ["nodeId", "role", "order", "storageKey", "name", "type"] } }, settings: { type: "object" },
                 }, required: ["id", "duration", "timeline"] } },
             },
             required: ["projectId", "nodeId", "segments"],
@@ -327,7 +354,14 @@ const TOOLS: PluginMcpToolWire[] = [
     { id: "canvas_list_reference_assets", annotations: { readOnlyHint: true }, version: "1.0.0", name: "列出项目参考资产", description: "列出项目级参考资产库及其主要职责、标签和媒体句柄。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"] } },
     { id: "canvas_update_reference_asset", version: "1.0.0", name: "更新项目参考资产", description: "新增或更新项目参考资产；职责只保存一个 primary role，补充语义放 tags。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, asset: { type: "object" } }, required: ["projectId", "asset"] } },
     { id: "canvas_analyze_reference_asset", version: "1.0.0", name: "记录参考资产分析", description: "把模型对参考素材的职责、标签和摘要写入项目资产；调用方应先实际查看素材再提交分析。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, assetId: { type: "string" }, role: { type: "string" }, tags: { type: "array", items: { type: "string" } }, summary: { type: "string" }, model: { type: "string" } }, required: ["projectId", "assetId", "role", "tags", "summary"] } },
-    { id: "h3_set_reference_bindings", version: "1.3.0", name: "设置 Clip 参考绑定", description: "整组替换指定 Clip 的手工参考绑定（场景、分镜、关键帧、音频、色卡、道具等），不修改节点位置或运行状态。角色组人物与其服装图片的参考绑定是 h3CharacterGroups 的派生视图，由编译器自动生成：增删改角色、服装或启用状态请调用 h3_bind_existing_character_groups，本工具只需管好非角色组参考。单张分镜图替换请用 h3_replace_storyboard_binding。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindings: { type: "array", items: { type: "object" } }, expectedBindings: { type: "array", items: { type: "object" } } }, required: ["projectId", "nodeId", "segmentId", "bindings"] } },
+    {
+        id: "h3_set_reference_bindings", version: "1.3.0", name: "设置 Clip 参考绑定",
+        description: "整组替换指定 Clip 的手工参考绑定（场景、分镜、关键帧、音频、色卡、道具等），不修改节点位置或运行状态。角色组人物与其服装图片的参考绑定是 h3CharacterGroups 的派生视图，由编译器自动生成：增删改角色、服装或启用状态请调用 h3_bind_existing_character_groups，本工具只需管好非角色组参考。单张分镜图替换请用 h3_replace_storyboard_binding。",
+        inputJsonSchema: { type: "object", properties: {
+            projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" },
+            bindings: { type: "array", items: h3ReferenceBindingSchema }, expectedBindings: { type: "array", items: h3ReferenceBindingSchema, description: "CAS 基线；省略时以服务端当前绑定为基线" },
+        }, required: ["projectId", "nodeId", "segmentId", "bindings"] },
+    },
     { id: "h3_replace_storyboard_binding", version: "1.1.0", name: "替换单个 Clip 分镜绑定", description: "按 bindingId 只替换一个 storyboard 参考；expectedStorageKey 省略时以服务端读到的当前 storageKey 做 CAS，冲突再报错。保留角色组、其他参考与任务历史。", inputJsonSchema: { type: "object", properties: { projectId: { type: "string" }, nodeId: { type: "string" }, segmentId: { type: "string" }, bindingId: { type: "string" }, expectedStorageKey: { type: "string", description: "旧 storageKey；省略时用服务端当前值做 CAS" }, assetId: { type: "string", description: "已登记且指向新分镜图的项目参考资产 ID" } }, required: ["projectId", "nodeId", "segmentId", "bindingId", "assetId"] } },
     {
         id: "canvas_get_storyboard_slots", annotations: { readOnlyHint: true },
@@ -781,7 +815,8 @@ export const pluginMcp: PluginMcpModule = {
                     const nodeMetadata = recordOf(node?.metadata);
                     if (!node || String(nodeMetadata.status || "") !== "success") throw new Error(`STORYBOARD_SLOT_NO_RESULT: 新分镜节点尚无成功结果:${nodeId}`);
                     const image = readNodeImage(node as unknown as Record<string, any>);
-                    if (!image.storageKey.startsWith("image:") || !(image.width > 0 && image.height > 0)) throw new Error(`STORYBOARD_SLOT_NO_IMAGE: 新分镜缺少活动图片尺寸:${nodeId}`);
+                    if (!image.storageKey.startsWith("image:")) throw new Error(`STORYBOARD_SLOT_INVALID_MEDIA: 新分镜 storageKey 不是有效的 image: 媒体键:${nodeId}`);
+                    if (!(image.width > 0 && image.height > 0)) throw new Error(`STORYBOARD_SLOT_INVALID_DIMENSIONS: 新分镜图片缺少有效宽高:${nodeId}`);
                     if (!matchesAspectRatio(image.width, image.height, targetRatio)) throw new Error(`STORYBOARD_ASPECT_MISMATCH: 第 ${index + 1} 槽图片 ${image.width}×${image.height}（${aspectRatioOf(image.width, image.height) || "未知"}）不符合目标画幅 ${targetRatioText}`);
                     let assetIds = Array.isArray(entry.assetIds) ? [...new Set(entry.assetIds.map(String))] : [];
                     let created: ReturnType<typeof buildStoryboardAsset> | undefined;

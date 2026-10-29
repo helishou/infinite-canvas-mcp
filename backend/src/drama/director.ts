@@ -203,7 +203,11 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
         if (artifact.kind === "image" && styleRequired && !isStyleAsset && !styleAnchorNodeId && artifact.targetId !== obj(d.source.style_lock).anchor_asset_id) {
             const styleId = String(obj(d.source.style_lock).anchor_asset_id || "");
             const style = d.assets[styleId];
-            if (!style || !style.storageKey || !style.sha256 || artifact.references.at(-1)?.storageKey !== style.storageKey || !dependencies.includes(styleId)) throw new Error("缺少有效的末槽 STYLE_MOTHER 引用");
+            if (!style) throw new Error(`STYLE_ANCHOR_ASSET_MISSING: 找不到风格锚点资产:${styleId}`);
+            if (!style.storageKey) throw new Error(`STYLE_ANCHOR_STORAGE_KEY_MISSING: 风格锚点资产缺少 storageKey:${styleId}`);
+            if (!style.sha256) throw new Error(`STYLE_ANCHOR_HASH_MISSING: 风格锚点资产缺少 sha256:${styleId}`);
+            if (artifact.references.at(-1)?.storageKey !== style.storageKey) throw new Error(`STYLE_ANCHOR_REFERENCE_MISMATCH: 产物末槽引用未绑定风格锚点:${styleId}`);
+            if (!dependencies.includes(styleId)) throw new Error(`STYLE_ANCHOR_DEPENDENCY_MISSING: 产物未声明风格锚点依赖:${styleId}`);
         }
         for (const ref of artifact.references) {
             const node = nodes.find(n => n.id === ref.nodeId);

@@ -14,6 +14,25 @@ export function upstreamLoopForGeneration(nodeId: string, nodes: CanvasNodeData[
         .find((source) => source?.type === CanvasNodeType.Loop);
 }
 
+/** A slot's own generate button runs that slot, while the loop button runs the batch. */
+export function loopForGenerationCommand(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    if (nodes.find((node) => node.id === nodeId)?.metadata?.loopOutputSlot === true) return undefined;
+    return upstreamLoopForGeneration(nodeId, nodes, connections);
+}
+
+export function singleLoopOutputBinding(node: CanvasNodeData | undefined, nodes: CanvasNodeData[]) {
+    if (node?.metadata?.loopOutputSlot !== true) return undefined;
+    const loopNodeId = node.metadata.loopSourceId;
+    const outputGroupId = node.metadata.loopOutputGroupId || node.metadata.groupId;
+    const group = nodes.find((item) => item.id === outputGroupId && item.type === CanvasNodeType.Group && item.metadata?.loopOutputGroup === true && item.metadata.loopSourceId === loopNodeId);
+    const slots = group?.metadata?.groupSlots;
+    const slotIndex = Array.isArray(slots) ? slots.indexOf(node.id) : -1;
+    if (!loopNodeId || !group || slotIndex < 0 || !slots?.length || !nodes.some((item) => item.id === loopNodeId && item.type === CanvasNodeType.Loop)) {
+        throw new Error("循环输出节点所属的循环或槽位不存在，请检查输出组");
+    }
+    return { loopNodeId, outputGroupId: group.id, slotNodeId: node.id, slotIndex, roundIndex: slotIndex + 1, totalRounds: slots.length };
+}
+
 export function resolveLoopInputPlan(metadata: CanvasNodeMetadata, imageCount: number, videoCount: number, audioCount = 0, promptCount = 0) {
     const start = Math.max(1, Math.floor(Number(metadata.loopStart) || 1));
     const mode = metadata.loopMediaMode || (metadata.loopVideoEnabled ? "video" : metadata.loopImageEnabled ? "image" : "auto");

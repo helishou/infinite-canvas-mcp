@@ -163,6 +163,15 @@ test("changed reference bytes, identity version and canvas drift fail before tas
     assert.throws(() => verifyImageInput(editedPrompt, d, artifact, "frame"), /提示词已有修改/);
 });
 
+test("style-anchor preflight reports a missing dependency instead of a missing reference", t => {
+    const f = fixture(t), d = structuredClone(f.service.get("ep").published!.director!);
+    (d.source as any).style_policy = "required";
+    (d.source as any).style_lock = { anchor_asset_id: "STYLE" };
+    const plan = (d.source.asset_plan as any[]).find(item => item.id === "FRAME");
+    plan.depends_on = plan.depends_on.filter((id: string) => id !== "STYLE");
+    assert.throws(() => validateDirectorMedia(f.db, "canvas", d, ["FRAME"]), /STYLE_ANCHOR_DEPENDENCY_MISSING.*STYLE/);
+});
+
 test("adding an approved identity back updates the formal draft and preserves its reference scope", t => {
     const f = fixture(t), input = f.input();
     const edge = (f.project().connections as any[]).find(edge => edge.fromNodeId === "NEIGHBOR" && edge.toNodeId === input.sourceNodeId);

@@ -12,6 +12,33 @@ test("H3 视频计划公开 schema 在调用前指出 id 和 timeline.end", () =
     assert.throws(() => validator.validateInput({ ...base, segments: [{ id: "S01", duration: 7, timeline: [{ start: 0 }] }] }), /segments\.0\.timeline\.0\.end/);
 });
 
+test("H3 视频计划公开 schema 描述参考素材必需字段", () => {
+    const tool = pluginMcp.tools.find((item) => item.id === "h3_apply_video_plan")!;
+    const schema: any = tool.inputJsonSchema;
+    const referenceSchema = schema.properties.segments.items.properties.references.items;
+    assert.deepEqual(referenceSchema.required, ["nodeId", "role", "order", "storageKey", "name", "type"]);
+    assert.equal(referenceSchema.properties.role.enum.includes("character_identity"), true);
+    assert.deepEqual(referenceSchema.properties.type.enum, ["image", "video", "audio"]);
+    for (const key of referenceSchema.required) assert.ok(referenceSchema.properties[key], `references.${key} must be documented`);
+    const validator = compilePluginInputSchema(schema);
+    const input = { projectId: "p", nodeId: "n", segments: [{ id: "s", duration: 1, timeline: [{ start: 0, end: 1 }], references: [{ nodeId: "img", role: "scene", order: 0, storageKey: "image:1", name: "场景图", type: "image" }] }] };
+    assert.doesNotThrow(() => validator.validateInput(input));
+});
+
+test("H3 设置参考绑定公开完整 ReferenceBinding 契约", () => {
+    const tool = pluginMcp.tools.find((item) => item.id === "h3_set_reference_bindings")!;
+    const schema: any = tool.inputJsonSchema;
+    const bindingSchema = schema.properties.bindings.items;
+    assert.deepEqual(bindingSchema.required, ["id", "assetId", "label", "role", "tags", "enabled", "usage"]);
+    assert.equal(bindingSchema.properties.role.enum.includes("scene"), true);
+    assert.deepEqual(bindingSchema.properties.usage.enum, ["reference", "first_frame", "last_frame"]);
+    assert.equal(schema.properties.expectedBindings.items, bindingSchema);
+    const validator = compilePluginInputSchema(schema);
+    const input = { projectId: "p", nodeId: "n", segmentId: "s", bindings: [{ id: "b", assetId: "a", label: "场景", role: "scene", tags: [], enabled: true, usage: "reference" }] };
+    assert.doesNotThrow(() => validator.validateInput(input));
+    assert.throws(() => validator.validateInput({ ...input, bindings: [{ ...input.bindings[0], assetId: undefined }] }), /assetId/);
+});
+
 function fixture() {
     const project: any = {
         id: "project-1",

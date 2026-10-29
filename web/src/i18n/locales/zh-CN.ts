@@ -696,6 +696,7 @@ export default {
             "fitAll": "总览全部节点",
             "fitAllShortcut": "总览全部节点（Shift + F）",
             "rename": "批量重命名",
+            "unifySize": "统一大小",
             "defaultPrefix": "节点",
             "prefix": "名称前缀",
             "startNumber": "起始序号",

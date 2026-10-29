@@ -695,6 +695,7 @@ export default {
             "fitAll": "Fit all nodes",
             "fitAllShortcut": "Fit all nodes (Shift + F)",
             "rename": "Batch rename",
+            "unifySize": "Unify size",
             "defaultPrefix": "Node",
             "prefix": "Name prefix",
             "startNumber": "Starting number",

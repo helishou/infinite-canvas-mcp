@@ -1,5 +1,5 @@
 import { Button, Dropdown, Tooltip, type MenuProps } from "antd";
-import { Plus, Upload, MousePointer2, Hand, Undo2, Redo2, Ellipsis, Focus, PencilLine, Grid2x2, Trash2, Group } from "lucide-react";
+import { Plus, Upload, MousePointer2, Hand, Undo2, Redo2, Ellipsis, Focus, PencilLine, Grid2x2, Trash2, Group, Scaling } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { getNodeSpec } from "@/constant/canvas";
@@ -9,6 +9,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 export function CanvasToolbar({
     onFocusSelection,
     onBatchRename,
+    onUnifySize,
     selectedCount,
     deleteDisabled = false,
     showSelectionActions,
@@ -38,6 +39,7 @@ export function CanvasToolbar({
 }: {
     onFocusSelection: () => void;
     onBatchRename: () => void;
+    onUnifySize: () => void;
     selectedCount: number;
     deleteDisabled?: boolean;
     showSelectionActions: boolean;
@@ -91,6 +93,7 @@ export function CanvasToolbar({
             <Tooltip title={t("canvasChrome.selected", { count: selectedCount })}><span className="canvas-selection-count" aria-label={t("canvasChrome.selected", { count: selectedCount })}>{selectedCount}</span></Tooltip>
             <Tooltip title={t("canvas.navigation.focusSelection")}><Button type="text" aria-label={t("canvas.navigation.focusSelection")} onClick={onFocusSelection} icon={<Focus className="size-4" />} /></Tooltip>
             {selectedCount > 1 && <Tooltip title={t("canvas.navigation.rename")}><Button type="text" aria-label={t("canvas.navigation.rename")} onClick={onBatchRename} icon={<PencilLine className="size-4" />} /></Tooltip>}
+            {selectedCount > 1 && <Tooltip title={t("canvas.navigation.unifySize")}><Button type="text" aria-label={t("canvas.navigation.unifySize")} onClick={onUnifySize} icon={<Scaling className="size-4" />} /></Tooltip>}
             {groupSelection && <Tooltip title={t("canvas.controls.group")}><Button type="text" aria-label={t("canvas.controls.group")} onClick={onAddGroup} icon={<Group className="size-4" />} /></Tooltip>}
             <Tooltip title={t("canvas.toolbar.arrange")}><Button type="text" aria-label={t("canvas.toolbar.arrange")} onClick={onArrange} icon={<Grid2x2 className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.deleteSelected")}><Button type="text" aria-label={t("canvas.deleteSelected")} danger disabled={deleteDisabled} onClick={onDelete} icon={<Trash2 className="size-4" />} /></Tooltip>

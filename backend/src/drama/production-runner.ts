@@ -599,7 +599,9 @@ export class EpisodeProductionRunner {
             if (!node) {
                 const unit = layoutPlan.units.find(item => item.targets.includes(`asset:${artifact.targetId}`) && item.members.some(member => member.role === "asset"));
                 const member = unit?.members.find(item => item.role === "asset");
-                if (!unit || !member || member.nodeId !== nodeId) throw new Error(`布局计划缺少正式资产节点：${artifact.targetId}`);
+                if (!unit) throw new Error(`PRODUCTION_ASSET_LAYOUT_UNIT_MISSING: 布局计划缺少资产 ${artifact.targetId} 的正式布局单元`);
+                if (!member) throw new Error(`PRODUCTION_ASSET_LAYOUT_MEMBER_MISSING: 资产 ${artifact.targetId} 的布局单元未包含 asset 成员`);
+                if (member.nodeId !== nodeId) throw new Error(`PRODUCTION_ASSET_NODE_ID_MISMATCH: 资产 ${artifact.targetId} 的布局节点 ${member.nodeId} 与制作稿绑定 ${nodeId} 不一致`);
                 this.stores.projects.applyOperations(episode.canvasId, Number(assetProject.revision || 0), [{ type: "add_node", id: nodeId, nodeType: member.nodeType, title: assetTitle(snapshot.director.source, artifact.targetId), position: member.position, width: member.size.width, height: member.size.height,
                     metadata: { prompt: artifact.prompt, status: "idle", productionAssetId: artifact.targetId, productionVersion: version, productionLayoutUnitId: unit.id, productionLayoutBounds: member.size } }], { operationId: stableId("production-asset-node", episodeId, String(version), artifact.targetId), runtimeWrite: true, source: { clientId: "episode-production", kind: "system", label: "准备 Acheng 资产" } });
                 assetProject = this.stores.projects.get(episode.canvasId!);
