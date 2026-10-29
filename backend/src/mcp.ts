@@ -8,7 +8,7 @@ import { isMcpProfile, isToolInProfile, MCP_PROFILES, type McpProfile } from "@b
 import { compactProductionEditSchema, COMPACT_EDIT_DESCRIPTION, compactEditOperationForIssue, isMcpSchemaMode, MCP_SCHEMA_MODES, DEFAULT_MCP_SCHEMA_MODE, type McpSchemaMode } from "@basketikun/canvas-agent/drama/production-edit-disclosure";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
-import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery, assertProductionSourceFields } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery, assertProductionSourceFields, canonicalProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
 import {
   executeCollaborationTool,
@@ -63,7 +63,7 @@ import { createLogger } from "./logger.js";
 import { classifyErrorDisposition, taskFailureDisposition } from "./error-taxonomy.js";
 import type { McpObservabilityStore } from "./stores/types.js";
 import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
-import { observeReadRequest, observeReadResult, observeTaskReadResult } from "./mcp-read-observation.js";
+import { observeReadRequest, observeReadResult, observeTaskReadResult, isStaticRead } from "./mcp-read-observation.js";
 
 type McpProjectSource = "browser" | "session" | "automatic";
 type BrowserActiveProjectResolver = () => string | null;
@@ -1266,7 +1266,7 @@ function registerBackendCanvasTools(
         });
         try {
           const input = schema.parse(rawInput) as Record<string, unknown>;
-          const value = await executeDirectCanvasTool(
+          const raw = await executeDirectCanvasTool(
             config,
             backendApi,
             state,
@@ -1275,6 +1275,7 @@ function registerBackendCanvasTools(
             getBrowserActiveProjectId,
             extra.signal,
           );
+          const value = applyReadShortCircuit(name, input, raw).value;
           const context = mcpToolResultContext(value, input, state, name);
           // 画布类工具绕过上面的通用包装，因此在这里施加同一道输出上限。
           enforceToolOutputLimit(name, value);
@@ -3202,6 +3203,66 @@ function enforceToolOutputLimit(tool: string, payload: unknown) {
   if (bytes > MAX_TOOL_OUTPUT_BYTES) throw new McpPayloadOverflowError(bytes, chars, MAX_TOOL_OUTPUT_BYTES, tool);
 }
 
+/** 指纹计算时忽略的字段：它们只描述「这次调用」，不描述「读到的内容」。 */
+const FINGERPRINT_OMIT_KEYS = new Set(["traceId", "contentFingerprint", "unchanged", "bytes"]);
+
+/**
+ * 读取内容的稳定指纹（P7c）。
+ *
+ * 用键序无关的规范化 JSON，保证同一投影/字段范围的相同内容得到同一哈希；
+ * 与内容无关的调用元信息（traceId 等）先剔除，否则每次调用都会变。
+ */
+function readContentFingerprint(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    const body = Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).filter(([key]) => !FINGERPRINT_OMIT_KEYS.has(key)),
+    );
+    return crypto.createHash("sha256").update(canonicalProduction(body)).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 重复读取短路（P7c）。
+ *
+ * 行为：静态读取一律在回执里附带 `contentFingerprint`；调用方下次把该值放进
+ * `ifChanged`，内容没变就只回 `{unchanged:true, contentFingerprint, revision, bytes:0}`，
+ * 不再重复返回正文。
+ *
+ * 不做的事：不缓存正文（只比较哈希）、不自动短路（必须显式传 `ifChanged`）、
+ * 不作用于任务状态/结果这类动态查询 —— 旧结果比多读一次更危险。
+ */
+function applyReadShortCircuit(tool: string, input: Record<string, unknown>, value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { value, shortCircuited: false };
+  if (!isStaticRead(tool, input)) return { value, shortCircuited: false };
+  const fingerprint = readContentFingerprint(value);
+  if (!fingerprint) return { value, shortCircuited: false };
+  const requested = typeof input.ifChanged === "string" ? input.ifChanged.trim().toLowerCase() : "";
+  if (/^[a-f0-9]{64}$/.test(requested) && requested === fingerprint) {
+    const revision = (value as Record<string, unknown>).revision;
+    return {
+      value: {
+        unchanged: true,
+        contentFingerprint: fingerprint,
+        tool,
+        ...(typeof revision === "number" ? { revision } : {}),
+        bytes: 0,
+      },
+      shortCircuited: true,
+    };
+  }
+  return { value: { ...(value as Record<string, unknown>), contentFingerprint: fingerprint }, shortCircuited: false };
+}
+
+/** 把改写后的值塞回工具原始返回体（插件工具返回 MCP content 数组，不能只换 value）。 */
+function withReplacedToolValue(result: unknown, value: unknown) {
+  const source = recordOf(result);
+  if (!Array.isArray(source.content)) return result;
+  return { ...source, content: [{ type: "text" as const, text: JSON.stringify(value) }] };
+}
+
 /** 超限时把「实际多大 / 上限多少」写进 outputSummary，让诊断能显示超了多少。
  *  注意 outputChars 与既有指标口径一致（字符数），字节数另开 outputBytes 字段。 */
 function payloadOverflowSummary(error: unknown) {
@@ -3672,7 +3733,7 @@ function installMcpToolObservability(
         inputSummary,
       });
       try {
-        const result = await handler(input, extra);
+        let result = await handler(input, extra);
         const value = mcpToolResultValue(result);
         const resultRecord = recordOf(result);
         const valueRecord = recordOf(value);
@@ -3720,6 +3781,8 @@ function installMcpToolObservability(
             },
           });
         } else {
+          const short = applyReadShortCircuit(name, input, value);
+          if (short.value !== value) result = withReplacedToolValue(result, short.value);
           // 成功返回体也受硬上限约束：超限直接抛错，由下面 catch 记为 tool.failed/OUTPUT_TOO_LARGE。
           enforceToolOutputLimit(name, result);
           await recordMcpObservabilityEvent(recordEvent, {
@@ -3729,7 +3792,7 @@ function installMcpToolObservability(
             tool: name,
             durationMs: Date.now() - startedAt,
             inputSummary,
-            ...mcpToolResultContext(value, input, state, name),
+            ...mcpToolResultContext(short.value, input, state, name),
           });
         }
         return withTraceIdInToolResult(result, traceId);

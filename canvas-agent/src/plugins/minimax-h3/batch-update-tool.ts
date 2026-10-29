@@ -83,6 +83,7 @@ export const H3_GET_CLIP_TOOL = {
             segmentIds: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "与 segmentId 二选一；同一快照批量读取保存摘要、fields 和 include:runtime，去重并保持请求顺序" },
             include: { type: "array", items: { type: "string", enum: ["prompt", "references", "runtime", "result"] }, uniqueItems: true },
             ifRevision: { type: "integer", minimum: 0, description: "正文已完整读取时传入其画布 revision；未变化时只返回当前状态摘要和 unchanged:true，不重复返回正文。include:result 时忽略此条件。" },
+            ifChanged: { type: "string", pattern: "^[a-fA-F0-9]{64}$", description: "上次同一范围读取返回的 contentFingerprint；内容未变只返回 unchanged:true 与指纹，不重复返回正文。按内容哈希判断，无关修订不会让它失效。" },
             taskId: { type: "string", minLength: 1, description: "include:result 时核对的精确历史/当前任务 ID；省略从 Clip 的结果记录解析" },
             storageKey: { type: "string", minLength: 1, description: "include:result 时核对的精确归档视频；必须属于此 Clip 和任务，不按目录最新文件猜测" },
             fields: { type: "array", minItems: 1, maxItems: H3_NARRATIVE_FIELDS.length, items: { type: "string", enum: H3_NARRATIVE_FIELDS }, uniqueItems: true },

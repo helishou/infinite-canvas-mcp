@@ -1,6 +1,6 @@
 # P7：编排浪费治理（调用次数、决策路径与失败语义）
 
-状态：P7a 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7b–P7d 仍为设计稿。
+状态：P7a、P7c 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7b、P7d 仍为设计稿。
 范围：MCP 工具契约与执行语义。不改业务编辑、生成参数、质量授权、并发上限与数据库格式。
 与既有关系：`mcp-efficiency-design.md` 的 P0–P6 处理「单次返回多大」，本文档处理「读多少次、读来干什么、失败怎么处置」。两者互补，不重复。
 
@@ -178,6 +178,17 @@
 - 不做服务端读取缓存（不保存正文，只比较指纹）。
 - 不自动跳过：必须显式传 `ifChanged`，避免把「用户要求再确认一次」误判成重复。
 
+### 6.5 实施记录（2026-10-29）
+
+- 机制放在 MCP 出口，不在各工具里各写一遍：`applyReadShortCircuit(name, input, value)` 位于 `backend/src/mcp.ts`，画布工具与插件工具两个出口共用；是否适用由 `mcp-read-observation.ts` 的 `isStaticRead()` 判定（沿用既有 `STATIC_READS` 白名单与动态读取排除规则）。
+- 指纹 = 规范化 JSON（复用 `canonicalProduction`，键序无关）的 SHA-256，剔除 `traceId / contentFingerprint / unchanged / bytes` 等调用元信息。**不复用 `sourceHash`**：它是整稿哈希，换 `fields` 投影会得到同一指纹，会造成跨投影误判为未变。
+- 短路回执：`{ unchanged: true, contentFingerprint, tool, revision?, bytes: 0 }`；未命中或未传参时正文照旧，仅附加 `contentFingerprint`。
+- 参数声明：`canvas_get_state`（`canvas-agent/src/canvas/schemas.ts`）、`production_get_source`（`production-tools.ts`，该 schema 为 `.strict()`，不声明会被拒）、`h3_get_clip`（`batch-update-tool.ts` 的 JSON Schema）。
+- 覆盖面：`canvas_get_state`、`production_get_source`、`h3_get_clip` 及同族的 `h3_get_clip_prompt / references / runtime`、`production_get*` 等 `STATIC_READS` 成员。`canvas_task_status`、`canvas_wait_tasks`、`include:runtime`、`include:result` 明确不参与。
+- 未接入：`canvas_image_input_manifest`（其入参 `nodeId/referenceNodeIds/characterImageKeys` 不在既有读取范围键内，且回执本身已带 `manifestHash`，接入需另开范围键，留待有实测需求时再做）。
+- 夹具：`backend/src/mcp-read-short-circuit.test.ts`（普通读取带指纹 → 同指纹短路 → 指纹稳定 → 内容变化不命中 → 跨投影不误命中 → 动态查询不参与）。
+- 现场实测（运行中的 17370，画布 `7PH4RT1U7lkBtCFjl9o8E`）：索引视图 1,048 → 206 字节；7 节点 `projection: full` 59,467 → 206 字节。期间画布 revision 248 → 252（另有会话在编辑）但该投影内容未变，指纹未变、短路仍然命中，符合「无关修订不失效」的设计意图。
+
 ## 7. 机制四：等待折叠（submit-and-collect）
 
 ### 7.1 契约
@@ -246,7 +257,7 @@
 | --- | --- | --- | --- |
 | P7a | 错误分级与 doNotRetry | MCP 错误映射、各 dispatcher 的抛出点、`h3-execution-contract` 的 unverified 汇总 | 场景 J 通过，旧字符串消费方不受影响（**已完成**） |
 | P7b | 等待折叠 | `h3_run_all_clips`、`canvas_generate_image_batch`、等待实现 | 场景 M 通过，`wait:'none'` 行为逐字段不变 |
-| P7c | 重复读取短路 | 共享投影、`canvas_get_state`、`h3_get_clip`、manifest | 场景 K 通过，未传 `ifChanged` 时字节与现在一致 |
+| P7c | 重复读取短路 | 共享投影、`canvas_get_state`、`h3_get_clip`、manifest | 场景 K 通过，未传 `ifChanged` 时字节与现在一致（**已完成**） |
 | P7d | `canvas_next` | 新工具、阶段判定、账本、`nextAction` 构造 | 场景 L 通过，`nextAction` 全部通过目标 schema 校验 |
 
 顺序建议 P7a → P7b → P7c → P7d。P7a 单独就能消灭「假失败重跑」，是性价比最高的一项。

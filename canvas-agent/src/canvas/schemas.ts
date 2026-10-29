@@ -336,6 +336,7 @@ export const toolInputSchemas = {
     includeConnections: z.boolean().optional().describe("仅配合 nodeIds；显式 projection 默认不带连线，旧请求默认包含"),
     view: z.enum(["index", "graph"]).optional().describe("默认 index：全部节点的 ID、类型、标题及生成模式；graph：节点布局摘要和连线"),
     ifRevision: z.number().int().min(0).optional().describe("只用于指定 projectId 的默认完整节点目录；revision 相同则返回 unchanged"),
+    ifChanged: z.string().regex(/^[a-f0-9]{64}$/i).optional().describe("上次同一范围读取返回的 contentFingerprint；内容未变只返回 unchanged 短确认，不重复返回正文。与 ifRevision 的区别：按内容哈希而非 revision 判断，无关修订不会让它失效"),
     nodeIds: z
       .array(z.string())
       .optional()
