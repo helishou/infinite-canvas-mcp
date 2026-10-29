@@ -1,6 +1,6 @@
 # P7：编排浪费治理（调用次数、决策路径与失败语义）
 
-状态：P7a、P7c 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7b、P7d 仍为设计稿。
+状态：P7a、P7b、P7c 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7d 仍为设计稿。
 范围：MCP 工具契约与执行语义。不改业务编辑、生成参数、质量授权、并发上限与数据库格式。
 与既有关系：`mcp-efficiency-design.md` 的 P0–P6 处理「单次返回多大」，本文档处理「读多少次、读来干什么、失败怎么处置」。两者互补，不重复。
 
@@ -218,6 +218,19 @@
 
 当前「提交 + 等 + 逐段查 + 再核验」至少 4 次调用、每段一轮推理；折叠后 1 次调用、1 轮推理。多段时线性变常数。
 
+### 7.4 实施记录（2026-10-29）
+
+- 沿用既有 `waitForCompletion`（不新增同义 `wait:'all'` 参数，避免同一能力两个入口）：`canvas_generate_image`、`canvas_generate_image_batch`、`h3_run_all_clips` 三处声明，默认 `false` 行为逐字段不变。
+- 折叠在 MCP 出口统一实现：`applyWaitFold` → `waitForCanvasTasks`（既有引擎：事件流优先 + 5s 回查 + 单次批量 `/tasks`，`pollMs ≤ 10000`）→ `foldWaitFields`。`canvas_generate_image_batch` 原先自带一份内部等待已删除，避免同一批任务被等两次、回执出现两种形状。
+- 回执附加折叠视图（与既有 `tasks/summary/timedOut` 并存，旧消费方不受影响）：
+  `status: succeeded | partial | timeout | pending | needs_confirmation`、`outputs[]`、`pending[]`、`blocked[]`、`needsConfirmation[]`。
+  `needs_confirmation` 是 H3 逐段确认的真实状态，不塞进 partial/timeout。
+- `blocked[]` 直接复用 P7a 的 `failure` 分级（`code/scope/doNotRetry`），partial 时不自动重试。
+- **规格来源修正**：原方案写「产物规格来自 media_files」，实测发现任务的 `result.media` 不带宽高时长（图片带、视频不带）。真正可用的是任务自身的 `result.specification`（归档时 probe 得到，含 `measured.width/height` 与 `status`）。因此 `toCanvasTask` 透传 `specification`，`foldWaitFields` 用它补齐 `outputs[].width/height` 并附压缩后的 `specification{status,width,height,issueCount}`，仍然不额外 probe。
+- 夹具：`backend/src/mcp-wait-fold.test.ts`（partial/succeeded 两种收敛、规格透传、blocked 分级、旧字段仍在、三个工具确实声明了 `waitForCompletion`）。
+- 现场实测：对画布 `7PH4RT1U7lkBtCFjl9o8E` 两段已完成 H3 任务一次 `canvas_wait_tasks` 得到 `status=succeeded`、`outputs=2`、含 `width=864/height=480/specification.status=passed`，整份回执 2,289 字节。
+- 范围外：`h3_run_all_clips` 的参数声明写在 `canvas-agent/src/plugins/minimax-h3/mcp.ts`，该文件另有未提交改动，本次不单独提交（改动已在工作区与 `dist` 中生效）。
+
 ## 8. 通用性：三层归属
 
 | 层 | 内容 | 落点 | 可推广性 |
@@ -256,7 +269,7 @@
 | 阶段 | 工作包 | 涉及位置 | 独立交付条件 |
 | --- | --- | --- | --- |
 | P7a | 错误分级与 doNotRetry | MCP 错误映射、各 dispatcher 的抛出点、`h3-execution-contract` 的 unverified 汇总 | 场景 J 通过，旧字符串消费方不受影响（**已完成**） |
-| P7b | 等待折叠 | `h3_run_all_clips`、`canvas_generate_image_batch`、等待实现 | 场景 M 通过，`wait:'none'` 行为逐字段不变 |
+| P7b | 等待折叠 | `h3_run_all_clips`、`canvas_generate_image_batch`、等待实现 | 场景 M 通过，`wait:'none'` 行为逐字段不变（**已完成**） |
 | P7c | 重复读取短路 | 共享投影、`canvas_get_state`、`h3_get_clip`、manifest | 场景 K 通过，未传 `ifChanged` 时字节与现在一致（**已完成**） |
 | P7d | `canvas_next` | 新工具、阶段判定、账本、`nextAction` 构造 | 场景 L 通过，`nextAction` 全部通过目标 schema 校验 |
 

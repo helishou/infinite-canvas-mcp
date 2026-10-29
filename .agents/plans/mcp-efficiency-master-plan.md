@@ -77,7 +77,8 @@
 | — | 批量任务查询 | `canvas_task_status(taskIds ≤ 32)` | **已上线**（`240ae707`） |
 | P7a | 错误分级与不可重试判定 | `error.scope / doNotRetry / fix`；失败任务回执带 `failure` 分级 | **已实现**（2026-10-29，源码+dist+运行进程均已生效） |
 | P7c | 重复读取短路 | `ifChanged` + `contentFingerprint`；静态读取命中回 `{unchanged,bytes:0}` | **已实现**（实测 59,467 → 206 字节） |
-| P7b、P7d | 等待折叠 / 阶段裁决 | `wait:'all'` / `canvas_next` | **设计稿** |
+| P7b | 等待折叠 | `waitForCompletion=true` 回 `status/outputs/pending/blocked`；规格取自任务 `specification` | **已实现**（实测两段 2,289 字节一次回执） |
+| P7d | 阶段裁决 | `canvas_next` | **设计稿** |
 
 ## 5. 各阶段要点
 
@@ -129,7 +130,7 @@
 | 错误分级（已实现） | `error.scope: environment\|input\|conflict\|transient\|content` + `fix` + `doNotRetry` | 假失败重跑（当晚 5 轮 → 0） |
 | 阶段裁决 | `canvas_next` 一次返回 `stage / settled / blockers / 唯一 nextAction / humanReview / budget` | 自我确认式读取（67 → ≤10） |
 | 读取短路（已实现） | 读时传 `ifChanged`，命中回 `{unchanged:true, bytes:0}` | 重复全文返回 |
-| 等待折叠 | 提交时 `wait:'all'`，内部轮询至终态，一次返回产物与规格 | 每批 N 轮 → 1 轮 |
+| 等待折叠（已实现） | 提交时 `waitForCompletion:true`，内部轮询至终态，一次返回产物与规格 | 每批 N 轮 → 1 轮 |
 
 `ifChanged` 即 P1c/§9.1 推迟的「内容哈希条件读取」，其触发条件（证明大量重复全文）已由本次实测满足。
 

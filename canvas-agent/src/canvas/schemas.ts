@@ -299,6 +299,29 @@ const assetUpsertItemSchema = z.object({
   metadata: recordSchema.optional(),
 });
 
+/** 提交类工具的等待折叠参数（P7b）：一次调用完成「提交 → 等待 → 核验」收口。
+ *  只提供折叠能力，不改变提交、并发、队列与超时语义。 */
+const waitFoldSchema = {
+  waitForCompletion: z
+    .boolean()
+    .optional()
+    .describe("true=由 MCP 内部等到本次提交的全部任务终态，返回 wait.status(succeeded|partial|timeout|needs_confirmation)、outputs、pending、blocked；默认 false，提交后立即返回 taskId"),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(1000)
+    .max(1800000)
+    .optional()
+    .describe("waitForCompletion=true 时的最长等待时间，默认 900000ms；超时返回 pending，原任务保留不重提"),
+  pollMs: z
+    .number()
+    .int()
+    .min(250)
+    .max(10000)
+    .optional()
+    .describe("waitForCompletion=true 时的轮询间隔，默认 2000ms"),
+};
+
 export const toolInputSchemas = {
   ...collaborationSchemas,
   site_navigate: z.object({
@@ -416,7 +439,8 @@ export const toolInputSchemas = {
         .optional()
         .describe("生图提示词；仅当前工作流要求提示词时必填"),
     })
-    .merge(generationOptionsSchema),
+    .merge(generationOptionsSchema)
+    .extend(waitFoldSchema),
   canvas_generate_image_batch: canvasProjectSchema.extend({
     defaults: z
       .record(z.unknown())
@@ -427,24 +451,7 @@ export const toolInputSchemas = {
       .min(1)
       .max(32)
       .describe("批量生图条目；同一画布内由 Backend 串行提交以避免 revision 冲突"),
-    waitForCompletion: z
-      .boolean()
-      .optional()
-      .describe("true=由 MCP 内部轮询到全部任务终态后返回；默认 false"),
-    timeoutMs: z
-      .number()
-      .int()
-      .min(1000)
-      .max(1800000)
-      .optional()
-      .describe("waitForCompletion=true 时的最长等待时间，默认 900000ms"),
-    pollMs: z
-      .number()
-      .int()
-      .min(250)
-      .max(10000)
-      .optional()
-      .describe("waitForCompletion=true 时的轮询间隔，默认 2000ms"),
+    ...waitFoldSchema,
   }),
   canvas_generate_video: canvasProjectSchema
     .extend(generationFlowSchema.shape)

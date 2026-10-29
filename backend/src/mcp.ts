@@ -169,7 +169,7 @@ async function createBackendMcpInstance(
     runtimeRevision = registry.contractRevision;
     return runtime = { serverInstanceId: `${process.pid}:${state.clientId}`, profile, schemaMode, mcpContractVersion: MCP_CONTRACT_VERSION, h3PluginVersion: h3?.version || null, toolSchemaHash: fingerprint };
   };
-  installMcpToolObservability(server, state, recordEvent);
+  installMcpToolObservability(server, state, recordEvent, backendApi);
   registerBackendCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
   registerDirectComfyTools(server, backendApi);
   registerAgentSessionCompatibilityTools(server, config);
@@ -859,10 +859,8 @@ async function executeDirectCanvasTool(
       }
     }
     const uniqueTaskIds = [...new Set(taskIds)];
-    const wait =
-      input.waitForCompletion === true
-        ? await waitForCanvasTasks(backendApi, uniqueTaskIds, input, signal)
-        : undefined;
+    // 等待统一在 MCP 出口折叠（applyWaitFold）：这里不再自带一份轮询实现，
+    // 否则同一批任务会被等两次、回执出现两种形状。
     return {
       ok: true,
       requestId: crypto.randomUUID(),
@@ -873,7 +871,6 @@ async function executeDirectCanvasTool(
       directTasks: results.flatMap((result) =>
         Array.isArray(result.directTasks) ? result.directTasks : [],
       ),
-      ...(wait ? { wait } : {}),
       ...(uniqueTaskIds.length ? { next: waitTasksAction(uniqueTaskIds) } : {}),
     };
   }
@@ -1275,7 +1272,7 @@ function registerBackendCanvasTools(
             getBrowserActiveProjectId,
             extra.signal,
           );
-          const value = applyReadShortCircuit(name, input, raw).value;
+          const value = applyReadShortCircuit(name, input, await applyWaitFold(backendApi, name, input, raw, extra.signal)).value;
           const context = mcpToolResultContext(value, input, state, name);
           // 画布类工具绕过上面的通用包装，因此在这里施加同一道输出上限。
           enforceToolOutputLimit(name, value);
@@ -2315,7 +2312,7 @@ async function waitForCanvasTasks(
         .filter((task) => !terminal.has(String(task.status)))
         .map((task) => String(task.taskId || ""))
         .filter(Boolean);
-      return {
+      const receipt = {
         timedOut: !complete,
         pendingTaskIds,
         elapsedMs,
@@ -2338,6 +2335,8 @@ async function waitForCanvasTasks(
           : pendingTaskIds.length ? { next: waitTasksAction(pendingTaskIds) } : {}),
         tasks,
       };
+      // P7b：同一次等待顺带给出折叠视图，提交工具与 canvas_wait_tasks 共用同一份计算。
+      return { ...receipt, ...foldWaitFields(receipt) };
     }
     if (waitMode === "sse") waitMode = "poll-fallback";
     await delayWithMcpSignal(Math.min(pollMs, Math.max(1, timeoutMs - elapsedMs)), waitSignal).catch(error => {
@@ -2346,6 +2345,100 @@ async function waitForCanvasTasks(
     });
   }
   } finally { clearTimeout(deadlineTimer); }
+}
+
+const WAIT_TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "completed", "missing", "awaiting_confirmation"]);
+
+/**
+ * 等待折叠视图（P7b）：把一批任务收敛成「成了什么、卡了什么、还差什么」。
+ *
+ * 目的：让「提交 → 逐个查 → 再核验」变成一次调用一轮推理。产物规格直接取
+ * 任务已有的 outputs（归档时已写入宽高时长），不额外 probe。
+ */
+function foldWaitFields(wait: Record<string, unknown>) {
+  const tasks = Array.isArray(wait.tasks) ? wait.tasks.map(recordOf) : [];
+  // 规格来自任务自身已经算好的 specification（实测宽高由归档时的 probe 写入），
+  // 这里只做透传与压缩，不再额外 probe 一次。
+  const compactSpecification = (task: Record<string, unknown>) => {
+    const spec = recordOf(task.specification);
+    if (!spec.status) return undefined;
+    const measured = recordOf(spec.measured);
+    return {
+      status: spec.status,
+      ...(typeof measured.width === "number" ? { width: measured.width } : {}),
+      ...(typeof measured.height === "number" ? { height: measured.height } : {}),
+      ...(Array.isArray(spec.issues) && spec.issues.length ? { issueCount: spec.issues.length } : {}),
+    };
+  };
+  const outputs = tasks.flatMap((task) => {
+    const specification = compactSpecification(task);
+    return (Array.isArray(task.outputs) ? task.outputs.map(recordOf) : []).map((item) => {
+      const width = typeof item.width === "number" ? item.width : specification?.width;
+      const height = typeof item.height === "number" ? item.height : specification?.height;
+      return {
+        taskId: String(task.taskId || ""),
+        ...(typeof item.storageKey === "string" ? { storageKey: item.storageKey } : {}),
+        ...(typeof width === "number" ? { width } : {}),
+        ...(typeof height === "number" ? { height } : {}),
+        ...(typeof item.durationMs === "number" ? { durationMs: item.durationMs } : {}),
+        ...(specification ? { specification } : {}),
+      };
+    });
+  });
+  const blocked = tasks
+    .filter((task) => ["failed", "cancelled", "missing"].includes(String(task.status)))
+    .map((task) => {
+      const failure = recordOf(task.failure);
+      return {
+        taskId: String(task.taskId || ""),
+        status: String(task.status || ""),
+        // 分级来自 P7a：调用方据此判断该修环境、改输入，还是干脆别重提。
+        code: String(failure.code || "TASK_FAILED"),
+        ...(typeof failure.scope === "string" ? { scope: failure.scope } : {}),
+        ...(typeof failure.doNotRetry === "boolean" ? { doNotRetry: failure.doNotRetry } : {}),
+        ...(task.error ? { error: String(task.error).slice(0, 400) } : {}),
+      };
+    });
+  const pending = tasks.filter((task) => !WAIT_TERMINAL_STATUSES.has(String(task.status))).map((task) => String(task.taskId || "")).filter(Boolean);
+  const needsConfirmation = tasks.filter((task) => task.status === "awaiting_confirmation").map((task) => String(task.taskId || "")).filter(Boolean);
+  const status = pending.length
+    ? wait.timedOut ? "timeout" : "pending"
+    : blocked.length ? "partial"
+      : needsConfirmation.length ? "needs_confirmation"
+        : "succeeded";
+  return { status, outputs, pending, blocked, ...(needsConfirmation.length ? { needsConfirmation } : {}) };
+}
+
+/** 提交类工具回执里属于「本次提交的任务」。插件 H3 批量运行返回的是单个父任务摘要（id/kind/status）。 */
+function taskIdsOfSubmission(value: Record<string, unknown>) {
+  const ids = new Set<string>();
+  const push = (id: unknown) => { const text = String(id || "").trim(); if (text) ids.add(text); };
+  if (Array.isArray(value.taskIds)) value.taskIds.forEach(push);
+  push(value.taskId);
+  if (Array.isArray(value.directTasks)) value.directTasks.forEach((task) => push(recordOf(task).taskId));
+  if (typeof value.kind === "string" && typeof value.status === "string") push(value.id);
+  return [...ids];
+}
+
+/** 提交类工具：waitForCompletion=true 时内部等到终态，一次返回折叠回执（提交 + 等 + 核验一步到位）。
+ *  只收录声明了该参数的工具，避免参数被 schema 静默丢弃后「看起来支持、其实没等」。 */
+const WAIT_FOLD_TOOLS = new Set([
+  "canvas_generate_image", "canvas_generate_image_batch", "h3_run_all_clips",
+]);
+
+async function applyWaitFold(
+  backend: ReturnType<typeof createBackendClient>,
+  name: string,
+  input: Record<string, unknown>,
+  value: unknown,
+  signal?: AbortSignal,
+) {
+  if (input.waitForCompletion !== true || !WAIT_FOLD_TOOLS.has(name)) return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const taskIds = taskIdsOfSubmission(value as Record<string, unknown>);
+  if (!taskIds.length) return value;
+  const wait = await waitForCanvasTasks(backend, taskIds, input, signal);
+  return { ...(value as Record<string, unknown>), taskIds, wait };
 }
 
 async function waitForH3TaskEvents(
@@ -2634,6 +2727,8 @@ function toCanvasTask(task: {
           ? result.images
           : [],
     error: task.error || undefined,
+    // 规格核对结果（archive 时 probe 得出）随任务回执透传，模型不必再单独核验一次。
+    ...(result.specification && typeof result.specification === "object" ? { specification: result.specification } : {}),
     // P7a：失败任务带上结构化分级。调用方读到 status=failed 时先看 scope，
     // 别再把「ffprobe 缺失」当成「内容不合规」去改提示词重提。
     ...(task.status === "failed" ? failureOfTask(task.error) : {}),
@@ -3712,6 +3807,7 @@ function installMcpToolObservability(
   server: McpServer,
   state: McpSessionState,
   recordEvent: McpEventRecorder,
+  backend: ReturnType<typeof createBackendClient>,
 ) {
   const target = server as unknown as { registerTool: McpToolRegistration };
   const registerTool = target.registerTool.bind(server);
@@ -3781,8 +3877,10 @@ function installMcpToolObservability(
             },
           });
         } else {
-          const short = applyReadShortCircuit(name, input, value);
-          if (short.value !== value) result = withReplacedToolValue(result, short.value);
+          const folded = await applyWaitFold(backend, name, input, value, extra.signal);
+          if (folded !== value) result = withReplacedToolValue(result, folded);
+          const short = applyReadShortCircuit(name, input, folded);
+          if (short.value !== folded) result = withReplacedToolValue(result, short.value);
           // 成功返回体也受硬上限约束：超限直接抛错，由下面 catch 记为 tool.failed/OUTPUT_TOO_LARGE。
           enforceToolOutputLimit(name, result);
           await recordMcpObservabilityEvent(recordEvent, {
