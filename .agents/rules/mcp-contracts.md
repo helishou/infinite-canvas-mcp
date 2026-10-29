@@ -12,6 +12,7 @@
 - 大集合提供筛选与分页，长正文提供定向／分块读取，导出提供鉴权文件引用。必须能读取完整内容，不静默截断，不把当前页当全集。分块保留内容摘要，游标绑定读取对象、版本和查询条件；历史游标不能依赖当前草稿版本。
 - 静态读取回执带 `contentFingerprint`，重复读同一范围时传 `ifChanged` 命中就只回 `{unchanged:true, bytes:0}`，不重复返回正文。短路在 MCP 出口统一实现，由静态读取白名单判定；任务状态、等待结果、`include:runtime/result` 等动态查询一律不参与——旧结果比多读一次更危险。指纹必须由实际返回内容算出，不能用整稿哈希代替（换 `fields`/`projection` 会误判未变）。
 - 提交类工具沿用 `waitForCompletion` 折叠等待（不另开同义参数）：内部等本批终态后一次返回 `status/outputs/pending/blocked`，`partial` 不自动重试；不改变提交、并发、队列与超时语义。产物规格取任务自身的 `specification`，不额外 probe。
+- 阶段裁决由 `canvas_next` 一次快照派生（`stage / settled / blockers / 唯一 nextAction / humanReview / budget`），只给建议不执行。`nextAction` 只能有一个且参数必须能被目标工具校验通过：拿不到必需 ID 时就退回到能执行的读工具，不得发出空参数动作；`deliver` 阶段不再给读取动作。
 - 超限响应必须给出该工具实际支持的参数或替代工具。沿用当前输出保护，不能通过放大上限或关闭保护掩盖接口缺陷；产品边界调整按根约定取得对应授权。
 - 下载引用不含 token 或本机路径；文件按固定内容身份读取并走 Backend 鉴权，不能复用免鉴权媒体路由暴露项目快照。
 

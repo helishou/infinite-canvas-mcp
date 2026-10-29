@@ -497,6 +497,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_task_status",
   "canvas_task_cancel",
   "canvas_wait_tasks",
+  "canvas_next",
   "canvas_h3_confirmation",
   "generation_get_status",
   "mcp_observability_report",
@@ -889,6 +890,12 @@ async function executeDirectCanvasTool(
       ...(input.postpassParams ? { postpassParams: input.postpassParams as Record<string, unknown> } : {}),
     });
     return { ok: true, task: toCanvasTask(task) };
+  }
+  if (name === "canvas_next") {
+    const target = await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId);
+    if (!target.projectId) throw Object.assign(new Error("当前会话没有活动画布；请先选择目标画布，或在 canvas_next 传 projectId"), { code: "PROJECT_SELECTION_REQUIRED" });
+    const project = await fetchCurrentCanvasProject(config, target.projectId);
+    return buildCanvasNext(project as Record<string, unknown>, input, backendApi);
   }
   if (name === "canvas_inspect")
     return inspectCanvasContext(config, backendApi, state, input, getBrowserActiveProjectId);
@@ -2943,6 +2950,244 @@ function summarizeCanvasTasks(
             ? { tool: "canvas_inspect", input: { projectId: task.projectId } }
             : { action: "检查任务 error 和产物；当前不自动重新提交相同生成请求" },
     })),
+  };
+}
+
+/** 节点当前生效的媒体键：人物取已选中的那张，场景取场景图。没有可用媒体返回 undefined。 */
+function activeMediaKeyOf(node: Record<string, unknown>): string | undefined {
+  const metadata = recordOf(node.metadata);
+  const images = Array.isArray(metadata.characterImages) ? metadata.characterImages.map(recordOf) : [];
+  const primary = Number(metadata.characterPrimaryIndex);
+  const chosen = images[Number.isInteger(primary) && primary >= 0 ? primary : 0];
+  const sceneImage = recordOf(metadata.sceneImage);
+  const key = String(sceneImage.storageKey || (chosen ? chosen.storageKey : "") || metadata.storageKey || "");
+  return key || undefined;
+}
+
+const CLIP_RUNNING_STATUSES = new Set(["queued", "running"]);
+const CLIP_FAILED_STATUSES = new Set(["failed", "cancelled"]);
+
+type CanvasNextClip = {
+  nodeId: string;
+  segmentId: string;
+  title: string;
+  status: string;
+  taskId: string;
+  taskStatus?: string;
+  promptChars: number;
+  referenceCount: number;
+  characterGroups: number;
+  hasResult: boolean;
+  firstResultKey?: string;
+  outdated: boolean;
+  failure?: Record<string, unknown>;
+};
+
+/**
+ * P7d：阶段级唯一裁决。
+ *
+ * 一次项目快照 + 至多一次批量任务读取，派生「现在处于哪个阶段、卡在哪、下一步只做什么」。
+ * 只给建议，不执行、不提交、不加锁；写入仍走各工具自己的 revision 校验。
+ * settled 按当前内容与 revision 派生，不做跨调用持久化 —— 方案 §11 明确不新增状态机，
+ * 而同一 revision 下重复调用本来就会得到同一结论，服务端记忆只省算力不换正确性。
+ */
+async function buildCanvasNext(
+  project: Record<string, unknown>,
+  input: Record<string, unknown>,
+  backend: ReturnType<typeof createBackendClient>,
+) {
+  const projectId = String(project.id || "");
+  const revision = Number(project.revision || 0);
+  const view = input.view === "full" ? "full" : "compact";
+  const onlyNodeId = String(input.nodeId || "");
+  const nodes = nodesOf(project);
+  const h3Nodes = nodes.filter((node) =>
+    isH3NodeType(effectiveCanvasNodeType(node as never))
+    && (!onlyNodeId || String(node.id || "") === onlyNodeId));
+  const characterNodes = nodes.filter((node) => String(node.type || "") === "character");
+  const sceneNodes = nodes.filter((node) => String(node.type || "") === "scene");
+
+  const clips: CanvasNextClip[] = h3Nodes.flatMap((node) => {
+    const metadata = recordOf(node.metadata);
+    const segments = Array.isArray(metadata.segments) ? metadata.segments.map(recordOf) : [];
+    return segments.map((segment) => {
+      const bindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings.map(recordOf) : [];
+      const results = Array.isArray(segment.results) ? segment.results.map(recordOf) : [];
+      return {
+        nodeId: String(node.id || ""),
+        segmentId: String(segment.id || ""),
+        title: String(segment.title || ""),
+        status: String(segment.status || "idle"),
+        taskId: String(segment.runtimeTaskId || ""),
+        promptChars: String(segment.prompt || "").trim().length,
+        referenceCount: bindings.filter((binding) => binding.enabled !== false).length,
+        characterGroups: Object.keys(recordOf(segment.h3CharacterGroups)).length,
+        hasResult: results.length > 0,
+        firstResultKey: String(recordOf(results[0]).storageKey || "") || undefined,
+        outdated: segment.inputOutdated === true,
+      } satisfies CanvasNextClip;
+    });
+  });
+
+  // 有任务号才查一次任务表；结果用于纠正节点里可能过期的段状态。
+  const taskIds = [...new Set(clips.map((clip) => clip.taskId).filter(Boolean))];
+  let taskReads = 0;
+  if (taskIds.length) {
+    taskReads = 1;
+    const tasks = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }).catch(() => ({ tasks: [] }))).tasks;
+    const byId = new Map(tasks.map((task) => [String(task.taskId || ""), task]));
+    for (const clip of clips) {
+      const task = byId.get(clip.taskId);
+      if (!task) continue;
+      clip.taskStatus = String(task.status || "");
+      if (recordOf(task.failure).code) clip.failure = recordOf(task.failure);
+      if (CLIP_FAILED_STATUSES.has(clip.taskStatus)) clip.status = clip.taskStatus;
+      else if (clip.taskStatus === "awaiting_confirmation") clip.status = "awaiting_confirmation";
+      else if (CLIP_RUNNING_STATUSES.has(clip.taskStatus)) clip.status = clip.taskStatus;
+      else if (clip.taskStatus === "succeeded") clip.hasResult = true;
+    }
+  }
+
+  const missingIdentity = characterNodes.filter((node) => !activeMediaKeyOf(node)).map((node) => String(node.id || ""));
+  const missingScene = sceneNodes.filter((node) => !activeMediaKeyOf(node)).map((node) => String(node.id || ""));
+  const noPrompt = clips.filter((clip) => clip.promptChars === 0);
+  const noReference = clips.filter((clip) => clip.referenceCount === 0 && clip.characterGroups === 0);
+  const running = clips.filter((clip) => CLIP_RUNNING_STATUSES.has(clip.status));
+  const waitingConfirmation = clips.filter((clip) => clip.status === "awaiting_confirmation");
+  const failed = clips.filter((clip) => CLIP_FAILED_STATUSES.has(clip.status));
+  const outdated = clips.filter((clip) => clip.outdated);
+
+  const stage = !h3Nodes.length
+    ? "clip-plan"
+    : clips.length && clips.every((clip) => clip.hasResult)
+      ? "deliver"
+      : missingIdentity.length ? "identity"
+        : missingScene.length ? "scene"
+          : !clips.length || noPrompt.length || noReference.length ? "clip-plan"
+            : "clip-run";
+
+  const blockers: Array<Record<string, unknown>> = [];
+  for (const nodeId of missingIdentity) {
+    blockers.push({
+      code: "IDENTITY_MEDIA_MISSING", scope: "input", target: nodeId, doNotRetry: false,
+      fix: { summary: "该人物节点没有活动图片；先导入或选定角色图，再看分镜", tool: "canvas_get_state", args: { projectId, nodeIds: [nodeId], projection: "media" } },
+    });
+  }
+  for (const nodeId of missingScene) {
+    blockers.push({
+      code: "SCENE_MEDIA_MISSING", scope: "input", target: nodeId, doNotRetry: false,
+      fix: { summary: "该场景节点没有场景图；先补场景母图", tool: "canvas_get_state", args: { projectId, nodeIds: [nodeId], projection: "media" } },
+    });
+  }
+  if (!h3Nodes.length) {
+    blockers.push({
+      code: "H3_NODE_MISSING", scope: "input", target: projectId, doNotRetry: true,
+      fix: { summary: "画布上还没有 H3 视频节点；先建节点再规划分镜", tool: "canvas_create_node", args: { projectId, nodeType: "minimax-h3:video" } },
+    });
+  } else if (!clips.length) {
+    blockers.push({
+      code: "CLIP_NOT_PLANNED", scope: "content", target: String(h3Nodes[0].id || ""), doNotRetry: true,
+      fix: { summary: "H3 节点还没有分镜；先用 h3_apply_video_plan 或 h3_prepare_clip 建 Clip", tool: "h3_get_node", args: { projectId, nodeId: String(h3Nodes[0].id || "") } },
+    });
+  }
+  for (const clip of noPrompt) {
+    blockers.push({
+      code: "PROMPT_MISSING", scope: "content", target: `${clip.nodeId}/${clip.segmentId}`, doNotRetry: true,
+      fix: { summary: "该段没有提示词；先读保存字段再写", tool: "h3_get_clip", args: { projectId, nodeId: clip.nodeId, segmentId: clip.segmentId } },
+    });
+  }
+  for (const clip of noReference) {
+    blockers.push({
+      code: "REFERENCE_UNBOUND", scope: "content", target: `${clip.nodeId}/${clip.segmentId}`, doNotRetry: true,
+      fix: { summary: "该段既无角色组也无参考；先绑定参考再跑", tool: "h3_get_clip_references", args: { projectId, nodeId: clip.nodeId, segmentId: clip.segmentId } },
+    });
+  }
+  for (const clip of waitingConfirmation) {
+    blockers.push({
+      code: "AWAITING_CONFIRMATION", scope: "conflict", target: `${clip.nodeId}/${clip.segmentId}`, doNotRetry: false,
+      fix: { summary: "该段等待人工确认；先看一采再由用户决定", tool: "canvas_task_status", args: { taskId: clip.taskId } },
+    });
+  }
+  for (const clip of failed) {
+    const failure = clip.failure || {};
+    blockers.push({
+      code: String(failure.code || "CLIP_TASK_FAILED"), scope: String(failure.scope || "transient"), target: `${clip.nodeId}/${clip.segmentId}`,
+      doNotRetry: failure.doNotRetry === true, ...(failure.fix ? { fix: failure.fix } : {}),
+      ...(clip.taskId ? { taskId: clip.taskId } : {}),
+    });
+  }
+  for (const clip of outdated) {
+    blockers.push({
+      code: "CLIP_INPUT_OUTDATED", scope: "content", target: `${clip.nodeId}/${clip.segmentId}`, doNotRetry: true,
+      fix: { summary: "该段已跑的输入与当前保存值不一致；按当前值重跑才算数", tool: "h3_preview_run", args: { projectId, nodeId: clip.nodeId } },
+    });
+  }
+
+  // 唯一裁决：优先级从「有人在等」到「该动手做」，只有一个，其余都进 blockers。
+  // 任何候选都要能真正执行：拿不到 taskId 的失败段退回去读 Clip，绝不发空参数动作。
+  const actionableFailure = failed.find((clip) => clip.taskId);
+  const nextAction = stage === "deliver"
+    // 已经出片：不再给读取动作，剩下的只有人眼确认与交付。
+    ? null
+    : waitingConfirmation.length
+      ? { tool: "canvas_task_status", args: { taskId: waitingConfirmation[0].taskId }, why: "该段等待人工确认，先看一采与确认项" }
+      : actionableFailure
+        ? { tool: "canvas_task_status", args: { taskId: actionableFailure.taskId }, why: `该段失败（${String(recordOf(actionableFailure.failure).code || "CLIP_TASK_FAILED")}），先看 error 与规格再决定改什么` }
+        : running.length
+          ? { tool: "canvas_wait_tasks", args: { taskIds: running.map((clip) => clip.taskId).filter(Boolean) }, why: "有任务在跑，按原 taskId 收敛，不要重提" }
+          : failed.length
+            ? { tool: "h3_get_clip", args: { projectId, nodeId: failed[0].nodeId, segmentId: failed[0].segmentId }, why: "该段标记失败但没有任务号，先读该段当前状态" }
+            : noPrompt.length
+              ? { tool: "h3_get_clip", args: { projectId, nodeId: noPrompt[0].nodeId, segmentId: noPrompt[0].segmentId }, why: "该段缺提示词，先读保存字段" }
+              : noReference.length
+                ? { tool: "h3_get_clip_references", args: { projectId, nodeId: noReference[0].nodeId, segmentId: noReference[0].segmentId }, why: "该段缺参考绑定，先看现有参考再用 h3_set_reference_bindings 补" }
+                : stage === "identity" || stage === "scene"
+                  ? { tool: "canvas_get_state", args: { projectId, nodeIds: [...missingIdentity, ...missingScene], projection: "media" }, why: "人物/场景锚点缺媒体，先确认要用的那张图" }
+                  : stage === "clip-plan"
+                    ? { tool: "h3_get_node", args: { projectId, nodeId: String((h3Nodes[0] || {}).id || "") }, why: "分镜还没成型，先看节点现有 Clip 规划" }
+                    : stage === "clip-run"
+                      ? { tool: "h3_preview_run", args: { projectId, nodeId: String((h3Nodes[0] || {}).id || "") }, why: "全部就绪，先预检拿 planHash，再用原 idempotencyKey 提交" }
+                      : null;
+
+  const humanReview = [
+    ...characterNodes.map((node) => ({ nodeId: String(node.id || ""), storageKey: activeMediaKeyOf(node), reason: "角色身份锚点，必须目视" })),
+    ...sceneNodes.map((node) => ({ nodeId: String(node.id || ""), storageKey: activeMediaKeyOf(node), reason: "场景母图，必须目视" })),
+    // 出片后最该人眼确认的是成片本身：给一条抽帧锚点，避免「都绿了但没人看过」。
+    ...(stage === "deliver" ? clips.slice(0, 1).map((clip) => ({ nodeId: clip.nodeId, storageKey: clip.firstResultKey, reason: "成片抽帧核对" })) : []),
+  ].filter((item) => Boolean(item.storageKey)).slice(0, 4);
+
+  return {
+    ok: true,
+    projectId,
+    revision,
+    stage,
+    settled: {
+      identity: characterNodes.length ? missingIdentity.length === 0 : null,
+      scene: sceneNodes.length ? missingScene.length === 0 : null,
+      clipRefs: clips.length ? noReference.length === 0 : null,
+      clipPlan: clips.length ? noPrompt.length === 0 : false,
+      clipRun: clips.length ? clips.every((clip) => clip.hasResult) : false,
+    },
+    counts: {
+      h3Nodes: h3Nodes.length, clips: clips.length, running: running.length, failed: failed.length,
+      awaitingConfirmation: waitingConfirmation.length, missingPrompt: noPrompt.length,
+      missingReference: noReference.length, done: clips.filter((clip) => clip.hasResult).length,
+    },
+    blockers: blockers.slice(0, 12),
+    blockerCount: blockers.length,
+    nextAction,
+    humanReview,
+    budget: { reads: 1 + taskReads, writes: 0, limit: { reads: 3 } },
+    ...(view === "full" ? {
+      clips: clips.slice(0, 50).map((clip) => ({
+        nodeId: clip.nodeId, segmentId: clip.segmentId, ...(clip.title ? { title: clip.title } : {}),
+        status: clip.status, ...(clip.taskStatus ? { taskStatus: clip.taskStatus } : {}),
+        promptChars: clip.promptChars, referenceCount: clip.referenceCount, characterGroups: clip.characterGroups,
+        hasResult: clip.hasResult, ...(clip.outdated ? { outdated: true } : {}),
+        ...(clip.failure ? { failure: clip.failure } : {}),
+      })),
+      ...(clips.length > 50 ? { clipsTruncated: true } : {}),
+    } : {}),
   };
 }
 

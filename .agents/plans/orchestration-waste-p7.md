@@ -1,6 +1,6 @@
 # P7：编排浪费治理（调用次数、决策路径与失败语义）
 
-状态：P7a、P7b、P7c 已实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）；P7d 仍为设计稿。
+状态：P7a–P7d 全部实现并验收（2026-10-29，源码、`dist`、运行进程三处一致）。
 范围：MCP 工具契约与执行语义。不改业务编辑、生成参数、质量授权、并发上限与数据库格式。
 与既有关系：`mcp-efficiency-design.md` 的 P0–P6 处理「单次返回多大」，本文档处理「读多少次、读来干什么、失败怎么处置」。两者互补，不重复。
 
@@ -144,6 +144,21 @@
 
 `canvas_next` 只给建议，不自动执行。授权与提交边界不变，不得把它做成隐式生成入口。
 
+### 5.6 实施记录（2026-10-29）
+
+- 新工具 `canvas_next`（`projectId / nodeId / view`），归入全部 profile 的 CONTEXT 组：读画布阶段不该被工具集挡住。
+- 判定来源与方案一致：项目快照一次 + 有任务号时才多读一次 `/tasks` 批量；不循环调用完整项目读取，不重跑 `h3_preview_run` 的编译。
+  `budget.reads` 如实反映这两次读取（1 或 2），`limit.reads` 为 3。
+- 阶段规则（按实际数据定，不按想象）：无 H3 节点或分镜未成型 → `clip-plan`；人物/场景节点缺活动媒体 → `identity` / `scene`；有段缺提示词或参考 → `clip-plan`；全部段有结果 → `deliver`；其余 `clip-run`。
+- `settled` 增加 `clipPlan` / `clipRun` 两个账本位，`identity` / `scene` 在本画布没有同类节点时返回 `null`（不适用），避免把「没有人物节点」误报成「人物没就绪」。
+- `blockers` 全部带 `code / scope / doNotRetry / fix`；失败段直接复用 P7a 的 `failure` 分级，所以环境故障在裁决里就是 `environment + doNotRetry:true`。
+- **裁决必须可执行**：只给一个动作，且参数必须能被目标工具校验通过。现场踩到两次坑并已修：
+  1. 段标记 `cancelled` 但没有 `runtimeTaskId` 时，曾生成 `canvas_task_status{taskId:""}` → 改为退回 `h3_get_clip{projectId,nodeId,segmentId}`；
+  2. `deliver` 阶段仍在给「再读一段」的动作 → 改为 `nextAction: null`，把动作让给 `humanReview`（成片抽帧锚点）。
+- `humanReview` 只列真需要人眼的锚点：角色身份图、场景母图，出片后追加第一条成片 storageKey（"成片抽帧核对"），最多 4 条。
+- 夹具：`backend/src/mcp-canvas-next.test.ts` 覆盖 6 个阶段/场景 + 每个 `nextAction` 参数的 schema 校验 + compact 不夹带正文。新增工具同步更新了工具目录计数断言（156 → 157）。
+- 现场实测（画布 `7PH4RT1U7lkBtCFjl9o8E`，revision 385）：26–41 ms、977 字节，`stage=deliver`、`nextAction=null`、`humanReview` 指向真实成片 `video:dcc302ad…`。
+
 ## 6. 机制三：重复读取短路（`ifChanged`）
 
 ### 6.1 依据
@@ -271,7 +286,7 @@
 | P7a | 错误分级与 doNotRetry | MCP 错误映射、各 dispatcher 的抛出点、`h3-execution-contract` 的 unverified 汇总 | 场景 J 通过，旧字符串消费方不受影响（**已完成**） |
 | P7b | 等待折叠 | `h3_run_all_clips`、`canvas_generate_image_batch`、等待实现 | 场景 M 通过，`wait:'none'` 行为逐字段不变（**已完成**） |
 | P7c | 重复读取短路 | 共享投影、`canvas_get_state`、`h3_get_clip`、manifest | 场景 K 通过，未传 `ifChanged` 时字节与现在一致（**已完成**） |
-| P7d | `canvas_next` | 新工具、阶段判定、账本、`nextAction` 构造 | 场景 L 通过，`nextAction` 全部通过目标 schema 校验 |
+| P7d | `canvas_next` | 新工具、阶段判定、账本、`nextAction` 构造 | 场景 L 通过，`nextAction` 全部通过目标 schema 校验（**已完成**） |
 
 顺序建议 P7a → P7b → P7c → P7d。P7a 单独就能消灭「假失败重跑」，是性价比最高的一项。
 

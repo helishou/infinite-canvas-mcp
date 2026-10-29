@@ -54,6 +54,7 @@ export const toolNames = [
   "site_navigate",
   "canvas_list_projects",
   "canvas_inspect",
+  "canvas_next",
   "canvas_get_state",
   "canvas_get_selection",
   "canvas_export_snapshot",
@@ -353,6 +354,16 @@ export const toolInputSchemas = {
       .max(200)
       .optional()
       .describe("最多返回多少个节点摘要，默认 30，最大 200；节点较多时按需指定更大的 limit"),
+  }),
+  canvas_next: canvasProjectSchema.extend({
+    view: z
+      .enum(["compact", "full"])
+      .optional()
+      .describe("默认 compact 只返回阶段、账本、阻断项计数和唯一裁决；full 额外返回每个 Clip 的判定明细"),
+    nodeId: z
+      .string()
+      .optional()
+      .describe("只评判这一批 H3 节点；省略时评判画布上全部 H3 节点"),
   }),
   canvas_get_state: canvasProjectSchema.passthrough().extend({
     projection: z.enum(["summary", "media", "generation", "full"]).optional().describe("仅配合 nodeIds；显式轻量投影不返回正文、参考或历史；省略保持旧完整节点行为"),
@@ -814,6 +825,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。制作时返回的 id 默认配合 site_navigate 的结构化 production 目标进入统一导演工作台；只有用户明确要求画布媒体操作时才打开 /canvas/:id。",
   canvas_inspect:
     "选择画布或读取选区用 view:context，仅返回项目与真实选区，不读模型目录；省略 view 保持完整检查。已知节点 ID 直接定向读取或操作。",
+  canvas_next:
+    "一次判明当前画布的生产阶段和唯一下一步：返回 stage（identity/scene/clip-plan/clip-run/deliver）、settled 账本、blockers（含分级与处置）、唯一 nextAction、需要人眼确认的锚点，一次项目快照内派生，不逐项读取。只给建议，不自动执行、不替代提交前预检与人工确认；nextAction 已可执行时直接照做，不要再自行逐个查状态。",
   canvas_get_state:
     "读取当前画布。projectId 未指定时优先使用本会话固定画布或浏览器聚焦画布；两者都没有且全库只有一张画布时，自动将它设为本会话活动画布。多张画布时需显式指定 projectId 或先选择活动画布。默认按 100 个节点分页返回目录摘要（id/type/title/generationMode）；用 nextNodeOffset 继续读取到末页。view: graph 同样分页读取布局和相关连线。已知 nodeIds 时用 projection:summary/media/generation 读取基本信息、活动媒体或保存配置，不含正文/历史；显式投影默认不带连线，可用 includeConnections 开启。省略 projection 保持完整节点与相关连线。完整目录读完后可用 projectId + ifRevision 复查是否变化。H3 时间线用 h3_get_node 读取稳定 Clip ID。",
   canvas_get_selection: "读取当前网页画布选区。默认只返回选中节点摘要；需要完整节点正文时传 view='full'，或按返回的 nodeIds 用 canvas_get_state 定向读取。",

@@ -39,8 +39,8 @@ test("HTTP profile catalogs are isolated, frozen per session and retain task/rec
         }
         assert.ok(tools.every(tool => isToolInProfile(profile, tool.name)));
         for (const name of ["canvas_get_state", "mcp_get_command_receipt", "canvas_wait_tasks", "production_get_compilation", "production_get_artifact_index"]) assert.ok(names.has(name), `${profile} missing ${name}`);
-        if (profile === "full") assert.equal(tools.length, 156);
-        else assert.ok(tools.length < 156);
+        if (profile === "full") assert.equal(tools.length, 157);
+        else assert.ok(tools.length < 157);
         if (profile === "h3") for (const name of ["production_edit", "h3_update_clips", "h3_run_clip", "h3_get_clip"]) assert.ok(names.has(name));
         const read = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "p", nodeIds: ["n"], projection: "media" } });
         assert.notEqual(read.isError, true);

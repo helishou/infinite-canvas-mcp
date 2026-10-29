@@ -75,6 +75,6 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     const bytes = Buffer.byteLength(JSON.stringify(catalog.tools));
     assert.ok(bytes < 216777, `catalog must shrink from the observed baseline: ${bytes}`);
     console.log(JSON.stringify({ catalogTools: catalog.tools.length, catalogBytes: bytes, unifiedTools: productionToolNames.length }));
-    assert.equal(catalog.tools.length, 156);
+    assert.equal(catalog.tools.length, 157);
     assert.equal(names.size, catalog.tools.length, "catalog names must remain unique");
 });
