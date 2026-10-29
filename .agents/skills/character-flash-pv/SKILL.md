@@ -98,13 +98,12 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 **画幅参数有两个坑，都必须处理（2026-10-29 实测跑成横屏）**：
 
 1. **`aspectRatio` 只认完整 UI 标签，不认裸比例**。实现是 `H3_VIDEO_RATIOS[aspectRatio] || [16, 9]`，映射表的 key 全是带后缀的形式：`"9:16 (Portrait Widescreen)"`、`"16:9 (Widescreen)"`、`"3:4 (Portrait Standard)"` 等。传裸 `"9:16"` 查不到就**静默回退 16:9**，不报错、不警告。实测同一 megapixels=2 下：裸 `9:16` → `1888×1088`，`"9:16 (Portrait Widescreen)"` → `1088×1888`。
-2. **参数必须先落盘到 Clip，禁止用 `params` 一次性覆盖**。MCP 已强制拦截：`h3_preview_run` / `h3_run_clip` / `h3_run_all_clips` 的 `params` 里只要出现设置类键（`H3_PARAM_KEYS`，含 `aspectRatio`、`megapixels`、`steps`、`loraSlots` 等）就直接报错，要求先写保存值。原因是一次性覆盖只在本次请求生效、不写回 Clip，面板显示一套、实际出片另一套，事后无法追溯，也会让「面板上明明是 9:16」的核对彻底失效（实测默认值出片 `864×480`，即 16:9 / 0.4 MP）。
+2. **params 自动写回 Clip 保存值（write-through，2026-10-29 上线）**。`h3_run_clip` / `h3_run_all_clips` 运行时，params 里的设置类键（`H3_PARAM_KEYS`：aspectRatio、megapixels、steps、loraSlots 等）会先写进 Clip 保存值再入队，**面板随之显示新值**，不存在「本次生效、下次回退」的幽灵覆盖。`aspectRatio` 传裸比例（`9:16`）或完整标签均可，写回前统一归一成完整标签。预检（`h3_preview_run`）保持只读试算、不落盘——所以预检显示的尺寸在运行后才会在面板上固化。
 
 ```jsonc
-// 正确顺序：先写保存值（面板与运行共用这一份真相），再预检和运行，全程不传 params
-h3_update_clips({ projectId, nodeId, updates: [{ segmentId, patch: {
-  aspectRatio: "9:16 (Portrait Widescreen)", megapixels: 2
-} }] })
+// 运行时直接传，写回与运行一步完成；面板会同步显示新参数
+h3_run_all_clips({ projectId, nodeIds, skipCompleted: false,
+  params: { aspectRatio: "9:16", megapixels: 2 } })   // 裸比例自动归一
 ```
 
 提交后必须**两处对齐才算成**：预检返回的 `expectedDimensions.final`，与实际归档媒体的宽高（`media_files` 的 width/height，或 ffprobe 实测）都是竖屏。只有预检对、归档不对，说明写盘没传到运行侧；只有归档对、Clip 保存值不对，下次从 UI 运行还会翻车。发现横屏不要靠后期裁切补救，按上面两条重设后重跑。

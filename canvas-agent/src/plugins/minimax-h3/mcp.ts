@@ -173,7 +173,7 @@ const TOOLS: PluginMcpToolWire[] = [
                 projectId: { type: "string", description: "画布项目 id" },
                 segmentId: { type: "string", description: "片段稳定 id；优先使用它定位片段" },
                 segmentIndex: { type: "integer", description: "兼容旧调用的片段下标；省略则运行首个未完成的片段" },
-                params: { type: "object", description: "已禁止传设置类参数：一次性覆盖会绕过 Clip 面板，导致面板显示与实际出片不一致；请先用 h3_update_clips 把参数写入 Clip 保存值，再预检和运行" },
+                params: { type: "object", description: "设置类参数（aspectRatio/megapixels/steps/loraSlots 等）会在运行前自动写回 Clip 保存值，面板随之显示新值；aspectRatio 传裸比例（如 9:16）或完整标签均可，会自动归一" },
             },
             required: ["projectId", "nodeId"],
         },
@@ -343,7 +343,7 @@ const TOOLS: PluginMcpToolWire[] = [
                 endSegmentId: { type: "string", description: "本次运行包含的最后一个 Clip；限定连续组范围" },
                 startSegmentId: { type: "string", description: "从该稳定 Clip id 起运行当前及后续片段；组中段须有匹配的上一段 AV 潜变量" },
                 skipCompleted: { type: "boolean", description: "是否跳过已有结果；默认 true，潜空间续写必须为 false" },
-                params: { type: "object", description: "已禁止传设置类参数：一次性覆盖会绕过 Clip 面板，导致面板显示与实际出片不一致；请先用 h3_update_clips 把参数写入 Clip 保存值，再预检和运行" },
+                params: { type: "object", description: "设置类参数（aspectRatio/megapixels/steps/loraSlots 等）会在运行前自动写回 Clip 保存值，面板随之显示新值；aspectRatio 传裸比例（如 9:16）或完整标签均可，会自动归一" },
                 waitForCompletion: { type: "boolean", description: "true=提交后在 MCP 内等到本批父任务终态，返回 wait.status(succeeded|partial|timeout|needs_confirmation)、outputs、pending、blocked；默认 false，提交后立即返回任务摘要" },
                 timeoutMs: { type: "integer", minimum: 1000, maximum: 1800000, description: "waitForCompletion=true 时的最长等待时间，默认 900000ms；超时返回 pending，原任务保留不重提" },
                 pollMs: { type: "integer", minimum: 250, maximum: 10000, description: "waitForCompletion=true 时的轮询间隔，默认 2000ms" },
@@ -536,23 +536,6 @@ async function readH3Clip(context: PluginMcpContext, input: Record<string, unkno
 
 function runtimeValuesOf(segment: H3Segment) {
     return Object.fromEntries(H3_PARAM_KEYS.filter(key => segment[key] !== undefined).map(key => [key, segment[key]]));
-}
-
-/** MCP 不允许用一次性 params 绕过 Clip 面板。
- *
- *  一次性覆盖只在本次请求里生效、不写回 Clip：面板显示的是保存值，实际出片用的是另一套值，
- *  事后无从追溯，也会让「面板上明明是 9:16」这类核对彻底失效
- *  （2026-10-29 实测：params 传裸 "9:16"，查表失败静默回退 16:9，出片 1920×1088，而面板仍显示 9:16）。
- *  正确做法是先把参数写进 Clip 保存值（h3_update_clips），再运行。
- */
-function assertNoRuntimeOverride(params: unknown) {
-    const override = (params as Record<string, unknown>) || {};
-    const blocked = Object.keys(override).filter((key) => (H3_PARAM_KEYS as readonly string[]).includes(key));
-    if (!blocked.length) return;
-    throw new Error(
-        `不允许用 params 临时覆盖运行参数（${blocked.join("、")}）：这会绕过 Clip 面板，使面板显示与实际出片不一致。` +
-        `请先用 h3_update_clips 把这些字段写入 Clip 保存值，再重新预检和运行。`,
-    );
 }
 
 function issueCountsOf(issues: unknown[]) {
@@ -1010,7 +993,6 @@ export const pluginMcp: PluginMcpModule = {
                 // `ok` 会被 MCP 观测层当成“工具执行失败”，而预检跑通本身就是成功；
                 // 校验结论用 ready 表达，避免把“发现阻断项”记成一次工具失败。
                 const ready = validation.issues.every((issue) => issue.severity !== "error");
-                assertNoRuntimeOverride(input.params);
                 const executionPreview = await context.backend.previewH3Generation?.({ mode: 'video', operation: 'h3-run', projectId, nodeId, segmentId, skipCompleted: false, params: input.params as Record<string, unknown> | undefined });
                 return { ready: ready && (executionPreview?.ready ?? true), blockingIssues: [...validation.issues.filter((issue) => issue.severity === "error"), ...(executionPreview?.diagnostics || [])], projectId, nodeId, segmentId, validation, snapshot: buildH3ClipSnapshot(segment, validation), executionPreview };
             },
@@ -1235,7 +1217,6 @@ export const pluginMcp: PluginMcpModule = {
                 const { node } = await getProjectNode(context, projectId, nodeId);
                 if (!node) throw new Error(`找不到画布节点:${nodeId}`);
                 if (!isH3Node(node)) throw new Error(`节点 ${nodeId} 不是 MiniMax H3 节点`);
-                assertNoRuntimeOverride(input.params);
                 const result = await context.backend.canvasRunGeneration({
                     mode: "video",
                     operation: "h3-run",
@@ -1423,7 +1404,6 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_run_all_clips: async (input) => {
                 const projectId = String(input.projectId || "");
-                assertNoRuntimeOverride(input.params);
                 const override = (input.params as Record<string, unknown>) || {};
                 const onlyIds = Array.isArray(input.nodeIds) ? (input.nodeIds as string[]).map(String) : null;
                 const startSegmentId = String(input.startSegmentId || "");

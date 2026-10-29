@@ -22,6 +22,7 @@ import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
 import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues } from "./h3-params.js";
+import { h3AspectRatioOption } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { diagnoseH3Clips } from "./h3-diagnose.js";
 import type { CanvasOperation } from "./project-ops.js";
 import { mediaToolPath } from "../runtime/media-tools.js";
@@ -258,6 +259,8 @@ export class CanvasH3Runner {
         const blockedPlans = preparedPlan ? [] : this.validatePlannedReferences(project, normalized);
         for (const issue of blocking) if (!blockedPlans.some(plan => plan.nodeId === issue.nodeId && plan.segmentId === issue.segmentId)) blockedPlans.push({ nodeId: issue.nodeId, segmentId: issue.segmentId, clipNumber: 0, reason: issue.message });
         const allPlans = preparedPlan ? [] : this.plansFor(normalized);
+        // params 里的设置键自动写回 Clip 保存值（write-through）：面板与实际出片共用一份真相。
+        this.persistRuntimeSettings(normalized.projectId, allPlans, (normalized.params || {}) as Record<string, unknown>);
         const failedGroups = new Set(allPlans.filter(plan => plan.continuation && blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)).map(plan => plan.continuation!.group));
         for (const plan of allPlans) if (plan.continuation && failedGroups.has(plan.continuation.group) && !blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)) blockedPlans.push({ nodeId: plan.nodeId, segmentId: plan.segmentId, clipNumber: plan.segmentIndex + 1, reason: "前置连续组不可执行" });
         const duplicate = this.findActiveDuplicate(normalized);
@@ -941,6 +944,27 @@ export class CanvasH3Runner {
         const segment = segments?.find((item) => item.id === plan.segmentId);
         if (!segment) throw new Error("H3 运行快照缺少目标 Clip");
         return { ...override, seed: segment.seed, noiseSeed: segment.noiseSeed, noiseSeedMode: segment.noiseSeedMode };
+    }
+
+    /** 把调用方 params 里的设置键写回 Clip 保存值（write-through）。
+     *
+     *  面板显示的必须是实际使用的：一次性覆盖只活在本请求里，会让 UI 上的画幅/步数
+     *  与实际产出不符（2026-10-29：params 传裸 9:16，面板仍写 9:16，出片却是 1920×1088）。
+     *  aspectRatio 先归一到完整选项名再落盘，避免下次读表时静默回退 16:9。
+     */
+    private persistRuntimeSettings(projectId: string, plans: Array<{ nodeId: string; segmentId: string }>, params: Record<string, unknown>) {
+        const keys = H3_PARAM_KEYS.filter((key) => params[key] !== undefined);
+        if (!keys.length || !plans.length) return;
+        const patch = Object.fromEntries(keys.map((key) => [
+            key,
+            key === "aspectRatio" ? h3AspectRatioOption(params[key]) ?? params[key] : params[key],
+        ]));
+        for (const plan of plans) {
+            const project = this.stores.projects.get(projectId)!;
+            this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
+                { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch },
+            ], { source: { clientId: "mcp:h3-run", kind: "task", label: "H3 运行参数写回" } });
+        }
     }
 
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {
