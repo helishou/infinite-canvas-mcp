@@ -84,7 +84,7 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 
 | 参数 | 本 Skill 默认目标 |
 |---|---|
-| 画幅 | 9:16 |
+| 画幅 | `9:16 (Portrait Widescreen)`（必须用完整标签；裸 `9:16` 静默回退 16:9） |
 | Clip 数 | N = 目标总时长 ÷ 5；不是整数时先询问 |
 | 每段时长 | 固定 5 秒 |
 | 尺寸目标 | 2.0 MP |
@@ -95,7 +95,19 @@ description: 为角色制作竖屏快闪 PV：新建独立画布，设计或反�
 
 在画布中准备 N 个正式 H3 Clip，绑定真实角色/场景参考并按顺序编译、翻译、检查和生成。自由画布可用 `h3_apply_video_plan` 建段；按 Ref2VA 规范改写完整提示词后，用 `h3_update_clips` 对目标 Clip 只更新 `prompt` / `timeline` 字段，避免覆盖已保存的运行参数。提交前把状态读取一次拿全：`h3_get_clip_references`（活动图 storageKey 与 Picture 顺序）与 `h3_get_clip`（已保存的运行参数）在同一阶段读完；随后用 `h3_preview_run` 对**同一 nodeIds 范围**预检，并与实际提交保持一致，独立片段统一 `skipCompleted:false`，把返回的 `planHash` 交给 `h3_run_all_clips`。若得到 `STALE_H3_PREVIEW`，该调用没有创建任务；保持原 `idempotencyKey`，用完全相同的范围与标志重做预检，再用新 `planHash` 重提。**实测该重试在当前版本会稳定失败**（2026-10-28：预检连调三次 hash 完全相同，但运行侧重算始终不等，`nodeIds`/`nodeId+runFromCurrent`/`forceRegenerate`/`skipCompleted` 等五种范围形态全部 STALE）。可用兜底：刚做完预检、确认画布无人改动时，**提交时不传 `expectedPlanHash`**——该字段省略即跳过一致性校验，任务照常创建。传之前必须自己核对预检返回的 `ready` 与参考数量，不要盲跳过。
 
-**运行参数覆盖必须预检和提交同时传**：只传其中一次时，生效值会退回节点默认（实测默认 16:9 / 0.4 MP）。两个调用都带 `params:{aspectRatio:"9:16",megapixels:2}` 后，预检的 `expectedDimensions.final` 才变成 `1088×1920`。提交后必看一眼这个数字再等结果。
+**画幅参数有两个坑，都必须处理（2026-10-29 实测跑成横屏）**：
+
+1. **`aspectRatio` 只认完整 UI 标签，不认裸比例**。实现是 `H3_VIDEO_RATIOS[aspectRatio] || [16, 9]`，映射表的 key 全是带后缀的形式：`"9:16 (Portrait Widescreen)"`、`"16:9 (Widescreen)"`、`"3:4 (Portrait Standard)"` 等。传裸 `"9:16"` 查不到就**静默回退 16:9**，不报错、不警告。实测同一 megapixels=2 下：裸 `9:16` → `1888×1088`，`"9:16 (Portrait Widescreen)"` → `1088×1888`。
+2. **参数必须先落盘到 Clip，禁止用 `params` 一次性覆盖**。MCP 已强制拦截：`h3_preview_run` / `h3_run_clip` / `h3_run_all_clips` 的 `params` 里只要出现设置类键（`H3_PARAM_KEYS`，含 `aspectRatio`、`megapixels`、`steps`、`loraSlots` 等）就直接报错，要求先写保存值。原因是一次性覆盖只在本次请求生效、不写回 Clip，面板显示一套、实际出片另一套，事后无法追溯，也会让「面板上明明是 9:16」的核对彻底失效（实测默认值出片 `864×480`，即 16:9 / 0.4 MP）。
+
+```jsonc
+// 正确顺序：先写保存值（面板与运行共用这一份真相），再预检和运行，全程不传 params
+h3_update_clips({ projectId, nodeId, updates: [{ segmentId, patch: {
+  aspectRatio: "9:16 (Portrait Widescreen)", megapixels: 2
+} }] })
+```
+
+提交后必须**两处对齐才算成**：预检返回的 `expectedDimensions.final`，与实际归档媒体的宽高（`media_files` 的 width/height，或 ffprobe 实测）都是竖屏。只有预检对、归档不对，说明写盘没传到运行侧；只有归档对、Clip 保存值不对，下次从 UI 运行还会翻车。发现横屏不要靠后期裁切补救，按上面两条重设后重跑。
 
 **参考绑定写在段落里**：`h3_apply_video_plan` 的每个 segment 可用 `references:[{nodeId,role,order,storageKey,name,type,subjectId}]`（role 取 `character_identity` / `character_turnaround` / `scene` 等，order 从 0 递增，storageKey 是已归档媒体键），配合 `subjects:[{subjectId,name,role}]`。写完用预检的 `clips[].referenceMap.length` 核验，为 0 说明没绑上，别提交。
 
