@@ -29,6 +29,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
+import { OnlineCostumes } from "./online-costumes";
 
 const subscribeCompactCanvas = (notify: () => void) => {
     const query = window.matchMedia("(max-width: 767px)");
@@ -495,6 +496,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
     const addAsset = useAssetStore((state) => state.addAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
+    const [assetSection, setAssetSection] = useState<"mine" | "online">("mine");
     const [tagFilter, setTagFilter] = useState<string>("all");
     const [dramaFilter, setDramaFilter] = useState(ALL_ASSET_DRAMAS);
     // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
@@ -577,74 +579,89 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
 
     return (
         <div className="flex h-full flex-col">
-            <div className="flex items-center gap-2 px-3 pb-2 pt-1">
+            <div className="flex items-center gap-4 px-3 pb-2 pt-1">
+                {(["mine", "online"] as const).map((section) => (
+                    <button key={section} type="button" aria-pressed={assetSection === section} onClick={() => setAssetSection(section)}
+                        className="border-b-2 px-1 pb-1 text-xs font-semibold transition-opacity" style={{ color: theme.node.text, borderColor: assetSection === section ? theme.toolbar.activeText : "transparent", opacity: assetSection === section ? 1 : 0.55 }}>
+                        {t(section === "mine" ? "canvas.sidePanel.myAssets" : "canvas.sidePanel.onlineAssets")}
+                    </button>
+                ))}
+            </div>
+            <div className="px-3 pb-2">
                 <Input size="small" allowClear prefix={<Search className="size-3.5 text-muted-foreground" />} placeholder={t("canvas.sidePanel.searchAssets")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
-                <button
-                    type="button"
-                    disabled={uploading}
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/10"
-                    style={{ color: theme.node.text }}
-                >
-                    <Plus className="size-3.5" />
-                    {t("canvas.sidePanel.add")}
-                </button>
-                <input ref={fileInputRef} type="file" accept="image/*,.svg,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
             </div>
-            <div className="flex items-center gap-2 px-3 pb-2">
-                <Clapperboard className="size-3.5 shrink-0 opacity-45" />
-                <Select
-                    size="small"
-                    className="min-w-0 flex-1"
-                    value={dramaFilter}
-                    options={dramaOptions}
-                    loading={dramaQuery.isLoading}
-                    onChange={(value) => { setDramaFilter(value); setTagFilter("all"); }}
-                />
-            </div>
-            {allTags.length ? (
-                <div className="flex flex-wrap gap-1.5 px-3 pb-2">
-                    <Tag.CheckableTag checked={tagFilter === "all"} className={cn("prompt-filter-tag", tagFilter === "all" && "is-active")} onChange={() => setTagFilter("all")}>
-                        {t("common.all")}
-                    </Tag.CheckableTag>
-                    {allTags.map((tag) => (
-                        <Tag.CheckableTag key={tag} checked={tagFilter === tag} className={cn("prompt-filter-tag", tagFilter === tag && "is-active")} onChange={() => setTagFilter((prev) => (prev === tag ? "all" : tag))}>
-                            {tag}
-                        </Tag.CheckableTag>
-                    ))}
-                </div>
-            ) : null}
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {groups.length ? (
-                    <div className="space-y-1">
-                        {groups.map((group) => {
-                            const isCollapsed = collapsed[group.kind];
-                            return (
-                                <div key={group.kind}>
-                                    <button
-                                        type="button"
-                                        onClick={() => setCollapsed((prev) => ({ ...prev, [group.kind]: !prev[group.kind] }))}
-                                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100"
-                                    >
-                                        <ChevronRight className={cn("size-3.5 transition-transform", !isCollapsed && "rotate-90")} />
-                                        <group.icon className="size-3.5" />
-                                        <span>{t(`assets.kinds.${group.kind}`)}</span>
-                                        <span className="opacity-50">{group.items.length}</span>
-                                    </button>
-                                    {isCollapsed ? null : (
-                                        <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
-                                            {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(libraryErrorText(error)))} />
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
+                <div style={{ display: assetSection === "online" ? undefined : "none" }}>
+                    <OnlineCostumes keyword={keyword} onInsert={onInsert} theme={theme} />
+                    <OnlineCostumes kind="portrait" keyword={keyword} onInsert={onInsert} theme={theme} />
+                    <OnlineCostumes kind="pose" keyword={keyword} onInsert={onInsert} theme={theme} />
+                </div>
+                <div style={{ display: assetSection === "mine" ? undefined : "none" }}>
+                    <div className="flex items-center justify-end px-1.5 pb-2">
+                        <button
+                            type="button"
+                            disabled={uploading}
+                            onClick={() => fileInputRef.current?.click()}
+                            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold transition hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/10"
+                            style={{ color: theme.node.text }}
+                        >
+                            <Plus className="size-3.5" />
+                            {t("canvas.sidePanel.add")}
+                        </button>
+                        <input ref={fileInputRef} type="file" accept="image/*,.svg,video/*" multiple className="hidden" onChange={(e) => void handleFiles(e.target.files)} />
                     </div>
-                ) : (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("canvas.sidePanel.noAssets")} className="pt-16" />
-                )}
+                    <div className="flex items-center gap-2 px-3 pb-2">
+                        <Clapperboard className="size-3.5 shrink-0 opacity-45" />
+                        <Select
+                            size="small"
+                            className="min-w-0 flex-1"
+                            value={dramaFilter}
+                            options={dramaOptions}
+                            loading={dramaQuery.isLoading}
+                            onChange={(value) => { setDramaFilter(value); setTagFilter("all"); }}
+                        />
+                    </div>
+                    {allTags.length ? (
+                        <div className="flex flex-wrap gap-1.5 px-3 pb-2">
+                            <Tag.CheckableTag checked={tagFilter === "all"} className={cn("prompt-filter-tag", tagFilter === "all" && "is-active")} onChange={() => setTagFilter("all")}>
+                                {t("common.all")}
+                            </Tag.CheckableTag>
+                            {allTags.map((tag) => (
+                                <Tag.CheckableTag key={tag} checked={tagFilter === tag} className={cn("prompt-filter-tag", tagFilter === tag && "is-active")} onChange={() => setTagFilter((prev) => (prev === tag ? "all" : tag))}>
+                                    {tag}
+                                </Tag.CheckableTag>
+                            ))}
+                        </div>
+                    ) : null}
+                    {groups.length ? (
+                        <div className="space-y-1">
+                            {groups.map((group) => {
+                                const isCollapsed = collapsed[group.kind];
+                                return (
+                                    <div key={group.kind}>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCollapsed((prev) => ({ ...prev, [group.kind]: !prev[group.kind] }))}
+                                            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1.5 text-left text-xs font-semibold opacity-75 transition hover:opacity-100"
+                                        >
+                                            <ChevronRight className={cn("size-3.5 transition-transform", !isCollapsed && "rotate-90")} />
+                                            <group.icon className="size-3.5" />
+                                            <span>{t(`assets.kinds.${group.kind}`)}</span>
+                                            <span className="opacity-50">{group.items.length}</span>
+                                        </button>
+                                        {isCollapsed ? null : (
+                                            <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
+                                                {group.items.map((asset) => (
+                                                    <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert({ ...buildInsertPayload(asset), sharedAssetSource: asset.metadata?.sharedAssetSource as SharedAssetSource | undefined })} onRemove={() => void removeAsset(asset.id).then(() => message.success(t("canvas.sidePanel.assetRemoved"))).catch(error => message.error(libraryErrorText(error)))} />
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : <div className="px-2 py-3 text-xs opacity-50">{t("canvas.sidePanel.noAssets")}</div>}
+                </div>
             </div>
         </div>
     );

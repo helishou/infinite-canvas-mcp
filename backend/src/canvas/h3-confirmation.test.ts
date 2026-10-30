@@ -55,6 +55,14 @@ function decision(db: BackendDatabase, taskId: string, action: "confirm" | "keep
     return { action, segmentId, expectedRevision: Number(confirmation?.revision || 0) };
 }
 
+/** Runs read the Clip's saved values, so a test that pins seeds saves them before starting. */
+function pinSeeds(stores: ReturnType<typeof createStores>, seed = 123, segmentIds = ["clip-1"]) {
+    const project = stores.projects.get("p")!;
+    stores.projects.applyOperations("p", Number(project.revision || 0), segmentIds.map(segmentId => ({
+        type: "update_h3_segment", nodeId: "n", segmentId, patch: { noiseSeedMode: "fixed", seed, noiseSeed: seed },
+    })));
+}
+
 test("同节点不同 Clip 并发暂停各自保留确认入口，放弃其中一个不影响另一个", async (t) => {
     const { db, runner, segment, node, submitted, settle } = fixture(t, 2, true);
     const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1" }, "parent-1");
@@ -170,7 +178,8 @@ test("潜空间确认先暂停，重启后沿用快照二采且重复确认不�
     stores.projects.applyOperations("p", Number(project.revision || 0), [{ type: "update_h3_segment", nodeId: "n", segmentId: "clip-1", patch: {
         latentUpscaleEnabled: true, latentUpscaleConfirmationMode: true, h3FirstSteps: 6, h3SecondSteps: 4,
     } }]);
-    const task = runner.start({ projectId: "p", nodeId: "n", params: { noiseSeedMode: "random", seed: 123 } }, "latent-parent");
+    pinSeeds(stores);
+    const task = runner.start({ projectId: "p", nodeId: "n" }, "latent-parent");
     await settle(task.id, "awaiting_confirmation");
     assert.equal(submitted.length, 1);
     const first = db.getTask(submitted[0].id)!;
@@ -392,14 +401,15 @@ test("放弃恢复旧输出、取消同一父任务且不删除历史媒体", as
 });
 
 test("固定种子保留一采后重新串行运行，复用的已收口 Clip 仍计入父任务媒体", async (t) => {
-    const { db, runner, submitted, segment, settle } = fixture(t, 2);
-    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true, params: { noiseSeedMode: "fixed", seed: 123 } }, "first");
+    const { db, stores, runner, submitted, segment, settle } = fixture(t, 2);
+    pinSeeds(stores, 123, ["clip-1", "clip-2"]);
+    const first = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "first");
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
     for (let i = 0; i < 100 && segment("clip-2").status !== "awaiting_confirmation"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "discard", "clip-2"));
-    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true, params: { noiseSeedMode: "fixed", seed: 123 } }, "second");
+    const second = runner.start({ projectId: "p", nodeId: "n", segmentId: "clip-1", runFromCurrent: true }, "second");
     await settle(second.id, "awaiting_confirmation");
     assert.equal(submitted.length, 3, "已收口的首 Clip 不应重跑");
     const media = db.getTask(second.id)?.result?.media;
@@ -433,8 +443,9 @@ test("二采失败返回同父任务待确认；显式重试使用新子任务�
 });
 
 test("固定种子明确重新生成绕过缓存，普通再次运行仍可复用成品", async (t) => {
-    const { db, runner, submitted, settle } = fixture(t);
-    const first = runner.start({ projectId: "p", nodeId: "n", params: { noiseSeedMode: "fixed", seed: 123 } }, "first");
+    const { db, stores, runner, submitted, settle } = fixture(t);
+    pinSeeds(stores);
+    const first = runner.start({ projectId: "p", nodeId: "n" }, "first");
     await settle(first.id, "awaiting_confirmation");
     runner.resolveConfirmation(first.id, decision(db, first.id, "keep_first_pass"));
     await settle(first.id, "succeeded");

@@ -834,6 +834,10 @@ export default {
         },
         videoFrames: { first: "截取首帧", last: "截取尾帧", current: "截取当前帧", allShots: "截取全部分镜首帧", extracting: "正在截取…", firstTitle: "{{name}} 首帧", lastTitle: "{{name}} 尾帧", currentTitle: "{{name}} 当前帧", shotTitle: "镜 {{index}}", shotGroupTitle: "{{name}} · {{count}} 镜首帧", extracted: "已截取 {{count}} 个分镜首帧", noShots: "这段视频没有检测到镜头切换", captured: "已生成图片节点", failed: "无法截取该画面，请重试" },
         sidePanel: {
+            onlineAssets: "在线资产", myAssets: "我的资产",
+            poses: "姿势（在线）", poseSource: "来源：AI Pose Gallery", poseCategory: "全部系列", poseAllTypes: "全部姿势", poseAllAngles: "全部角度", poseLoading: "正在读取在线姿势…", poseError: "无法读取在线姿势，请检查网络或稍后重试", poseRetry: "重试", poseEmpty: "没有匹配的姿势", poseMore: "查看更多", poseInsertError: "姿势图片导入失败，请重试",
+            costumes: "服装（在线）", costumeSource: "来源：AI Costume Gallery", costumeCategory: "全部分类", costumeLoading: "正在读取在线服装…", costumeError: "无法读取在线服装，请检查网络或稍后重试", costumeRetry: "重试", costumeEmpty: "没有匹配的服装", costumeMore: "查看更多", costumeInsertError: "服装图片导入失败，请重试",
+            portraits: "脸型（在线）", portraitSource: "来源：AI 脸型库（中文索引）", portraitCategory: "全部发长", portraitAllTypes: "全部类型", portraitLoading: "正在读取在线脸型…", portraitError: "无法读取在线脸型，请检查网络或稍后重试", portraitRetry: "重试", portraitEmpty: "没有匹配的脸型", portraitMore: "查看更多", portraitInsertError: "脸型图片导入失败，请重试",
             gridView: "缩略图视图", listView: "列表视图",
             canvas: "画布", assets: "资产", prompts: "提示词库", resize: "调整左侧面板宽度", elements: "画布元素", select: "选择", searchNodes: "名称、类型、提示词或节点 ID", focusNode: "定位到节点", preview: "放大预览", noNodes: "画布暂无节点", clearAll: "取消全选", selected: "已选 {{count}}", exporting: "正在导出选中元素…", exportName: "画布元素-{{count}}个", exported: "已导出 {{count}} 个元素", exportFailed: "导出失败，请重试",
             addingAssets: "正在添加资产…", addedAssets: "已添加 {{count}} 个资产", mediaOnly: "仅支持图片或视频文件", addFailed: "添加失败，请重试", searchAssets: "搜索资产", add: "添加", noAssets: "暂无资产", inserted: "插入画布", removeAssetDescription: "此操作删除素材库中的这项资产，不是仅移除当前画布中的引用。", removeAssetTitle: "从素材库删除「{{name}}」？", remove: "移除", removeAsset: "从素材库删除", assetRemoved: "已从素材库删除",

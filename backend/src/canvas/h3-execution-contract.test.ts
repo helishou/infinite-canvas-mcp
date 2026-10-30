@@ -50,10 +50,15 @@ test('preview is read-only; draft revision and defaults changes invalidate its s
     assert.equal(stores.tasks.list().length, 0);
 });
 
-test('direct canvas preview permits a valid manual aspect differing from episode defaults', t => {
+test('a hidden aspect override is rejected instead of being written back over the Clip', t => {
     const { stores, runner } = fixture(t);
     stores.projects.getH3ProductionRequirements = () => ({ ownerId: 'ep', revision: 1, version: 1, videoAspectRatio: '9:16', clips: [] });
-    assert.equal(runner.preview({ projectId: 'p', nodeId: 'n', segmentId: 'a', params: { aspectRatio: '16:9' } }).ready, true);
+    const input = { projectId: 'p', nodeId: 'n', segmentId: 'a', params: { aspectRatio: '16:9' } };
+    const preview = runner.preview(input);
+    assert.equal(preview.ready, false);
+    assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH' && /aspectRatio/.test(issue.message)));
+    assert.throws(() => runner.start(input), /必须与 Clip 保存值一致/);
+    assert.equal(((stores.projects.get('p')!.nodes as any[])[0].metadata.segments[0]).aspectRatio, '9:16');
     assert.equal(stores.tasks.list().length, 0);
 });
 
@@ -93,32 +98,36 @@ test('manual storyboard edits still reject dangling current reference bindings',
     assert.equal(stores.tasks.list().length, 0);
 });
 
-test('director submission rejects hidden parameter overrides and accepts saved UI edits', t => {
-    const { stores, runner } = fixture(t, { directorEngine: 'acheng' });
-    const input = { projectId: 'p', nodeId: 'n', segmentId: 'a', skipCompleted: false };
-    for (const params of [{ megapixels: 0.8 }, { steps: 12 }, { sampler: 'euler' },
-        { loraSlots: [{ name: 'other', strength: 0.5, enabled: true }] }, { latentUpscaleEnabled: true }]) {
-        const preview = runner.preview({ ...input, params });
-        assert.equal(preview.ready, false);
-        assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH'));
-        assert.throws(() => runner.start({ ...input, params }), /必须与前端 Clip 设置一致/);
+test('every canvas submission rejects hidden parameter overrides and accepts saved UI edits', t => {
+    for (const manualClip of [{}, { directorEngine: 'acheng' }]) {
+        const { stores, runner } = fixture(t, manualClip);
+        const input = { projectId: 'p', nodeId: 'n', segmentId: 'a', skipCompleted: false };
+        for (const params of [{ megapixels: 0.8 }, { steps: 12 }, { sampler: 'euler' },
+            { loraSlots: [{ name: 'other', strength: 0.5, enabled: true }] }, { latentUpscaleEnabled: true }]) {
+            const preview = runner.preview({ ...input, params });
+            assert.equal(preview.ready, false);
+            assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH'));
+            assert.throws(() => runner.start({ ...input, params }), /必须与 Clip 保存值一致/);
+        }
+        assert.equal(stores.tasks.list().length, 0);
+        assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }), /必须与 Clip 保存值一致/);
+        assert.throws(() => runner.startFrozen({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }, 'frozen-hidden-override', stores.projects.get('p')!, stores.settings.get('plugin:minimax-h3:defaults:v1') as Record<string, unknown>), /必须与 Clip 保存值一致/);
+        // The rejected submissions must not have written the override back onto the Clip.
+        assert.equal(((stores.projects.get('p')!.nodes as any[])[0].metadata.segments[0]).megapixels, undefined);
+        stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { megapixels: 0.8, videoSteps: 12, sampler: 'euler' } }]);
+        const saved = runner.preview(input);
+        assert.equal(saved.ready, true);
+        assert.equal(saved.clips[0].effectiveRuntime.megapixels, 0.8);
+        assert.equal(saved.clips[0].effectiveRuntime.steps, 12);
+        assert.equal(saved.clips[0].effectiveRuntime.sampler, 'euler');
+        assert.equal(runner.preview({ ...input, params: { megapixels: 0.8, steps: 12, sampler: 'euler' } }).ready, true);
+        t.mock.method(runner as any, 'execute', async () => {});
+        const task = runner.start(input, 'saved-ui-run');
+        const frozen = (task.input.runPlan as any).project.nodes[0].metadata.segments[0];
+        assert.equal(frozen.megapixels, 0.8);
+        assert.equal(frozen.videoSteps, 12);
+        assert.equal(frozen.sampler, 'euler');
     }
-    assert.equal(stores.tasks.list().length, 0);
-    assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }), /必须与前端 Clip 设置一致/);
-    assert.throws(() => runner.startFrozen({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }, 'frozen-hidden-override', stores.projects.get('p')!, stores.settings.get('plugin:minimax-h3:defaults:v1') as Record<string, unknown>), /必须与前端 Clip 设置一致/);
-    stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { megapixels: 0.8, videoSteps: 12, sampler: 'euler' } }]);
-    const saved = runner.preview(input);
-    assert.equal(saved.ready, true);
-    assert.equal(saved.clips[0].effectiveRuntime.megapixels, 0.8);
-    assert.equal(saved.clips[0].effectiveRuntime.steps, 12);
-    assert.equal(saved.clips[0].effectiveRuntime.sampler, 'euler');
-    assert.equal(runner.preview({ ...input, params: { megapixels: 0.8, steps: 12, sampler: 'euler' } }).ready, true);
-    t.mock.method(runner as any, 'execute', async () => {});
-    const task = runner.start(input, 'saved-ui-director');
-    const frozen = (task.input.runPlan as any).project.nodes[0].metadata.segments[0];
-    assert.equal(frozen.megapixels, 0.8);
-    assert.equal(frozen.videoSteps, 12);
-    assert.equal(frozen.sampler, 'euler');
 });
 
 test('distinct shot IDs may reuse one frame; dangling, reordered and shortened tracks fail', () => {

@@ -1,4 +1,4 @@
-import { resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { estimateH3Dimensions, resolveH3Runtime } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
@@ -8,7 +8,7 @@ import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_M
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
 import { useH3DropdownOpen } from "../hooks/useH3DropdownOpen";
 import { H3_STYLE_TEMPLATES, styleTemplateFromPrompt } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
-import { H3_VIDEO_MEGAPIXELS as megapixels, H3_VIDEO_RATIOS as videoRatios, h3VideoDimensions } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
+import { H3_VIDEO_MEGAPIXELS as megapixels, H3_VIDEO_RATIOS as videoRatios } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
 import type { H3Ref, H3Segment } from "../types";
 import { h3Label, useH3Locale } from "../h3-locale";
@@ -164,12 +164,12 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         || ratioChoices.find((value) => String(value).startsWith("16:9"))
         || ratioChoices[0];
     const megapixelChoices = nfChoices("百万像素", megapixels);
-    // 档位换算后可能落到同一个潜空间格（如 9:16 的 0.98 与 1.0 都是 768×1344），直接标出实际分辨率避免误判。
+    // 一采尺寸使用展开流和规格检查共用的计算，不受二采潜空间对齐设置影响。
     const megapixelLabel = (value: string | number) => {
         const ratio = String(selectedRatio || "");
         if (!videoRatios[ratio]) return `${value} MP`;
-        const size = h3VideoDimensions(ratio, Number(value), Number(segment.latentUpscaleAlign ?? 2));
-        return `${value} MP · ${size.width}×${size.height}`;
+        const size = estimateH3Dimensions({ aspectRatio: ratio, megapixels: Number(value) });
+        return size ? `${value} MP · ${size.width}×${size.height}` : `${value} MP`;
     };
     const samplerChoices = nfChoices("采样器", samplers);
     const schedulerChoices = nfChoices("调度器", schedulers);

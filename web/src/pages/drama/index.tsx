@@ -199,7 +199,7 @@ function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; epis
                 <ArrowUpRight className="mt-1 size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-primary" />
             </div>
             {(folder.tags || []).length ? <div className="mt-4 flex gap-1.5 overflow-hidden">{(folder.tags || []).slice(0, 3).map((tag) => <Tag key={tag} className="m-0 max-w-28 truncate border-border bg-transparent text-xs text-muted-foreground">{tag}</Tag>)}</div> : null}
-            <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
+            <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
                 <span>{episodes ? t("drama.boundCanvasCount", { count: boundCanvases }) : t("projects.episodesUnavailable")}</span>
                 <span className="flex items-center gap-3">
                     <button type="button" className="text-red-500 hover:text-red-600" onClick={(event) => { event.stopPropagation(); modal.confirm({ title: t("drama.deleteProject"), content: t("drama.deleteProjectDescription", { name: folder.name }), okText: t("drama.deleteProjectConfirm"), okType: "danger", cancelText: t("common.cancel"), onOk: async () => { try { await deleteDramaProject(folder.id); message.success(t("drama.deleted")); } catch (error) { message.error(String(error)); } } }); }}> <Trash2 className="inline size-3.5" /> {t("drama.deleteProject")}</button>

@@ -5,6 +5,14 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Canvas asset panel tabs: verify My assets and Online assets can be switched, drama and tag filters appear only under My assets, and the search applies to both tabs.
+
+- Expand “Poses (online)” in the canvas asset panel and check the series, pose type, angle and search filters. Selecting a pose archives and inserts its original image, which remains available after reload. Network or source format failures should show an error and retry.
+
+- Expand “Costumes (online)” in the canvas asset panel and check the source images, categories and search. Selecting a costume archives and inserts its original image; it should remain available after a reload. Network or source format failures should show an error and retry.
+
+- H3 Clip megapixel options: verify the first-pass dimension labels match the expanded workflow, including 1 MP = 1376×768 and 2 MP = 1920×1088 at 16:9, independently of second-pass alignment.
+
 - Generate from an individual loop output node and verify only that node receives a task and result; running the loop node still processes all rounds.
 - For individual loop output generation, verify the existing slot binding is accepted after reordering and the panel's current prompt and references are used.
 

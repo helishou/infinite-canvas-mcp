@@ -38,9 +38,10 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
     t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
         discoveryRequests.push({ url, method: init?.method || "GET" });
-        assert.match(url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15)$/);
+        assert.match(url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15|LoraLoaderModelOnly)$/);
         assert.equal(init?.method || "GET", "GET");
         if (url.endsWith("/UNETLoader")) return Response.json({ UNETLoader: { input: { required: { unet_name: [[workflowParams.modelName]] } } } });
+        if (url.endsWith("/LoraLoaderModelOnly")) return Response.json({ LoraLoaderModelOnly: { input: { required: { lora_name: [[String(workflowParams.loraName || "")]] } } } });
         const required = Object.fromEntries([
             ["模型", "modelName"], ["文本编码器", "textEncoder"], ["视频VAE", "videoVae"], ["音频VAE", "audioVae"],
         ].map(([name, key]) => [name, [[workflowParams[key]]]]));
@@ -51,7 +52,7 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
         { id: "a", noiseSeedMode: "random", seed: 123, noiseSeed: 123 },
         { id: "b", noiseSeedMode: "random", seed: 123, noiseSeed: 123 },
     ]);
-    const input = { projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false, params: { noiseSeedMode: "random", seed: 123 } };
+    const input = { projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false };
     const first = runner.start(input, "first");
     const frozen = structuredClone(db.getTask(first.id)!.input);
     assert.equal(runner.start(input, "duplicate").id, first.id);
@@ -73,7 +74,7 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
     }
     assert.ok(discoveryRequests.length > 0);
     for (const request of discoveryRequests) {
-        assert.match(request.url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15)$/);
+        assert.match(request.url, /^http:\/\/comfy\.test\/object_info\/(?:UNETLoader|NanFengH3MultiReferenceGeneratorV15|LoraLoaderModelOnly)$/);
         assert.equal(request.method, "GET");
     }
     const second = runner.start(input, "second");
@@ -87,11 +88,12 @@ test("random mode rerolls copied seeds per Clip and per new run, while duplicate
 });
 
 test("fixed zero and legacy explicit seeds survive unrelated overrides and repeated runs", async (t) => {
+    // 无关的保存修改（这里清空 LoRA）不能改动固定种子；运行参数不再覆盖 Clip。
     const { runner, submitted, settle, clips } = fixture(t, [
-        { id: "a", noiseSeedMode: "fixed", seed: 0 },
-        { id: "b", seed: 456 },
+        { id: "a", noiseSeedMode: "fixed", seed: 0, loraSlots: [] },
+        { id: "b", seed: 456, loraSlots: [] },
     ]);
-    const input = { projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false, forceRegenerate: true, params: { loraSlots: [] } };
+    const input = { projectId: "p", nodeId: "n", segmentId: "a", runFromCurrent: true, skipCompleted: false, forceRegenerate: true };
     await settle(runner.start(input, "first").id);
     await settle(runner.start(input, "second").id);
     assert.deepEqual(submitted.map((params) => params.seed), [0, 456, 0, 456]);

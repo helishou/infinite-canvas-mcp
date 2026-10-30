@@ -22,7 +22,6 @@ import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCompositePrompt, storyboardCompositeDirective, storyboardCompositePlan } from "./storyboard-composite.js";
 import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues } from "./h3-params.js";
-import { h3AspectRatioOption } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { diagnoseH3Clips } from "./h3-diagnose.js";
 import type { CanvasOperation } from "./project-ops.js";
 import { mediaToolPath } from "../runtime/media-tools.js";
@@ -151,13 +150,15 @@ export class CanvasH3Runner {
             const segment = (metadata.segments as H3Segment[]).find(item => item.id === plan.segmentId)!;
             const effective = effectiveH3Runtime(segment, normalized.params || {}, metadata, defaults);
             const issue = (code: string, message: string) => diagnostics.push({ code, nodeId: plan.nodeId, segmentId: plan.segmentId, message });
-            // Director submissions must use the same saved values the Clip UI resolves.
-            // Execution controls may travel in params, but cannot silently replace settings.
-            if (segment.directorEngine || segment.productionClipProjection) {
+            // Every run must use the same saved values the Clip UI resolves. Execution
+            // controls may travel in params, but settings cannot silently replace them:
+            // a divergent params value used to be written back over the Clip, which let
+            // an MCP call quietly change the panel and the produced footage.
+            {
                 const saved = effectiveH3Runtime(segment, {}, metadata, defaults).params;
                 const changed = Object.keys(effective.params).filter(key => (H3_PARAM_KEYS as readonly string[]).includes(key)
                     && stableH3Fingerprint(effective.params[key]) !== stableH3Fingerprint(saved[key]));
-                if (changed.length) issue('H3_UI_PARAMETER_MISMATCH', `导演 H3 参数必须与前端 Clip 设置一致：${changed.join('、')}；请先保存 Clip 参数，再重新预检提交`);
+                if (changed.length) issue('H3_UI_PARAMETER_MISMATCH', `H3 参数必须与 Clip 保存值一致：${changed.join('、')}；请先保存 Clip 参数，再重新预检提交`);
             }
             for (const message of effective.parameterIssues) issue('INVALID_H3_PARAMETERS', message);
             if (effective.params.selectedVideoModelEnabled === true && !String(effective.params.selectedVideoModel || "").trim()) issue("SELECTED_VIDEO_MODEL_REQUIRED", "已启用自选视频模型，请先选择一个已配置的视频模型");
@@ -251,18 +252,8 @@ export class CanvasH3Runner {
         if (normalized.params?.confirmSecondPass === true) throw new Error("请通过 H3 确认接口继续原任务，不能另建二采任务");
         const project = this.stores.projects.get(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
-        if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
-        const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
-        if (blocking.length && (blocking.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH') || !("readyTargets" in preview && preview.readyTargets.length))) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
-        // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
-        const blockedPlans = preparedPlan ? [] : this.validatePlannedReferences(project, normalized);
-        for (const issue of blocking) if (!blockedPlans.some(plan => plan.nodeId === issue.nodeId && plan.segmentId === issue.segmentId)) blockedPlans.push({ nodeId: issue.nodeId, segmentId: issue.segmentId, clipNumber: 0, reason: issue.message });
-        const allPlans = preparedPlan ? [] : this.plansFor(normalized);
-        // params 里的设置键自动写回 Clip 保存值（write-through）：面板与实际出片共用一份真相。
-        this.persistRuntimeSettings(normalized.projectId, allPlans, (normalized.params || {}) as Record<string, unknown>);
-        const failedGroups = new Set(allPlans.filter(plan => plan.continuation && blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)).map(plan => plan.continuation!.group));
-        for (const plan of allPlans) if (plan.continuation && failedGroups.has(plan.continuation.group) && !blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)) blockedPlans.push({ nodeId: plan.nodeId, segmentId: plan.segmentId, clipNumber: plan.segmentIndex + 1, reason: "前置连续组不可执行" });
+        // 同一请求的重放必须在参数校验之前认出原任务：随机种子模式会把解析后的种子
+        // 写回 Clip，重放请求里记的还是提交时的种子，按当前保存值比较会误判成参数偏差。
         const duplicate = this.findActiveDuplicate(normalized);
         if (duplicate) {
             // 旧投影可能因同节点另一 Clip 占据顶层 taskId 而丢失；即使拒绝新提交，
@@ -281,6 +272,16 @@ export class CanvasH3Runner {
             }
             return duplicate;
         }
+        const preview = preparedPlan ? { diagnostics: [], planHash: "" } : this.preview(normalized);
+        if (normalized.expectedPlanHash && normalized.expectedPlanHash !== preview.planHash) throw Object.assign(new Error('生成预检已过期，请重新读取参数与预检'), { code: 'STALE_H3_PREVIEW', preview });
+        const blocking = preview.diagnostics.filter(issue => issue.code !== 'REFERENCE_INVALID');
+        if (blocking.length && (blocking.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH') || !("readyTargets" in preview && preview.readyTargets.length))) throw Object.assign(new Error(blocking.map(issue => `${issue.segmentId}: ${issue.message}`).join('；')), { code: 'H3_EXECUTION_CONTRACT_MISMATCH', diagnostics: blocking });
+        // 单个 Clip 的参考素材不完整只跳过它自己；其余 Clip 必须照常入队，不能整批卡死。
+        const blockedPlans = preparedPlan ? [] : this.validatePlannedReferences(project, normalized);
+        for (const issue of blocking) if (!blockedPlans.some(plan => plan.nodeId === issue.nodeId && plan.segmentId === issue.segmentId)) blockedPlans.push({ nodeId: issue.nodeId, segmentId: issue.segmentId, clipNumber: 0, reason: issue.message });
+        const allPlans = preparedPlan ? [] : this.plansFor(normalized);
+        const failedGroups = new Set(allPlans.filter(plan => plan.continuation && blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)).map(plan => plan.continuation!.group));
+        for (const plan of allPlans) if (plan.continuation && failedGroups.has(plan.continuation.group) && !blockedPlans.some(block => block.nodeId === plan.nodeId && block.segmentId === plan.segmentId)) blockedPlans.push({ nodeId: plan.nodeId, segmentId: plan.segmentId, clipNumber: plan.segmentIndex + 1, reason: "前置连续组不可执行" });
         const runPlan = preparedPlan || this.buildRunPlan(normalized, blockedPlans);
         if (blockedPlans.length) logger.warn("H3 批量运行跳过参考素材不完整的 Clip", { projectId: normalized.projectId, blocked: blockedPlans.map((item) => `${item.segmentId}: ${item.reason}`) });
         const frozenInput = { ...normalized, runPlan };
@@ -944,27 +945,6 @@ export class CanvasH3Runner {
         const segment = segments?.find((item) => item.id === plan.segmentId);
         if (!segment) throw new Error("H3 运行快照缺少目标 Clip");
         return { ...override, seed: segment.seed, noiseSeed: segment.noiseSeed, noiseSeedMode: segment.noiseSeedMode };
-    }
-
-    /** 把调用方 params 里的设置键写回 Clip 保存值（write-through）。
-     *
-     *  面板显示的必须是实际使用的：一次性覆盖只活在本请求里，会让 UI 上的画幅/步数
-     *  与实际产出不符（2026-10-29：params 传裸 9:16，面板仍写 9:16，出片却是 1920×1088）。
-     *  aspectRatio 先归一到完整选项名再落盘，避免下次读表时静默回退 16:9。
-     */
-    private persistRuntimeSettings(projectId: string, plans: Array<{ nodeId: string; segmentId: string }>, params: Record<string, unknown>) {
-        const keys = H3_PARAM_KEYS.filter((key) => params[key] !== undefined);
-        if (!keys.length || !plans.length) return;
-        const patch = Object.fromEntries(keys.map((key) => [
-            key,
-            key === "aspectRatio" ? h3AspectRatioOption(params[key]) ?? params[key] : params[key],
-        ]));
-        for (const plan of plans) {
-            const project = this.stores.projects.get(projectId)!;
-            this.stores.projects.applyOperations(projectId, Number(project.revision || 0), [
-                { type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch },
-            ], { source: { clientId: "mcp:h3-run", kind: "task", label: "H3 运行参数写回" } });
-        }
     }
 
     private patchSegment(projectId: string, nodeId: string, segmentId: string, patch: Record<string, unknown>) {

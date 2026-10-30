@@ -30,7 +30,8 @@ function fixture(t: TestContext) {
     const releases: Array<() => void> = [];
     const runningParents = new Set<string>();
     stores.projects.create({ id: "p", nodes: ["n", "other"].map((id) => ({ id, type: "minimax-h3", metadata: { segments: [
-        { id: "clip-a", prompt: "A bell.", mode: "t2v" },
+        // 运行参数必须等于 Clip 保存值，所以测试要用的时长先存在 Clip 上。
+        { id: "clip-a", prompt: "A bell.", mode: "t2v", duration: 4 },
         { id: "clip-b", prompt: "Another bell.", mode: "t2v" },
     ] } })), connections: [] });
     // Only the external execution boundary is replaced. Planning, task/log

@@ -7,10 +7,11 @@ test("UI workflow conversion omits unconnected notes but retains execution nodes
   const source = { nodes: [
     { id: 54, type: "MarkdownNote", inputs: [], outputs: [] },
     { id: 55, type: "Note", inputs: [], outputs: [] },
+    { id: 56, type: "孤海注释", inputs: [], outputs: [] },
     { id: 1, type: "SaveImage", inputs: [] },
   ], links: [] };
   assert.deepEqual(convertComfyWorkflowToApi(source), { "1": { class_type: "SaveImage", inputs: {} } });
-  assert.equal(source.nodes.length, 3);
+  assert.equal(source.nodes.length, 4);
 });
 
 test("connected UI notes fail conversion instead of silently breaking a link", () => {
@@ -19,6 +20,32 @@ test("connected UI notes fail conversion instead of silently breaking a link", (
     { id: 1, type: "SaveImage", inputs: [{ name: "images", link: 1 }] },
   ], links: [[1, 54, 0, 1, 0]] };
   assert.throws(() => convertComfyWorkflowToApi(source), /54/);
+});
+
+test("Reroute nodes are bypassed, including consecutive reroutes", () => {
+  const source = { nodes: [
+    { id: 1, type: "LoadImage", inputs: [], outputs: [{ links: [1] }] },
+    { id: 44, type: "Reroute", inputs: [{ name: "", link: 1 }], outputs: [{ links: [2] }] },
+    { id: 45, type: "Reroute", inputs: [{ name: "", link: 2 }], outputs: [{ links: [3] }] },
+    { id: 2, type: "PreviewImage", inputs: [{ name: "images", link: 3 }], outputs: [] },
+  ], links: [[1, 1, 0, 44, 0], [2, 44, 0, 45, 0], [3, 45, 0, 2, 0]] };
+  assert.deepEqual(convertComfyWorkflowToApi(source), {
+    "1": { class_type: "LoadImage", inputs: {} },
+    "2": { class_type: "PreviewImage", inputs: { images: ["1", 0] } },
+  });
+  assert.equal(source.nodes.length, 4);
+});
+
+test("孤海注释 is omitted from previously imported API workflows during run preparation", async () => {
+  const source = {
+    "56": { class_type: "孤海注释", inputs: {} },
+    "1": { class_type: "SaveImage", inputs: {} },
+  };
+  const executor = new WorkflowExecutor({} as never, { create: () => ({ id: "task" }) } as never, {} as never);
+  const prepare = executor as unknown as { prepareRun: (...args: unknown[]) => Promise<{ prepared: Record<string, unknown> }> };
+  const result = await prepare.prepareRun(source, { title: "test", fields: [] }, {}, "client", "http://localhost:8188", undefined, undefined, undefined, undefined, undefined);
+  assert.deepEqual(result.prepared, { "1": source["1"] });
+  assert.ok(source["56"]);
 });
 
 test("seed controls do not shift sampler and llama inputs", () => {
