@@ -192,3 +192,29 @@ test("write receipts discard top-level snapshots and retain operation replay ide
     assert.ok(JSON.stringify(receipt).length < 2000);
     console.log(`write projection: ${Buffer.byteLength(JSON.stringify(payload))} -> ${Buffer.byteLength(JSON.stringify(receipt))} bytes`);
 });
+
+test("multi-section source reads collapse several sections into one round trip", () => {
+    const production: any = record();
+    production.draft.director.source.shots = [{ id: "s1", duration_frames: 24, camera: { size: "medium" } }];
+    production.draft.settings = { parallelScenes: true };
+    const result: any = projectProductionRead(production, { view: "source", sourceSections: ["segments", "shots", "settings"] });
+    assert.deepEqual(result.sourceSections, ["segments", "shots", "settings"]);
+    assert.equal(result.sources.segments.length, 28);
+    assert.equal(result.sources.shots.length, 1);
+    assert.equal(result.sources.settings.parallelScenes, true);
+    assert.deepEqual(result.counts, { segments: 28, shots: 1, settings: 1 });
+    assert.ok(result.bytes > 0);
+    // 单段路径保持原形状（source 直接是值，不是分节字典）。
+    const single: any = projectProductionRead(production, { view: "source", sourceSection: "segments" });
+    assert.ok(Array.isArray(single.source));
+    // fields 投影对每段分别生效。
+    const projected: any = projectProductionRead(production, { view: "source", sourceSections: ["shots"], fields: ["duration_frames"] });
+    assert.deepEqual(projected.sources.shots, [{ id: "s1", duration_frames: 24 }]);
+    // 组合校验：二选一、不支持分块与续页。
+    assert.throws(() => projectProductionRead(production, { view: "source", sourceSection: "segments", sourceSections: ["shots"] }), /SOURCE_SECTIONS_CONFLICT/);
+    assert.throws(() => projectProductionRead(production, { view: "source", sourceSections: ["segments"], chunkBytes: 100 }), /SOURCE_SECTIONS_CHUNK/);
+    assert.throws(() => projectProductionRead(production, { view: "source", sourceSections: ["segments"], cursor: "x", pageSize: 2 }), /SOURCE_SECTIONS_CURSOR/);
+    // 多段查询序列化与「不允许整份源稿」的读取边界。
+    assert.match(productionReadQuery({ view: "source", sourceSections: ["segments", "settings"] }), /sourceSections=segments%2Csettings/);
+    assert.throws(() => productionReadQuery({ view: "source" }), /SOURCE_SECTION_REQUIRED/);
+});

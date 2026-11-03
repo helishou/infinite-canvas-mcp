@@ -113,6 +113,15 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             if (event.key === "Control") setIsControlPressed(true);
             if (event.code !== "Space") return;
             const target = event.target instanceof Element ? event.target : null;
+            const video = target?.closest("video");
+            if (video instanceof HTMLVideoElement) {
+                event.preventDefault();
+                if (event.repeat) return;
+                if (video.paused || video.ended) void video.play().catch(() => undefined);
+                else video.pause();
+                return;
+            }
+            if (target?.closest("audio")) return;
             if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true']")) return;
             event.preventDefault();
             setIsSpacePressed(true);
@@ -122,7 +131,9 @@ export function InfiniteCanvas({ containerRef, viewportRef, registerViewportWrit
             if (!active) return;
             if (event.code === "Space") {
                 const target = event.target instanceof Element ? event.target : null;
-                if (!(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true']"))) event.preventDefault();
+                const isVideoControl = target?.closest("video") instanceof HTMLVideoElement;
+                const isEditable = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || Boolean(target?.closest("[contenteditable='true']"));
+                if (isVideoControl || (!target?.closest("audio") && !isEditable)) event.preventDefault();
                 setIsSpacePressed(false);
             }
             if (event.key === "Control") setIsControlPressed(false);

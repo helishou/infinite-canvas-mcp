@@ -60,6 +60,9 @@ test("wait receipt folds outputs, pending and blocked in one call", async t => {
     // 既有字段不受影响：旧消费方仍可读 tasks/summary。
     assert.equal(wait.tasks.length, 2);
     assert.equal(wait.summary.total, 2);
+    // 进度比例让「还要不要继续等」可判定，不必 wait → get_batch → wait。
+    assert.deepEqual(wait.progress, { complete: 2, total: 2, ratio: 1, pending: 0 });
+    assert.equal(wait.canKeepWaiting, false);
 
     // 全部成功：status 折成 succeeded。
     const allOk = await call("canvas_wait_tasks", { taskIds: [okTask.id], timeoutMs: 5_000 });

@@ -2,7 +2,7 @@ import { estimateH3Dimensions, resolveH3Runtime } from "@basketikun/canvas-agent
 import { useDefaultParams } from "../services/h3-defaults";
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { CanvasNodeContext, CanvasVideoModelField, CanvasVideoModelSchema } from "@infinite-canvas/plugin-sdk";
-import { AutoComplete, Input, InputNumber, Switch, Select, Tooltip } from "antd";
+import { AutoComplete, Input, InputNumber, message, Switch, Select, Tooltip } from "antd";
 import { Search } from "lucide-react";
 import { h3LoraOptions, h3ModelOptions, H3_LORA_STRENGTH_MIN, H3_LORA_STRENGTH_MAX } from "../constants";
 import { discoverH3Models, mergeH3Options } from "../services/model-discovery";
@@ -18,6 +18,34 @@ type SectionKey = "mode" | "model" | "sampling" | "lora" | "sla" | "runtime" | "
 const sectionKeys: SectionKey[] = ["model", "continuation", "sampling", "lora", "sla", "runtime", "latentUpscale", "preview", "rtx", "faceRefine", "audio"];
 const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考" } as const;
 const NO_STYLE_TEMPLATE_OPTION = "__h3_no_style_template__";
+const H3_LORA_PRESETS_STORAGE_KEY = "h3-lora-presets";
+type H3LoraSlot = { name: string; strength: number; enabled: boolean };
+type H3LoraPreset = { name: string; slots: H3LoraSlot[] };
+
+function parseH3LoraPresets(value: unknown): H3LoraPreset[] {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new Error("保存的 LoRA 组合格式无效");
+    const names = new Set<string>();
+    return value.map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("保存的 LoRA 组合格式无效");
+        const preset = item as Record<string, unknown>;
+        const name = typeof preset.name === "string" ? preset.name.trim() : "";
+        if (!name || names.has(name) || !Array.isArray(preset.slots) || preset.slots.length < 1 || preset.slots.length > 16) {
+            throw new Error("保存的 LoRA 组合格式无效");
+        }
+        names.add(name);
+        const slots = preset.slots.map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("保存的 LoRA 组合格式无效");
+            const slot = item as Record<string, unknown>;
+            const slotName = typeof slot.name === "string" ? slot.name.trim() : "";
+            const strength = slot.strength;
+            if (!slotName || typeof strength !== "number" || !Number.isFinite(strength) || strength < H3_LORA_STRENGTH_MIN || strength > H3_LORA_STRENGTH_MAX || typeof slot.enabled !== "boolean") throw new Error("保存的 LoRA 组合格式无效");
+            return { name: slotName, strength, enabled: slot.enabled };
+        });
+        return { name, slots };
+    });
+}
+
 const encoderTypes = ["minimax"];
 const encoderDevices = ["default", "cpu"];
 const precisions = ["default", "fp8_e4m3fn", "fp8_e5m2"];
@@ -41,11 +69,11 @@ const h3SelectStyles = {
 };
 const renderH3SelectLabel = ({ label, value }: { label?: ReactNode; value?: string | number }) => <span style={h3SelectValueStyle} title={typeof label === "string" ? label : String(value ?? "")}>{label ?? value}</span>;
 
-function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; listId?: string }) {
+function H3Dropdown({ values, value, onChange, placeholder, allowClear = false, format, searchable = false, disabled = false, listId = "nfh3-options" }: { values: Array<string | number>; value?: string | number; onChange: (value: string | number) => void; placeholder?: string; allowClear?: boolean; format?: (value: string | number) => string; searchable?: boolean; disabled?: boolean; listId?: string }) {
     const selected = value === undefined || value === null ? undefined : String(value);
     const options = values.map((item) => ({ value: String(item), label: format ? format(item) : String(item) }));
     const dropdown = useH3DropdownOpen();
-    return <span ref={dropdown.rootRef} style={{ display: "block", minWidth: 0 }}><Select className="nfh3-select" size="middle" showSearch={searchable} allowClear={allowClear} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} labelRender={renderH3SelectLabel} styles={h3SelectStyles} open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} /></span>;
+    return <span ref={dropdown.rootRef} style={{ display: "block", minWidth: 0 }}><Select className="nfh3-select" size="middle" showSearch={searchable} allowClear={allowClear} disabled={disabled} value={selected} placeholder={placeholder} optionFilterProp="label" options={options} labelRender={renderH3SelectLabel} styles={h3SelectStyles} open={dropdown.open} onOpenChange={dropdown.onOpenChange} onChange={(v) => { onChange(v as string); }} onMouseDown={(event) => event.stopPropagation()} style={{ width: "100%" }} popupMatchSelectWidth={false} /></span>;
 }
 
 function H3LoraPicker({ values, value, onChange }: { values: string[]; value: string; onChange: (value: string) => void }) {
@@ -77,6 +105,13 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const [catalog, setCatalog] = useState<{ models: string[]; loras: string[]; textEncoders: string[]; videoVaes: string[]; audioVaes: string[]; latentUpscaleModels: string[]; nanfeng: Record<string, unknown[]> }>({ models: [], loras: [], textEncoders: [], videoVaes: [], audioVaes: [], latentUpscaleModels: [], nanfeng: {} });
     const [refreshingLoras, setRefreshingLoras] = useState(false);
     const [loraSearch, setLoraSearch] = useState("");
+    const [loraPresets, setLoraPresets] = useState<H3LoraPreset[]>([]);
+    const [loraPresetsLoaded, setLoraPresetsLoaded] = useState(false);
+    const [loraPresetsLoading, setLoraPresetsLoading] = useState(false);
+    const [loraPresetsBusy, setLoraPresetsBusy] = useState(false);
+    const [loraPresetError, setLoraPresetError] = useState("");
+    const [selectedLoraPreset, setSelectedLoraPreset] = useState("");
+    const [loraPresetLoadRequest, setLoraPresetLoadRequest] = useState(0);
     const [sigmaPresets, setSigmaPresets] = useState<Record<string, string>>({});
     useEffect(() => {
         let active = true;
@@ -115,6 +150,24 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         }).catch(() => { if (active) setSigmaPresets(Object.fromEntries(Object.entries(legacy).filter(([, value]) => typeof value === "string" && value.trim())) as Record<string, string>); });
         return () => { active = false; };
     }, [ctx.storage, segment?.id]);
+    useEffect(() => {
+        let active = true;
+        setLoraPresetsLoaded(false);
+        setLoraPresetsLoading(true);
+        setLoraPresetError("");
+        setSelectedLoraPreset("");
+        void ctx.storage.get<unknown>(H3_LORA_PRESETS_STORAGE_KEY)
+            .then((stored) => {
+                if (!active) return;
+                setLoraPresets(parseH3LoraPresets(stored));
+                setLoraPresetsLoaded(true);
+            })
+            .catch((error) => {
+                if (active) setLoraPresetError(error instanceof Error ? error.message : String(error));
+            })
+            .finally(() => { if (active) setLoraPresetsLoading(false); });
+        return () => { active = false; };
+    }, [ctx.storage, segment?.id, loraPresetLoadRequest]);
     if (!segment) return null;
     const mode = (segment.taskMode || segment.mode || "ref2va") as keyof typeof modeLabels;
     const styleTemplateId = segment.styleTemplateId === undefined
@@ -250,6 +303,53 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const loraQuery = loraSearch.trim().toLocaleLowerCase();
     const filteredLoraValues = loraQuery ? loraValues.filter((value) => value.toLocaleLowerCase().includes(loraQuery)) : loraValues;
     const loraSummary = loraSlots.filter((slot) => slot.enabled && slot.name).length;
+    const selectedLoraPresetData = loraPresets.find((preset) => preset.name === selectedLoraPreset);
+    const saveLoraPreset = async () => {
+        if (!loraPresetsLoaded || loraPresetsBusy) return;
+        const name = window.prompt(h3Label(locale, "loraPresetName"), selectedLoraPreset || `${h3Label(locale, "loraPresetDefaultName")} ${loraPresets.length + 1}`)?.trim();
+        if (!name) return;
+        const selectedSlots = loraSlots.filter((slot) => slot.name.trim());
+        if (!selectedSlots.length) { message.info(h3Label(locale, "loraPresetEmpty")); return; }
+        if (selectedSlots.some((slot) => {
+            const strength = Number(slot.strength);
+            return !Number.isFinite(strength) || strength < H3_LORA_STRENGTH_MIN || strength > H3_LORA_STRENGTH_MAX;
+        })) { message.info(h3Label(locale, "loraPresetInvalidWeights")); return; }
+        const slots = selectedSlots.map((slot) => ({ name: slot.name.trim(), strength: Number(slot.strength), enabled: slot.enabled })).slice(0, 16);
+        const next = [...loraPresets.filter((preset) => preset.name !== name), { name, slots }];
+        setLoraPresetsBusy(true);
+        setLoraPresetError("");
+        try {
+            await ctx.storage.set(H3_LORA_PRESETS_STORAGE_KEY, next);
+            setLoraPresets(next);
+            setSelectedLoraPreset(name);
+            message.success(h3Label(locale, "loraPresetSaved").replace("{name}", name));
+        } catch (error) {
+            setLoraPresetError(error instanceof Error ? error.message : String(error));
+        } finally { setLoraPresetsBusy(false); }
+    };
+    const applyLoraPreset = (value: string | number) => {
+        const name = String(value || "");
+        setSelectedLoraPreset(name);
+        const preset = loraPresets.find((item) => item.name === name);
+        if (!preset || !loraPresetsLoaded || loraPresetsBusy) return;
+        const slots = preset.slots.map((slot) => ({ ...slot }));
+        patch({ loraSlots: slots, loraName: slots[0]?.name || "", loraStrength: slots[0]?.strength ?? 0.75 });
+        message.success(h3Label(locale, "loraPresetApplied").replace("{name}", preset.name));
+    };
+    const deleteLoraPreset = async () => {
+        if (!selectedLoraPresetData || !loraPresetsLoaded || loraPresetsBusy) return;
+        const next = loraPresets.filter((preset) => preset.name !== selectedLoraPresetData.name);
+        setLoraPresetsBusy(true);
+        setLoraPresetError("");
+        try {
+            await ctx.storage.set(H3_LORA_PRESETS_STORAGE_KEY, next);
+            setLoraPresets(next);
+            setSelectedLoraPreset("");
+            message.success(h3Label(locale, "loraPresetDeleted").replace("{name}", selectedLoraPresetData.name));
+        } catch (error) {
+            setLoraPresetError(error instanceof Error ? error.message : String(error));
+        } finally { setLoraPresetsBusy(false); }
+    };
     const sigmaPresetNames = Object.keys(sigmaPresets);
     const selectedSigmaPreset = String(metadata.h3SigmaPresetName || sigmaPresetNames[0] || "");
     const saveSigmaPreset = (name: string) => { const trimmed = name.trim(); const value = String(segment.h3FullSigma || "").trim(); if (!trimmed || !value) return; const next = { ...sigmaPresets, [trimmed]: value }; setSigmaPresets(next); void ctx.storage.set("h3-sigma-presets", next); ctx.updateMetadata({ h3SigmaPresetName: trimmed }); };
@@ -381,6 +481,14 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>开启潜空间放大二采时，潜空间二采确认模式保存一采潜变量，确认后继续放大二采并可追加人脸精修；人脸精修确认需单独开启，确认后从一采视频解码执行人脸精修。确认前不执行 RTX、人脸精修或 DLSS 后处理。</div>
         </div>)}
         {section("lora", "LoRA", loraSummary ? enabledSummary(`${loraSummary} 个已启用 `) : "未启用", <div className="nfh3-lora-stack">
+            <div className="nfh3-lora-presets">
+                <H3Dropdown values={loraPresetsLoaded ? loraPresets.map((preset) => preset.name) : []} value={selectedLoraPreset || undefined} onChange={applyLoraPreset} placeholder={loraPresetsLoading ? h3Label(locale, "loraPresetLoading") : h3Label(locale, "loraPresetSelect")} allowClear searchable disabled={!loraPresetsLoaded || loraPresetsBusy} format={(value) => { const preset = loraPresets.find((item) => item.name === String(value)); return preset ? `${preset.name} · ${preset.slots.filter((slot) => slot.enabled).length}/${preset.slots.length}` : String(value); }} listId="nfh3-lora-preset-options" />
+                <button type="button" className="nfh3-lora-add" onClick={() => void saveLoraPreset()} disabled={!loraPresetsLoaded || loraPresetsBusy}>{h3Label(locale, "loraPresetSave")}</button>
+                <button type="button" className="nfh3-lora-add" onClick={() => void deleteLoraPreset()} disabled={!selectedLoraPresetData || !loraPresetsLoaded || loraPresetsBusy}>{h3Label(locale, "loraPresetDelete")}</button>
+                {loraPresetError ? <div className="nfh3-hint" role="alert" style={{ gridColumn: "1 / -1" }}>{h3Label(locale, "loraPresetLoadFailed")}{loraPresetError}</div> : null}
+                {!loraPresetsLoaded && !loraPresetError ? <div className="nfh3-hint" style={{ gridColumn: "1 / -1" }}>{h3Label(locale, "loraPresetLoadingHint")}</div> : null}
+                {loraPresetError ? <button type="button" className="nfh3-lora-add" style={{ gridColumn: "1 / -1" }} onClick={() => setLoraPresetLoadRequest((value) => value + 1)} disabled={loraPresetsLoading}>{h3Label(locale, "loraPresetRetry")}</button> : null}
+            </div>
             <Input className="nfh3-lora-search" size="middle" prefix={<Search size={20} aria-hidden="true" />} allowClear value={loraSearch} onChange={(event) => setLoraSearch(event.target.value)} placeholder="搜索 LoRA 文件名" aria-label="搜索 LoRA 文件名" onMouseDown={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()} />
             {loraSlots.map((slot, index) => <div className="nfh3-lora-row" key={index}><b>LoRA {index + 1}</b><Switch checked={slot.enabled} onChange={(checked) => patchLoraSlot(index, { enabled: checked })} /><H3LoraPicker key={`${segment.id}:${index}`} values={filteredLoraValues} value={slot.name || ""} onChange={(value) => patchLoraSlot(index, { name: value, enabled: !!value })} /><InputNumber min={H3_LORA_STRENGTH_MIN} max={H3_LORA_STRENGTH_MAX} step={0.05} value={slot.strength != null ? Number(slot.strength) : undefined} placeholder="0.75" onChange={(value) => patchLoraSlot(index, { strength: value ?? undefined })} /></div>)}
             {loraSlots.length < 16 ? <button type="button" className="nfh3-lora-add" onClick={addLoraSlot}>＋ 添加 LoRA 槽位</button> : null}

@@ -7,6 +7,8 @@ export const productionReadSchema = z.object({
     snapshot: z.enum(["draft", "published"]).default("draft"),
     targetIds: z.array(z.string().min(1)).optional(),
     sourceSection: productionSourceSectionSchema.optional(),
+    sourceSections: z.array(productionSourceSectionSchema).min(1).max(8).optional()
+        .describe("一次读取多个完整源稿段（如 shots、segments、script_scenes、settings），替代同一秒内多次单段调用；与 sourceSection 二选一，体积受 fields 约束，需要分块时退回单段"),
     fields: z.preprocess(value => { if (typeof value !== "string") return value; try { return JSON.parse(value); } catch { return value; } }, productionSourceFieldsSchema),
     pageSize: z.coerce.number().int().positive().optional(),
     cursor: z.string().optional(),
@@ -18,10 +20,13 @@ export const productionReadSchema = z.object({
 export function productionReadQuery(raw: unknown) {
     const input = productionReadSchema.parse(raw);
     validateProductionSourceFields(input);
+    // 单段与多段二选一；两个都不给会退回整份源稿，MCP 读取边界直接拒绝。
+    if (input.view === "source" && !input.sourceSection && !input.sourceSections?.length) throw new Error("SOURCE_SECTION_REQUIRED: 必须指定 sourceSection 或 sourceSections；不接受整份源稿读取");
     const query = new URLSearchParams({ view: input.view, snapshot: input.snapshot });
     if (input.targetIds) query.set("targetIds", input.targetIds.join(","));
     if (input.fields) query.set("fields", JSON.stringify(input.fields));
     for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "includeContext", "includeRuntime", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
+    if (input.sourceSections) query.set("sourceSections", input.sourceSections.join(","));
     return `?${query}`;
 }
 
@@ -36,8 +41,10 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     const selected = production[input.snapshot];
     if (input.snapshot === "published" && selected?.director && !subjectPromptV2(selected.director.source)) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 历史发布稿是旧版 Director 格式，只能通过维护命令检查；当前 v2 草稿仍可继续编辑。");
     const d = selected?.director;
-    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, chunkBytes: input.chunkBytes, ...(input.fields ? { fields: input.fields, pageSize: input.pageSize } : {}), includeContext: input.includeContext, includeRuntime: input.includeRuntime });
+    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, sections: input.sourceSections, chunkBytes: input.chunkBytes, ...(input.fields ? { fields: input.fields, pageSize: input.pageSize } : {}), includeContext: input.includeContext, includeRuntime: input.includeRuntime });
     let offset = 0;
+    // 多段读取没有游标语义；在解码旧游标之前就明确拒绝，避免报成 INVALID_CURSOR 误导调用方。
+    if (input.cursor && input.sourceSections?.length) throw new Error("SOURCE_SECTIONS_CURSOR: 多段读取不支持续页；需要分页请退回单段 sourceSection + pageSize");
     if (input.cursor) {
         let cursor: any;
         try { cursor = JSON.parse(decodeURIComponent(input.cursor)); } catch { throw new Error("INVALID_CURSOR"); }
@@ -81,11 +88,45 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
             ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(selectedWorkbench)) } : { workbench: selectedWorkbench }) };
     }
     if (input.view === "source") {
-        if (input.targetIds && !input.sourceSection) throw new Error("定向源稿读取必须指定 sourceSection");
+        const sections = input.sourceSections?.length ? [...new Set(input.sourceSections)] : undefined;
+        if (sections && input.sourceSection) throw new Error("SOURCE_SECTIONS_CONFLICT: sourceSection 与 sourceSections 只能选一个");
+        if (sections && input.chunkBytes) throw new Error("SOURCE_SECTIONS_CHUNK: 多段读取不支持分块；需要分块时对单段使用 sourceSection + chunkBytes");
+        if (sections && input.cursor) throw new Error("SOURCE_SECTIONS_CURSOR: 多段读取不支持续页；需要分页请退回单段 sourceSection + pageSize");
+        if (input.targetIds && !input.sourceSection && !sections) throw new Error("定向源稿读取必须指定 sourceSection 或 sourceSections");
         const source = d?.source || null;
         if (subjectPromptV2(source) && (input.sourceSection === "production_shots" || input.sourceSection === "clip_groups")) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: Acheng v2 的 Shot/Segment 只能从 source.shots/source.segments 读取");
         const rootSections: Record<string, unknown> = { script: subjectPromptV2(source) ? source.script_scenes : selected?.scenes,
             production_shots: selected?.shots, clip_groups: selected?.clipGroups, keyframes: selected?.keyframes, keyframe_reviews: selected?.keyframeReviews, settings: selected?.settings };
+        // 多段合并读取：同一秒内 15–20 个并发读往往只是同一份源稿的不同 section，
+        // 一次返回多段可把 4 次往返压成 1 次。单段路径保持完全兼容。
+        if (sections) {
+            const pick = (name: string) => {
+                if (subjectPromptV2(source) && (name === "production_shots" || name === "clip_groups")) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: Acheng v2 的 Shot/Segment 只能从 source.shots/source.segments 读取");
+                return name === "context"
+                    ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key)))
+                    : Object.hasOwn(rootSections, name) ? rootSections[name] : name.startsWith("ledger.") ? source?.ledger?.[name.split(".")[1]] : source?.[name];
+            };
+            const filteredFor = (value: unknown) => Array.isArray(value) && input.targetIds
+                ? value.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id)))
+                : value;
+            const sources: Record<string, unknown> = {};
+            const missingFields: Array<{ section: string; fields: string[] }> = [];
+            const counts: Record<string, number | null> = {};
+            for (const name of sections) {
+                const value = filteredFor(pick(name));
+                counts[name] = Array.isArray(value) ? value.length : value && typeof value === "object" ? Object.keys(value).length : null;
+                if (input.fields) {
+                    const projected = projectProductionSourceFields(value, input.fields);
+                    sources[name] = projected.value;
+                    if (projected.missingFields.length) missingFields.push({ section: name, fields: [...new Set(projected.missingFields.flatMap(item => item.fields))] });
+                } else sources[name] = value;
+            }
+            return { ...header, ...fieldsReceipt, snapshot: input.snapshot, engine: d?.engine, sourceHash: d?.sourceHash,
+                sourceSections: sections, sources, counts,
+                ...(missingFields.length ? { missingFields } : {}),
+                bytes: new TextEncoder().encode(JSON.stringify(sources)).length,
+                ...(input.targetIds ? { targetIds: input.targetIds } : {}) };
+        }
         const section = input.sourceSection === "context" ? Object.fromEntries(Object.entries(source || {}).filter(([key]) => !["asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger"].includes(key))) : input.sourceSection && Object.hasOwn(rootSections, input.sourceSection) ? rootSections[input.sourceSection] : input.sourceSection?.startsWith("ledger.") ? source?.ledger?.[input.sourceSection.split(".")[1]] : input.sourceSection ? source?.[input.sourceSection] : source;
         const filtered = Array.isArray(section) && input.targetIds ? section.filter((item: any) => input.targetIds!.includes(String(item.id || item.asset_id || item.shot_id || item.segment_id || item.fact_id))) : section;
         const page = Array.isArray(filtered) && input.pageSize ? paginate(filtered) : undefined;
@@ -242,6 +283,8 @@ export function productionWriteReceipt(result: any, context: { tool?: string; in
     const tool = kind === "scene" ? "production_get_scene_production" : "production_get";
     const readInput = kind === "scene" ? { sceneId: ownerId, view: "summary" } : { kind, id: ownerId };
     return { ...pick(result, ["ok", "replayed", "mediaSubmitted", "mediaAuthorized", "operationId", "workId", "runId", "status", "updated", "created", "reused", "skipped"]),
+        // 写入自带的非阻塞诊断（编号、绑定、时长、对白容量）：改完即可判断是否还需单独检查。
+        ...(Array.isArray(result.writeDiagnostics) && result.writeDiagnostics.length ? { writeDiagnostics: result.writeDiagnostics, writeDiagnosticCount: Number(result.writeDiagnosticCount || result.writeDiagnostics.length) } : {}),
         ...(clipRefreshes.length ? { sourceSaved: true, clipRefreshes, ...(clipRefreshes.length === 1 ? { clipRefresh: clipRefreshes[0] } : {}), mediaSubmitted: false } : {}),
         ...(clipRefreshSummary ? { clipRefreshSummary, ...(input.operationId ? { nextAction: { tool: "production_get_compilation", input: { kind, id: ownerId, operationId: input.operationId } } } : {}) } : {}),
         ...pick(input, ["operationId", "sceneId", "projectId", "episodeId"]),

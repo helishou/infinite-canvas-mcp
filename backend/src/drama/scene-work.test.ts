@@ -540,3 +540,31 @@ test("scene coordinator progresses independent source, scoped compilation and H3
     assert.equal(coordinator.inspect("ep").works.length, works.length);
     assert.equal(generated, 2, "completed work must not generate again");
 });
+
+test("scene start failures name the setting and the usable scene directory", t => {
+    const { service, coordinator } = fixture(t);
+    service.edit("ep", { operationId: "disable-parallel", expectedRevision: service.get("ep").revision, ops: [{ type: "set_settings", patch: { parallelScenes: false } }] });
+    assert.throws(() => coordinator.start("ep", { operationId: "start-disabled", expectedRevision: service.get("ep").revision, sceneIds: ["A"], generateMedia: false }), (error: any) => {
+        assert.equal(error.code, "SCENE_SETTINGS_REQUIRED");
+        assert.equal(error.details.setting, "parallelScenes");
+        assert.equal(error.details.current, false);
+        assert.equal(error.nextActions[0].tool, "production_edit");
+        assert.deepEqual(error.nextActions[0].input.ops, [{ type: "set_settings", patch: { parallelScenes: true } }]);
+        assert.equal(error.nextActions[0].input.expectedRevision, service.get("ep").revision);
+        return true;
+    });
+    service.edit("ep", { operationId: "enable-parallel", expectedRevision: service.get("ep").revision, ops: [{ type: "set_settings", patch: { parallelScenes: true } }] });
+    assert.throws(() => coordinator.start("ep", { operationId: "start-segment-id", expectedRevision: service.get("ep").revision, sceneIds: ["SEG-A"], generateMedia: false }), (error: any) => {
+        assert.equal(error.code, "SCENE_NOT_FOUND");
+        assert.equal(error.details.detectedKind, "segment");
+        assert.deepEqual(error.details.availableScenes.map((item: any) => item.sceneId), ["A", "B"]);
+        assert.equal(error.details.availableSceneCount, 2);
+        assert.match(error.message, /SEG-A/);
+        return true;
+    });
+    assert.throws(() => coordinator.start("ep", { operationId: "start-env-id", expectedRevision: service.get("ep").revision, sceneIds: ["ENV-ROOM"], generateMedia: false }), (error: any) => {
+        assert.equal(error.details.detectedKind, "environment");
+        assert.deepEqual(error.nextActions, [{ action: "correct_source", message: "改用 details.availableScenes 中的场次实例 id（如 A）重提；不要重读整份源稿。" }]);
+        return true;
+    });
+});

@@ -53,6 +53,13 @@ test("old production contracts, preflight, compilation and continuity follow the
     const contract = getProductionContract(f.old.runtimeId);
     assert.equal(contract.engine.runtimeId, f.next.runtimeId);
     assert.match(contract.notice!, /deprecated/);
+    // 合同身份随「引擎 + 查询范围」稳定，并明确告知可复用；分块读取不冒充「已完整读过」。
+    assert.match(contract.contractHash, /^[a-f0-9]{64}$/);
+    const brief = getProductionContract(undefined, "set_director_brief");
+    assert.equal(brief.contractHash, getProductionContract(undefined, "set_director_brief").contractHash);
+    assert.equal((brief as any).contractReuse.sameHashReusable, true);
+    assert.notEqual(brief.contractHash, getProductionContract(undefined, "set_settings").contractHash);
+    assert.equal((getProductionContract(undefined, "set_director_brief", undefined, { chunkBytes: 64 }) as any).contractReuse, undefined);
     assert.ok((await validateAchengSource(f.director, "edit")).some(item => item.code === "ACTIVE_b"));
     const preflight = await preflightCompilationDirector(f.director);
     assert.equal(preflight.compileReady, true, JSON.stringify(preflight.diagnostics));

@@ -42,6 +42,7 @@ const nodeTypeSchema = z
     "智能节点类型。内置智能生成使用 config，H3 使用 minimax-h3:video；普通 text/image/video/audio 节点不能通过 MCP 创建。",
   );
 const smartNodeMetadataSchema = z.object({ smart: z.literal(true) }).passthrough();
+const mcpNodePatchSchema = nodePatchSchema.omit({ type: true });
 const generationModeSchema = z
   .enum(["text", "image", "video", "audio"])
   .describe(
@@ -142,7 +143,7 @@ export const canvasOpSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("update_node"),
       id: z.string().describe("目标节点 ID，必填"),
-      patch: nodePatchSchema
+      patch: mcpNodePatchSchema
         .optional()
         .describe("节点字段子集，如 { x: 300, y: 200, title: '新标题' }"),
       metadataDelete: z.array(z.string().min(1)).optional(),
@@ -321,7 +322,7 @@ const waitFoldSchema = {
     .min(1000)
     .max(1800000)
     .optional()
-    .describe("waitForCompletion=true 时的最长等待时间，默认 900000ms；超时返回 pending，原任务保留不重提"),
+    .describe("waitForCompletion=true 时的最长等待时间，默认 60000ms；超时返回 pending 与进度比例，原任务保留不重提"),
   pollMs: z
     .number()
     .int()
@@ -400,7 +401,7 @@ export const toolInputSchemas = {
       .array(canvasOpSchema)
       .min(1)
       .describe(
-        "操作数组，至少 1 个；type 决定其余字段。例：[{ type: 'add_node', nodeType: 'text', title: '剧名', x: 100, y: 100 }, { type: 'connect_nodes', fromNodeId: 'n1', toNodeId: 'n2' }]",
+        "操作数组，至少 1 个；type 决定其余字段。例：[{ type: 'add_node', nodeType: 'config', title: '图片生成', position: { x: 100, y: 100 }, metadata: { smart: true, generationMode: 'image', prompt: '古风角色立绘' } }, { type: 'connect_nodes', fromNodeId: 'n1', toNodeId: 'n2' }]",
       ),
   }),
   canvas_create_node: canvasProjectSchema.extend({
@@ -488,7 +489,7 @@ export const toolInputSchemas = {
   }),
   canvas_update_node: canvasProjectSchema.extend({
     id: z.string().describe("目标节点 ID，必填"),
-    patch: nodePatchSchema
+    patch: mcpNodePatchSchema
       .optional()
       .describe("节点字段子集，如 { x: 300, y: 200, title: '新标题' }"),
     metadata: recordSchema
@@ -620,7 +621,7 @@ export const toolInputSchemas = {
       .min(1000)
       .max(1800000)
       .optional()
-      .describe("最长等待时间，默认 900000ms"),
+      .describe("最长等待时间，默认 60000ms；回执带 progress（完成数/总数/比例）与 pendingTaskIds，可据此决定是否继续等，未完成任务保留不重提"),
     pollMs: z
       .number()
       .int()
@@ -888,7 +889,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_set_generation_references:
     "替换指定生成节点的参考资源。会删除该节点现有的图片、视频、音频等参考输入，保留文本提示词输入，再按 referenceNodeIds 的顺序重新连接；适合第二次生成或重做分镜时清理旧参考图。例：{ nodeId: 'n-h3-1', referenceNodeIds: ['n-char-1', 'n-outfit-2', 'n-scene-1'] }",
   canvas_update_node:
-    "更新节点基础字段用 patch，插件字段用 metadata；metadata 按字段合并。例：{ id: 'n1', patch: { title: '沈昭宁小传', x: 300 } }",
+    "更新节点基础字段用 patch，插件字段用 metadata；metadata 按字段合并。MCP 不通过 update_node 更改节点类型，新增生成节点请使用智能节点工具。例：{ id: 'n1', patch: { title: '沈昭宁小传', x: 300 } }",
   canvas_move_nodes:
     "移动一个或多个节点。每项支持 绝对坐标(x/y) 或 相对偏移(dx/dy)，二选一；不传则保持原位。例：{ items: [{ id: 'n1', x: 500, y: 300 }, { id: 'n2', dx: 50, dy: 0 }] }",
   canvas_resize_node: "调整节点尺寸。例：{ id: 'n1', width: 400, height: 300 }",

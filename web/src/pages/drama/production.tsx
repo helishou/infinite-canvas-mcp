@@ -1385,6 +1385,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     });
   };
 
+  const askDirectorWithFeedback = (scope: Parameters<typeof askDirector>[0]) => {
+    const hideLoading = message.loading(t("common.loading"), 0);
+    void askDirector(scope).catch(fail).finally(hideLoading);
+  };
+
   const acceptRunStart = async (run: ProductionBatch) => {
     setBatches(current => [run, ...current.filter(item => item.runId !== run.runId)]);
     setPendingRun(null);
@@ -1855,7 +1860,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (!await edit([{ type: "set_director_workflow", patch: { pendingDecisions: updated } }])) return false;
     }
     const workspace: DirectorWorkspace = decision.module === "story" ? "story" : decision.module === "assets" ? "assets" : ["shots", "performance", "effects"].includes(decision.module) ? "shots" : "production";
-    void askDirector({ workspace, targetId: decision.targetId, workId: decision.workId, instruction: `制作对象的待决定事项 ${decision.id} 已由用户明确答复：${answer.trim()}。请只在 ${decision.sourceHash} 所属的当前源稿版本上处理此决定，保留其他冻结事实与未编辑字段。` });
+    askDirectorWithFeedback({ workspace, targetId: decision.targetId, workId: decision.workId, instruction: `制作对象的待决定事项 ${decision.id} 已由用户明确答复：${answer.trim()}。请只在 ${decision.sourceHash} 所属的当前源稿版本上处理此决定，保留其他冻结事实与未编辑字段。` });
     return true;
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);
@@ -2380,7 +2385,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onSaveV2Shot={saveV2Shot} onRepartitionClips={repartitionV2} onEditShot={editV2Shot}
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onH3Boundary={setH3Boundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
-              onReplace={value => void replaceDirector(value)} onAskDirector={scope => void askDirector(scope)} onNavigate={navigateWorkspace}
+              onReplace={value => void replaceDirector(value)} onAskDirector={askDirectorWithFeedback} onNavigate={navigateWorkspace}
               onCompile={(sceneId, targetId, targetIds) => void runProductionCompile(sceneId, targetId, targetIds)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} autoTranslateCompilation={autoTranslateCompilation} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }

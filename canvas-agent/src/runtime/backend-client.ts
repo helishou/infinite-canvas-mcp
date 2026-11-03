@@ -38,6 +38,8 @@ export class BackendClientError extends Error {
   readonly snapshotAvailable?: boolean;
   readonly diagnostics?: ProductionDiagnostic[];
   readonly nextActions?: ProductionNextAction[];
+  /** 失败回执的结构化上下文（如未启用字段、可用场次目录）；原样透传给调用方。 */
+  readonly details?: Record<string, unknown>;
 
   constructor(
     message: string,
@@ -56,6 +58,7 @@ export class BackendClientError extends Error {
       snapshotAvailable?: boolean;
       diagnostics?: ProductionDiagnostic[];
       nextActions?: ProductionNextAction[];
+      details?: Record<string, unknown>;
       cause?: unknown;
     },
   ) {
@@ -75,6 +78,7 @@ export class BackendClientError extends Error {
     this.snapshotAvailable = details.snapshotAvailable;
     this.diagnostics = details.diagnostics;
     this.nextActions = details.nextActions;
+    this.details = details.details;
   }
 }
 
@@ -109,6 +113,8 @@ function errorPayload(value: unknown) {
     snapshotAvailable: typeof body.snapshotAvailable === "boolean" ? body.snapshotAvailable : undefined,
     diagnostics: Array.isArray(body.diagnostics) ? body.diagnostics as ProductionDiagnostic[] : undefined,
     nextActions: Array.isArray(body.nextActions) ? body.nextActions as ProductionNextAction[] : undefined,
+    // 未识别的结构化上下文字段（details）只在确实是对象时透传，避免把字符串错误体当成上下文。
+    details: body.details && typeof body.details === "object" && !Array.isArray(body.details) ? body.details as Record<string, unknown> : undefined,
   };
 }
 
@@ -185,6 +191,7 @@ export class BackendClient {
           snapshotAvailable: details.snapshotAvailable,
           diagnostics: details.diagnostics,
           nextActions: details.nextActions,
+          details: details.details,
         },
       );
     }

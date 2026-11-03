@@ -39,9 +39,10 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     const catalog = await client.listTools(); const names = new Set(catalog.tools.map(tool => tool.name));
     for (const name of productionToolNames) assert.ok(names.has(name));
     const retiredNames = ["production_list_legacy", "production_preview_continuity_upgrade", "drama_get_production", "canvas_get_production", "canvas_create_text_node", "canvas_create_text_nodes", "canvas_split_image", "canvas_crop_image"];
-    assert.ok(names.has("canvas_import_local_images"), "the local-image importer must be exposed as a native MCP tool");
+    assert.ok(names.has("canvas_import_local_images"), "the smart local-image importer must be exposed as a native MCP tool");
     const importTool = catalog.tools.find(tool => tool.name === "canvas_import_local_images");
     assert.ok(importTool?.inputSchema && "items" in (importTool.inputSchema.properties || {}), "import tool must advertise image items");
+    assert.match(importTool?.description || "", /智能图片节点/u);
     for (const name of retiredNames) {
         assert.equal(names.has(name), false);
     }
@@ -49,6 +50,9 @@ test("MCP exposes only current tools and retired names are unavailable", async t
         ["canvas_create_node", { projectId: "p", nodeType: "image" }],
         ["canvas_apply_ops", { projectId: "p", operationId: "plain-node-op", expectedRevision: 0, ops: [{ type: "add_node", nodeType: "text", metadata: { content: "plain" } }] }],
         ["canvas_apply_commands", { projectId: "p", operationId: "plain-node-command", baseRevision: 0, operations: [{ type: "add_node", nodeType: "audio", metadata: {} }] }],
+        ["canvas_update_node", { projectId: "p", id: "n1", patch: { type: "image" } }],
+        ["canvas_apply_ops", { projectId: "p", operationId: "plain-type-op", expectedRevision: 0, ops: [{ type: "update_node", id: "n1", patch: { type: "image" } }] }],
+        ["canvas_apply_commands", { projectId: "p", operationId: "plain-type-command", baseRevision: 0, operations: [{ type: "update_node", id: "n1", patch: { type: "image" } }] }],
     ] as const) {
         const result = await client.callTool({ name, arguments: arguments_ });
         assert.equal(result.isError, true, `${name} must reject ordinary node creation`);
@@ -65,8 +69,11 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     assert.equal(importReceipt.count, 1);
     assert.equal(uploadedBytes.equals(imageBytes), true, "the original attachment bytes must be uploaded unchanged");
     assert.equal(canvas.nodes.length, 1);
-    assert.equal(canvas.nodes[0].type, "image");
-    assert.equal(canvas.nodes[0].metadata.storageKey, "image:fixture-turnaround");
+    assert.equal(canvas.nodes[0].type, "config");
+    assert.equal(canvas.nodes[0].metadata.smart, true);
+    assert.equal(canvas.nodes[0].metadata.generationMode, "image");
+    assert.equal(canvas.nodes[0].metadata.images[0].storageKey, "image:fixture-turnaround");
+    assert.equal(canvas.nodes[0].metadata.primaryImageId, canvas.nodes[0].metadata.images[0].id);
     assert.equal(canvas.nodes[0].metadata.role, "character_turnaround");
     assert.equal(writes, 0);
     assert.equal(client.getServerVersion()?.version, "0.1.0+mcp3");

@@ -45,7 +45,10 @@ test("HTTP MCP defaults stay compact while historic source and model catalog rem
     const tools = await client.listTools();
     assert.ok((tools.tools.find(tool => tool.name === "production_get")!.inputSchema.properties as any).ifRevision);
     assert.equal((tools.tools.find(tool => tool.name === "production_get")!.inputSchema.properties as any).view, undefined);
-    assert.ok((tools.tools.find(tool => tool.name === "production_get_source")!.inputSchema.required as string[]).includes("sourceSection"));
+    // sourceSection 与 sourceSections 二选一：多段读取是同一入口的可发现能力，不再强制单段。
+    const sourceTool = tools.tools.find(tool => tool.name === "production_get_source")!;
+    assert.ok((sourceTool.inputSchema.properties as any).sourceSections);
+    assert.ok(!((sourceTool.inputSchema.required as string[]) || []).includes("sourceSection"));
     assert.ok((tools.tools.find(tool => tool.name === "production_get_artifact")!.inputSchema.required as string[]).includes("targetId"));
     const oldWholeRead = await client.callTool({ name: "production_get", arguments: { kind: "episode", id: "ep", view: "full" } });
     assert.equal(oldWholeRead.isError, true);

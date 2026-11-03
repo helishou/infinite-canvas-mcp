@@ -105,7 +105,24 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const targetIds = [...new Set(scope.output === "selected"
         ? [...wanted].filter(id => compilerTargetIds.has(id))
         : [...assetTargetIds].filter(id => assets.has(id)).concat(segments.map(stableId)))].sort();
-    if (!targetIds.length) throw new Error("COMPILATION_SCOPE_EMPTY: 编译范围没有可生成的资产提示词卡或视频段落");
+    if (!targetIds.length) {
+        // "Scope is empty" is useless on its own: the caller cannot tell whether it
+        // passed a Scene with no timed Shots, a Shot set with no Clip, or media-only
+        // targets that are already covered. Report the specific gap.
+        const outputCards = [...assetTargetIds].filter(id => assets.has(id));
+        const reasons: string[] = [];
+        if (scope.sceneId && !shots.size) reasons.push(`场次 ${scope.sceneId} 没有已定时的正式 Shot`);
+        if (!scope.sceneId && !shots.size && !wanted.size) reasons.push("未指定场次或目标，且当前源稿没有已定时的 Shot");
+        if (shots.size && !segments.length) reasons.push("范围内的 Shot 没有归属 Segment（Clip），先建立 Clip 再编译");
+        if (!outputCards.length && !segments.length) reasons.push("范围内没有待生成的资产提示词卡或视频段落（共享媒体覆盖的目标不进入编译输出）");
+        if (!reasons.length) reasons.push("范围内的目标都已被共享媒体覆盖，或不在可编译目标内");
+        const details = {
+            scope: { sceneId: scope.sceneId ?? null, targetIds: scope.targetIds ?? [], output: scope.output ?? null },
+            counts: { scopedShots: shots.size, scopedSegments: segments.length, outputAssetCards: outputCards.length, sourceShots: allShots.length, sourceSegments: allSegments.length, sourceAssetCards: cards.length },
+            reasons,
+        };
+        throw Object.assign(new Error(`COMPILATION_SCOPE_EMPTY: 编译范围没有可生成的资产提示词卡或视频段落。${reasons.join("；")}。`), { code: "COMPILATION_SCOPE_EMPTY", details });
+    }
     const projected = structuredClone(director);
     projected.source.shots = allShots.filter(item => shots.has(stableId(item)));
     projected.source.segments = segments;

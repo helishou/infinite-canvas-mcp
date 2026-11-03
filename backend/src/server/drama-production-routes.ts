@@ -71,8 +71,14 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             return res.status(400).json({ ok: false, error: error.message, diagnostics });
         }
         if (error instanceof ProductionConflictError) return res.status(409).json({ ok: false, code: "REVISION_CONFLICT", error: error.message, current: error.current, diagnostics: [{ code: "REVISION_CONFLICT", path: "request.expectedRevision", message: error.message, severity: "error" }], nextActions: [{ action: "refresh", message: "回读当前制作对象并核对 revision 后继续；不要重复原写入请求。" }] });
+        // 领域错误可以携带 code/details/nextActions（启用开关、可用场次目录等）。
+        // 只带上错误自身声明的字段，普通 Error 的返回体保持原形状。
+        const structured = error as { code?: unknown; details?: unknown; nextActions?: unknown };
+        const code = typeof structured?.code === "string" ? structured.code : undefined;
+        const details = structured?.details && typeof structured.details === "object" && !Array.isArray(structured.details) ? structured.details : undefined;
+        const nextActions = Array.isArray(structured?.nextActions) ? structured.nextActions : undefined;
         return res.status(error instanceof ZodError ? 400 : /不存在|找不到/.test(String(error)) ? 404 : 400)
-            .json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+            .json({ ok: false, error: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}), ...(details ? { details } : {}), ...(nextActions ? { nextActions } : {}) });
     };
     router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
         try {
@@ -232,7 +238,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     });
     router.get<Record<string, string>>(`${base}`, (req, res) => {
         try {
-            const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds });
+            const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds,
+                sourceSections: typeof req.query.sourceSections === "string" && req.query.sourceSections ? req.query.sourceSections.split(",") : req.query.sourceSections });
             validateProductionSourceFields(query);
             let production: any;
             // Canonical reads use the saved source directly; legacy runtime projections are opt-in for execution paths.
@@ -259,7 +266,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
                 const activeClipRefreshes = service.clipRefreshStore(req.params.episodeId).currentBySegment()
                     .filter(job => job.status !== "succeeded").map(clipRefreshReceipt);
                 if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
-                if (!(selected as any).unchanged && query.targetIds?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
+                if (!(selected as any).unchanged && query.targetIds?.length && !query.sourceSections?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
             }
             res.json({ ok: true, production: selected });
         } catch (error) { handle(res, error); }

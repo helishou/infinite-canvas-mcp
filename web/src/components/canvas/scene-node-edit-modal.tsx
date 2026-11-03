@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { SceneColorPaletteEditor } from "@/components/canvas/scene-color-palette-editor";
 import { extractSceneColorPalette, normalizeSceneColorPalette } from "@/lib/canvas/scene-color-palette";
+import { backendMediaUrl } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import type { CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import { CanvasNodeType } from "@/types/canvas";
@@ -105,6 +106,7 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
         }
     };
 
+    const imageUrlOf = (value: SceneImage | null) => value?.storageKey ? backendMediaUrl(value.storageKey) : value?.url || "";
     const imageSlot = (slot: "image" | "colorCard", value: SceneImage | null, inputRef: RefObject<HTMLInputElement | null>, required = false) => (
         <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -125,7 +127,7 @@ export function SceneNodeEditModal({ open, selectingCanvasImage, canvasImagePick
             </div>
             {value ? (
                 <div className="relative overflow-hidden rounded-lg border border-border">
-                    <AntImage src={value.url} alt={value.name} preview={{ src: value.url }} className="!h-36 !w-full !object-cover" />
+                    <AntImage src={imageUrlOf(value)} alt={value.name} preview={{ src: imageUrlOf(value) }} className="!h-36 !w-full !object-cover" />
                     <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[11px] text-white">{value.name}</span>
                 </div>
             ) : (

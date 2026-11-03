@@ -298,6 +298,35 @@ function isImageConversionSource(node: CanvasNodeData) {
     return node.type === CanvasNodeType.Image || (node.type === CanvasNodeType.Config && node.metadata?.smart === true && (node.metadata.generationMode || "image") === "image");
 }
 
+function convertedAssetNodePosition(source: CanvasNodeData, nodes: CanvasNodeData[], width: number, height: number): Position {
+    const gap = 48;
+    const y = source.position.y;
+    let x = source.position.x + source.width + gap;
+    for (let attempt = 0; attempt <= nodes.length; attempt++) {
+        const collisions = nodes.filter(node =>
+            x < node.position.x + node.width
+            && x + width > node.position.x
+            && y < node.position.y + node.height
+            && y + height > node.position.y,
+        );
+        if (!collisions.length) return { x, y };
+        x = Math.max(...collisions.map(node => node.position.x + node.width)) + gap;
+    }
+    return { x, y };
+}
+
+function convertedAssetNodeMetadata(metadata: CanvasNodeData["metadata"]): CanvasNodeData["metadata"] {
+    const converted = { ...(metadata || {}) };
+    for (const key of [
+        "smart", "generationMode", "runtimeTaskId", "generationTaskId", "runProgress", "errorDetails",
+        "canvasReferenceNodeIds", "productionImageInput", "productionEntity", "productionLayoutUnitId",
+        "productionSceneId", "productionScriptId", "productionScriptSceneId", "sharedAssetReference",
+        "sharedLibraryAssetId", "sharedAssetOrigin", "referenceIds", "images", "primaryImageId",
+        "smartImageReferenceSelection", "activeImageHistoryId", "activeImageHistoryExplicit", "generationResultsByMode",
+    ] as const) delete converted[key];
+    return converted;
+}
+
 function loopImageInputCount(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], graph: CanvasGraphIndex) {
     const target = graph.nodeById.get(nodeId);
     const loop = target?.type === CanvasNodeType.Loop ? target : graph.incomingByNodeId.get(nodeId)?.find((source) => source.type === CanvasNodeType.Loop);
@@ -3943,57 +3972,59 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         [saveCanvasAsset, getCurrentCanvasDramaId, message, t],
     );
 
-    // 把当前画布上的图片节点就地转成角色节点：保留位置 / 大小 / 标题，把原图作为
-    // character.images 的第一张 outfit（主图），原 metadata 里的 prompt 当作 description。
+    // 从图片节点创建角色节点，把原图作为 character.images 的第一张 outfit（主图），
+    // 原 metadata 里的 prompt 作为 description；图片源节点继续保留。
     const convertImageNodeToCharacter = useCallback(
         (node: CanvasNodeData) => {
             if (!isImageConversionSource(node) || !canvasNodePrimaryImage(node)) {
                 message.warning(t("canvas.character.convertNoImage"));
                 return;
             }
+            const convertedId = nanoid();
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
-            setNodes((prev) =>
-                prev.map((item) => {
-                    if (item.id !== node.id) return item;
-                    const itemMetadata = item.metadata;
-                    const sourceImage = canvasNodePrimaryImage(item);
-                    if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return item;
-                    const convertedMetadata = { ...itemMetadata };
-                    delete convertedMetadata.smart;
-                    delete convertedMetadata.generationMode;
-                    return {
-                        ...item,
-                        type: CanvasNodeType.Character,
-                        title: item.title || t("canvas.nodeTypes.character"),
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: {
-                            ...convertedMetadata,
-                            status: NODE_STATUS_SUCCESS,
-                            characterAssetId: undefined,
-                            characterName: item.title,
-                            characterDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
-                            characterImages: [
-                                {
-                                    url: sourceImage.content || (sourceImage.storageKey ? backendMediaUrl(sourceImage.storageKey) : ""),
-                                    storageKey: sourceImage.storageKey,
-                                    name: item.title || "image",
-                                    outfit: "",
-                                    outfitDescription: "",
-                                    width: sourceImage.naturalWidth || item.width,
-                                    height: sourceImage.naturalHeight || item.height,
-                                    bytes: sourceImage.bytes || 0,
-                                    mimeType: sourceImage.mimeType || "image/png",
-                                },
-                            ],
-                            characterPrimaryIndex: 0,
-                        },
-                    };
-                }),
-            );
+            setNodes((prev) => {
+                const item = prev.find(candidate => candidate.id === node.id);
+                if (!item) return prev;
+                const itemMetadata = item.metadata;
+                const sourceImage = canvasNodePrimaryImage(item);
+                if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return prev;
+                const convertedMetadata = convertedAssetNodeMetadata(itemMetadata);
+                const title = item.title || t("canvas.nodeTypes.character");
+                return [...prev, {
+                    ...item,
+                    id: convertedId,
+                    type: CanvasNodeType.Character,
+                    title,
+                    position: convertedAssetNodePosition(item, prev, spec.width, spec.height),
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: {
+                        ...convertedMetadata,
+                        status: NODE_STATUS_SUCCESS,
+                        characterAssetId: undefined,
+                        characterName: title,
+                        characterDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
+                        characterImages: [
+                            {
+                                url: sourceImage.content || (sourceImage.storageKey ? backendMediaUrl(sourceImage.storageKey) : ""),
+                                storageKey: sourceImage.storageKey,
+                                name: title || "image",
+                                outfit: "",
+                                outfitDescription: "",
+                                width: sourceImage.naturalWidth || item.width,
+                                height: sourceImage.naturalHeight || item.height,
+                                bytes: sourceImage.bytes || 0,
+                                mimeType: sourceImage.mimeType || "image/png",
+                            },
+                        ],
+                        characterPrimaryIndex: 0,
+                    },
+                }];
+            });
+            setSelectedNodeIds(new Set([convertedId]));
             message.success(t("canvas.character.converted"));
         },
-        [message, t],
+        [message, setNodes, setSelectedNodeIds, t],
     );
 
     const convertImageNodeToScene = useCallback(
@@ -4002,55 +4033,69 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 message.warning(t("canvas.scene.convertNoImage"));
                 return;
             }
+            const convertedId = nanoid();
             const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Scene];
-            setNodes((prev) =>
-                prev.map((item) => {
-                    if (item.id !== node.id) return item;
-                    const itemMetadata = item.metadata;
-                    const sourceImage = canvasNodePrimaryImage(item);
-                    if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return item;
-                    const convertedMetadata = { ...itemMetadata };
-                    delete convertedMetadata.smart;
-                    delete convertedMetadata.generationMode;
-                    return {
-                        ...item,
-                        type: CanvasNodeType.Scene,
-                        title: item.title || t("canvas.nodeTypes.scene"),
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: {
-                            ...convertedMetadata,
-                            status: NODE_STATUS_SUCCESS,
-                            sceneAssetId: undefined,
-                            sceneName: item.title,
-                            sceneDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
-                            sceneImage: {
-                                url: sourceImage.content || (sourceImage.storageKey ? backendMediaUrl(sourceImage.storageKey) : ""),
-                                storageKey: sourceImage.storageKey,
-                                name: item.title || "image",
-                                width: sourceImage.naturalWidth || item.width,
-                                height: sourceImage.naturalHeight || item.height,
-                                bytes: sourceImage.bytes || 0,
-                                mimeType: sourceImage.mimeType || "image/png",
-                            },
-                            sceneColorCard: undefined,
-                            sceneColorPalette: undefined,
-                            sceneColorCardPrompt: undefined,
+            setNodes((prev) => {
+                const item = prev.find(candidate => candidate.id === node.id);
+                if (!item) return prev;
+                const itemMetadata = item.metadata;
+                const sourceImage = canvasNodePrimaryImage(item);
+                if (!isImageConversionSource(item) || !itemMetadata || !sourceImage) return prev;
+                const convertedMetadata = convertedAssetNodeMetadata(itemMetadata);
+                const title = item.title || t("canvas.nodeTypes.scene");
+                return [...prev, {
+                    ...item,
+                    id: convertedId,
+                    type: CanvasNodeType.Scene,
+                    title,
+                    position: convertedAssetNodePosition(item, prev, spec.width, spec.height),
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: {
+                        ...convertedMetadata,
+                        status: NODE_STATUS_SUCCESS,
+                        sceneAssetId: undefined,
+                        sceneName: title,
+                        sceneDescription: typeof item.metadata?.prompt === "string" ? item.metadata.prompt : "",
+                        sceneImage: {
+                            url: sourceImage.content || (sourceImage.storageKey ? backendMediaUrl(sourceImage.storageKey) : ""),
+                            storageKey: sourceImage.storageKey,
+                            name: title || "image",
+                            width: sourceImage.naturalWidth || item.width,
+                            height: sourceImage.naturalHeight || item.height,
+                            bytes: sourceImage.bytes || 0,
+                            mimeType: sourceImage.mimeType || "image/png",
                         },
-                    };
-                }),
-            );
+                        sceneColorCard: undefined,
+                        sceneColorPalette: undefined,
+                        sceneColorCardPrompt: undefined,
+                    },
+                }];
+            });
+            setSelectedNodeIds(new Set([convertedId]));
             message.success(t("canvas.scene.converted"));
         },
-        [message, t],
+        [message, setNodes, setSelectedNodeIds, t],
     );
 
     const convertImageNodeToProp = useCallback((node: CanvasNodeData) => {
         const converted = convertImageToPropNode(node);
         if (!converted) { message.warning(t("canvas.prop.convertNoImage")); return; }
-        setNodes(prev => prev.map(item => item.id === node.id ? convertImageToPropNode(item) || item : item));
+        const convertedId = nanoid();
+        setNodes(prev => {
+            const source = prev.find(item => item.id === node.id);
+            const currentConversion = source && convertImageToPropNode(source);
+            if (!source || !currentConversion) return prev;
+            return [...prev, {
+                ...currentConversion,
+                id: convertedId,
+                position: convertedAssetNodePosition(source, prev, currentConversion.width, currentConversion.height),
+                metadata: convertedAssetNodeMetadata(currentConversion.metadata),
+            }];
+        });
+        setSelectedNodeIds(new Set([convertedId]));
         message.success(t("canvas.prop.converted"));
-    }, [message, setNodes, t]);
+    }, [message, setNodes, setSelectedNodeIds, t]);
 
     // 把拖入的资源（图片/音频）落到角色节点上：图片 -> outfit，音频 -> 声线。
     const dropOnCharacterNode = useCallback((node: CanvasNodeData, ref: { url: string; type: "image" | "audio"; name?: string; storageKey?: string; mimeType?: string }) => {
@@ -4462,8 +4507,20 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setPropEditNodeId(null);
     }, []);
 
-    const savePropEdit = useCallback((patch: { title: string; propName: string; propDescription: string; propImage?: NonNullable<CanvasNodeMetadata["propImage"]> }) => {
+    const savePropEdit = useCallback(async (patch: { title: string; propName: string; propDescription: string; propImage?: NonNullable<CanvasNodeMetadata["propImage"]> }) => {
         if (!propEditNodeId) return;
+        const currentNode = useCanvasStore.getState().projects.find(project => project.id === projectId)?.nodes.find(node => node.id === propEditNodeId);
+        const entity = currentNode?.metadata?.productionEntity;
+        const currentImage = currentNode?.metadata?.propImage;
+        const mediaKey = (image: typeof currentImage) => String(image?.storageKey || image?.url || "");
+        const formalEpisodeEntity = entity?.ownerKind === "episode" && Boolean(entity.ownerId) && entity.kind === "prop" && Boolean(entity.entityId);
+        if (formalEpisodeEntity && mediaKey(currentImage) !== mediaKey(patch.propImage)) {
+            if (!entity?.ownerId || !entity.entityId || !projectId) throw new Error("正式道具图片缺少制作归属，无法同步引用绑定");
+            const current = (await fetchEpisodeProduction(entity.ownerId)).production;
+            const operation = bindEntityPictureToNode(current.draft.director?.source as Record<string, unknown> | undefined,
+                entity.ownerKind, entity.ownerId, "prop", entity.entityId, projectId, propEditNodeId);
+            if (operation) await editEpisodeProduction(entity.ownerId, current.revision, [operation], nanoid());
+        }
         setNodes(prev => prev.map(item => {
             if (item.id !== propEditNodeId || item.type !== CanvasNodeType.Prop) return item;
             const metadata = { ...item.metadata, propName: patch.propName, propDescription: patch.propDescription };
@@ -4471,7 +4528,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             else delete metadata.propImage;
             return { ...item, title: patch.title, metadata };
         }));
-    }, [propEditNodeId, setNodes]);
+        if (formalEpisodeEntity && projectId) await flushCanvasProjectBeforeGeneration(projectId);
+    }, [flushCanvasProjectBeforeGeneration, projectId, propEditNodeId, setNodes]);
 
     const startSceneImageSelection = useCallback((slot: "image" | "colorCard") => {
         if (!sceneEditNodeId) return;

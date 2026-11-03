@@ -5,8 +5,9 @@ const field = z.string().trim().min(1).refine(value => !["__proto__", "construct
 export const productionSourceFieldsSchema = z.array(field).min(1).transform(fields => [...new Set(fields)].sort()).optional()
     .describe("只读指定顶层字段并保留稳定 ID；去重排序，不附带其他正文或画布运行上下文。仅 source 视图配合 sourceSection 使用，部分结果不能整稿覆盖");
 
-export function validateProductionSourceFields(input: { fields?: string[]; view?: string; sourceSection?: string }) {
-    if (input.fields && (input.view !== "source" || !input.sourceSection)) throw Object.assign(new Error("fields 必须与 view=source 和明确 sourceSection 一起使用"), { code: "INVALID_INPUT" });
+export function validateProductionSourceFields(input: { fields?: string[]; view?: string; sourceSection?: string; sourceSections?: string[] }) {
+    const scoped = Boolean(input.sourceSection) || Boolean(input.sourceSections?.length);
+    if (input.fields && (input.view !== "source" || !scoped)) throw Object.assign(new Error("fields 必须与 view=source 和明确 sourceSection/sourceSections 一起使用"), { code: "INVALID_INPUT" });
 }
 
 export function projectProductionSourceFields(value: unknown, fields: string[], offset = 0) {

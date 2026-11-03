@@ -81,6 +81,15 @@ export function captureCanvasInputs(project: CanvasProject, data: EpisodeProduct
         if (asset && asset.nodeId) nodeByTarget.set(`frame:${shotId}`, asset.nodeId);
     }
     for (const group of data.clipGroups) if (group.nodeId) nodeByTarget.set(`segment:${group.id}`, group.nodeId);
+    // Quick-storyboard keyframes are archived production inputs without an image-node owner
+    // (Subject Prompt v2 resolves them by storageKey); they carry no canvas generation target.
+    targetIds = targetIds.filter(id => {
+        if (!id.startsWith('frame:') || nodeByTarget.has(id)) return true;
+        const keyframeAssetId = data.director?.shotInputs[id.slice('frame:'.length)]?.keyframeAssetId;
+        const asset = keyframeAssetId ? data.director?.assets[keyframeAssetId] : undefined;
+        if (!asset?.canvasReferenceBindingId || !asset.storageKey) return true;
+        return !media(asset.storageKey)?.filePath;
+    });
     const canonicalImages = new Map<string, string>(), aliases: Array<{ targetId: string; canonicalId: string }> = [];
     targetIds = targetIds.filter(id => {
         const nodeId = nodeByTarget.get(id);

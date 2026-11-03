@@ -57,7 +57,7 @@ import { H3_DEFAULTS_KEY, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins
 import { generationSettingsSnapshot } from "../canvas/generation-settings.js";
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
-import { assertAchengSource, auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
+import { auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, changedModelTextIdDiagnostics } from "@basketikun/canvas-agent/drama/production-validation";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
@@ -2249,14 +2249,18 @@ export class EpisodeProductionService {
         return shotIds.size ? { shotIds: [...shotIds] } : undefined;
     }
 
-    private async validateSource(director: NonNullable<EpisodeProductionData["director"]>, stage: "edit" | "publish" | "generate", scope?: { shotIds: string[] }): Promise<void> {
+    private async sourceDiagnostics(director: NonNullable<EpisodeProductionData["director"]>, stage: "edit" | "publish" | "generate", scope?: { shotIds: string[] }) {
         // The existing injected engine checker is also used by temporary-data tests.
         // Production instances always verify the immutable runtime.
         const checkedEngine = this.checkEngine(director.engine);
-        if (this.checkEngine === assertDirectorEngine) {
-            const candidate = stage === "edit" && isSubjectPromptAssembly(director.source) ? { ...director, artifacts: [] } : director;
-            await assertAchengSource(candidate, stage, checkedEngine as AchengRuntime, scope);
-        }
+        if (this.checkEngine !== assertDirectorEngine) return [] as ProductionDiagnostic[];
+        const candidate = stage === "edit" && isSubjectPromptAssembly(director.source) ? { ...director, artifacts: [] } : director;
+        return validateAchengSource(candidate, stage, checkedEngine as AchengRuntime, scope);
+    }
+
+    private async validateSource(director: NonNullable<EpisodeProductionData["director"]>, stage: "edit" | "publish" | "generate", scope?: { shotIds: string[] }): Promise<void> {
+        const blocking = (await this.sourceDiagnostics(director, stage, scope)).filter(item => diagnosticBlocksAction(item, stage));
+        if (blocking.length) throw new ProductionValidationError(blocking);
     }
 
     /** readiness 条件请求（If-None-Match）的输入戳：PRAGMA data_version 在每次事务提交后必递增，
@@ -2282,14 +2286,17 @@ export class EpisodeProductionService {
         if (!data.director) return baseline;
         const stage = directorStageReadiness(data.director);
         const keyframeIds = new Set(Object.values(data.director.shotInputs).map(input => input.keyframeAssetId).filter(Boolean));
-        const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
+        // Quick-storyboard keyframes are archived clip inputs without an image-node owner;
+        // once the formal gate validates the archived media they need no canvas generation target.
+        const archivedKeyframeTargetIds = new Set(baseline.targets.filter(target => target.kind === "keyframe" && target.status === "complete").map(target => target.id));
+        const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId && !archivedKeyframeTargetIds.has(`frame:${id}`)).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
         try {
             const checked = this.canvasExecution(episodeId, ids);
             const project = checked.canvasId ? this.db.getCanvasProject(checked.canvasId) : null;
             const nodes = (project?.nodes || []) as Array<Record<string, any>>;
             const ready = new Set(checked.targets.map(target => target.id));
             const dependencyBlocked = new Map(checked.targets.filter(target => target.dependencies.length && data.director!.workflow.mediaProductionMode !== "automatic").map(target => [target.id, target.dependencies.map(dependency => dependency.targetId)]));
-            const targets = ids.map(id => {
+            const targets = [...baseline.targets.filter(target => archivedKeyframeTargetIds.has(target.id)), ...ids.map(id => {
                 const previous = baseline.targets.find(target => target.id === id);
                 const mediaBlockers = productionMediaDependencyBlockers(previous);
                 // Canvas execution snapshots do not know the authored H3 mode's media
@@ -2309,7 +2316,7 @@ export class EpisodeProductionService {
                 const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0 && referenceModeBlockers.length === 0 && compilationBlockers.length === 0;
                 return { ...(previous || { id, targetId: id.slice(id.indexOf(":") + 1), kind: id.startsWith("segment:") ? "segment" as const : id.startsWith("frame:") ? "keyframe" as const : "asset" as const, title: id }),
                     status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers, notice: "使用当前已保存内容" };
-            });
+            })];
             const next = targets.find(target => target.status === "ready") || targets.find(target => target.status === "blocked");
             return { ...baseline, targets, canvasId: checked.canvasId, canvasRevision: checked.canvasRevision,
                 unresolved: [...new Set(targets.flatMap(target => target.blockers))],
@@ -2456,10 +2463,23 @@ export class EpisodeProductionService {
             return [];
         });
         const usableAssetMedia = (asset: NonNullable<DirectorProduction["assets"][string]>) => {
-            if (!asset.nodeId || !asset.storageKey || !asset.sha256 || !canvasId) return false;
+            if (!asset.storageKey || !asset.sha256 || !canvasId) return false;
             const media = this.db.getMediaFile(asset.storageKey);
+            if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) return false;
+            if (!asset.nodeId) {
+                // Quick Storyboard archived inputs are owned by the H3 clip's referenceBindings,
+                // not by an image node (Subject Prompt v2 resolves them directly by storageKey).
+                // Accept them when the binding still anchors exactly this archived key.
+                const bindingId = String(asset.canvasReferenceBindingId || "");
+                return Boolean(bindingId) && (nodes || []).some(node => {
+                    const metadata = record(node.metadata);
+                    return (Array.isArray(metadata.segments) ? metadata.segments : []).some((segment: Record<string, any>) =>
+                        (Array.isArray(segment?.referenceBindings) ? segment.referenceBindings : [])
+                            .some((ref: Record<string, any>) => String(ref?.id || ref?.bindingId || "") === bindingId && String(ref?.storageKey || "") === asset.storageKey));
+                });
+            }
             const node = nodes?.find(item => item.id === asset.nodeId);
-            if (!media || !node || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) return false;
+            if (!node) return false;
             const metadata = record(node.metadata);
             return [...resolveCanvasCharacterImageReferences(node).map(item => item.storageKey), node.storageKey, metadata.storageKey, metadata.resultStorageKey].includes(asset.storageKey);
         };
@@ -2491,7 +2511,9 @@ export class EpisodeProductionService {
             const assetId = input.keyframeAssetId || "";
             const frame = data.keyframes[shotId];
             const frameAsset = director.assets[assetId];
-            const frameUsable = Boolean(frame?.storageKey && frameAsset?.storageKey === frame.storageKey && usableAssetMedia(frameAsset));
+            // Archived Quick-storyboard keyframes live on the asset itself (storageKey + binding);
+            // a legacy keyframes row is only required when one exists to cross-check against.
+            const frameUsable = Boolean(frameAsset && usableAssetMedia(frameAsset) && (!frame?.storageKey || frameAsset.storageKey === frame.storageKey));
             const artifact = assetId ? artifactFor("image", assetId) : undefined;
             const deps = [...(input.assetIds || []), ...idList(shot.required_assets)].filter(Boolean);
             const blockers = [...(canvasRole === "shared-assets" ? ["剧目共享资产画布只生产可复用资产；关键帧应在分集画布生成"] : []), ...(assetId ? assetScopeBlockers(assetId) : ["关键帧未绑定 Acheng 图像资产"]), ...dependencyBlockers(deps), ...compiled(artifact, `镜头 ${shotId} 的关键帧`)];
@@ -3312,6 +3334,27 @@ export class EpisodeProductionService {
         } catch (error) { try { this.db.db.exec("ROLLBACK"); } catch { /* Preserve the simulation failure. */ } throw error; }
     }
 
+    /**
+     * 写入失败必须能照着改：给出第几个操作、哪个字段、多了哪些键。
+     * 过去直接把 zod 的长路径串拼进 message，再被出口截成 `director.source.shots.14.sub…`，
+     * agent 只能在同一 revision 上原样重提。这里只产出可执行短句 + 结构化字段。
+     */
+    private editOperationFailure(operation: unknown, index: number, error: unknown) {
+        const type = String((operation as { type?: unknown } | undefined)?.type || "unknown");
+        const raw = (error as { issues?: unknown } | undefined)?.issues;
+        const issues = Array.isArray(raw) ? raw as Array<{ code?: string; keys?: string[]; path?: Array<string | number>; message?: string }> : [];
+        const unexpectedKeys = issues.flatMap(issue => issue.code === "unrecognized_keys" && Array.isArray(issue.keys) ? issue.keys : []);
+        const paths = issues.map(issue => (issue.path || []).map(String).filter(Boolean).join(".")).filter(Boolean);
+        const fieldPath = paths[0] || "";
+        const first = issues.find(issue => issue.code !== "unrecognized_keys");
+        const message = unexpectedKeys.length
+            ? `第 ${index} 个操作（${type}）${fieldPath ? `的 ${fieldPath} ` : ""}含未允许字段：${unexpectedKeys.join("、")}；删掉这几个字段后按原 operationId 重提，不用重读合同。`
+            : issues.length
+                ? `第 ${index} 个操作（${type}）${fieldPath ? `的 ${fieldPath} ` : ""}${first?.message || issues[0].message || "字段不合法"}；只改这一处后按原 operationId 重提。`
+                : `第 ${index} 个操作（${type}）失败：${error instanceof Error ? error.message : String(error)}`;
+        return { message: message.slice(0, 400), opIndex: index, opType: type, ...(fieldPath ? { fieldPath } : {}), ...(unexpectedKeys.length ? { unexpectedKeys } : {}) };
+    }
+
     private editedCandidate(episodeId: string, record: ProductionRecord, input: ProductionEdit, canvasCommits?: CanvasCommit[], sceneRuntime = false, onStage?: (name: string, durationMs: number) => void, overwriteCompiledPromptTargets?: ReadonlySet<string>) {
             const measure = <T>(name: string, action: () => T): T => {
                 const startedAt = performance.now();
@@ -3330,7 +3373,7 @@ export class EpisodeProductionService {
                 catch (error) {
                     if (error instanceof ProductionValidationError) throw error;
                     console.error("[edit-op-error] op=", operation?.type, "index=", lastProjectionOperation, "msg=", error instanceof Error ? error.message : String(error), "\nSTACK=", error instanceof Error ? (error.stack || "") : "");
-                    throw new ProductionValidationError([{ code: "INVALID_OPERATION", path: `request.ops.${lastProjectionOperation}`, targetId: operation && "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }]);
+                    throw new ProductionValidationError([{ code: "INVALID_OPERATION", ...this.editOperationFailure(operation, lastProjectionOperation, error), path: `request.ops.${lastProjectionOperation}`, targetId: operation && "id" in operation ? String(operation.id) : undefined, severity: "error" }]);
                 }
                 directorProjectionDirty = false;
             };
@@ -3377,7 +3420,7 @@ export class EpisodeProductionService {
                     if (error instanceof ProductionValidationError) throw error;
                     if ((error as { code?: string })?.code === "BASE_HISTORY_UNAVAILABLE") throw error;
                     console.error("[edit-op-error] op=", operation?.type, "index=", index, "msg=", error instanceof Error ? error.message : String(error), "\nSTACK=", error instanceof Error ? (error.stack || "") : "");
-                    throw new ProductionValidationError([{ code: "INVALID_OPERATION", path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, message: error instanceof Error ? error.message : String(error), severity: "error" }]);
+                    throw new ProductionValidationError([{ code: "INVALID_OPERATION", ...this.editOperationFailure(operation, index, error), path: `request.ops.${index}`, targetId: "id" in operation ? String(operation.id) : undefined, severity: "error" }]);
                 }
             }
             flushDirectorProjection();
@@ -3795,12 +3838,25 @@ export class EpisodeProductionService {
         validatedDirectorFingerprint = simulated.draft.director ? fingerprint(simulated.draft.director) : null;
         const validationStarted = performance.now();
         const validation = simulated.draft.director
-            ? this.validateSource(simulated.draft.director, "edit", this.sourceShotValidationScope(input.ops))
-            : Promise.resolve();
+            // 同一次校验同时产出阻塞项与非阻塞观察：阻塞项仍按原语义整批拒绝，
+            // 观察项随写回执返回，避免「先生成、再单独 check_continuity、再取消」。
+            ? this.sourceDiagnostics(simulated.draft.director, "edit", this.sourceShotValidationScope(input.ops)).then(diagnostics => {
+                const blocking = diagnostics.filter(item => diagnosticBlocksAction(item, "edit"));
+                if (blocking.length) throw new ProductionValidationError(blocking);
+                return diagnostics.filter(item => item.severity !== "error");
+            })
+            : Promise.resolve([] as ProductionDiagnostic[]);
         return validation.catch(error => {
-            if (this.replayOperationReceipt(episodeId, input.operationId, requestHash)) return;
+            if (this.replayOperationReceipt(episodeId, input.operationId, requestHash)) return [] as ProductionDiagnostic[];
             throw error;
-        }).finally(() => onStage?.("acheng_source_validation", Math.round(performance.now() - validationStarted))).then(commitPrepared);
+        }).finally(() => onStage?.("acheng_source_validation", Math.round(performance.now() - validationStarted))).then(advisory => {
+            const result = commitPrepared();
+            const writeDiagnostics = advisory.slice(0, 20).map(item => ({
+                code: item.code, targetId: item.targetId, path: item.path, severity: item.severity,
+                message: item.message.length > 240 ? `${item.message.slice(0, 239)}…` : item.message,
+            }));
+            return writeDiagnostics.length ? Object.assign(result, { writeDiagnostics, writeDiagnosticCount: advisory.length }) : result;
+        });
     }
 
     async previewImpact(episodeId: string, stage: "script" | "shots" | "director"): Promise<ProductionImpact> {
@@ -4490,9 +4546,50 @@ export class EpisodeProductionService {
             for (const artifact of director.artifacts) if (priorKey !== op.storageKey && artifact.references.some(ref => ref.nodeId === op.nodeId || ref.storageKey === priorKey)) artifact.status = "stale";
             const images = Array.isArray(metadata.images) ? metadata.images as Record<string, unknown>[] : [];
             const imageId = images.find(image => image.storageKey === op.storageKey)?.id || `history:${log.id}:${op.storageKey}`;
-            const image = { id: imageId, status: "success", storageKey: op.storageKey, content: `/media/${encodeURIComponent(op.storageKey)}`, naturalWidth: media.width || 0, naturalHeight: media.height || 0, bytes: media.bytes, mimeType: media.mimeType };
+            const generationTaskId = String(log.runtimeTaskId || task.id);
+            const image = { id: imageId, status: "success", storageKey: op.storageKey, content: `/media/${encodeURIComponent(op.storageKey)}`, naturalWidth: media.width || 0, naturalHeight: media.height || 0, bytes: media.bytes, mimeType: media.mimeType, generationTaskId, generationLogId: log.id };
             const { id: selectedImageId, ...imageMetadata } = image;
-            operations = [{ type: "update_node", id: op.nodeId, metadata: { ...imageMetadata, url: image.content, images: images.some(image => image.storageKey === op.storageKey) ? images : [...images, image], primaryImageId: selectedImageId, runtimeTaskId: "", runProgress: 1, errorDetails: "" } }];
+            const imageIndex = images.findIndex(candidate => candidate.storageKey === op.storageKey);
+            const nextImages = imageIndex < 0
+                ? [...images, image]
+                : images.map((candidate, index) => index === imageIndex ? { ...candidate, ...image } : candidate);
+            const selectedMetadata: Record<string, unknown> = {
+                ...imageMetadata,
+                url: image.content,
+                images: nextImages,
+                primaryImageId: selectedImageId,
+                generationTaskId,
+                status: "success",
+                runtimeTaskId: "",
+                runProgress: 1,
+                errorDetails: "",
+            };
+            const selectedNodeImage = {
+                storageKey: op.storageKey,
+                url: image.content,
+                name: String(record(metadata.propImage)["name"] || record(metadata.sceneImage)["name"] || node.title || "image.png"),
+                width: image.naturalWidth,
+                height: image.naturalHeight,
+                bytes: image.bytes,
+                mimeType: image.mimeType,
+                generationTaskId,
+                generationLogId: log.id,
+            };
+            if (node.type === "prop") selectedMetadata.propImage = { ...record(metadata.propImage), ...selectedNodeImage };
+            else if (node.type === "scene") selectedMetadata.sceneImage = { ...record(metadata.sceneImage), ...selectedNodeImage };
+            else if (node.type === "character") {
+                const characterImages = Array.isArray(metadata.characterImages) ? metadata.characterImages as Record<string, unknown>[] : [];
+                const characterIndex = characterImages.findIndex(candidate => candidate.storageKey === op.storageKey);
+                selectedMetadata.characterImages = characterIndex < 0
+                    ? [...characterImages, { ...selectedNodeImage, id: selectedImageId }]
+                    : characterImages.map((candidate, index) => index === characterIndex ? { ...candidate, ...selectedNodeImage, id: selectedImageId } : candidate);
+                selectedMetadata.characterPrimaryIndex = characterIndex < 0 ? characterImages.length : characterIndex;
+            } else if (node.type === "config" && metadata.generationMode === "image") {
+                selectedMetadata.activeImageHistoryId = selectedImageId;
+                selectedMetadata.activeImageHistoryExplicit = true;
+                selectedMetadata.smartImageReferenceSelection = { mode: "selected_result", resultId: selectedImageId };
+            }
+            operations = [{ type: "update_node", id: op.nodeId, metadata: selectedMetadata }];
         }
         if (canvasCommits && operations.length) this.db.applyCanvasProjectOperations(canvasId!, op.canvasRevision, operations, { operationId: `${operationId}:result:${op.targetKind}:${op.targetId}`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:history", label: "选用制作历史结果" } });
     }

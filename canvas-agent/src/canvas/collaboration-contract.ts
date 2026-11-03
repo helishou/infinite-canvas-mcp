@@ -18,13 +18,23 @@ export function isSmartCanvasNodeType(value: string) {
     return value === "config" || value === "loop" || /^(?:minimax-h3|smart-minimax|minimax)(?::|$)/i.test(value) || value.includes(":");
 }
 const collaborationOperationSchema = z.record(z.unknown()).superRefine((operation, context) => {
-    if (operation.type !== "add_node") return;
-    const nodeType = typeof operation.nodeType === "string" ? operation.nodeType : "config";
-    const metadata = operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)
-        ? operation.metadata as Record<string, unknown>
-        : {};
-    if (!isSmartCanvasNodeType(nodeType) || metadata.smart !== true) {
-        context.addIssue({ code: "custom", message: "MCP 仅允许通过命令创建 metadata.smart=true 的智能节点。" });
+    if (operation.type === "add_node") {
+        const nodeType = typeof operation.nodeType === "string" ? operation.nodeType : "config";
+        const metadata = operation.metadata && typeof operation.metadata === "object" && !Array.isArray(operation.metadata)
+            ? operation.metadata as Record<string, unknown>
+            : {};
+        if (!isSmartCanvasNodeType(nodeType) || metadata.smart !== true) {
+            context.addIssue({ code: "custom", message: "MCP 仅允许创建 config、loop 或智能插件节点；普通内容与素材节点不能通过 MCP 创建。" });
+        }
+        return;
+    }
+    if (operation.type === "update_node") {
+        const patch = operation.patch && typeof operation.patch === "object" && !Array.isArray(operation.patch)
+            ? operation.patch as Record<string, unknown>
+            : {};
+        if (Object.hasOwn(patch, "type")) {
+            context.addIssue({ code: "custom", message: "MCP 命令不能通过 update_node 更改节点类型；请使用智能节点创建工具。" });
+        }
     }
 });
 export const collaborationSchemas = {
@@ -43,7 +53,7 @@ export const collaborationSchemas = {
 export const collaborationDescriptions: Record<CollaborationToolName, string> = {
     canvas_get_collaboration_state: "读取 revision、在线协作者和协议能力；不依赖网页或 Agent 面板在线。",
     canvas_read_text: "读取完整协作文本、documentId 和 Yjs state；支持项目、节点、Clip 和批量文本项。修改前须读取对应目标。",
-    canvas_apply_commands: "统一命令事务，baseRevision 是请求基线；无关字段自动合并，同字段按服务端提交顺序以后写入者为准。历史不可恢复的删除/恢复操作会保留草稿并返回冲突。add_node 仅允许新增 metadata.smart=true 的智能节点；重试复用 operationId 和完整请求，不发送整图快照。",
+    canvas_apply_commands: "统一命令事务，baseRevision 是请求基线；无关字段自动合并，同字段按服务端提交顺序以后写入者为准。历史不可恢复的删除/恢复操作会保留草稿并返回冲突。add_node 仅允许创建 config、loop 或智能插件节点，update_node 不允许更改节点类型；重试复用 operationId 和完整请求，不发送整图快照。",
     canvas_edit_text: "在读取的 baseState 上按 UTF-16 索引依次局部编辑，Yjs 增量合并协作者文字；必须传原 documentId。重试复用全部参数。",
     canvas_replace_text: "安全整段替换/采用 AI 改写：事务内检查 documentId 和 expectedText。原文变化则拒绝覆盖，应将结果保留为候选供用户确认。",
     canvas_list_text_suggestions: "读取 Backend 持久化的改写候选，包括已采用/已忽略记录；可按目标筛选，不依赖网页在线。",

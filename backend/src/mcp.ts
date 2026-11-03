@@ -1405,12 +1405,12 @@ function registerBackendCanvasTools(
       },
     );
   }
-  // 导入真实图片媒体节点：默认解析本 MCP session 当前活动画布，不要求调用方手填 projectId。
+  // 导入本机图片到智能图片节点：普通 image 节点只保留为旧数据，不再由 MCP 创建。
   server.registerTool(
     "canvas_import_local_images",
     {
       description:
-        "把本机图片文件导入当前活动画布，创建带真实 storageKey 的 image 媒体节点，可作为人物/场景/分镜参考。省略 projectId 时使用本 MCP 会话当前画布（或唯一画布）；不会仅写入素材库。附件已在本机时直接传它的绝对路径，不必再次转存。",
+        "把本机图片文件导入当前活动画布，创建 config 类型的智能图片节点（smart=true、generationMode=image），图片保存在智能节点的成功结果槽中，可继续作为参考或进行图生图。不会创建普通 image 节点。省略 projectId 时使用本 MCP 会话当前画布（或唯一画布）；附件已在本机时直接传它的绝对路径，不必再次转存。",
       inputSchema: z.object({
         projectId: z.string().optional().describe("可选：明确指定目标画布；省略时使用当前活动画布"),
         items: z.array(z.union([
@@ -1460,23 +1460,34 @@ function registerBackendCanvasTools(
           const height = Math.max(1, Math.round(width * (size.width > 0 && size.height > 0 ? size.height / size.width : 0.5625)));
           const column = index % columns;
           const row = Math.floor(index / columns);
-          const id = `image-${crypto.randomUUID()}`;
+          const id = "config-image-" + crypto.randomUUID();
+          const imageId = "imported-" + crypto.randomUUID();
           const title = source.title || (titlePrefix ? `${titlePrefix} · ${prepared.name}` : prepared.name);
           const position = { x: baseX + column * (width + gap), y: baseY + row * (height + gap) };
           const metadata: Record<string, unknown> = {
-            content: media.url,
-            storageKey: media.storageKey,
+            smart: true,
+            generationMode: "image",
+            prompt: "",
+            images: [{
+              id: imageId,
+              status: "success",
+              content: media.url,
+              storageKey: media.storageKey,
+              naturalWidth: size.width || null,
+              naturalHeight: size.height || null,
+              bytes: media.bytes,
+              mimeType: prepared.mimeType,
+            }],
+            primaryImageId: imageId,
+            activeImageHistoryId: imageId,
+            activeImageHistoryExplicit: false,
             status: "success",
-            naturalWidth: size.width || null,
-            naturalHeight: size.height || null,
-            bytes: media.bytes,
-            mimeType: prepared.mimeType,
             importSource: { kind: "local-file", fileName: prepared.name, importedAt: new Date().toISOString() },
             ...(docType ? { docType } : {}),
             ...(role ? { role } : {}),
           };
-          operations.push({ type: "add_node", nodeType: "image", id, title, position, width, height, metadata });
-          created.push({ id, title, storageKey: media.storageKey, url: media.url, bytes: media.bytes, mimeType: prepared.mimeType, width: size.width, height: size.height, position });
+          operations.push({ type: "add_node", nodeType: "config", id, title, position, width, height, metadata });
+          created.push({ id, title, nodeType: "config", smart: true, generationMode: "image", imageId, storageKey: media.storageKey, url: media.url, bytes: media.bytes, mimeType: prepared.mimeType, width: size.width, height: size.height, position });
         } catch (error) {
           failed.push({ fileName: source.filePath.split(/[\\/]/).pop(), error: error instanceof Error ? error.message : String(error) });
         }
@@ -2455,6 +2466,10 @@ export function attachGenerationParamsToNodes(
   return prepended.length ? [...prepended, ...patched] : patched;
 }
 
+/** 单次等待的默认时长。实测 agent 一直在手传 60 秒，说明这才是真实节奏；
+ *  统一到一处，避免 schema 描述、实现和 SOP 各写一个值。 */
+const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
+
 async function waitForCanvasTasks(
   backend: ReturnType<typeof createBackendClient>,
   taskIds: string[],
@@ -2464,7 +2479,7 @@ async function waitForCanvasTasks(
   if (!taskIds.length) return { timedOut: false, pendingTaskIds: [], elapsedMs: 0, pollCount: 0, eventCount: 0, waitMode: "none", summary: { total: 0, complete: 0, needsAction: 0, workflowComplete: 0, byStatus: {} }, tasks: [] };
   const timeoutMs = Math.max(
     1000,
-    Math.min(1_800_000, Number(input.timeoutMs || 900_000)),
+    Math.min(1_800_000, Number(input.timeoutMs || DEFAULT_WAIT_TIMEOUT_MS)),
   );
   const pollMs = Math.max(250, Math.min(10_000, Number(input.pollMs || 2_000)));
   const startedAt = Date.now();
@@ -2477,17 +2492,23 @@ async function waitForCanvasTasks(
   let eventCount = 0;
   let waitMode = "poll";
   let tasks: Array<Record<string, unknown>> = [];
+  // 首次快照命中数：区分「任务未创建」与「部分缺失导致退化」的依据，供 7 天复测归因。
+  let firstSnapshotObserved = 0;
   try {
     throwIfMcpCancelled(signal);
     const initial = (await listTasksFromBackend(backend, { taskIds, limit: taskIds.length }, waitSignal)).tasks;
+    firstSnapshotObserved = initial.length;
     const initialById = new Map(initial.map((task) => [String(task.taskId || ""), task]));
     tasks = taskIds.map((taskId) => initialById.get(taskId) || { taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" });
-    if (initial.length === taskIds.length && initial.length > 0) {
-      const eventResult = await waitForH3TaskEvents(backend, taskIds, initial, deadlineAt, waitSignal, signal);
+    if (initial.length > 0) {
+      // 单条 taskId 不在快照里（刚提交、刚被清理）时，过去会整批放弃 SSE 退化成轮询。
+      // 现在只把缺失的那几条标成 missing，其余任务继续走事件流。
+      const missing = taskIds.filter(taskId => !initialById.has(taskId)).map(taskId => ({ taskId, status: "missing", progress: 0, outputs: [], error: "任务不存在或已被清理" }));
+      const eventResult = await waitForH3TaskEvents(backend, taskIds, [...initial, ...missing], deadlineAt, waitSignal, signal);
       if (eventResult.connected) {
         tasks = eventResult.tasks;
         eventCount = eventResult.eventCount;
-        waitMode = eventResult.usedStream ? "sse" : "snapshot";
+        waitMode = eventResult.usedStream ? (missing.length ? "sse-partial" : "sse") : "snapshot";
       } else waitMode = "poll-fallback";
     }
   } catch (error) {
@@ -2516,16 +2537,27 @@ async function waitForCanvasTasks(
         .filter((task) => !terminal.has(String(task.status)))
         .map((task) => String(task.taskId || ""))
         .filter(Boolean);
+      const completeCount = tasks.filter((task) => terminal.has(String(task.status))).length;
+      // 进度比例让「还要不要再等一次」可判定，不必 wait → get_batch → wait 来回问。
+      const progress = {
+        complete: completeCount,
+        total: tasks.length,
+        ratio: tasks.length ? Number((completeCount / tasks.length).toFixed(3)) : 0,
+        pending: pendingTaskIds.length,
+      };
       const receipt = {
         timedOut: !complete,
         pendingTaskIds,
+        progress,
+        canKeepWaiting: pendingTaskIds.length > 0,
         elapsedMs,
         pollCount,
         eventCount,
         waitMode,
+        firstSnapshotObserved,
         summary: {
           total: tasks.length,
-          complete: tasks.filter((task) => terminal.has(String(task.status))).length,
+          complete: completeCount,
           needsAction: tasks.filter((task) => task.status === "awaiting_confirmation").length,
           workflowComplete: tasks.filter((task) => ["succeeded", "failed", "cancelled", "completed", "missing"].includes(String(task.status))).length,
           byStatus: tasks.reduce<Record<string, number>>((counts, task) => {
@@ -3874,7 +3906,26 @@ function structuredErrorMetadata(error: unknown) {
   }
   if (Array.isArray(value.conflictTargets)) result.conflictTargets = value.conflictTargets.map(String);
   if (typeof value.taskId === "string") result.taskId = value.taskId;
+  // 领域错误自带的结构化上下文（启用开关、可用场次目录、范围缺口）原样保留，
+  // 让调用方一次就能纠正，不必靠试错。
+  if (value.details && typeof value.details === "object" && !Array.isArray(value.details)) result.details = value.details;
   return result;
+}
+
+/** 场次不存在时给出可用的场次实例 id，替代“检查 errorContext”这类空泛提示。 */
+function sceneNotFoundSuggestion(error: unknown) {
+  const details = recordOf(recordOf(error).details);
+  const available = Array.isArray(details.availableScenes) ? details.availableScenes.map(recordOf).map(item => String(item.sceneId || "")).filter(Boolean) : [];
+  const detectedKind = typeof details.detectedKind === "string" ? details.detectedKind : "";
+  const misuse = detectedKind === "segment" ? "传的是 Segment（Clip）ID，不是场次实例 ID。"
+    : detectedKind === "environment" ? "传的是环境（scene_registry）ID，不是场次实例 ID。"
+    : "";
+  return {
+    action: `${misuse}${available.length
+      ? `改用 details.availableScenes 中的场次实例 id（${available.slice(0, 8).join("、")}${available.length > 8 ? " 等" : ""}）重提；不需要重读整份源稿。`
+      : "当前制作稿没有场次目录；先同步场次或建立正式剧本段落后再启动。"}`,
+    ...(available.length ? { retryInput: { sceneIds: available.slice(0, 8) } } : {}),
+  };
 }
 
 function inputTaskIds(input: Record<string, unknown>) {
@@ -4051,6 +4102,12 @@ function classifyToolError(
     /"(expected|received)"\s*:/.test(message);
   const invalidInput = error instanceof z.ZodError || backendError.code === "INVALID_INPUT" || embeddedValidationIssues;
   const productionDiagnostics = Array.isArray(recordOf(error).diagnostics) ? recordOf(error).diagnostics as Array<Record<string, unknown>> : [];
+  // 写操作的失败提示只保留可执行短句：过去是多条「长路径: 长消息」拼成一句，
+  // 出口按 240 字符截断后只剩半截路径，调用方无法定位。issues[] 仍保留完整定位。
+  const editFailure = productionDiagnostics.find(item => item.code === "INVALID_OPERATION" && typeof item.message === "string");
+  const editFailureMessage = editFailure
+    ? `${productionDiagnostics.length > 1 ? `共 ${productionDiagnostics.length} 处问题；` : ""}${String(editFailure.message)}`
+    : undefined;
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
   const domainCode = productionDiagnostics.length || ["SOURCE_FIELDS_UNSUPPORTED", "REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED", "STALE_H3_PREVIEW"].includes(backendError.code || "") ? backendError.code : undefined;
   const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
@@ -4118,7 +4175,7 @@ function classifyToolError(
   const compactOperation = state.schemaMode === "compact" && toolName === "production_edit" && error instanceof z.ZodError
     ? error.issues.map(issue => compactEditOperationForIssue(input, issue.path)).find(Boolean) : undefined;
   const suggestedAction = compactOperation
-    ? { tool: "production_get_contract", input: { operationType: compactOperation, ...(compactOperation === "patch_director_source" ? { includePatchFields: true } : {}) }, action: "嵌套参数未通过完整合同校验，本次未提交；仅查询该操作详情并修正字段，不原样重试。" }
+    ? { tool: "production_get_contract", input: { operationType: compactOperation, ...(compactOperation === "patch_director_source" ? { includePatchFields: true } : {}) }, action: "本次未提交，只有 issues 里列出的这几处字段不合格；按 issues 的 path/unexpectedKeys 改完可直接用原 operationId 与同一 expectedRevision 重提，不需要重读合同或整份源稿。" }
     : productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
@@ -4180,7 +4237,9 @@ function classifyToolError(
         ? { tool: "h3_get_node", input: { projectId: String(mcpInputProjectId(input, state)) || "", nodeId: String(input.nodeId || "") } }
         : missingEpisode
           ? { tool: "drama_list_episodes", input: {}, action: "先用分集列表核对有效的 episodeId，再用真实存在的 ID 读取制作稿。" }
-          : artifactTargetMissing
+          : missingScene
+            ? sceneNotFoundSuggestion(error)
+            : artifactTargetMissing
             ? (input.kind === "episode" || input.kind === "canvas") && input.id
               ? { tool: "production_get_artifact_index", input: { kind: input.kind, id: String(input.id), ...(input.snapshot ? { snapshot: input.snapshot } : {}) }, action: "核对原制作对象的 targetId 后定向读取。" }
               : { action: "缺少产物所属 kind/id；取得原制作对象身份后调用 production_get_artifact_index。" }
@@ -4195,7 +4254,9 @@ function classifyToolError(
   const issueSource = error && typeof error === "object" ? (error as Record<string, unknown>).issues || productionDiagnostics : undefined;
   const issues = Array.isArray(issueSource) ? issueSource.map((issue) => {
     const item = recordOf(issue);
-    return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : typeof item.path === "string" ? { path: item.path } : {}), ...(typeof recordOf(item.blockingRun).runId === "string" ? { blockingRun: item.blockingRun } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}) };
+    return { code: String(item.code || "validation_error"), message: safeErrorMessage(new Error(String(item.message || ""))), ...(Array.isArray(item.path) ? { path: item.path } : typeof item.path === "string" ? { path: item.path } : {}), ...(typeof recordOf(item.blockingRun).runId === "string" ? { blockingRun: item.blockingRun } : {}), ...(typeof item.bindingId === "string" ? { bindingId: item.bindingId } : {}), ...(Array.isArray(item.allowedFields) ? { allowedFields: item.allowedFields.filter((field) => typeof field === "string") } : {}),
+      // 写操作定位信息：第几个操作、哪个字段、多了哪些键。调用方据此一次改对。
+      ...(typeof item.opIndex === "number" ? { opIndex: item.opIndex } : {}), ...(typeof item.opType === "string" ? { opType: item.opType } : {}), ...(typeof item.fieldPath === "string" ? { fieldPath: item.fieldPath } : {}), ...(Array.isArray(item.unexpectedKeys) ? { unexpectedKeys: item.unexpectedKeys.filter((key) => typeof key === "string") } : {}) };
   }) : [];
   const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
   const availableAction = "tool" in suggestedAction && typeof suggestedAction.tool === "string" && !isToolInProfile(state.profile, suggestedAction.tool)
@@ -4205,7 +4266,7 @@ function classifyToolError(
   const disposition = classifyErrorDisposition({ code, message, tool: toolName });
   return {
     code: disposition.code,
-    message,
+    message: editFailureMessage || message,
     recoverable,
     scope: disposition.scope,
     doNotRetry: disposition.doNotRetry,
@@ -4499,6 +4560,9 @@ function mcpToolResultContext(
       ...(typeof result.pollCount === "number" ? { pollCount: result.pollCount } : {}),
       ...(typeof result.eventCount === "number" ? { eventCount: result.eventCount } : {}),
       ...(typeof result.waitMode === "string" ? { waitMode: result.waitMode } : {}),
+      // 归因用：首次快照命中数与完成比例，用来区分「任务未创建」「部分缺失」和「真的等待不够久」。
+      ...(typeof result.firstSnapshotObserved === "number" ? { firstSnapshotObserved: result.firstSnapshotObserved } : {}),
+      ...(typeof recordOf(result.progress).ratio === "number" ? { waitRatio: recordOf(result.progress).ratio } : {}),
     },
   };
 }

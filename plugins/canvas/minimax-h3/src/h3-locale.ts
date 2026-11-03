@@ -57,6 +57,20 @@ const labels = {
     cancelUnavailableHint: ["缺少父任务 ID，无法取消；请使用重置操作", "The parent task ID is missing; use reset to recover"],
     generationCancelled: ["已取消生成", "Generation cancelled"],
     generationAlreadyFinished: ["任务已结束", "The task has already finished"],
+    loraPresetName: ["LoRA 组合名称", "LoRA combination name"],
+    loraPresetDefaultName: ["组合", "Combination"],
+    loraPresetLoading: ["正在加载 LoRA 组合…", "Loading LoRA combinations…"],
+    loraPresetSelect: ["选择组合即应用", "Select a combination to apply"],
+    loraPresetSave: ["保存当前组合", "Save current combination"],
+    loraPresetDelete: ["删除组合", "Delete combination"],
+    loraPresetLoadFailed: ["LoRA 组合读取或保存失败：", "Could not read or save LoRA combinations: "],
+    loraPresetRetry: ["重新读取 LoRA 组合", "Reload LoRA combinations"],
+    loraPresetLoadingHint: ["LoRA 组合正在读取，读取完成后即可保存或应用。", "LoRA combinations are loading. Save and load controls will be available when this finishes."],
+    loraPresetEmpty: ["请先选择至少一个 LoRA，再保存组合。", "Select at least one LoRA before saving a combination."],
+    loraPresetInvalidWeights: ["请为每个 LoRA 填入 -4 到 10 之间的有效权重。", "Enter a valid weight from -4 to 10 for each LoRA."],
+    loraPresetSaved: ["已保存 LoRA 组合「{name}」", "Saved LoRA combination “{name}”"],
+    loraPresetApplied: ["已应用 LoRA 组合「{name}」", "Applied LoRA combination “{name}”"],
+    loraPresetDeleted: ["已删除 LoRA 组合「{name}」", "Deleted LoRA combination “{name}”"],
 } as const satisfies Record<string, readonly [string, string]>;
 
 export type H3Label = keyof typeof labels;

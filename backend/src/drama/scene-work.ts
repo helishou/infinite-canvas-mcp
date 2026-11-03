@@ -295,19 +295,48 @@ export class SceneWorkCoordinator {
         } catch (error) { const message = error instanceof Error ? error.message : String(error); this.updateSharedWork(id, workId, { status: "awaiting_review", error: message }); if (this.service.get(id).draft.director!.workflow.sharedReviewContinuation) this.saveSharedContinuation(id, { status: "awaiting_review", error: message }); }
         finally { this.active.delete(key); queueMicrotask(() => this.wake(id)); }
     }
-    start(id: string, input: { operationId: string; expectedRevision: number; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string }) {
+    start(id: string, input: { operationId: string; expectedRevision: number; sceneIds: string[]; generateMedia: boolean; model?: string; effort?: string; kind?: "canvas" | "episode" }) {
         const prior = this.service.operationReceipt(id, input.operationId);
         if (prior) return { production: prior, replayed: true };
         const current = this.service.get(id), director = current.draft.director;
         if (current.revision !== input.expectedRevision) throw new ProductionConflictError(current);
-        if (!director || !current.draft.settings.parallelScenes) throw new Error("SCENE_SETTINGS_REQUIRED: 请先启用并行场次制作");
+        const ownerKind = input.kind === "canvas" ? "canvas" as const : "episode" as const;
+        // Two different preconditions used to share one opaque message, so the agent
+        // could only find out by trial. Each now carries the field, the current value
+        // and a ready-to-execute next action.
+        if (!director) throw Object.assign(new Error("PRODUCTION_SOURCE_REQUIRED: 该制作对象还没有已保存的导演源稿，不能启动场次制作。"), {
+            code: "PRODUCTION_SOURCE_REQUIRED",
+            details: { setting: "director.source", current: null, revision: current.revision },
+            nextActions: [{ action: "configure", message: "先建立正式剧本首稿，再按本回执 revision 与原 operationId 重试启动。", ...(ownerKind === "episode" ? { tool: "production_initialize_from_current_demand", input: { episodeId: id, operationId: `${input.operationId}:init-source` } } : {}) }],
+        });
+        if (!current.draft.settings.parallelScenes) throw Object.assign(new Error("SCENE_SETTINGS_REQUIRED: settings.parallelScenes 当前为 false，场次并行制作未启用。"), {
+            code: "SCENE_SETTINGS_REQUIRED",
+            details: { setting: "parallelScenes", current: false, required: true, revision: current.revision },
+            nextActions: [{ action: "configure", message: "按 nextActions.input 启用 parallelScenes 后，用原 operationId 与同一 revision 重试；不需要重读合同或场次目录。", tool: "production_edit",
+                input: { kind: ownerKind, id, operationId: `${input.operationId}:enable-parallel-scenes`, expectedRevision: current.revision, ops: [{ type: "set_settings", patch: { parallelScenes: true } }] } }],
+        });
         // Review policy is legacy metadata. Latest committed source and technically
         // valid bound media drive this workflow; no verdict is a production gate.
         const shared: ReturnType<SceneWorkCoordinator["shared"]> | undefined = undefined;
-        const known = new Set(productionSceneEntries(director.source).map(scene => scene.id));
+        const sceneEntries = productionSceneEntries(director.source);
+        const known = new Set(sceneEntries.map(scene => scene.id));
         const sceneWorks = { ...director.workflow.sceneWorks };
         for (const sceneId of [...new Set(input.sceneIds)]) {
-            if (!known.has(sceneId)) throw new Error(`正式场次不存在：${sceneId}`);
+            if (!known.has(sceneId)) {
+                // Return the usable directory instead of only echoing the wrong id:
+                // the two real-world failures passed a Segment id and an environment id.
+                const detectedKind = rows(director.source.segments).some(segment => objectId(segment) === sceneId) || /^SEG-/i.test(sceneId) ? "segment"
+                    : rows(director.source.scene_registry).some(scene => objectId(scene) === sceneId) || /^ENV-/i.test(sceneId) ? "environment" : "unknown";
+                const hint = detectedKind === "segment" ? `${sceneId} 是 Segment（Clip）ID，不是场次实例 ID；先用该 Clip 的 shot_ids 反查所属场次。`
+                    : detectedKind === "environment" ? `${sceneId} 是环境（scene_registry）ID，不是场次实例 ID；同一环境可能对应多个场次实例。`
+                    : "该 ID 不在当前场次目录中。";
+                const availableScenes = sceneEntries.slice(0, 20).map(scene => ({ sceneId: scene.id, title: scene.title, shotCount: scene.shotIds.length }));
+                throw Object.assign(new Error(`SCENE_NOT_FOUND: 正式场次不存在：${sceneId}。${hint} 当前共 ${sceneEntries.length} 个场次${availableScenes.length ? `，可用：${availableScenes.map(scene => scene.sceneId).join("、")}${sceneEntries.length > availableScenes.length ? " 等" : ""}` : ""}。`), {
+                    code: "SCENE_NOT_FOUND",
+                    details: { unknownSceneId: sceneId, detectedKind, availableScenes, availableSceneCount: sceneEntries.length, revision: current.revision },
+                    nextActions: [{ action: "correct_source", message: availableScenes.length ? `改用 details.availableScenes 中的场次实例 id（如 ${availableScenes[0].sceneId}）重提；不要重读整份源稿。` : "当前制作稿还没有场次目录；先同步场次或建立正式剧本段落后重试。" }],
+                });
+            }
             const existing = Object.values(sceneWorks).find(work => work.sceneId === sceneId && !["failed", "succeeded"].includes(work.status));
             if (existing) {
                 // Explicit H3 continuation may authorize an unfinished source work, or retry

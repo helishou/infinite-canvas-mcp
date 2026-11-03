@@ -845,7 +845,9 @@ export type ProductionDiagnosticDetails = {
     expectedSourceProjectId?: string;
     expectedSourceNodeId?: string;
 };
-export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blockingActions?: ProductionBlockingAction[]; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; details?: ProductionDiagnosticDetails; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction };
+export type ProductionDiagnostic = { code: string; path: string; targetId?: string; shotId?: string; origin?: "source" | "compiler"; matchedText?: string; blockingActions?: ProductionBlockingAction[]; blocksCompilation?: boolean; message: string; severity: "error" | "warning" | "unverified"; example?: unknown; details?: ProductionDiagnosticDetails; blockingRun?: { runId: string; status: string; taskIds: string[] }; nextAction?: ProductionNextAction;
+    /** 写操作校验失败时定位到具体操作与字段，供调用方一次改对后重提。 */
+    opIndex?: number; opType?: string; fieldPath?: string; unexpectedKeys?: string[]; allowedFields?: string[] };
 export const diagnosticBlocksAction = (diagnostic: ProductionDiagnostic, action: ProductionBlockingAction) =>
     diagnostic.blockingActions ? diagnostic.blockingActions.includes(action) : diagnostic.severity === "error" && (action !== "compile" || diagnostic.blocksCompilation !== false);
 export type ProductionPreflight = { readyTargets?: string[]; blockedTargets?: Array<{ targetId: string; code: string; message: string }>; warnings?: Array<{ targetId: string; code: string; message: string }>; planHash?: string; canvasRevision?: number; valid: boolean; contractVersion: string; engine: DirectorProduction["engine"] | null; revision: number | null; diagnostics: ProductionDiagnostic[]; generationReady: boolean; compileReady?: boolean; replayed?: boolean; nextActions?: ProductionNextAction[] };

@@ -702,7 +702,18 @@ export function getProductionContract(
     }
     const contract = operationType ? productionOperationContract(operationType, includeDetails) : { contractVersion: productionContractVersion };
     const includeSourceContract = !operationType && !moduleId || includeDetails.sourceContract;
-    return { ...contract, engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
+    // 合同按「引擎 + 查询范围」静态，同一 hash 重读没有新信息。回执直接给出身份，
+    // 把「同版本已读可复用」从提示词约定变成可核对的回执事实。
+    const contractHash = crypto.createHash("sha256").update(JSON.stringify({
+        runtimeId: runtime.runtimeId, contractVersion: productionContractVersion,
+        operationType: operationType || null, moduleId: moduleId || null,
+        moduleFile: includeDetails.moduleFile || null,
+        requests: includeDetails.requests ?? null, patchFields: includeDetails.patchFields ?? null,
+        sourceContract: includeDetails.sourceContract ?? null,
+    })).digest("hex");
+    return { contractHash, ...(includeDetails.cursor || includeDetails.chunkBytes ? {}
+        : { contractReuse: { sameHashReusable: true, guidance: "同一 contractHash 的合同已完整返回，本会话内直接复用；只有换 operationType/moduleId 或引擎升级后才需要重读。" } }),
+        ...contract, engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
         ...(includeSourceContract ? { sourceContract: runtime.sourceContract, sourceContractNotice: runtime.sourceContract ? undefined : "The active runtime has no machine-readable Canvas source contract; compiler validation remains authoritative." } : {}),
         ...(includeSourceContract ? { ref2vaMaximumWords: runtime.sourceContract ? runtime.sourceContract.ref2vaMaximumWords : 2900 } : {}),
         ...(moduleRow ? { module: { id: moduleRow.id, owns: moduleRow.owns, checks_with: moduleRow.checks_with, check_focus: moduleRow.check_focus,

@@ -376,6 +376,7 @@ export class ComfyUiBackend {
             await new Promise((resolve) => setTimeout(resolve, 2000));
             try {
                 const read = await readComfyHistory(comfyUrl, promptId, controller.signal);
+                if (read.kind === "unavailable") throw new ComfyUnavailableError(promptId, read.code);
                 if (read.kind === "history") {
                     const item = exactHistoryEntry(read.history, promptId);
                     const statusStr = item?.status?.status_str;
@@ -709,6 +710,10 @@ export class ComfyUiBackend {
                     // 不再 throw，继续走下面的 /history 轮询
                 }
                 const historyRead = await readComfyHistory(comfyUrl, body.prompt_id, controller.signal);
+                if (historyRead.kind === "unavailable") {
+                    closeWs();
+                    throw new ComfyUnavailableError(body.prompt_id, historyRead.code);
+                }
                 if (historyRead.kind === "history") {
                     const item = exactHistoryEntry(historyRead.history, body.prompt_id);
                     const statusStr = item?.status?.status_str;
@@ -2112,6 +2117,14 @@ const TRANSIENT_COMFY_NETWORK_CODES = new Set([
     "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EAI_AGAIN",
     "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
 ]);
+const UNAVAILABLE_COMFY_NETWORK_CODES = new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"]);
+
+class ComfyUnavailableError extends Error {
+    constructor(promptId: string, code: string) {
+        super(comfyUnavailableMessage(promptId, code));
+        this.name = "ComfyUnavailableError";
+    }
+}
 
 function isRetryableComfyHttpStatus(status: number) {
     return RETRYABLE_COMFY_HTTP_STATUSES.has(status);
@@ -2119,6 +2132,7 @@ function isRetryableComfyHttpStatus(status: number) {
 
 /** ComfyUI/Undici 网络错误可能把具体 socket 错误放在 cause 链中。 */
 function isTransientComfyNetworkError(error: unknown) {
+    if (error instanceof ComfyUnavailableError) return false;
     let current: unknown = error;
     for (let depth = 0; depth < 5 && current && typeof current === "object"; depth += 1) {
         const item = current as { code?: unknown; message?: unknown; cause?: unknown };
@@ -2129,7 +2143,26 @@ function isTransientComfyNetworkError(error: unknown) {
     return false;
 }
 
-export type ComfyHistoryRead = { kind: "history"; history: Record<string, any> } | { kind: "missing" } | { kind: "retry" };
+function unavailableComfyNetworkCode(error: unknown) {
+    const pending = [error];
+    const visited = new Set<unknown>();
+    while (pending.length) {
+        const current = pending.pop();
+        if (!current || typeof current !== "object" || visited.has(current)) continue;
+        visited.add(current);
+        const item = current as { code?: unknown; cause?: unknown; errors?: unknown };
+        if (typeof item.code === "string" && UNAVAILABLE_COMFY_NETWORK_CODES.has(item.code)) return item.code;
+        if (item.cause && typeof item.cause === "object") pending.push(item.cause);
+        if (Array.isArray(item.errors)) pending.push(...item.errors);
+    }
+    return null;
+}
+
+function comfyUnavailableMessage(promptId: string, code: string) {
+    return `ComfyUI 已停止或当前不可达（${code}）；目标 promptId ${promptId} 未收到终态回执，画布任务已停止等待。请检查 ComfyUI 输出目录，确认是否已有可恢复的部分结果。`;
+}
+
+export type ComfyHistoryRead = { kind: "history"; history: Record<string, any> } | { kind: "missing" } | { kind: "retry" } | { kind: "unavailable"; code: string };
 
 /** Read the exact submitted prompt's history without turning transport failures into task failures. */
 export async function readComfyHistory(comfyUrl: string, promptId: string, signal: AbortSignal): Promise<ComfyHistoryRead> {
@@ -2139,6 +2172,8 @@ export async function readComfyHistory(comfyUrl: string, promptId: string, signa
         response = await fetch(`${comfyUrl}/history/${encodeURIComponent(promptId)}`, { signal });
     } catch (error) {
         if (signal.aborted) throw error;
+        const unavailableCode = unavailableComfyNetworkCode(error);
+        if (unavailableCode) return { kind: "unavailable", code: unavailableCode };
         if (isTransientComfyNetworkError(error)) return { kind: "retry" };
         throw error;
     }

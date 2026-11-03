@@ -196,7 +196,7 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
     };
 
     const labelClass = "text-xs text-muted-foreground";
-    const imageUrlOf = (image: { url?: string; storageKey?: string }) => image.url || (image.storageKey ? backendMediaUrl(image.storageKey) : "");
+    const imageUrlOf = (image: { url?: string; storageKey?: string }) => image.storageKey ? backendMediaUrl(image.storageKey) : image.url || "";
 
     return <Modal open={open} onCancel={onCancel} footer={null} width={760} destroyOnHidden title={t("director.crud.editCanvasAsset")}>
         <div className="space-y-4">

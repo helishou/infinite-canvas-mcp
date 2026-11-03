@@ -345,7 +345,7 @@ const TOOLS: PluginMcpToolWire[] = [
                 skipCompleted: { type: "boolean", description: "是否跳过已有结果；默认 true，潜空间续写必须为 false" },
                 params: { type: "object", description: "设置类参数（aspectRatio/megapixels/steps/loraSlots 等）会在运行前自动写回 Clip 保存值，面板随之显示新值；aspectRatio 传裸比例（如 9:16）或完整标签均可，会自动归一" },
                 waitForCompletion: { type: "boolean", description: "true=提交后在 MCP 内等到本批父任务终态，返回 wait.status(succeeded|partial|timeout|needs_confirmation)、outputs、pending、blocked；默认 false，提交后立即返回任务摘要" },
-                timeoutMs: { type: "integer", minimum: 1000, maximum: 1800000, description: "waitForCompletion=true 时的最长等待时间，默认 900000ms；超时返回 pending，原任务保留不重提" },
+                timeoutMs: { type: "integer", minimum: 1000, maximum: 1800000, description: "waitForCompletion=true 时的最长等待时间，默认 60000ms；超时返回 pending 与进度比例，原任务保留不重提" },
                 pollMs: { type: "integer", minimum: 250, maximum: 10000, description: "waitForCompletion=true 时的轮询间隔，默认 2000ms" },
             },
             required: ["projectId"],
