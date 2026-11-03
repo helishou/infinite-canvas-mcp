@@ -9,6 +9,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useParams, useSearchParams, createSearchParams } from "react-router-dom";
+import { useShallow } from "zustand/react/shallow";
 import { diagnosticBlocksAction, isSubjectPromptAssembly, productionSceneEntries, type ProductionBlockingAction, type ProductionDiagnostic, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
@@ -226,7 +227,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [productionContext, setProductionContext] = useState<ProductionCanvasContext | null>(null);
   const [episode, setEpisode] = useState<DramaEpisode | null>(null);
   const [canvasRead, setCanvasRead] = useState<ProductionCanvasSnapshot>();
-  const liveCanvas = useCanvasStore(state => state.projects.find(project => project.id === canvasId));
+  // 视口保存会替换 project 对象但保留 nodes/summary 引用；只订阅画布快照字段，避免每次拖拽或缩放都重渲染整个制作页。
+  const liveCanvas = useCanvasStore(useShallow(state => {
+    const project = state.projects.find(project => project.id === canvasId);
+    return project ? { id: project.id, revision: project.revision, summary: project.summary, nodes: project.nodes } : undefined;
+  }));
   const canvasNodes = productionCanvasNodes(canvasId, liveCanvas, canvasRead);
   // 风格锚点等选择器需要同一剧目的共享资产画布节点；分集页本身只持有分集画布。
   const [sharedCanvasNodes, setSharedCanvasNodes] = useState<ProductionCanvasSnapshot>();

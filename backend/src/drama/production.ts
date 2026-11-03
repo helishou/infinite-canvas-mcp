@@ -736,9 +736,20 @@ export class EpisodeProductionService {
                     unresolvedBinding({ code: "SUBJECT_IMAGE_RESULT_MISSING", path: `${bindingPath}.selection`, targetId: bindingId, message: "来源节点没有可读取的归档图片", severity: "error" }, bindingId, !old?.storageKey);
                     continue;
                 }
+                const referencedCharacterImage = selectedCharacterImage || characterImages.find(image => String(image.storageKey || "") === String(reference.storageKey || ""));
+                const referencedResult = Array.isArray(metadata.images)
+                    ? (metadata.images as Array<Record<string, any>>).find(image => String(image.storageKey || "") === String(reference.storageKey || ""))
+                    : undefined;
+                const nodeGenerationTaskId = String(metadata.generationTaskId || "");
+                const nodeGenerationTask = nodeGenerationTaskId ? this.db.getTask(nodeGenerationTaskId) : null;
+                const nodeGenerationOutputs = [...(nodeGenerationTask?.outputs || []), ...(Array.isArray(nodeGenerationTask?.result?.media) ? nodeGenerationTask.result.media as Array<Record<string, any>> : [])];
+                // A typed entity's propImage/sceneImage can be a manually selected reference, unrelated to the node's latest generated output.
+                // Carry node-level provenance only when that exact task actually archived this exact image.
+                const matchingNodeGenerationTaskId = nodeGenerationTask?.status === "succeeded" && nodeGenerationTask.projectId === projectId && nodeGenerationTask.nodeId === nodeId
+                    && nodeGenerationOutputs.some(output => output.storageKey === reference.storageKey) ? nodeGenerationTaskId : "";
                 slot = { id: reference.id, storageKey: reference.storageKey, mimeType: reference.mimeType,
-                    ...(selectedCharacterImage?.sha256 ? { sha256: selectedCharacterImage.sha256 } : {}),
-                    generationTaskId: selectedCharacterImage?.generationTaskId || metadata.generationTaskId || "" };
+                    ...(referencedCharacterImage?.sha256 ? { sha256: referencedCharacterImage.sha256 } : {}),
+                    generationTaskId: referencedCharacterImage?.generationTaskId || referencedResult?.generationTaskId || matchingNodeGenerationTaskId };
             }
             const storageKey = String(slot.storageKey || ""), generationTaskId = String(slot.generationTaskId || "");
             const media = storageKey && this.db.getMediaFile(storageKey);

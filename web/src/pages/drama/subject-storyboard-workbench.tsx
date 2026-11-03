@@ -32,6 +32,22 @@ function CompileElapsed({ updatedAt, status }: { updatedAt?: string; status?: st
 /** 工作包读取缓存（LRU）：同一镜头、同一源稿版本、同一参考结果版本直接命中，避免反复「正在读取镜头工作包」。 */
 const workbenchCache = new Map<string, Record<string, any>>();
 
+/**
+ * 编译新鲜度缓存：每次判定都会重新投影并哈希整份导演输入，而镜头/分镜列表在
+ * 同一次渲染里会按 Clip 反复查询同一批产物。导演对象按不可变快照更新，因此按
+ * 对象身份缓存判定结果即可，产物换新时自动失效。
+ */
+const currentArtifactCache = new WeakMap<DirectorProduction, WeakMap<DirectorProduction["artifacts"][number], boolean>>();
+function isCurrentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
+    let byArtifact = currentArtifactCache.get(director);
+    if (!byArtifact) { byArtifact = new WeakMap(); currentArtifactCache.set(director, byArtifact); }
+    const cached = byArtifact.get(artifact);
+    if (cached !== undefined) return cached;
+    const current = currentCompilationArtifact(director, artifact);
+    byArtifact.set(artifact, current);
+    return current;
+}
+
 export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter: string; search: string; view: "shots" | "clips"; mobileEditing: boolean; detailView: "editing" | "context"; shotSection?: "direction" | "sound" | "subjects" | "anchors"; scrollTop: number } };
 
 function readSavedStoryboardSelection(storageKey: string) {
@@ -410,7 +426,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         : t(currentCompiled ? "director.atomic.stateReady" : "director.atomic.statePending");
     const compiledArtifactMatchesCanvas = (clipId: string, artifact: DirectorProduction["artifacts"][number] | undefined) => {
         if (!artifact || artifact.kind !== "h3" || artifact.status !== "ready"
-            || !currentCompilationArtifact(director, artifact)) return false;
+            || !isCurrentCompilationArtifact(director, artifact)) return false;
         const matches = productionSegmentRuntimeMatches(canvasNodes as any, clipId);
         return matches.length === 1 && /^minimax|^smart-minimax/i.test(String(matches[0].node.type || ""));
     };
@@ -455,7 +471,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
     const viewableCompiledPrompts = visibleClipStates.flatMap(item => {
         const artifact = director.artifacts.find(candidate => candidate.kind === "h3" && candidate.targetId === item.id);
-        return item.tone === "ready" && artifact?.status === "ready" && currentCompilationArtifact(director, artifact)
+        return item.tone === "ready" && artifact?.status === "ready" && isCurrentCompilationArtifact(director, artifact)
             ? [{ targetId: item.id, prompt: artifact.prompt }]
             : [];
     });

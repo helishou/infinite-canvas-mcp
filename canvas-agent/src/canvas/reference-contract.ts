@@ -269,23 +269,25 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
         const token = mediaType === "image" ? `<Picture ${ordinal}>` : mediaType === "video" ? `<Video ${ordinal}>` : `<Audio ${ordinal}>`;
         return [{ ...merged, mediaType, ordinal, token }];
     });
-    // 同一个主体用同一张图占两个 Picture 槽位时，模型只会看到“两张一样的参考图”，
-    // 提示词里的 <Picture N> 也随之失去意义。同一主体同媒体直接判错；不同主体共用
-    // 同媒体只报警，保留“确实要共用一张氛围图”的可能。
+    // 重复图片会占用多个 Picture 槽位，但这是可提交的输入；记录提示供诊断，不能因此阻断生成。
     const mediaOwners = new Map<string, CompiledReference>();
     const subjectMedia = new Map<string, CompiledReference>();
     for (const reference of references) {
         if (reference.mediaType !== "image" || !reference.storageKey) continue;
         const subjectKey = String(reference.subjectId || reference.groupId || "");
+        let duplicateForSubject = false;
         if (subjectKey) {
             const key = `${reference.storageKey}\0${subjectKey}`;
             const prior = subjectMedia.get(key);
-            if (prior) issues.push({ severity: "error", code: "duplicate_reference_media", bindingId: reference.id, message: `参考“${reference.label}”与“${prior.label}”是同一主体的同一张图（${reference.storageKey}）；共享资产只保留指向本集引用节点的一条绑定` });
-            else subjectMedia.set(key, reference);
+            if (prior) {
+                duplicateForSubject = true;
+                issues.push({ severity: "warning", code: "duplicate_reference_media", bindingId: reference.id, message: `参考“${reference.label}”与“${prior.label}”是同一主体的同一张图；仍按两条绑定提交` });
+            } else subjectMedia.set(key, reference);
         }
         const priorOwner = mediaOwners.get(reference.storageKey);
-        if (priorOwner && priorOwner.id !== reference.id) issues.push({ severity: "warning", code: "shared_reference_media", bindingId: reference.id, message: `参考“${reference.label}”与“${priorOwner.label}”使用同一媒体；确认确实需要共用` });
-        else if (!priorOwner) mediaOwners.set(reference.storageKey, reference);
+        if (priorOwner && priorOwner.id !== reference.id && !duplicateForSubject) {
+            issues.push({ severity: "warning", code: "shared_reference_media", bindingId: reference.id, message: `参考“${reference.label}”与“${priorOwner.label}”使用同一媒体；确认确实需要共用` });
+        } else if (!priorOwner) mediaOwners.set(reference.storageKey, reference);
     }
     const semanticPrompt = String(segment.prompt || "");
     const bySubjectId = new Map<string, { reference: CompiledReference; ordinal: number }>();
