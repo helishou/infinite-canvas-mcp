@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button, Checkbox, Empty } from "antd";
+import { workflowDisplayGraph } from "./workflow-source";
 import type { WorkflowGraphJson } from "./workflow-graph-view";
 
 /** 能产出文件的节点类型。选节点比选类型更准，但先按类型给出候选，减少无关项。 */
@@ -8,7 +9,7 @@ const OUTPUT_CLASS_HINTS = /Save|Preview|VHS|VideoCombine|ImageSave|Export/i;
 type Candidate = { nodeId: string; label: string; classType: string };
 
 function outputCandidates(graph: WorkflowGraphJson, excludeSaveImageToLocal: boolean): Candidate[] {
-    return Object.entries(graph || {}).map(([nodeId, node]) => ({
+    return Object.entries(workflowDisplayGraph(graph)).filter(([, node]) => node.mode !== 2 && node.mode !== 4).map(([nodeId, node]) => ({
         nodeId,
         classType: node?.class_type || "",
         label: String((node as { _meta?: { title?: string } })?._meta?.title || node?.class_type || nodeId),
@@ -33,6 +34,7 @@ function linkSource(value: unknown): string {
  * 一张图常有好几个输出节点（多个 PreviewImage + 一个 SaveImage），只有深度最大的那条是链路末端。
  */
 function outputDepths(graph: WorkflowGraphJson): Map<string, number> {
+    graph = workflowDisplayGraph(graph);
     const depths = new Map<string, number>();
     const visiting = new Set<string>();
     const depthOf = (nodeId: string): number => {

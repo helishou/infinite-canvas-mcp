@@ -59,6 +59,32 @@ export function normalizeEntityNodeOperation(project: Record<string, any>, opera
     return operation;
 }
 export const entityNodeId = (owner: Owner, kind: string, id: string) => productionLayoutStableId("production-entity", owner.kind, owner.id, kind, id);
+
+/**
+ * 主体的图片绑定只指向自己的制作实体节点。
+ *
+ * 场景/道具/角色在画布上只有一个权威节点（`production-entity-*`），制作台的主体图片必须跟着它走；
+ * 已有绑定指向别的来源（例如智能图片节点）时就地改指向实体节点，保留绑定 ID 与用途，
+ * 避免同一主体出现第二个图片来源。
+ */
+export function entitySubjectPictureBinding(source: Record<string, any>, owner: Owner, kind: "character" | "scene" | "prop",
+    entityId: string, canvasId: string, nodeId: string) {
+    const entityRefKind = kind === "prop" ? "asset" : kind;
+    const subject = (Array.isArray(source.subject_registry) ? source.subject_registry : []).find((item: Record<string, any>) =>
+        item?.entityRef?.ownerKind === owner.kind && item.entityRef?.ownerId === owner.id
+        && item.entityRef?.kind === entityRefKind && String(item.entityRef?.id || "") === entityId);
+    if (!subject) return undefined;
+    const pictureBindings = (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []) as Array<Record<string, any>>;
+    if (pictureBindings.some(binding => binding?.sourceNode?.projectId === canvasId && String(binding.sourceNode?.nodeId || "") === nodeId)) return undefined;
+    const purpose = kind === "scene" ? "environment" : kind === "prop" ? "prop" : "identity";
+    const purposeIndex = pictureBindings.findIndex(binding => Array.isArray(binding?.provides) && binding.provides.map(String).includes(purpose));
+    const index = purposeIndex >= 0 ? purposeIndex : pictureBindings.length === 1 ? 0 : -1;
+    if (index < 0) return undefined;
+    const next = pictureBindings.map((binding, position) => position === index
+        ? { ...binding, sourceNode: { projectId: canvasId, nodeId }, selection: { mode: "node_selection" } }
+        : binding);
+    return { type: "upsert_director_subject" as const, subject: { ...subject, pictureBindings: next } };
+}
 export function entityNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous: EpisodeProductionData | undefined, layout: ProductionLayoutPlan): CanvasOperation[] {
     if (!data.director) return [];
     const planRows = Array.isArray(data.director.source.asset_plan) ? data.director.source.asset_plan as Array<Record<string, any>> : [];

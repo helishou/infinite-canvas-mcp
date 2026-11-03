@@ -13,22 +13,58 @@ export function WorkflowCustomFields({
     values: Record<string, unknown>;
     onChange: (id: string, value: unknown) => void;
 }) {
+    const visible = fields.filter((field) => !["image", "audio", "video"].includes(field.type));
     return (
         <div className="space-y-3">
-            {fields.filter((field) => !["image", "audio", "video"].includes(field.type)).map((field) => (
-                <CustomFieldInput key={field.id} field={field} value={values[field.id]} onChange={(value) => onChange(field.id, value)} />
+            {labelWorkflowFields(visible).map(({ field, label }) => (
+                <CustomFieldInput key={field.id} field={field} label={label} value={values[field.id]} onChange={(value) => onChange(field.id, value)} />
             ))}
         </div>
     );
 }
 
-function CustomFieldInput({ field, value, onChange }: { field: WorkflowField; value: unknown; onChange: (value: unknown) => void }) {
-    const label = <span className="mb-1.5 block text-sm font-semibold">{field.name}</span>;
+/**
+ * 工作流里常见多个节点导出同名输入（例如每个文本节点都有一个 Text1），
+ * 直接显示 field.name 会出现一列重复标题，分不清改的是哪个。同名的补上「节点.输入」后缀。
+ */
+export function labelWorkflowFields(fields: WorkflowField[]): Array<{ field: WorkflowField; label: string }> {
+    const counts = new Map<string, number>();
+    for (const field of fields) {
+        const name = fieldTitle(field);
+        counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const seen = new Map<string, number>();
+    return fields.map((field) => {
+        const name = fieldTitle(field);
+        if ((counts.get(name) || 0) <= 1) return { field, label: name };
+        const order = (seen.get(name) || 0) + 1;
+        seen.set(name, order);
+        const suffix = field.node && field.input ? `${field.node}.${field.input}` : `#${order}`;
+        return { field, label: `${name} · ${suffix}` };
+    });
+}
+
+function fieldTitle(field: WorkflowField): string {
+    return String(field.name || field.input || field.id).trim();
+}
+
+/** 数值回显：去掉 0.5000000000000001 这类浮点噪声，同时保留有意义的小数位。 */
+export function formatFieldNumber(value: unknown): string {
+    if (value === undefined || value === null || value === "") return "";
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return String(value);
+    if (Number.isInteger(parsed)) return String(parsed);
+    const rounded = Number(parsed.toPrecision(6));
+    return String(rounded);
+}
+
+function CustomFieldInput({ field, label, value, onChange }: { field: WorkflowField; label: string; value: unknown; onChange: (value: unknown) => void }) {
+    const caption = <span className="mb-1.5 block text-sm font-semibold">{label}</span>;
     switch (field.type) {
         case "boolean":
             return (
                 <label className="flex cursor-pointer items-center justify-between gap-3">
-                    <span className="text-sm font-semibold">{field.name}</span>
+                    <span className="text-sm font-semibold">{label}</span>
                     <Switch checked={value === true} onChange={(checked) => onChange(checked)} />
                 </label>
             );
@@ -37,7 +73,7 @@ function CustomFieldInput({ field, value, onChange }: { field: WorkflowField; va
             const current = options.includes(String(value ?? "")) ? String(value ?? "") : options[0] ?? "";
             return (
                 <label className="block">
-                    {label}
+                    {caption}
                     <Select
                         value={current || undefined}
                         onChange={(next) => onChange(next)}
@@ -52,10 +88,10 @@ function CustomFieldInput({ field, value, onChange }: { field: WorkflowField; va
         case "slider":
             return (
                 <label className="block">
-                    {label}
+                    {caption}
                     <Input
                         type="number"
-                        value={value === undefined || value === null ? "" : String(value)}
+                        value={formatFieldNumber(value)}
                         min={field.min}
                         max={field.max}
                         step={field.step}
@@ -67,7 +103,7 @@ function CustomFieldInput({ field, value, onChange }: { field: WorkflowField; va
         default:
             return (
                 <label className="block">
-                    {label}
+                    {caption}
                     <Input value={value === undefined || value === null ? "" : String(value)} onChange={(event) => onChange(event.target.value)} />
                 </label>
             );

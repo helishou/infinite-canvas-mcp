@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CanvasTextDispatcher, requestOpenAiText } from "./text-dispatcher.js";
+import { CanvasTextDispatcher, requestOpenAiText, resolveTextProvider } from "./text-dispatcher.js";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 
@@ -39,6 +39,8 @@ test("OpenAI Responses 请求携带参考图并解析 output_text", async () => 
     }) as typeof fetch;
     try {
         const result = await requestOpenAiText({
+            id: "test::gpt-5-5",
+            name: "Test / gpt-5-5",
             baseUrl: "http://127.0.0.1:8000/v1",
             apiKey: "test-key",
             apiFormat: "openai",
@@ -65,12 +67,60 @@ test("Responses 不可用时回退 Chat Completions", async () => {
         return new Response(JSON.stringify({ choices: [{ message: { content: "回退成功" } }] }), { status: 200 });
     }) as typeof fetch;
     try {
-        const result = await requestOpenAiText({ baseUrl: "http://127.0.0.1:8000", apiKey: "test-key", apiFormat: "openai", model: "gpt-5-5", systemPrompt: "", reasoningEffort: "auto" }, "分析", []);
+        const result = await requestOpenAiText({ id: "test::gpt-5-5", name: "Test / gpt-5-5", baseUrl: "http://127.0.0.1:8000", apiKey: "test-key", apiFormat: "openai", model: "gpt-5-5", systemPrompt: "", reasoningEffort: "auto" }, "分析", []);
         assert.equal(result, "回退成功");
         assert.deepEqual(seen, ["http://127.0.0.1:8000/v1/responses", "http://127.0.0.1:8000/v1/chat/completions"]);
     } finally {
         globalThis.fetch = originalFetch;
     }
+});
+
+test("文本渠道解析透传视觉声明与稳定标识", () => {
+    const aiConfig = { channels: [{
+        id: "c1", name: "主渠道", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "k", apiFormat: "openai",
+        models: [
+            { name: "vision-model", capability: "text", supportsImages: true },
+            { name: "text-model", capability: "text", supportsImages: false },
+            { name: "auto-model", capability: "text" },
+        ],
+    }] };
+    const vision = resolveTextProvider(aiConfig, "c1::vision-model");
+    assert.equal(vision.id, "c1::vision-model");
+    assert.equal(vision.name, "主渠道 / vision-model");
+    assert.equal(vision.supportsImages, true);
+    assert.equal(resolveTextProvider(aiConfig, "c1::text-model").supportsImages, false);
+    assert.equal("supportsImages" in resolveTextProvider(aiConfig, "c1::auto-model"), false, "未声明时保持自动探测");
+});
+
+test("渠道声明仅文本时，带图文本任务在请求模型前失败", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+    let calls = 0;
+    let task: any;
+    const project = { id: "p", revision: 1, nodes: [{ id: "source", type: "config", metadata: {} }], connections: [] };
+    const stores: any = {
+        tasks: {
+            get: (id: string) => id === task?.id ? task : undefined,
+            list: () => [],
+            create: (id: string, kind: string, input: unknown, params: unknown) => { task = { id, kind, input, params, status: "queued", progress: 0, createdAt: "", updatedAt: "" }; return task; },
+            update: (_id: string, patch: Record<string, unknown>) => { task = { ...task, ...patch }; return task; },
+            addEvent: () => undefined,
+        },
+        settings: { get: () => ({ channels: [{ id: "c", name: "C", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "k", apiFormat: "openai", models: [{ name: "mystery-model", capability: "text", supportsImages: false }] }] }) },
+        projects: { get: () => project, applyOperations: () => project },
+        media: {
+            meta: () => ({ storageKey: "image:ref" }),
+            read: async () => png,
+            store: () => { throw new Error("已有存储的参考图不应重新入库"); },
+            url: () => "/media/ref",
+        },
+    };
+    const dispatcher = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async () => { calls++; return "不应调用"; });
+    dispatcher.start({ projectId: "p", nodeId: "source", model: "c::mystery-model", prompt: "看图", clientTaskId: "blocked-image", references: [{ storageKey: "image:ref", name: "ref.png", mimeType: "image/png" }] });
+    for (let index = 0; index < 100 && !["succeeded", "failed"].includes(task?.status); index += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(task.status, "failed");
+    assert.match(task.error, /不支持图片输入/);
+    assert.match(task.error, /标记为支持图片/);
+    assert.equal(calls, 0, "确认不支持时不得发出带图请求");
 });
 
 test("文本任务完成后原子追加结果节点并连接源配置节点", async () => {

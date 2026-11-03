@@ -32,6 +32,8 @@ export type ChannelModel = {
     name: string;
     capability: ModelCapability;
     script?: string;
+    /** 文本模型是否支持图片输入；缺省表示自动探测，true/false 为显式声明。 */
+    supportsImages?: boolean;
     /** ComfyUI 渠道：该模型对外暴露时可用的工作流（可挂多个）。 */
     workflows?: string[];
     /** ComfyUI 渠道：三种输入场景分别走哪个工作流；未配置的场景回退到第一个工作流。 */
@@ -549,7 +551,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const workflowRouting = typeof item === "string" ? undefined : normalizeWorkflowRouting(item.workflowRouting, workflows);
         const workflowParams = typeof item === "string" ? undefined : normalizeModelWorkflowParams(item.workflowParams, workflows, workflowRouting);
         const workflowBindings = typeof item === "string" ? undefined : normalizeWorkflowBindings(item.workflowBindings);
-        result.push({ name, capability, script, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
+        const supportsImages = typeof item === "string" ? undefined : item.supportsImages;
+        result.push({ name, capability, script, ...(supportsImages === undefined ? {} : { supportsImages }), ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
     }
     return result;
 }

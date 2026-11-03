@@ -73,20 +73,44 @@ export function convertComfyWorkflowToApi(value: unknown): Record<string, unknow
   const nodeById = new Map(nodes.filter((node): node is Row => Boolean(node && node.id !== undefined)).map((node) => [String(node.id), node]));
   const incoming = new Map<string, { originId: string; originSlot: number; targetId: string; targetSlot: number }>();
   for (const link of links.values()) incoming.set(`${link.targetId}:${link.targetSlot}`, link);
-  const resolveSource = (originId: string, originSlot: number, visited = new Set<string>()): [string, number] | null => {
+  // Compile from the authoritative source on demand; do not persist a prompt cache.
+  const routeName = (node: Row): string => {
+    const named = row(node.widgets_values_named);
+    const value = named && Object.hasOwn(named, "Constant")
+      ? named.Constant : Array.isArray(node.widgets_values) ? node.widgets_values[0] : undefined;
+    if (typeof value !== "string" || !value.trim()) throw new Error(`${node.type} ${node.id} 缺少有效的 Constant 名称`);
+    return value;
+  };
+  const setters = new Map<string, Row[]>();
+  for (const node of nodes) {
+    if (!node || node.type !== "SetNode" || isDisabled(node)) continue;
+    const name = routeName(node);
+    setters.set(name, [...(setters.get(name) || []), node]);
+  }
+  const resolveSource = (originId: string, originSlot: number, visited = new Set<string>(), namedRoute = false): [string, number] | null => {
     const source = nodeById.get(originId);
     if (!source) return [originId, originSlot];
     if (!isRoutingNode(source)) return [originId, originSlot];
-    if (visited.has(originId)) return null; // 循环，放弃透传
+    if (visited.has(originId)) throw new Error(`ComfyUI 路由循环：${[...visited, originId].join(" → ")}`);
     visited.add(originId);
+    if (source.type === "GetNode" && !isBypassed(source)) {
+      const name = routeName(source);
+      const matches = setters.get(name) || [];
+      if (matches.length !== 1) throw new Error(`GetNode ${originId} (${name}) ${matches.length ? `匹配多个 SetNode：${matches.map((node) => node.id).join(", ")}` : "缺少匹配的 SetNode"}`);
+      return resolveSource(String(matches[0].id), 0, visited, true);
+    }
+    namedRoute ||= source.type === "SetNode";
     // bypass 节点只透传第一个输入到第一个输出，其他槽位不透传
     if (isBypassed(source) && originSlot !== 0) return [originId, originSlot];
     const rerouteInput = (Array.isArray(source.inputs) ? source.inputs : []).find((input: Row, index: number) => Number(input?.slot_index ?? input?.slotIndex ?? index) === (isBypassed(source) ? 0 : originSlot));
     const upstream = rerouteInput?.link !== null && rerouteInput?.link !== undefined
       ? links.get(String(rerouteInput.link))
       : incoming.get(`${originId}:${originSlot}`);
-    if (!upstream) return null; // 上游缺失，放弃透传，保留原节点引用
-    return resolveSource(upstream.originId, upstream.originSlot, visited);
+    if (!upstream) {
+      if (namedRoute) throw new Error(`SetNode/GetNode 路由 ${originId} 缺少上游连线`);
+      return null;
+    }
+    return resolveSource(upstream.originId, upstream.originSlot, visited, namedRoute);
   };
   for (const node of nodes) {
     if (!node || node.id === undefined || typeof node.type !== "string" || !node.type) continue;

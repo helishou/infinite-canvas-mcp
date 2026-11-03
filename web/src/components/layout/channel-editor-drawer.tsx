@@ -64,6 +64,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
+    const setSupportsImages = (name: string, value: "auto" | "yes" | "no") => setModels(draft.models.map((model) => (model.name === name ? { ...model, supportsImages: value === "auto" ? undefined : value === "yes" } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
 
@@ -146,6 +147,20 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                                     </span>
                                 ) : null}
                                 <div className="flex shrink-0 items-center gap-2">
+                                    {!isCodex && model.capability === "text" && (
+                                        <Tooltip title={t("config.channelEditor.visionHint")}>
+                                            <Segmented
+                                                size="small"
+                                                value={model.supportsImages === true ? "yes" : model.supportsImages === false ? "no" : "auto"}
+                                                options={[
+                                                    { label: t("config.channelEditor.visionAuto"), value: "auto" },
+                                                    { label: t("config.channelEditor.visionSupported"), value: "yes" },
+                                                    { label: t("config.channelEditor.visionUnsupported"), value: "no" },
+                                                ]}
+                                                onChange={(value) => setSupportsImages(model.name, value as "auto" | "yes" | "no")}
+                                            />
+                                        </Tooltip>
+                                    )}
                                     <Segmented size="small" value={model.capability} options={isCodex ? capabilityOptions.filter(option => option.value === "text") : capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
                                     {!isCodex && <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
                                         {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}

@@ -1616,6 +1616,10 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
             scriptReady: "脚本已设",
             script: "调用脚本",
             empty: "点击「选择模型」拉取或手动增加模型。",
+            visionAuto: "自动",
+            visionSupported: "支持图片",
+            visionUnsupported: "仅文本",
+            visionHint: "文本模型是否能接收图片。自动会按模型名和一次小图探测判断；确认不支持时才会提示并中止带图请求。",
             capabilities: {
                 image: "生图",
                 video: "视频",

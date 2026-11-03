@@ -3,7 +3,7 @@ import { Alert, App, Button, Empty, Input, Modal, Progress, Segmented, Skeleton,
 import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { fetchProductionCanvasContext } from "@/services/backend-api";
+import { fetchProductionCanvasContext, BackendApiError } from "@/services/backend-api";
 import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
@@ -94,6 +94,11 @@ function HomeWorkbench() {
                     }
                 } catch (error) {
                     if (requestId !== openDestinationRequest.current) return;
+                    // 画布不存在（404）时按普通画布处理，继续导航，避免“新建画布”等入口被阻断
+                    if (error instanceof BackendApiError && error.status === 404) {
+                        openInOverlay();
+                        return;
+                    }
                     message.error(error instanceof Error ? error.message : String(error));
                     return;
                 }

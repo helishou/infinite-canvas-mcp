@@ -8,7 +8,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { AGENT_PROMPT } from "../config.js";
 import type { AgentAttachment, AgentEmit } from "./types.js";
-import { configuredLlmProviders, resolveLlmProvider, requestLlm, textOf, llmHistoryForProvider, expandImageRefs, type Json, type LlmMessage, type LlmPart, type LlmTool } from "./llm-provider.js";
+import { configuredLlmProviders, resolveLlmProvider, requestLlm, textOf, llmHistoryForProvider, expandImageRefs, IMAGE_TOOL_NAME, type Json, type LlmMessage, type LlmPart, type LlmTool } from "./llm-provider.js";
+import { normalizeImageDataUrl } from "./image-input.js";
+import { ensureImageSupport, hasImageParts } from "./vision-capability.js";
 
 export type LlmSettings = { get(key: string): unknown; set(key: string, value: unknown): void };
 type ChatMessage = { id: string; itemId: string; threadId: string; turnId: string; role: "user" | "assistant" | "tool" | "error"; title?: string; text: string; detail?: unknown };
@@ -18,7 +20,7 @@ export const isLlmThread = (id: string) => id.startsWith("llm-");
 const threadKey = (id: string) => `agent.llm.thread:${id}`;
 const userSkills = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills");
 const readTool: LlmTool = { name: "agent_read_file", description: "读取当前工作空间或已登记 Skill 的 UTF-8 文件；学习 SKILL.md 中引用的模块和合同。", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false } };
-const imageTool: LlmTool = { name: "agent_view_image", description: "实际查看 Backend 归档图片。先从画布、资产或制作工具回包获取真实 storageKey，再调用本工具；不要从文件名或 URL 猜图片内容。", inputSchema: { type: "object", properties: { storageKey: { type: "string" } }, required: ["storageKey"], additionalProperties: false } };
+const imageTool: LlmTool = { name: IMAGE_TOOL_NAME, description: "实际查看 Backend 归档图片。先从画布、资产或制作工具回包获取真实 storageKey，再调用本工具；不要从文件名或 URL 猜图片内容。", inputSchema: { type: "object", properties: { storageKey: { type: "string" } }, required: ["storageKey"], additionalProperties: false } };
 
 /** API-backed conversations reuse Backend settings, channel credentials and the authoritative MCP. */
 export class LlmAgent {
@@ -80,14 +82,14 @@ export class LlmAgent {
     /** storageKey → 数据 URL 的进程内缓存：同一轮里模型多次回看同一张图不再重复下载。 */
     private mediaDataUrls = new Map<string, string>();
 
-    /** 取回归档媒体为数据 URL（历史里只存 storageKey，不存 base64）。 */
+    /** 取回归档媒体为数据 URL（历史里只存 storageKey，不存 base64），并在出口统一归一化。 */
     private async dataUrlFor(storageKey: string, signal?: AbortSignal): Promise<string> {
         const cached = this.mediaDataUrls.get(storageKey);
         if (cached) return cached;
         const response = await fetch(new URL(`/media/${encodeURIComponent(storageKey)}`, this.backendUrl), { headers: { authorization: `Bearer ${this.backendToken}` }, signal });
         if (!response.ok) { await response.body?.cancel(); throw new Error(`归档媒体不可读：${storageKey}`); }
         const mimeType = response.headers.get("content-type")?.split(";")[0] || "application/octet-stream";
-        const dataUrl = `data:${mimeType};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`;
+        const dataUrl = await normalizeImageDataUrl(`data:${mimeType};base64,${Buffer.from(await response.arrayBuffer()).toString("base64")}`);
         this.mediaDataUrls.set(storageKey, dataUrl);
         return dataUrl;
     }
@@ -100,28 +102,31 @@ export class LlmAgent {
         const parts: LlmPart[] = [];
         for (const item of attachments) {
             if (!item.dataUrl) continue;
+            // 上传前归一化：入库的字节与模型实际收到的字节保持一致，历史回看也不会再放大。
+            const dataUrl = await normalizeImageDataUrl(item.dataUrl);
             try {
                 const response = await fetch(new URL("/media/upload", this.backendUrl), {
                     method: "POST",
                     headers: { authorization: `Bearer ${this.backendToken}`, "content-type": "application/json" },
-                    body: JSON.stringify({ dataUrl: item.dataUrl, name: item.name || "attachment.png", category: "input", width: item.width ?? null, height: item.height ?? null }),
+                    body: JSON.stringify({ dataUrl, name: item.name || "attachment.png", category: "input", width: item.width ?? null, height: item.height ?? null }),
                 });
                 const payload = response.ok ? await response.json() as { media?: { storageKey?: string } } : undefined;
                 if (!response.ok) await response.body?.cancel();
                 const storageKey = payload?.media?.storageKey;
-                if (storageKey) { this.mediaDataUrls.set(storageKey, item.dataUrl); parts.push({ imageRef: storageKey }); continue; }
+                if (storageKey) { this.mediaDataUrls.set(storageKey, dataUrl); parts.push({ imageRef: storageKey }); continue; }
             } catch { /* 落库失败按内联处理 */ }
-            parts.push({ image: item.dataUrl });
+            parts.push({ image: dataUrl });
         }
         return parts;
     }
     /**
      * 工具返回的图片：能对上 storageKey 就只留引用（字节已在媒体库里），否则退回内联 base64。
+     * 两种去向都先归一化，避免工具回包的原图直接撑大上下文。
      */
-    private toolImageParts(callName: string, input: Json, images: Json[]): LlmPart[] {
+    private async toolImageParts(callName: string, input: Json, images: Json[]): Promise<LlmPart[]> {
         const parts: LlmPart[] = [];
         for (const image of images) {
-            const dataUrl = `data:${image.mimeType};base64,${image.data}`;
+            const dataUrl = await normalizeImageDataUrl(`data:${image.mimeType};base64,${image.data}`);
             const storageKey = callName === imageTool.name ? String(input.storageKey || "") : "";
             if (storageKey) { this.mediaDataUrls.set(storageKey, dataUrl); parts.push({ imageRef: storageKey }); }
             else parts.push({ image: dataUrl });
@@ -248,7 +253,9 @@ export class LlmAgent {
             while (true) {
                 controller.signal.throwIfAborted();
                 const itemId = crypto.randomUUID();
-                const reply = await requestLlm(provider, instructions, llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key, controller.signal)), provider), tools, controller.signal, delta => event("item.updated", { item: { id: itemId, type: "agent_message", delta, model: provider.name } }), options.effort);
+                const history = llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key, controller.signal)), provider);
+                if (hasImageParts(history)) await ensureImageSupport(provider, controller.signal);
+                const reply = await requestLlm(provider, instructions, history, tools, controller.signal, delta => event("item.updated", { item: { id: itemId, type: "agent_message", delta, model: provider.name } }), options.effort);
                 controller.signal.throwIfAborted();
                 const message = reply.message;
                 turn.messages.push(message);
@@ -300,7 +307,7 @@ export class LlmAgent {
                     const images = content.filter(item => item.type === "image" && item.data && item.mimeType);
                     const modelResult = images.length ? { ...toolResult, content: content.map(item => item.type === "image" ? { type: "text", text: "工具图片已作为下一条视觉输入传入" } : item) } : result;
                     turn.messages.push({ role: "tool", callId: call.id, callName: call.name, parts: [{ text: JSON.stringify(modelResult) }] });
-                    toolImages.push(...this.toolImageParts(call.name, input, images));
+                    toolImages.push(...await this.toolImageParts(call.name, input, images));
                     const completed = { ...item, status: toolResult?.isError ? "failed" : "completed", result: modelResult, toolCharacters: { input: countCharacters(call.arguments), output: countCharacters(serializeToolValue(modelResult)) } };
                     turn.display.push(this.display(thread.id, turn.id, call.id, "tool", call.name, call.name, completed));
                     this.save(thread); event("item.completed", { item: completed });
@@ -349,7 +356,7 @@ export class LlmAgent {
             return { threadId, output: parseOutput(textOf(turn.messages.at(-1)!)) };
         }
         const provider = resolveLlmProvider(this.settings.get("ai.config"), request.model || thread.model);
-        const images = await Promise.all((request.images || []).map(async file => ({ image: `data:${/\.jpe?g$/i.test(file) ? "image/jpeg" : /\.webp$/i.test(file) ? "image/webp" : "image/png"};base64,${(await fs.readFile(file)).toString("base64")}` })));
+        const images = await Promise.all((request.images || []).map(async file => ({ image: await normalizeImageDataUrl(`data:${/\.jpe?g$/i.test(file) ? "image/jpeg" : /\.webp$/i.test(file) ? "image/webp" : "image/png"};base64,${(await fs.readFile(file)).toString("base64")}`) })));
         const controller = new AbortController();
         if (this.controllers.has(threadId)) throw new Error("当前 Agent 对话已有运行中的任务");
         this.controllers.set(threadId, controller);
@@ -359,7 +366,9 @@ export class LlmAgent {
         try {
             this.save(thread); request.onTurn?.(turn.id);
             while (true) {
-                const reply = await requestLlm(provider, `按用户提供的正式合同返回结构化结果；需要先读取 Skill 文件。只读文件，不执行命令，不提交媒体、不写业务数据。最终回复必须是严格 JSON，不使用代码块。结果必须符合 JSON Schema：\n${JSON.stringify(request.schema)}`, llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key)), provider), [readTool], controller.signal, undefined, request.effort);
+                const history = llmHistoryForProvider(await expandImageRefs(thread.turns.flatMap(turn => turn.messages), key => this.dataUrlFor(key)), provider);
+                if (hasImageParts(history)) await ensureImageSupport(provider, controller.signal);
+                const reply = await requestLlm(provider, `按用户提供的正式合同返回结构化结果；需要先读取 Skill 文件。只读文件，不执行命令，不提交媒体、不写业务数据。最终回复必须是严格 JSON，不使用代码块。结果必须符合 JSON Schema：\n${JSON.stringify(request.schema)}`, history, [readTool], controller.signal, undefined, request.effort);
                 controller.signal.throwIfAborted(); turn.messages.push(reply.message); this.save(thread);
                 if (!reply.message.calls?.length) {
                     const output = parseOutput(textOf(reply.message));

@@ -315,10 +315,31 @@ function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionDat
     if (!nodeId) return false;
     return Boolean(referenceNodeId === nodeId && (!storageKey || referenceStorageKey === storageKey));
 }
+function formalSubjectIndexes(subjects: Array<Record<string, any>>) {
+    const subjectsById = new Map(subjects.map(subject => [String(subject.id || ""), subject]));
+    const subjectIdsBySourceNode = new Map<string, Set<string>>();
+    for (const subject of subjects) for (const binding of (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).map(object)) {
+        const subjectId = String(subject.id || ""), sourceIds = [String(object(binding.sourceNode).nodeId || "").trim(), String(object(subject.entityRef).id || "").trim()];
+        if (!subjectId) continue;
+        for (const sourceId of new Set(sourceIds.filter(Boolean))) {
+            const ids = subjectIdsBySourceNode.get(sourceId) || new Set<string>();
+            ids.add(subjectId);
+            subjectIdsBySourceNode.set(sourceId, ids);
+        }
+    }
+    return { subjectsById, subjectIdsBySourceNode };
+}
+function formalSubjectIdForCharacterGroup(value: unknown, subjectsById: Map<string, Record<string, any>>, subjectIdsBySourceNode: Map<string, Set<string>>) {
+    const characterGroup = object(value), subjectId = String(characterGroup.subjectId || "").trim();
+    if (subjectsById.has(subjectId)) return subjectId;
+    const nodeId = String(characterGroup.characterNodeId || "").trim();
+    const candidates = subjectIdsBySourceNode.get(nodeId);
+    return candidates?.size === 1 ? [...candidates][0] : "";
+}
 function reconcileSubjectImageReferences(segment: Record<string, any>, director: NonNullable<EpisodeProductionData["director"]>, group: EpisodeProductionData["clipGroups"][number], compiledBindings?: unknown) {
     if (!isSubjectPromptAssembly(director.source)) return;
     const subjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []).map(object);
-    const subjectsById = new Map(subjects.map(subject => [String(subject.id || ""), subject]));
+    const { subjectsById, subjectIdsBySourceNode } = formalSubjectIndexes(subjects);
     const bindingsById = new Map<string, { subjectId: string; binding: Record<string, any> }>();
     const bindingsByNodeId = new Map<string, { subjectId: string; binding: Record<string, any> }[]>();
     for (const subject of subjects) for (const binding of (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).map(object)) {
@@ -370,10 +391,13 @@ function reconcileSubjectImageReferences(segment: Record<string, any>, director:
     const groups = reconcileCharacterGroupOutfitSelection(segment.h3CharacterGroups, compiledBindings ?? segment.referenceBindings) as Record<string, any>;
     segment.h3CharacterGroups = groups;
     for (const [id, value] of Object.entries(groups)) {
-        const characterGroup = object(value), subjectId = String(characterGroup.subjectId || "");
-        if (subjectId && subjectsById.has(subjectId) && !visuallyUsedSubjectIds.has(subjectId) && characterGroup.outfitEnabled !== false) {
-            groups[id] = { ...characterGroup, outfitEnabled: false };
-        }
+        const characterGroup = object(value);
+        const subjectId = formalSubjectIdForCharacterGroup(characterGroup, subjectsById, subjectIdsBySourceNode);
+        if (!subjectId) continue;
+        const normalized = String(characterGroup.subjectId || "") === subjectId ? characterGroup : { ...characterGroup, subjectId };
+        groups[id] = !visuallyUsedSubjectIds.has(subjectId) && normalized.outfitEnabled !== false
+            ? { ...normalized, outfitEnabled: false }
+            : normalized;
     }
 }
 export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>) {
@@ -720,8 +744,12 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const merged = mergeDirectorInput(existing, segment, baseline, groups);
             const mergedSegment = merged.merged;
             const preserveManualCharacterGroups = merged.manualFields.includes("h3CharacterGroups");
-            const hasManualCharacterGroups = Object.hasOwn(mergedSegment, "h3CharacterGroups");
-            const manualCharacterGroups = preserveManualCharacterGroups && hasManualCharacterGroups ? structuredClone(mergedSegment.h3CharacterGroups) : undefined;
+            const rawCharacterGroups = object(mergedSegment.h3CharacterGroups);
+            // Source-backed groups follow formal Subject/Shot usage; preserve only
+            // groups that have no exact identity link into the production registry.
+            const manualCharacterGroups = preserveManualCharacterGroups
+                ? Object.fromEntries(Object.entries(rawCharacterGroups).filter(([, value]) => !isFormalCharacterGroup(value)))
+                : undefined;
             // A successfully applied fresh H3 compilation owns the Prompt field.
             // Other Clip inputs still use the normal three-way merge, but an old
             // translated or hand-edited canvas Prompt must not block the new artifact.
@@ -734,7 +762,10 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             }
             reconcileSubjectImageReferences(mergedSegment, data.director!, group, segment.referenceBindings);
             if (preserveManualCharacterGroups) {
-                if (hasManualCharacterGroups) mergedSegment.h3CharacterGroups = manualCharacterGroups;
+                const reconciledGroups = object(mergedSegment.h3CharacterGroups);
+                const formalGroups = Object.fromEntries(Object.entries(reconciledGroups).filter(([, value]) => isFormalCharacterGroup(value)));
+                const nextGroups = { ...formalGroups, ...(manualCharacterGroups || {}) };
+                if (Object.keys(nextGroups).length) mergedSegment.h3CharacterGroups = nextGroups;
                 else delete mergedSegment.h3CharacterGroups;
             }
             if (overwriteCompiledPrompt) {
@@ -815,14 +846,49 @@ function emptyProductionClip(project: Record<string, any>, data: EpisodeProducti
         return Number(data.shots.find(item => item.id === shot.id)?.duration || 0);
     };
     const storyboardShots = shots.map(shot => ({ id: String(shot.id), duration: durationOf(shot) }));
-    const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(sourceSegment.mode)] || "ref2va";
+    const sourceSubjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []).map(object);
+    const { subjectsById, subjectIdsBySourceNode } = formalSubjectIndexes(sourceSubjects);
+    const presentationsBySubject = new Map<string, Set<string>>();
+    for (const shot of shots) for (const usage of (Array.isArray(shot.subject_usages) ? shot.subject_usages : []).map(object)) {
+        const subjectId = String(usage.subjectId || "");
+        if (!subjectsById.has(subjectId)) continue;
+        const presentations = presentationsBySubject.get(subjectId) || new Set<string>();
+        presentations.add(String(usage.presentation || ""));
+        presentationsBySubject.set(subjectId, presentations);
+    }
     const node = (project.nodes || []).find((item: Record<string, any>) => item.id === group.nodeId);
+    // A Clip inserted into an established scene node must inherit the scene's
+    // execution context from sibling rows: a bare empty row (no bindings, no
+    // character groups, default mode) compiles to an empty prompt and forces
+    // every workflow to re-bind the Clip by hand. Only formal-source derived
+    // mode overrides the sibling-inherited mode; role/usage-based scene and
+    // environment bindings are shared, shot-specific storyboard bindings are not.
+    const siblings = (Array.isArray((node?.metadata as Record<string, any> | undefined)?.segments)
+        ? (node?.metadata as Record<string, any>).segments : []).map((item: Record<string, any>) => object(item)).filter((item: Record<string, any>) => item.id !== segmentId);
+    const inheritedMode = siblings.map((item: Record<string, any>) => String(item.taskMode ?? item.mode ?? "")).find((mode: string) => ["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(mode)) || "";
+    const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(sourceSegment.mode)]
+        || (inheritedMode || "ref2va");
+    const inheritedBindings = siblings.flatMap((item: Record<string, any>) => (Array.isArray(item.referenceBindings) ? (item.referenceBindings as Array<Record<string, any>>).map(object) : []))
+        .filter((binding: Record<string, any>) => binding.role === "scene" || (Array.isArray(binding.picturePurpose) ? binding.picturePurpose : [binding.usage]).map(String).includes("scene") || String(binding.usage || "") === "scene")
+        .filter((binding: Record<string, any>) => binding.id && binding.storageKey);
+    const inheritedGroups = siblings.map((item: Record<string, any>) => object(item.h3CharacterGroups)).find((groups: Record<string, any>) => Object.keys(groups).length) || {};
+    const scopedInheritedGroups = Object.fromEntries(Object.entries(inheritedGroups).flatMap(([id, value]) => {
+        const subjectId = formalSubjectIdForCharacterGroup(value, subjectsById, subjectIdsBySourceNode);
+        if (!subjectId) return [[id, value]];
+        const presentations = presentationsBySubject.get(subjectId);
+        if (!presentations?.has("visible") && !presentations?.has("offscreen_voice")) return [];
+        // A visible Subject inherits its outfit group; offscreen dialogue keeps
+        // voice settings but does not pull the character's image into the Clip.
+        const characterGroup: Record<string, any> = { ...object(value), subjectId };
+        if (!presentations.has("visible")) characterGroup.outfitEnabled = false;
+        return [[id, characterGroup]];
+    }));
     const segment: Record<string, any> = {
         id: segmentId, sourceShotId: group.shotIds.join("~"), title: shots.map(shot => String(shot.title || shot.id)).join(" / "),
-        duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt: "", referenceBindings: [],
+        duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0), taskMode, prompt: "", referenceBindings: structuredClone(inheritedBindings),
         storyboardModeEnabled: true, storyboardShots, tailFrameContinuation: false, motionContextEnabled: false,
         directorSourceHash: director.sourceHash, styleTemplateId: sourceSegment.styleTemplateId ?? null,
-        h3CharacterGroups: {}, aspectRatio: object(node?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
+        h3CharacterGroups: structuredClone(scopedInheritedGroups), aspectRatio: object(node?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
         modelName: object(node?.metadata).modelName || defaults.modelName || BASE_H3_NODE_METADATA.modelName,
     };
     segment.productionClipProjection = { targetId: group.id, sourceHash: director.sourceHash,

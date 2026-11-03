@@ -58,6 +58,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
     const prompt = textStatus.text;
     const editorRef = useRef<CanvasTextEditorHandle>(null);
     const [expanded, setExpanded] = useState(false);
+    const [imageCompatible, setImageCompatible] = useState(true);
     const [imagePromptRequired, setImagePromptRequired] = useState(false);
     const promptRequired = mode !== "image" || imagePromptRequired;
     const activeHistoryImage = mode === "image" && node.metadata?.activeImageHistoryExplicit === true && node.metadata?.activeImageHistoryId
@@ -81,7 +82,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
 
     const submit = () => {
         const text = prompt.trim();
-        if (!textStatus.ready || textStatus.blocked || isRunning || (promptRequired && !text)) return;
+        if (!textStatus.ready || textStatus.blocked || isRunning || (mode === 'image' && !imageCompatible) || (promptRequired && !text)) return;
         onGenerate(node.id, mode, text);
     };
 
@@ -152,6 +153,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                     layout="compact"
                     className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] items-center gap-1.5"
                     onImageSettingsOpenChange={onImageSettingsOpenChange}
+                    onImageCompatibilityChange={setImageCompatible}
                     onImagePromptRequiredChange={setImagePromptRequired}
                 />
                 <Tooltip title={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}>
@@ -160,7 +162,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                         size="small"
                         className="!grid !h-7 !w-7 !min-w-7 shrink-0 place-items-center !rounded-md !p-0"
                         danger={isRunning}
-                        disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (promptRequired && !prompt.trim()))}
+                        disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (mode === 'image' && !imageCompatible) || (promptRequired && !prompt.trim()))}
                         onClick={() => (isRunning ? onStop(node.id) : submit())}
                         aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
                     >

@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { requestCodexText } from "@basketikun/canvas-agent/agent/codex-text";
+import { normalizeImageDataUrl } from "@basketikun/canvas-agent/agent/image-input";
+import { ensureImageSupport } from "@basketikun/canvas-agent/agent/vision-capability";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { ResolvedConfig } from "../config.js";
@@ -35,12 +37,17 @@ export type CanvasTextGenerationInput = {
 
 export type TextProvider = {
     kind?: "codex-cli";
+    /** 渠道限定标识，与 Agent 侧一致：`channelId::model`。 */
+    id: string;
+    name: string;
     model: string;
     baseUrl: string;
     apiKey: string;
     apiFormat: "openai" | "openai-chat";
     systemPrompt: string;
     reasoningEffort: string;
+    /** 渠道里对该模型的显式视觉声明；缺省时由能力探测判断。 */
+    supportsImages?: boolean;
 };
 
 type TextRequest = (provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal) => Promise<string>;
@@ -64,9 +71,12 @@ export function resolveTextProvider(
     if (!channel) throw new Error(`文本模型「${model}」没有可用渠道配置`);
     const declaration = arrayRecords(channel.models).find((entry) => String(entry.name || "") === model);
     if (String(declaration?.script || "").trim()) throw new Error(`文本模型「${model}」使用浏览器自定义脚本，Backend 无头执行暂不支持该脚本`);
+    const id = `${channel.id}::${model}`;
+    const name = `${channel.name || channel.id} / ${model}`;
+    const supportsImages = typeof declaration?.supportsImages === "boolean" ? declaration.supportsImages : undefined;
     if (channel.kind === "codex-cli") {
         if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
-        return { kind: "codex-cli", model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto") };
+        return { kind: "codex-cli", id, name, model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"), ...(supportsImages === undefined ? {} : { supportsImages }) };
     }
     const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
     if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
@@ -75,12 +85,15 @@ export function resolveTextProvider(
     if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
     if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
     return {
+        id,
+        name,
         model,
         baseUrl,
         apiKey,
         apiFormat,
         systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
         reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"),
+        ...(supportsImages === undefined ? {} : { supportsImages }),
     };
 }
 
@@ -200,7 +213,9 @@ export class CanvasTextDispatcher {
 
     private async execute(input: CanvasTextGenerationInput, provider: TextProvider, task: RuntimeTask, controller: AbortController) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.05 });
-        const imageDataUrls = await Promise.all((input.references || []).map((reference) => this.referenceDataUrl(reference)));
+        // 参考图在进入模型前统一归一化（EXIF 转正、限边、限体积），与 Agent 侧共用同一实现。
+        const imageDataUrls = await Promise.all((input.references || []).map(async (reference) => normalizeImageDataUrl(await this.referenceDataUrl(reference))));
+        if (imageDataUrls.length) await ensureImageSupport(provider, controller.signal);
         const count = Math.max(1, Math.min(4, Math.floor(Number(input.count || 1))));
         const contents: string[] = [];
         for (let index = 0; index < count; index++) {

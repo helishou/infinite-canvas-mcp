@@ -245,3 +245,27 @@ test("h3_write_storyboard_prompt 拒绝写入正式制作 Clip，草稿 Clip 不
     assert.match(rejected.message, /request_director_clip_refresh|production_compile/);
     assert.equal(calls.length, 0);
 });
+
+test("绑定角色组时共享资产节点 id 自动解析为本集引用节点，不需要导入副本", async () => {
+    // 共享资产画布上的节点 id 与本节画布引用节点的 id 不同。以前只能导入一份副本，
+    // 画布上就会出现两张一模一样的参考图。现在按 sharedAssetReference 反查引用节点。
+    const { project, handlers } = fixture();
+    const template = project.nodes[1];
+    project.nodes.push({ ...structuredClone(template), id: "entity-muli", title: "慕璃",
+        metadata: { ...structuredClone(template.metadata), characterName: "慕璃", characterAssetId: "asset-muli",
+            sharedAssetReference: { dramaId: "drama-1", assetId: "AST-CHAR-MULI", sourceProjectId: "shared-canvas", sourceNodeId: "library-char-muli", writeThrough: true } } });
+    const result: any = await handlers.h3_bind_existing_character_groups!({ projectId: project.id, nodeId: "h3-1", segmentId: "s2",
+        characters: [{ characterNodeId: "library-char-muli", subjectId: "muli", selectedOutfitStorageKeys: ["image:1"] }] });
+    assert.equal(result.groups[0].characterNodeId, "entity-muli");
+    const group = Object.values(project.nodes[0].metadata.segments[1].h3CharacterGroups)[0] as any;
+    assert.equal(group.characterNodeId, "entity-muli");
+    assert.ok(project.connections.some((connection: any) => connection.fromNodeId === "entity-muli" && connection.toNodeId === "h3-1"));
+    assert.equal(project.nodes.some((node: any) => node.id === "library-char-muli"), false, "不允许为了复用资产而造本地副本");
+});
+
+test("找不到角色节点时报错并指向 production sync，而不是让调用方导入副本", async () => {
+    const { calls, handlers } = fixture();
+    await assert.rejects(handlers.h3_bind_existing_character_groups!({ projectId: "project-1", nodeId: "h3-1", segmentId: "s2",
+        characters: [{ characterNodeId: "library-char-unknown" }] }), /production sync/);
+    assert.equal(calls.length, 0);
+});

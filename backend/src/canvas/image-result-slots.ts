@@ -85,23 +85,28 @@ export function completedImageSlots(metadata: Record<string, any>, ids: string[]
     const completedIds = new Set<string>();
     const keptImages: Array<Record<string, unknown>> = [];
     const oldImages: Array<Record<string, unknown>> = Array.isArray(metadata.images) ? metadata.images : [];
+    const hasImageIds = media.some((item) => item.imageId);
     for (const image of oldImages) {
         const index = ids.indexOf(String(image.id));
         if (index < 0) {
-            keptImages.push(image);
+            // Extra outputs have deterministic IDs; rebuild them on replay instead of duplicating.
+            const replayedExtra = generationTaskId && ids.some(id => String(image.id).startsWith(`${id}:output:${generationTaskId}:`));
+            if (!replayedExtra) keptImages.push(image);
             continue;
         }
-        const output = media.some((item) => item.imageId) ? media.find((item) => item.imageId === image.id) : media[index];
-        if (!output?.url) {
-            // 槽位失败直接清出，不在历史里留下占位卡片。
-            continue;
-        }
-        completedIds.add(String(image.id));
-        const generationOutputIndex = media.indexOf(output);
-        keptImages.push({ ...image, status: "success", errorDetails: undefined, content: output.url,
-            storageKey: output.storageKey, naturalWidth: output.width, naturalHeight: output.height,
-            bytes: output.bytes, mimeType: output.mimeType || "image/png", ...(generationTaskId ? { generationTaskId } : {}),
-            ...(generationTaskSequence !== undefined ? { generationTaskSequence } : {}), ...(generationOutputIndex >= 0 ? { generationOutputIndex } : {}) });
+        // One invocation / reserved slot can yield several output nodes or batch images.
+        // Only expand an existing slot: a remotely deleted slot must stay deleted.
+        const outputs = hasImageIds ? media.filter(item => item.imageId === image.id) : ids.length === 1 ? media : media.slice(index, index + 1);
+        outputs.forEach((output, outputIndex) => {
+            if (!output.url) return;
+            const id = outputIndex === 0 ? String(image.id) : `${image.id}:output:${generationTaskId || "result"}:${outputIndex}`;
+            completedIds.add(id);
+            const generationOutputIndex = media.indexOf(output);
+            keptImages.push({ ...image, id, status: "success", errorDetails: undefined, content: output.url,
+                storageKey: output.storageKey, naturalWidth: output.width, naturalHeight: output.height,
+                bytes: output.bytes, mimeType: output.mimeType || "image/png", ...(generationTaskId ? { generationTaskId } : {}),
+                ...(generationTaskSequence !== undefined ? { generationTaskSequence } : {}), ...(generationOutputIndex >= 0 ? { generationOutputIndex } : {}) });
+        });
     }
     // 批量结果保持折叠；单张自动展示。运行中选择了另一张主图时不抢回选择。
     const primaryId = metadata.primaryImageId || (keptImages.length === 1 ? keptImages[0].id : undefined);

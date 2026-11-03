@@ -5,7 +5,7 @@ export const MCP_PROFILES = ["full", "canvas", "h3", "production", "diagnostics"
 export type McpProfile = typeof MCP_PROFILES[number];
 
 // Task dependencies are explicit; unknown plugin tools remain full-only.
-const CONTEXT = ["canvas_list_projects", "canvas_get_state", "canvas_inspect", "canvas_next", "canvas_get_selection", "canvas_set_active_project", "site_navigate", "assets_list", "assets_get", "models_list", "mcp_get_command_receipt", "mcp_observability_report"];
+const CONTEXT = ["canvas_list_projects", "canvas_get_state", "canvas_inspect", "canvas_next", "canvas_get_selection", "canvas_image_ops", "canvas_set_active_project", "site_navigate", "assets_list", "assets_get", "models_list", "mcp_get_command_receipt", "mcp_observability_report"];
 const TASKS = ["canvas_task_status", "canvas_wait_tasks", "canvas_task_cancel", "canvas_h3_confirmation", "h3_get_task", "h3_cancel_task", "comfyui_get_task", "comfyui_cancel_task", "comfyui_status", "generation_get_status"];
 const REFERENCES = ["canvas_list_reference_assets", "canvas_update_reference_asset", "canvas_analyze_reference_asset", "canvas_get_storyboard_slots", "canvas_replace_storyboard_slots"];
 const PRODUCTION_READS = ["production_get", "production_get_source", "production_get_workbench", "production_get_artifact", "production_get_artifact_index", "production_get_contract", "production_get_compilation", "production_get_readiness", "production_get_canvas_context", "production_get_batch", "production_get_continuity", "production_get_scene_production", "production_get_scene", "production_list_scenes", "drama_get_episode", "drama_list_episodes", "drama_get_project"];

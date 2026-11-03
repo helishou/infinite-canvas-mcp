@@ -306,7 +306,8 @@ const shotSubjectUsageSchema = z.object({
     localNotes: z.string().optional(),
 }).strict();
 const shotKeyframeFields = {
-    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict().optional(),
+    id, assetId: id, sourceNode: z.object({ projectId: id, nodeId: id }).strict().optional()
+        .describe("当 requiredForSubmission=true 且 selection.mode=node_selection 时必须填写实际图片来源画布 projectId 与节点 nodeId；其他选择模式按其来源绑定契约处理。"),
     selection: z.discriminatedUnion("mode", [
         z.object({ mode: z.literal("node_selection") }).strict(),
         z.object({ mode: z.literal("latest_success") }).strict(),
@@ -321,7 +322,12 @@ const validateShotKeyframe = (keyframe: { anchor: string; localFrame?: number },
 // Source reads accept the old composition anchor so saved v2 productions stay readable.
 // New writes use the temporal-only schema and move composition refs to reference_requirements.
 const shotKeyframeSchema = z.object({ ...shotKeyframeFields, anchor: z.enum(["composition", "opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional() }).strict().superRefine(validateShotKeyframe);
-const shotKeyframeWriteSchema = z.object({ ...shotKeyframeFields, anchor: z.enum(["opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional() }).strict().superRefine(validateShotKeyframe);
+const shotKeyframeWriteSchema = z.object({ ...shotKeyframeFields, anchor: z.enum(["opening", "closing", "at_frame"]), localFrame: z.number().int().nonnegative().optional() }).strict().superRefine((keyframe, context) => {
+    validateShotKeyframe(keyframe, context);
+    if (keyframe.requiredForSubmission && keyframe.selection.mode === "node_selection" && !keyframe.sourceNode) {
+        context.addIssue({ code: "custom", path: ["sourceNode"], message: "必需的 node_selection 关键帧必须绑定图片来源节点 sourceNode（projectId 和 nodeId）" });
+    }
+});
 const shotReferenceRequirementSchema = z.object({
     id, asset_id: id, asset_version: id, purpose: z.string().trim().min(1),
     sourceNode: z.object({ projectId: id, nodeId: id }).strict(),
@@ -382,6 +388,23 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
     const entityOwners = new Set<string>();
     const bindingOwners = new Map<string, string>();
     const bindingIds = new Set<string>();
+    const assetPlanRows = rowsForContract(source.asset_plan);
+    const sharedSourceAssetOf = (assetId: string) => {
+        const row = assetPlanRows.find(item => String(item.asset_id || item.id || "") === assetId);
+        const shared = row?.sharedSource;
+        return shared && typeof shared === "object" ? String((shared as Record<string, unknown>).assetId || "") : "";
+    };
+    /** 该 Subject 里由共享资产来源提供的用途集合（可排除某条绑定自身）。 */
+    const sharedBackedBindingProvides = (subject: { pictureBindings: Array<Record<string, any>> }, excludeBindingId?: string) => {
+        const provides = new Set<string>();
+        for (const item of subject.pictureBindings) {
+            if (excludeBindingId && String(item.id || "") === excludeBindingId) continue;
+            const assetId = String(item.assetId || "");
+            if (!assetId || !sharedSourceAssetOf(assetId)) continue;
+            for (const value of Array.isArray(item.provides) ? item.provides : []) provides.add(String(value));
+        }
+        return provides;
+    };
     for (const [subjectIndex, subject] of subjects.entries()) {
         const entityKey = `${subject.entityRef.ownerKind}:${subject.entityRef.ownerId}:${subject.entityRef.kind}:${subject.entityRef.id}`;
         if (entityOwners.has(entityKey)) add(["subject_registry", subjectIndex, "entityRef"], "同一已登记实体只能对应一个稳定 Subject");
@@ -392,6 +415,18 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
             const path = ["subject_registry", subjectIndex, "pictureBindings", bindingIndex];
             if (bindingIds.has(binding.id)) add([...path, "id"], `重复图片绑定 ID：${binding.id}`);
             bindingIds.add(binding.id); bindingOwners.set(binding.id, subject.id);
+            // 共享资产必须只经本集引用节点接入。若同一 Subject 同时存在“共享来源绑定”和
+            // “本地绑定”（多半是本地导入的副本）且用途重叠，编译后就会出现两张一模一样的参考图。
+            // 只在该模式下报错：同一 Subject 挂多张图本身是合法的（身份/服装/尾部），
+            // 甚至允许“默认图未定”的歧义态跳过保存阻断。
+            if (binding.selection?.mode !== "selected_result") {
+                const provides = new Set((Array.isArray(binding.provides) ? binding.provides : []).map(String));
+                const ownIsShared = Boolean(sharedSourceAssetOf(String(binding.assetId || "")));
+                const othersShared = sharedBackedBindingProvides(subject, binding.id);
+                if (!ownIsShared && [...provides].some(value => othersShared.has(value))) {
+                    add([...path, "assetId"], `同一 Subject 同时存在共享来源绑定与本地绑定且用途重叠（${[...provides].join("/")}）；共享资产只保留指向本集引用节点的一条绑定`);
+                }
+            }
         }
     }
     const shotById = new Map<string, Record<string, any>>();

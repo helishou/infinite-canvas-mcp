@@ -665,3 +665,34 @@ test("a failed auto continuity check falls back to the warning-only gate instead
     const diagnostics: any[] = compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 50).items;
     assert.ok(diagnostics.some(item => item.code === "CONTINUITY_REPORT_REQUIRED" && item.severity === "warning"));
 });
+
+test("绑定诊断能发现共享资产副本、同主体重复绑定和片段重复参考", t => {
+    const { service } = fixture(t);
+    const sharedNode = { id: "entity-muli", type: "character", title: "慕璃", metadata: { sharedAssetReference: { assetId: "AST-CHAR-MULI", sourceNodeId: "library-muli" }, characterImages: [{ storageKey: "image:muli" }] } };
+    // 1) 共享资产被复制成本地图片节点
+    const copied = service.bindingIntegrityIssues({ source: { asset_plan: [], subject_registry: [] }, assets: {} } as any,
+        [sharedNode, { id: "image-copy", type: "image", title: "慕璃 · 副本", metadata: { storageKey: "image:muli" } }]);
+    assert.equal(copied.filter(item => item.code === "SHARED_ASSET_COPIED_LOCALLY").length, 1, JSON.stringify(copied));
+    // 2) 同一 Subject 两条绑定指向同一张图且用途重叠（服装变体不算）
+    const draft = { source: { asset_plan: [], subject_registry: [{ id: "SUBJ-MULI", kind: "character", pictureBindings: [
+        { id: "PB-A", storageKey: "image:muli", provides: ["identity"], selection: { mode: "latest_success" } },
+        { id: "PB-B", storageKey: "image:muli", provides: ["identity"], selection: { mode: "node_selection" } },
+        { id: "PB-COSTUME", storageKey: "image:muli", provides: ["identity"], selection: { mode: "selected_result", resultId: "r1" } },
+    ] }] }, assets: {} } as any;
+    const duplicated = service.bindingIntegrityIssues(draft, [sharedNode]).filter(item => item.code === "SUBJECT_PICTURE_DUPLICATED");
+    assert.equal(duplicated.length, 1, JSON.stringify(duplicated));
+    assert.deepEqual(duplicated[0].bindingIds, ["PB-A", "PB-B"]);
+    // 3) 同一段 Clip 里同一张图占两个 Picture 槽位
+    const segmentNode = { id: "h3-1", type: "minimax-h3", metadata: { segments: [
+        { id: "clip-same", referenceBindings: [{ id: "b1", subjectId: "S1", storageKey: "image:x" }, { id: "b2", subjectId: "S1", storageKey: "image:x" }] },
+        { id: "clip-cross", referenceBindings: [{ id: "b3", subjectId: "S1", storageKey: "image:y" }, { id: "b4", subjectId: "S2", storageKey: "image:y" }] },
+    ] } };
+    const reference = service.bindingIntegrityIssues({ source: { asset_plan: [], subject_registry: [] }, assets: {} } as any, [segmentNode]);
+    assert.ok(reference.some(item => item.code === "DUPLICATE_REFERENCE_MEDIA" && item.segmentId === "clip-same" && item.severity === "error"));
+    assert.ok(reference.some(item => item.code === "DUPLICATE_REFERENCE_MEDIA" && item.segmentId === "clip-cross" && item.severity === "warning"));
+    // 资产源头（本集生成共享资产的 config 节点）不算副本
+    assert.deepEqual(service.bindingIntegrityIssues({ source: { asset_plan: [], subject_registry: [] }, assets: {} } as any,
+        [sharedNode, { id: "config-gen", type: "config", title: "生成共享资产", metadata: { productionAssetId: "AST-CHAR-MULI", storageKey: "image:muli" } }]), []);
+    // 干净数据不报
+    assert.deepEqual(service.bindingIntegrityIssues({ source: { asset_plan: [], subject_registry: [] }, assets: {} } as any, [sharedNode]), []);
+});

@@ -48,6 +48,7 @@ import {
   detectLineInset,
   type DetectLineInsetParams,
 } from "./canvas/image-split-detect.js";
+import { runImageOps } from "./canvas/image-ops-run.js";
 import {
   CANVAS_TASKS_PATH,
   CANVAS_TASK_ROUTE,
@@ -1624,6 +1625,19 @@ export function startServer(
       }
     },
   );
+
+  /** 本地图像计算：只读媒体库图片，返回差异/主色，或把裁剪结果写回媒体库。 */
+  app.post("/canvas/image-ops", async (req, res) => {
+    try {
+      res.json(await runImageOps(stores.media, req.body || {}));
+    } catch (error) {
+      res.status(400).json({
+        ok: false,
+        code: (error as { code?: string }).code || "IMAGE_OP_FAILED",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 
   /** 代理读取媒体文件。视频必须支持 Range，浏览器才能按需缓冲和 seek，避免整段读入内存后播放卡顿。 */
   app.get("/media/:storageKey", async (req, res) => {

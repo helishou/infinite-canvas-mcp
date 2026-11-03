@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { directorModules, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { ClipRefreshCoordinator, ClipRefreshStore, clipRefreshReceipt, type ClipRefreshJob } from "./clip-refresh.js";
+import { ClipRefreshCoordinator, ClipRefreshStore, clipRefreshReceipt, retryableRefreshFailure, type ClipRefreshJob } from "./clip-refresh.js";
 
 function makeStore() {
     const db = new DatabaseSync(":memory:");
@@ -159,4 +159,93 @@ test("a parent edit operation returns one aggregated status for all its targeted
   assert.deepEqual(one.phases, { source: "saved", compilation: "succeeded", application: "ready", translation: "not_started", mediaSubmitted: false });
   assert.deepEqual(one.referenceSync.map((item: any) => item.targetId), ["CLIP_A"], "a per-Clip receipt never carries unrelated sync blockers");
  } finally { db.close(); }
+});
+
+test("只有异步校验期间的瞬时冲突才算可重排", () => {
+    assert.equal(retryableRefreshFailure(new Error("SOURCE_CHANGED_DURING_VALIDATION: 制作依赖在异步校验期间变化，请重试")), true);
+    assert.equal(retryableRefreshFailure(Object.assign(new Error("制作稿版本已变化，请核对当前版本后重试"), { current: {} })), true);
+    assert.equal(retryableRefreshFailure(Object.assign(new Error("boom"), { code: "COMPILATION_INPUT_CHANGED" })), true);
+    // 真正的校验错误必须留给用户：重排只会重复失败。
+    assert.equal(retryableRefreshFailure(new Error("缺少正式导演源稿")), false);
+    assert.equal(retryableRefreshFailure(Object.assign(new Error("path: message"), { diagnostics: [{ code: "INVALID_SUBJECT_SOURCE" }] })), false);
+});
+
+test("异步校验期间被其它编辑改写时按退避重排同一 operationId，而不是直接 failed", async () => {
+    const { db, store } = makeStore();
+    const source = director();
+    const entry = store.register("edit-conflict", 4, source, source, "CLIP_A");
+    const enqueues: string[] = [];
+    let applies = 0;
+    const service = {
+        clipRefreshStore: () => store,
+        get: () => ({ revision: 4, draft: { director: source } }),
+        resolveSubjectPictureInputs: (_id: string, value: DirectorProduction) => value,
+        targetOccupancy: () => [],
+    };
+    const compilations = {
+        enqueue: (_id: string, _owner: string, operationId: string) => { enqueues.push(operationId); return { status: "succeeded", preparedId: `prepared-${enqueues.length}` }; },
+        getCompilation: (_id: string, _owner: string, _operationId: string, view?: string) => view === "targets"
+            ? { items: [{ targetId: "CLIP_A", status: "ready" }], total: 1 }
+            : { status: "succeeded", preparedId: `prepared-${enqueues.length}` },
+        apply: () => {
+            applies++;
+            if (applies === 1) throw new Error("SOURCE_CHANGED_DURING_VALIDATION: 制作依赖在异步校验期间变化，请重试");
+            return { revision: 5, sourceHash: "b".repeat(64), referenceSync: [{ targetId: "CLIP_A", status: "ready", referenceCount: 1 }] };
+        },
+    };
+    const coordinator = new ClipRefreshCoordinator(service as any, compilations as any, "owner");
+    coordinator.wake("EP");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const retried = store.get(entry.operationId)!;
+    assert.equal(retried.status, "queued", "瞬时冲突不应落成终态 failed");
+    assert.equal(retried.attempts, 1);
+    assert.equal(retried.compileOperationId, `${entry.compilationOperationId}:r1`, "重排必须换编译 id，否则同 id 幂等重放拿不到新结果");
+    assert.equal(retried.diagnostics[0].code, "CLIP_REFRESH_RETRY_SCHEDULED");
+    assert.ok(Date.parse(retried.nextAttemptAt!) > Date.now());
+    // 退避等待期内再次唤醒不推进
+    coordinator.wake("EP");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(enqueues.length, 1);
+    // 到点后按新编译 id 重排并成功，刷新任务的 operationId 保持不变
+    const due = store.get(entry.operationId)!;
+    due.nextAttemptAt = new Date(Date.now() - 1).toISOString();
+    store.save(due);
+    coordinator.wake("EP");
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const settled = store.get(entry.operationId)!;
+    assert.equal(settled.operationId, entry.operationId);
+    assert.equal(settled.status, "succeeded");
+    assert.equal(enqueues.length, 2);
+    assert.notEqual(enqueues[1], enqueues[0]);
+    db.close();
+});
+
+test("重排次数用尽后仍然失败，不会无限重试", async () => {
+    const { db, store } = makeStore();
+    const source = director();
+    const entry = store.register("edit-exhausted", 4, source, source, "CLIP_A");
+    const service = {
+        clipRefreshStore: () => store,
+        get: () => ({ revision: 4, draft: { director: source } }),
+        resolveSubjectPictureInputs: (_id: string, value: DirectorProduction) => value,
+        targetOccupancy: () => [],
+    };
+    const compilations = {
+        enqueue: () => ({ status: "succeeded", preparedId: "prepared" }),
+        getCompilation: (_id: string, _owner: string, _operationId: string, view?: string) => view === "targets"
+            ? { items: [{ targetId: "CLIP_A", status: "ready" }], total: 1 }
+            : { status: "succeeded", preparedId: "prepared" },
+        apply: () => { throw new Error("SOURCE_CHANGED_DURING_VALIDATION: 一直冲突"); },
+    };
+    const coordinator = new ClipRefreshCoordinator(service as any, compilations as any, "owner");
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const pending = store.get(entry.operationId)!;
+        if (pending.nextAttemptAt) { pending.nextAttemptAt = new Date(Date.now() - 1).toISOString(); store.save(pending); }
+        coordinator.wake("EP");
+        await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    const settled = store.get(entry.operationId)!;
+    assert.equal(settled.status, "failed");
+    assert.equal(settled.attempts, 3);
+    db.close();
 });

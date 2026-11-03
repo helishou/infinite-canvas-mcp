@@ -53,7 +53,7 @@ export function effectiveTargetInput(project: CanvasProject, nodeId: string, seg
         .sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER));
     const referenceNodes = incoming.filter(edge => ![nodeId, source.id].includes(edge.fromNodeId)).map(edge => edge.fromNodeId).filter(id => {
         const ref = rows(project.nodes).find(node => node.id === id);
-        return !ref || ["image", "character", "scene"].includes(ref.type) || ref.type === "config" && ref.metadata?.generationMode === "image";
+        return !ref || ["image", "character", "scene", "prop"].includes(ref.type) || ref.type === "config" && ref.metadata?.generationMode === "image";
     });
     const baselineReferences = productionImageInput(source)?.references || formal?.references || [];
     const references = referenceNodes.flatMap(id => resolveCanvasImageReferencesByIds(project, source.id, [id]).map(ref => {

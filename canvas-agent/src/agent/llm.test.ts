@@ -51,7 +51,7 @@ test("structured image review encodes verified local files at the API boundary a
     assert.equal(requests, 1);
 });
 const provider = (baseUrl: string, apiFormat: LlmProvider["apiFormat"] = "openai-chat"): LlmProvider => ({ id: "a::model", model: "model", name: "a / model", baseUrl, apiKey: "secret-test-key", apiFormat, systemPrompt: "" });
-const config = (baseUrl: string, apiFormat = "openai-chat") => ({ textModel: "a::model", channels: [{ id: "a", name: "A", baseUrl, apiKey: "secret-test-key", apiFormat, models: [{ name: "model", capability: "text" }] }] });
+const config = (baseUrl: string, apiFormat = "openai-chat") => ({ textModel: "a::model", channels: [{ id: "a", name: "A", baseUrl, apiKey: "secret-test-key", apiFormat, models: [{ name: "model", capability: "text", supportsImages: true }] }] });
 
 test("canvas channel identity distinguishes equal model names and excludes browser scripts / Comfy", () => {
     const value = configuredLlmProviders({ channels: [

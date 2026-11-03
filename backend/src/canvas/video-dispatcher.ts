@@ -7,6 +7,7 @@ import type { RunningHubBackend } from "../runtime/runninghub.js";
 import { validateVideoTrimRange, type VideoConcatBackend } from "../runtime/video-concat.js";
 import type { Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "../workflows/executor.js";
+import { convertComfyWorkflowToApi } from "../workflows/comfyui-workflow-conversion.js";
 import type { WorkflowStore } from "../workflows/store.js";
 import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowBindingForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
@@ -323,6 +324,7 @@ export class CanvasVideoDispatcher {
             } finally { this.untrack(taskId, childId); }
         }
         const detail = await this.workflows.get(plan.workflow!);
+        if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
         const fields = detail.config?.fields || [];
         const values: Record<string, unknown> = { ...(plan.input.params || {}) };
         if (values.seconds === undefined && plan.input.seconds !== undefined) values.seconds = plan.input.seconds;

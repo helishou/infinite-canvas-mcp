@@ -1,3 +1,4 @@
+import { workflowImageInputs } from "./image-input-capability.js";
 import type { Request, Response, Router } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -136,7 +137,7 @@ export function registerWorkflowRoutes(
       const instance = typeof req.body?.instance === "string" ? req.body.instance : "";
       const relativePath = typeof req.body?.relativePath === "string" ? req.body.relativePath : "";
       const { selected, raw, sha256 } = await readLocalComfyWorkflow(instance, relativePath);
-      const workflow = convertComfyWorkflowToApi(JSON.parse(raw));
+      const workflow = JSON.parse(raw) as Record<string, unknown>;
       const existing = new Set((await store.list()).map((item) => item.name.toLocaleLowerCase()));
       const sourceName = path.basename(relativePath);
       const extension = path.extname(sourceName) || ".json";
@@ -145,7 +146,7 @@ export function registerWorkflowRoutes(
       for (let suffix = 2; existing.has(`custom/${name}`.toLocaleLowerCase()) || existing.has(name.toLocaleLowerCase()); suffix += 1) name = `${stem} (${suffix})${extension}`;
       const result = await store.upload(name, workflow);
       await store.saveSourceLink(result.name, { instance: selected.instance, relativePath: selected.relativePath, syncedSha256: sha256, syncedAt: new Date().toISOString() });
-      await onImported?.(result.name);
+      // Import/sync only changes workflow resources; model creation is explicit.
       res.status(201).json(result);
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -159,11 +160,11 @@ export function registerWorkflowRoutes(
       const source = detail.source;
       if (!source) return res.status(409).json({ error: "该工作流没有记录 ComfyUI 原流来源" });
       const { raw, sha256 } = await readLocalComfyWorkflow(source.instance, source.relativePath);
-      const workflow = convertComfyWorkflowToApi(JSON.parse(raw));
+      const workflow = JSON.parse(raw) as Record<string, unknown>;
       await store.saveWorkflow(name, workflow);
       const updatedSource = { ...source, syncedSha256: sha256, syncedAt: new Date().toISOString() };
       await store.saveSourceLink(name, updatedSource);
-      await onImported?.(name);
+      // Sync preserves existing model bindings without registering another model.
       res.json({ name, source: updatedSource });
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -198,7 +199,8 @@ export function registerWorkflowRoutes(
           detail.source.syncState = "missing";
         }
       }
-      res.json(detail);
+      const imageInputs = workflowImageInputs(detail.workflow, detail.config?.fields || [], detail.config?.outputNodes);
+      res.json({ ...detail, imageInputCounts: imageInputs.counts, imageInputFieldIds: imageInputs.fields.map(field => field.id) });
     } catch (error) {
       res
         .status(404)
@@ -216,7 +218,7 @@ export function registerWorkflowRoutes(
         workflow: Record<string, unknown>;
       };
       const result = await store.upload(name, workflow);
-      await onImported?.(result.name);
+      // Import/sync only changes workflow resources; model creation is explicit.
       res.status(201).json(result);
     } catch (error) {
       res
@@ -253,7 +255,7 @@ export function registerWorkflowRoutes(
         name || "workflow.json",
         normalizedPackage,
       );
-      if (exposeModel !== false) await onImported?.(result.name);
+      if (exposeModel === true) await onImported?.(result.name);
       res.status(201).json(result);
     } catch (error) {
       res
@@ -273,7 +275,7 @@ export function registerWorkflowRoutes(
         const pkg = await store.exportPackage(name);
         if (pkg?.config) pkg.config = normalizeWorkflowConfig(pkg.config);
         // 附带原始 UI 格式（有的话）：上传到 RunningHub 网页端必须用 UI 格式，API 格式编辑器解析不了。
-        const uiWorkflow = await findUiWorkflowJson(name);
+        const uiWorkflow = Array.isArray(pkg.workflow.nodes) ? pkg.workflow : await findUiWorkflowJson(name);
         res.json(uiWorkflow ? { ...pkg, uiWorkflow } : pkg);
       } catch (error) {
         res
@@ -406,10 +408,12 @@ export function registerWorkflowRoutes(
         let pushed = false;
         let pushError = "";
         try {
+          // 磁盘保留 ComfyUI 原始画布格式；运行中的伴生扩展只接受 API/prompt 格式。
+          const apiGraph = convertComfyWorkflowToApi(detail.workflow);
           const resp = await fetch(`http://${instance}/infinite-canvas/open-workflow`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ graph: detail.workflow, title: file }),
+            body: JSON.stringify({ graph: apiGraph, title: file }),
             signal: AbortSignal.timeout(5000),
           });
           const json = await resp.json().catch(() => ({}));

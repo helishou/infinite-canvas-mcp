@@ -5,7 +5,7 @@ import type { MediaStore, TaskStore } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
 import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
-import { removeUiNotes } from "./comfyui-workflow-conversion.js";
+import { convertComfyWorkflowToApi, removeUiNotes } from "./comfyui-workflow-conversion.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
@@ -387,7 +387,7 @@ function isOptionalMediaLink(workflow: Record<string, unknown>, classType: strin
  * 解析 ComfySwitchNode 当前选中的分支名（on_true / on_false）。
  * 支持 API 图里的直接布尔值，也支持追溯 PrimitiveBoolean 节点；来源缺失/不可判定时返回 null。
  */
-function selectedSwitchBranch(graph: Record<string, unknown>, node: WfNode): "on_true" | "on_false" | null {
+export function selectedSwitchBranch(graph: Record<string, unknown>, node: WfNode): "on_true" | "on_false" | null {
     const sw = node!.inputs?.switch;
     if (typeof sw === "boolean") return sw ? "on_true" : "on_false";
     if (Array.isArray(sw) && isNodePresent(graph, String(sw[0]))) {
@@ -671,6 +671,9 @@ export class WorkflowExecutor {
         outputNodes: string[];
         parentTaskId: string | undefined;
     }> {
+        // Compile the current authoritative source on every run, including UI graphs
+        // saved before this version. Never write the derived prompt back to the store.
+        if (Array.isArray(workflowJson.nodes)) workflowJson = convertComfyWorkflowToApi(workflowJson);
         const controller = new AbortController();
         const url = comfyUrl ?? this.bridge.getUrl();
         // 先把工作流重新保存后失效的旧字段 ID 迁回当前字段定义，再铺默认值。
@@ -956,7 +959,7 @@ export class WorkflowExecutor {
         const Ctor = (globalThis as any).WebSocket;
         let capturedPromptId: string | null = null;
         let ws: any = null;
-        let wsExecuted = false;
+        let wsExecutedAt: number | null = null;
         let wsOutputs: Record<string, unknown> | null = null;
         let wsClosed = false;
         let wsError: Error | null = null;
@@ -975,12 +978,17 @@ export class WorkflowExecutor {
                             const msg = JSON.parse(raw);
                             if (!msg?.type || !capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) return;
                             if (msg.type === "executed" || msg.type === "execution_success") {
-                                if (msg.type === "execution_success") wsExecuted = true;
+                                if (msg.type === "execution_success") wsExecutedAt ??= Date.now();
                                 if (msg.data?.output && typeof msg.data.output === "object") {
-                                    wsOutputs = { ...(wsOutputs || {}), ...(msg.data.output as Record<string, unknown>) };
-                                }
-                                if (msg.type === "execution_success" && msg.data?.output) {
-                                    wsExecutionSuccessOutputs = msg.data.output;
+                                    // `executed` carries ONE node's UI output, not history.outputs.
+                                    // Flattening it loses the node ID and breaks outputNodes filtering.
+                                    const node = msg.data.node;
+                                    if (msg.type === "executed" && node != null) {
+                                        wsOutputs = { ...(wsOutputs || {}), [String(node)]: msg.data.output };
+                                    } else if (msg.type === "execution_success") {
+                                        wsExecutionSuccessOutputs = msg.data.output;
+                                        wsOutputs = { ...(wsOutputs || {}), ...msg.data.output };
+                                    }
                                 }
                             } else if (msg.type === "execution_error") {
                                 const d = msg.data || {};
@@ -1040,9 +1048,11 @@ export class WorkflowExecutor {
                     throw wsFailure;
                 }
 
-                if (wsExecuted) {
+                if (wsExecutedAt !== null) {
                     const useOutputs = wsOutputs ?? wsExecutionSuccessOutputs;
-                    if (useOutputs && Object.keys(useOutputs).length > 0) {
+                    // Cached nodes may emit no `executed` event. A partial WS map is not
+                    // a complete result; unfiltered runs need authoritative history too.
+                    if (useOutputs && outputNodes.length > 0 && outputNodes.every(id => Object.hasOwn(useOutputs, id))) {
                         // 指定输出节点时只保留选中节点的产物。
                         const outputs = selectOutputNodes(useOutputs, outputNodes);
                         if (Object.keys(outputs).length) {
@@ -1050,7 +1060,6 @@ export class WorkflowExecutor {
                             if (media.length) return { promptId, outputs, media, status: { status_str: "success", completed: true } };
                         }
                     }
-                    if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 已在 WebSocket 报告完成但取回结果");
                 }
 
                 if (wsClosed) throw new Error("WebSocket 已关闭但未收到 executed");
@@ -1073,7 +1082,8 @@ export class WorkflowExecutor {
                         if (rescued) return { promptId, outputs: rescued.outputs, media: rescued.media, status: { status_str: "success", completed: true }, warning: `工作流整体失败（${statusStr}），已采用指定输出节点的产物` };
                         throw new Error(`ComfyUI 执行失败：${statusStr}`);
                     }
-                    if (statusStr === "success" || item?.status?.completed || hasOutputs) {
+                    // An output node finishing is not the prompt finishing.
+                    if (statusStr === "success" || item?.status?.completed === true) {
                         if (!hasOutputs) throw new Error("ComfyUI 执行结束但无输出");
                         // 用户可指定输出节点：只保留选中的节点产物，未指定时保持原样。
                         const outputs = selectOutputNodes(item.outputs, outputNodes);
@@ -1082,6 +1092,11 @@ export class WorkflowExecutor {
                         if (media.length) return { promptId, outputs, media, status: item.status || {} };
                         if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 执行结束但输出中没有可用媒体");
                     }
+                }
+                // Completion is signalled before history is committed. Always try
+                // history first, and measure its grace from completion, not submission.
+                if (wsExecutedAt !== null && Date.now() - wsExecutedAt > 60000) {
+                    throw new Error(`ComfyUI 已在 WebSocket 报告完成但仍未取回结果（promptId: ${promptId}；输出节点: ${outputNodes.join("、") || "全部"}）`);
                 }
                 await new Promise((r) => setTimeout(r, 1500));
             }

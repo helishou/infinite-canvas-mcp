@@ -18,7 +18,7 @@ import { EpisodeProductionService, type ProductionRecord, type ProductionRun } f
 import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
-import { entityNodeOperations } from "./entity-nodes.js";
+import { entityNodeOperations, entitySubjectPictureBinding } from "./entity-nodes.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
 
@@ -218,17 +218,23 @@ export class EpisodeProductionRunner {
                 const assetId = kind === "frame" ? director.shotInputs[targetId]?.keyframeAssetId : targetId;
                 if (!assetId) throw new Error(`布局目标 ${target} 缺少正式资产映射`);
                 const sharedPlan = kind === "asset" ? (Array.isArray(director.source.asset_plan) ? director.source.asset_plan : []).map(object).find(item => String(item.asset_id || item.id || "") === assetId) : undefined;
-                if (sharedPlan?.sharedSource && ["character", "scene", "prop"].includes(String(sharedPlan.kind || ""))) {
-                    const entityKind = String(sharedPlan.kind), entityId = String(sharedPlan.entity_id || sharedPlan.id || sharedPlan.asset_id || "");
-                    const entityUnit = selectedUnits.find(item => item.id === `entity:${entityKind}:${entityId}`);
-                    const entityMember = entityUnit?.members.find(item => item.role === "asset");
-                    if (!entityUnit || !entityMember) throw new Error(`共享主体 ${assetId} 缺少正式实体布局`);
+                // 角色/场景/道具资产由制作实体节点承担：资产绑定和主体图片绑定都指向同一个实体节点，
+                // 制作台的场景与画布的场景节点一一对应，不再另建智能图片节点。
+                const planKind = String(sharedPlan?.kind || "");
+                const entityKind = ["character", "scene", "prop"].includes(planKind) ? planKind as "character" | "scene" | "prop" : undefined;
+                const entityId = entityKind ? String(sharedPlan?.entity_id || sharedPlan?.id || sharedPlan?.asset_id || "") : "";
+                const entityUnit = entityKind ? selectedUnits.find(item => item.id === `entity:${entityKind}:${entityId}`) : undefined;
+                const entityMember = entityUnit?.members.find(item => item.role === "asset");
+                if (entityUnit && entityMember) {
                     canvasOps.push(...entityNodeOperations(project, current.draft, owner, current.draft, plan)
                         .filter(operation => String((operation as Record<string, any>).id || "") === entityMember.nodeId));
                     plannedNodeIds.add(entityMember.nodeId);
                     if (director.assets[assetId]?.nodeId !== entityMember.nodeId) bindings.push({ type: "bind_director_asset", assetId, nodeId: entityMember.nodeId });
+                    const subjectBinding = entitySubjectPictureBinding(director.source, owner, entityKind!, entityId, canvasId, entityMember.nodeId);
+                    if (subjectBinding) bindings.push(subjectBinding);
                     continue;
                 }
+                if (sharedPlan?.sharedSource && entityKind) throw new Error(`共享主体 ${assetId} 缺少正式实体布局`);
                 const unit = selectedUnits.find(item => item.targets.includes(`asset:${assetId}`) || item.targets.includes(`frame:${targetId}`));
                 const member = unit?.members.find(item => item.role === "asset" || item.role === "keyframe");
                 if (!unit || !member) throw new Error(`布局目标 ${target} 没有对应图片节点`);

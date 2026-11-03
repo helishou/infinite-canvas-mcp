@@ -452,6 +452,11 @@ export class BackendClient {
     return this.put<{ ok: boolean }>("/canvas/assets", { assets, folders });
   }
 
+  /** 本地图像计算：只传媒体库 storageKey，由 Backend 读字节并计算。 */
+  async imageOps(input: Record<string, unknown>, signal?: AbortSignal) {
+    return this.post<Record<string, unknown>>("/canvas/image-ops", input, signal);
+  }
+
   async listPluginDeclarations() {
     const data = await this.get<{ ok: boolean; declarations?: unknown[] }>(
       "/plugins/mcp",

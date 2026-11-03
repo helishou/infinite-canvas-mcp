@@ -191,6 +191,13 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         }
         catch (error) { handle(res, error); }
     });
+    if (base === "/drama/episodes/:episodeId/production" || base === "/canvas/projects/:episodeId/production") router.post<Record<string, string>>(`${base}/sync-scenes`, (req, res) => {
+        try {
+            const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().trim().min(1) }).strict().parse(req.body);
+            const result = service.syncSceneDirectory(req.params.episodeId, input.expectedRevision, input.operationId);
+            res.json({ ok: true, ...result, mediaSubmitted: false });
+        } catch (error) { handle(res, error); }
+    });
     router.post<Record<string, string>>(`${base}/prepare-targets`, async (req, res) => {
         try {
             const input = productionWorkspaceSchemas.production_prepare_targets.omit({ kind: true, id: true }).parse(req.body);

@@ -21,6 +21,9 @@ export type WorkflowDetail = {
     description?: string;
     workflow: Record<string, unknown>;
     config?: WorkflowConfig;
+    /** Backend-derived valid reference counts, not output batch size. */
+    imageInputCounts?: number[];
+    imageInputFieldIds?: string[];
     source?: { instance: string; relativePath: string; syncedSha256: string; syncedAt: string; syncState?: "current" | "changed" | "missing" };
 };
 

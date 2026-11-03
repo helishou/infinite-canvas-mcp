@@ -27,6 +27,7 @@ import { defaultConfig, resolveModelChannel, resolveModelWorkflow, useConfigStor
 import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workflows";
 import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
+import { canvasImageCopyTarget, copyCanvasImageContent } from "@/lib/canvas/canvas-image-copy";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { BackendApiError, isBackendAvailabilityError, updateBackendAsset, backendMediaUrl, cancelBackendTask, createBackendGenerationLog, createBackendProject, createBackendTask, detectVideoSceneCuts, editEpisodeProduction, fetchBackendCanvasDrama, fetchBackendTask, fetchEpisodeProduction, fetchProductionCanvasContext, prepareCanvasLoop, request, resolveComfyMediaUrl, retryBackendTask, syncBackendCanvasCharacterAssets, updateBackendGenerationLog, updateBackendTask, type BackendMediaResult } from "@/services/backend-api";
 import { bindEntityPictureToNode } from "@/lib/production/subject-picture-binding";
@@ -1256,8 +1257,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         return () => { cancelled = true; revoke(); };
     }, [activeImageToolNode?.id, activeImageToolSource?.content, activeImageToolSource?.storageKey, message, t]);
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
-    // 右键菜单仅在节点有可复制的文本正文、提示词或描述时提供「复制内容」。
-    const contextMenuText = contextMenuNode ? nodeCopyableText(contextMenuNode) : "";
+    // Image content means the visible primary result, never its prompt or URL text.
+    const contextMenuImage = contextMenuNode ? canvasImageCopyTarget(contextMenuNode, contextMenu?.type === 'node' ? contextMenu.imageId : undefined) : null;
+    const contextMenuIsImage = contextMenuNode?.type === CanvasNodeType.Image || contextMenuNode?.type === CanvasNodeType.Config && contextMenuNode.metadata?.smart === true && (contextMenuNode.metadata.generationMode || 'image') === 'image';
+    const contextMenuText = contextMenuNode && !contextMenuIsImage ? nodeCopyableText(contextMenuNode) : "";
     // 右键菜单「生成组」的可用性：选中的普通节点（组不计）至少 2 个。
     const groupableSelectedCount = useMemo(
         () => nodes.reduce((count, node) => (selectedNodeIds.has(node.id) && node.type !== CanvasNodeType.Group ? count + 1 : count), 0),
@@ -6257,7 +6260,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const handleNodeContextMenu = useCallback((event: ReactMouseEvent, nodeId: string) => {
         event.preventDefault();
         event.stopPropagation();
-        setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
+        const imageId = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-canvas-image-id]')?.dataset.canvasImageId : undefined;
+        setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId, ...(imageId ? { imageId } : {}) });
     }, []);
 
     const renderLoopPanel = useCallback(
@@ -6839,7 +6843,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         canDelete={contextMenu.type === "connection" || !isProtectedSceneBoundH3Node(contextMenuNode, connections)}
                         canCaptureVideoFrame={contextMenuNode?.type === CanvasNodeType.Video && Boolean(contextMenuNode.metadata?.content)}
                         canGroup={contextMenu.type === "node" && selectedNodeIds.has(contextMenu.nodeId) && groupableSelectedCount > 1}
-                        canCopyContent={Boolean(contextMenuText)}
+                        canCopyContent={Boolean(contextMenuImage || contextMenuText)}
                         canTranslate={Boolean(contextMenuNode?.type === CanvasNodeType.Text && contextMenuText)}
 
                         onClose={() => setContextMenu(null)}
@@ -6857,7 +6861,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         }}
 
                         onCopyContent={() => {
-                            if (contextMenuText) copyText(contextMenuText);
+                            if (contextMenuImage && contextMenuNode) {
+                                void copyCanvasImageContent(contextMenuNode, undefined, contextMenu.type === 'node' ? contextMenu.imageId : undefined).catch((error) => message.error(error instanceof Error ? error.message : t('canvas.projectPage.clipboardCopyFailed')));
+                            } else if (contextMenuText) copyText(contextMenuText);
                             setContextMenu(null);
                         }}
                         onTranslate={(target) => {

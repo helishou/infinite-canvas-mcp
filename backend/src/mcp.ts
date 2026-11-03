@@ -26,7 +26,7 @@ import {
   loadPluginMcpDeclarationsFromBackend,
   type PluginMcpBackend,
 } from "@basketikun/canvas-agent/plugin-mcp";
-import type { CanvasProject, McpObservabilityEventInput } from "./db.js";
+import type { CanvasProject, McpObservabilityEventInput, WorkflowField } from "./db.js";
 import {
   toolDescriptions,
   toolInputSchemas,
@@ -39,6 +39,7 @@ import {
 } from "@basketikun/canvas-agent/operations";
 import { createH3NodeMetadata, isH3NodeType, readH3Layout } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
+import { resolveWorkflowForModel } from "@basketikun/canvas-agent/model-workflow";
 import type { CanvasImageGenerationInput } from "./canvas/image-dispatcher.js";
 import type { CanvasTextGenerationInput } from "./canvas/text-dispatcher.js";
 import { splitImageBuffer } from "./canvas/image-split.js";
@@ -493,6 +494,7 @@ const BACKEND_CANVAS_TOOLS = [
   "canvas_set_generation_references",
   "canvas_select_nodes",
   "canvas_image_input_manifest",
+  "canvas_image_ops",
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_task_cancel",
@@ -636,6 +638,10 @@ async function executeDirectCanvasTool(
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
   signal?: AbortSignal,
 ) {
+  if (name === "canvas_image_ops") {
+    // 纯本地图像计算：不需要 projectId，也不需要网页会话。
+    return backendApi.imageOps(input, signal);
+  }
   if (name === "canvas_list_projects") {
     // v7: 画布不再直接归属剧目；按分集过滤用 episodeId。
     const episodeId =
@@ -772,9 +778,85 @@ async function executeDirectCanvasTool(
           capability: String(model.capability || "text"),
         }));
     });
+    const wanted = String(input.model || "").trim();
+    if (wanted && !models.some((model) => model.id === wanted || model.name === wanted))
+      throw Object.assign(new Error(`找不到模型：${wanted}`), { code: "MODEL_NOT_FOUND", nextAction: { action: "list_models" } });
+    const matched = wanted
+      ? models.filter((model) => model.id === wanted || model.name === wanted)
+      : models;
     const page = Math.max(1, Math.floor(Number(input.page || 1)));
     const pageSize = Math.max(1, Math.min(100, Math.floor(Number(input.pageSize || 20))));
-    return { total: models.length, page, pageSize, models: models.slice((page - 1) * pageSize, page * pageSize) };
+    const pageModels = wanted
+      ? matched.slice(0, 1)
+      : matched.slice((page - 1) * pageSize, page * pageSize);
+    const withParams = String(input.detail || "compact") === "params";
+    // 一次列表请求拿到 name → 字段数，避免按模型逐个回源判断工作流是否存在。
+    let fieldCounts: Map<string, number> | null = null;
+    if (withParams || pageModels.length) {
+      try {
+        const listing = await backendApi.get<{ workflows?: { name?: unknown; fieldCount?: unknown }[] }>("/api/workflows");
+        fieldCounts = new Map(
+          (Array.isArray(listing?.workflows) ? listing.workflows : []).map((item) => [
+            String(item?.name || ""),
+            Math.max(0, Number(item?.fieldCount) || 0),
+          ]),
+        );
+      } catch { fieldCounts = null; }
+    }
+    const fieldCache = new Map<string, ModelParamDefinition[] | null>();
+    const loadParams = async (workflow: string): Promise<ModelParamDefinition[] | null> => {
+      if (fieldCache.has(workflow)) return fieldCache.get(workflow) ?? null;
+      let params: ModelParamDefinition[] | null = null;
+      try {
+        const detail = await backendApi.get<{ config?: { fields?: WorkflowField[] } }>(
+          `/api/workflows/${encodeURIComponent(workflow)}`,
+        );
+        const fields = Array.isArray(detail?.config?.fields) ? detail.config.fields : [];
+        params = summarizeWorkflowFields(fields.filter((field) => field && typeof field.id === "string" && field.id));
+      } catch { params = null; }
+      fieldCache.set(workflow, params);
+      return params;
+    };
+    const described: Record<string, unknown>[] = [];
+    for (const model of pageModels) {
+      // 同一模型在不同输入场景下可能绑定不同工作流；按 text/单图/多图 依次解析并去重。
+      const bindings: { scenario: string; workflow: string }[] = [];
+      for (const [referenceCount, scenario] of [[0, "text"], [1, "single image"], [2, "multi image"]] as const) {
+        const resolved = resolveWorkflowForModel(config, model.id, referenceCount);
+        if (!resolved.ok || !resolved.workflow) continue;
+        if (bindings.some((binding) => binding.workflow === resolved.workflow)) continue;
+        bindings.push({ scenario, workflow: resolved.workflow });
+      }
+      const primary = bindings[0];
+      const paramCount = primary
+        ? (fieldCounts?.get(primary.workflow) ?? (withParams ? (await loadParams(primary.workflow))?.length : 0) ?? 0)
+        : 0;
+      const params = withParams
+        ? primary
+          ? await loadParams(primary.workflow)
+          : null
+        : undefined;
+      described.push({
+        ...model,
+        ...(primary?.workflow ? { workflow: primary.workflow, inputScenario: primary.scenario } : {}),
+        paramCount,
+        ...(bindings.length > 1
+          ? { otherWorkflows: bindings.slice(1).map((binding) => ({ scenario: binding.scenario, workflow: binding.workflow })) }
+          : {}),
+        ...(withParams
+          ? params
+            ? { params }
+            : { params: [], paramsNote: "该模型没有可读的本地工作流参数；直接传通用参数（如 aspectRatio/size/seconds）即可" }
+          : {}),
+      });
+    }
+    return {
+      total: matched.length,
+      page,
+      pageSize,
+      ...(withParams ? { detail: "params" } : {}),
+      models: described,
+    };
   }
   if (name === "canvas_generate_image_batch") {
     const projectId = (await resolveMcpProjectIdWithUniqueFallback(config, state, input.projectId, getBrowserActiveProjectId)).projectId;
@@ -982,6 +1064,9 @@ async function executeDirectCanvasTool(
         : op,
     ),
   );
+  // 本次运行的参数就是前端设置面板应该显示的值：同步进节点 metadata.comfyParams，
+  // 否则面板读不到 MCP 传的覆盖值，会一直显示工作流默认值（如 denoise 0.8）。
+  ops = attachGenerationParamsToNodes(ops, nodesOf(projectState));
   if (mcpCommandIdentity) {
     ops = ops.map((op, index) => op.type === "run_generation" && !op.idempotencyKey
       ? { ...op, idempotencyKey: `${mcpOperationId}:${index}` }
@@ -2160,7 +2245,7 @@ export function buildCanvasImageRequest(
     referencedIds.add(match[1]);
   for (const connection of incomingConnections) {
     const node = nodeById.get(String(connection.fromNodeId));
-    if (node && ["image", "character", "scene"].includes(effectiveCanvasNodeType(node)))
+    if (node && ["image", "character", "scene", "prop"].includes(effectiveCanvasNodeType(node)))
       referencedIds.add(String(node.id));
   }
   if (
@@ -2256,6 +2341,118 @@ function recordOf(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/** 一个工作流可调参数的对外描述：只保留调用方真正需要用来传参的字段。 */
+type ModelParamDefinition = {
+  id: string;
+  label: string;
+  type?: string;
+  input?: string;
+  node?: string;
+  prompt?: true;
+  required?: true;
+  default?: unknown;
+  defaultValueLength?: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  options?: string[];
+};
+
+const MEDIA_FIELD_TYPES = new Set(["image", "audio", "video"]);
+/** 长文本字段（提示词类）的默认值只回一段预览，否则一个模型的参数清单就能塞满上下文。 */
+const FIELD_DEFAULT_PREVIEW = 160;
+
+/**
+ * 把工作流字段整理成参数清单。
+ * 同名输入（多个节点的 Text1）按前端面板同一规则补「节点.输入」后缀，保证两边看到的是同一个名字。
+ */
+function summarizeWorkflowFields(fields: WorkflowField[]): ModelParamDefinition[] {
+  const counts = new Map<string, number>();
+  for (const field of fields) {
+    const name = String(field.name || field.input || field.id).trim();
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  return fields.map((field) => {
+    const base = String(field.name || field.input || field.id).trim();
+    const duplicated = (counts.get(base) || 0) > 1;
+    const label = duplicated && field.node && field.input ? `${base} · ${field.node}.${field.input}` : base;
+    const isPrompt = Boolean(field.isPrompt) || String(field.id).toLowerCase() === "prompt";
+    const raw = field.default;
+    const preview = typeof raw === "string" && raw.length > FIELD_DEFAULT_PREVIEW
+      ? { default: `${raw.slice(0, FIELD_DEFAULT_PREVIEW)}…`, defaultValueLength: raw.length }
+      : { default: cleanFieldNumber(raw) };
+    return {
+      id: field.id,
+      label,
+      ...(field.type ? { type: String(field.type) } : {}),
+      ...(field.input ? { input: String(field.input) } : {}),
+      ...(field.node ? { node: String(field.node) } : {}),
+      ...(isPrompt ? { prompt: true as const } : {}),
+      ...(field.required ? { required: true as const } : {}),
+      // 媒体槽位的 default 常常是残留文件名，传回去会被当成已提供的素材，因此一律不返回。
+      ...(raw !== undefined && raw !== null && !MEDIA_FIELD_TYPES.has(String(field.type || "")) ? preview : {}),
+      ...(typeof field.min === "number" ? { min: cleanFieldNumber(field.min) as number } : {}),
+      ...(typeof field.max === "number" ? { max: cleanFieldNumber(field.max) as number } : {}),
+      ...(typeof field.step === "number" ? { step: cleanFieldNumber(field.step) as number } : {}),
+      ...(Array.isArray(field.options) && field.options.length
+        ? { options: field.options.map(String) }
+        : {}),
+    };
+  });
+}
+
+/** 0.5000000000000001 这类浮点噪声照原样回给调用方会被当成「要传这个数」，先收敛到有效位。 */
+function cleanFieldNumber(value: unknown): unknown {
+  if (typeof value !== "number" || !Number.isFinite(value) || Number.isInteger(value)) return value;
+  return Number(value.toPrecision(6));
+}
+
+/**
+ * 把一次运行实际生效的参数写进节点 metadata.comfyParams。
+ *
+ * 前端设置面板读的是 comfyParams，而 MCP 的 run_generation 参数只挂在 op.params 上，
+ * 于是面板永远显示工作流默认值（例如 denoise 0.8，实际跑的是 0.4）。这里把两者对齐：
+ * 同批新建的节点补进 add_node 的 metadata；对已有节点的运行则前置一条 update_node 做浅合并。
+ */
+export function attachGenerationParamsToNodes(
+  ops: Array<Record<string, unknown>>,
+  nodes: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const mergeParams = (metadata: Record<string, unknown>, params: Record<string, unknown>) => ({
+    ...metadata,
+    comfyParams: { ...recordOf(metadata.comfyParams), ...params },
+  });
+  const createdParams = new Map<string, Record<string, unknown>>();
+  for (const op of ops) {
+    if (op.type !== "add_node") continue;
+    const params = recordOf(recordOf(op.metadata).params);
+    if (Object.keys(params).length) createdParams.set(String(op.id || ""), params);
+  }
+  const patched = ops.map((op) => {
+    if (op.type !== "add_node") return op;
+    const params = createdParams.get(String(op.id || ""));
+    return params ? { ...op, metadata: mergeParams(recordOf(op.metadata), params) } : op;
+  });
+  const alreadyWritten = new Set(
+    patched
+      .filter((op) => op.type === "update_node" && Object.hasOwn(recordOf(op.metadata), "comfyParams"))
+      .map((op) => String(op.id || "")),
+  );
+  const prepended: Array<Record<string, unknown>> = [];
+  for (const op of patched) {
+    if (op.type !== "run_generation") continue;
+    const nodeId = String(op.nodeId || "");
+    const params = recordOf(op.params);
+    if (!nodeId || !Object.keys(params).length) continue;
+    if (createdParams.has(nodeId) || alreadyWritten.has(nodeId)) continue;
+    const node = nodes.find((item) => String(item.id || "") === nodeId);
+    if (!node) continue;
+    prepended.push({ type: "update_node", id: nodeId, metadata: mergeParams(recordOf(node.metadata), params) });
+    alreadyWritten.add(nodeId);
+  }
+  return prepended.length ? [...prepended, ...patched] : patched;
 }
 
 async function waitForCanvasTasks(

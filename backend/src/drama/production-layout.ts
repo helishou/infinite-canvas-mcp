@@ -187,9 +187,19 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     };
 
     const frameAssetIds = new Set(shotsByKeyframeAsset.keys());
-    const sharedEntityAssets = new Set(explicitAssets.filter(({ item }) => Boolean(item.sharedSource)
-        && ["character", "scene", "prop"].includes(String(item.kind || ""))).map(item => item.id));
-    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id) && !sharedEntityAssets.has(item.id));
+    // 角色/场景/道具资产由制作实体节点承担，画布上一个实体只有一个节点（共享资产同样如此）。
+    // 这类资产不再单独占用素材单元，`asset:<id>` 目标并入实体单元，避免同一主体出现第二个图片节点。
+    const entities = director ? productionEntities(director.source, owner) : [];
+    const entityAssetIds = new Map<string, string[]>();
+    for (const { item, id } of explicitAssets) {
+        const kind = String(item.kind || "");
+        if (!["character", "scene", "prop"].includes(kind) || frameAssetIds.has(id)) continue;
+        const key = `${kind}:${String(item.entity_id || item.id || item.asset_id || "")}`;
+        if (!entities.some(entity => `${entity.kind}:${entity.entityId}` === key)) continue;
+        entityAssetIds.set(key, [...(entityAssetIds.get(key) || []), id]);
+    }
+    const entityBackedAssetIds = new Set([...entityAssetIds.values()].flat());
+    const standaloneAssets = explicitAssets.filter(item => !frameAssetIds.has(item.id) && !entityBackedAssetIds.has(item.id));
     const multiSceneFrames = explicitAssets.filter(item => frameAssetIds.has(item.id) && new Set((shotsByKeyframeAsset.get(item.id) || []).map(shotId => sceneByShot.get(shotId)).filter(Boolean)).size > 1).map(item => item.id);
     const assetOrder = [...new Set([...standaloneAssets.map(item => item.id), ...multiSceneFrames])];
     // Keep the first asset row below the fixed canvas toolbar and review actions.
@@ -274,16 +284,14 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         createUnit(`video:${nodeId}`, "video", targets, sceneId, position, { width, height }, [{ role: "video", nodeId, nodeType: "minimax-h3:video", position, size: { width, height } }]);
     }
 
-    for (const [index, entity] of productionEntities(director?.source || {}, owner).entries()) {
+    for (const [index, entity] of entities.entries()) {
         const explicit = nodes.filter(node => node.type === entity.kind && node.metadata?.productionEntity?.ownerId === owner.id && node.metadata.productionEntity.kind === entity.kind && node.metadata.productionEntity.entityId === entity.entityId);
         if (explicit.length > 1) throw new Error("制作实体重复绑定到多个节点");
         const nodeId = explicit[0]?.id || entityNodeId(owner, entity.kind, entity.entityId);
         const position = { x: -1260, y: 280 + index * 580 };
-        const sharedAssetId = explicitAssets.find(({ item }) => Boolean(item.sharedSource)
-            && String(item.kind || "") === entity.kind
-            && String(item.entity_id || item.id || item.asset_id || "") === entity.entityId)?.id;
+        const linkedAssetIds = entityAssetIds.get(`${entity.kind}:${entity.entityId}`) || [];
         createUnit(`entity:${entity.kind}:${entity.entityId}`, "asset", [`entity:${entity.kind}:${entity.entityId}`,
-            ...(sharedAssetId ? [`asset:${sharedAssetId}`] : [])], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
+            ...linkedAssetIds.map(assetId => `asset:${assetId}`)], undefined, position, { width: 460, height: 480 }, [{ role: "asset", nodeId, nodeType: entity.kind, position, size: { width: 460, height: 480 } }]);
     }
 
     // Old materialized nodes remain layout anchors even if their source object was later removed.

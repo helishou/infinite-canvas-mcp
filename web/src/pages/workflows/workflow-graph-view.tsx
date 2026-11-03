@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { workflowDisplayGraph, workflowSourcePositions } from "./workflow-source";
 import { useTranslation } from "react-i18next";
 
 /** API 格式工作流：节点 ID → 节点定义。本地 ComfyUI JSON 与 RunningHub 同形。 */
@@ -80,6 +81,8 @@ function topologicalLayers(workflow: WorkflowGraphJson): Map<string, number> {
 
 /** 拓扑分层 + 按层排布，产出可直接画的节点与连线坐标。 */
 export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFieldRef[]): GraphLayout {
+    const sourcePositions = workflowSourcePositions(workflow);
+    workflow = workflowDisplayGraph(workflow);
     const layers = topologicalLayers(workflow);
     const exposedCounts = new Map<string, number>();
     for (const f of fields) {
@@ -99,13 +102,17 @@ export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFie
     const sortedLevels = [...buckets.keys()].sort((a, b) => a - b);
     let maxRows = 0;
 
+    const minX = sourcePositions.size ? Math.min(...[...sourcePositions.values()].map((pos) => pos.x)) : 0;
+    const minY = sourcePositions.size ? Math.min(...[...sourcePositions.values()].map((pos) => pos.y)) : 0;
     for (const lv of sortedLevels) {
         const ids = buckets.get(lv)!.sort((a, b) => parseInt(a) - parseInt(b));
         ids.forEach((id, idx) => {
-            positions.set(id, { x: lv * (NODE_W + X_GAP) + 20, y: idx * (NODE_H + Y_GAP) + 20 });
+            const authored = sourcePositions.get(id);
+            positions.set(id, authored ? { x: authored.x - minX + 20, y: authored.y - minY + 20 } : { x: lv * (NODE_W + X_GAP) + 20, y: idx * (NODE_H + Y_GAP) + 20 });
             const node = workflow[id];
             const classType = node.class_type || "";
-            const label = classType.length > 14 ? classType.slice(0, 14) + "…" : classType;
+            const title = (node as { _meta?: { title?: string } })._meta?.title || classType;
+            const label = title.length > 24 ? title.slice(0, 24) + "…" : title;
             nodes.push({ id, classType, label, layer: lv, x: positions.get(id)!.x, y: positions.get(id)!.y, hasExposed: (exposedCounts.get(id) || 0) > 0, exposedCount: exposedCounts.get(id) || 0 });
         });
         maxRows = Math.max(maxRows, ids.length);
@@ -125,7 +132,7 @@ export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFie
         }
     }
 
-    return { nodes, edges, width: sortedLevels.length * (NODE_W + X_GAP) + 40, height: maxRows * (NODE_H + Y_GAP) + 40 };
+    return { nodes, edges, width: Math.max(sortedLevels.length * (NODE_W + X_GAP) + 40, ...nodes.map((node) => node.x + NODE_W + 20)), height: Math.max(maxRows * (NODE_H + Y_GAP) + 40, ...nodes.map((node) => node.y + NODE_H + 20)) };
 }
 
 type Props = {

@@ -93,16 +93,8 @@ export class WorkflowModelCatalog {
         Object.assign(model, workflowModel(name, detail));
         replaceModelReferences(config, channel.id, oldName, name);
         changed = true;
-      } else if (!model && !processed.has(item.name)) {
-        const name = uniqueModelName(
-          config.channels,
-          preferredModelName(detail, item.title),
-        );
-        model = workflowModel(name, detail);
-        channel.models.push(model);
-        added.push(name);
-        changed = true;
       }
+      // Unbound workflows remain resources, never synthesize models during startup/settings sync.
 
       if (model && hasBrokenName(model.name)) {
         const oldName = model.name;

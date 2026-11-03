@@ -15,6 +15,7 @@ export const productionWorkspaceSchemas = {
     production_ensure_canvas: z.object({ kind: z.enum(["episode", "shared-assets", "scene"]), id }),
     production_get_canvas_context: z.object({ projectId: id }),
     production_list_scenes: z.object({ dramaId: id, episodeId: id.optional(), includeOrphaned: z.boolean().default(false), page: z.number().int().positive().default(1), pageSize: z.number().int().positive().max(100).default(20) }),
+    production_sync_scenes: z.object({ kind: z.enum(["canvas", "episode"]), id, expectedRevision: z.number().int().nonnegative(), operationId: id }).strict(),
     production_get_scene: z.object({ sceneId: id }),
     production_get_scene_production: productionReadSchema.extend({ sceneId: id }),
     production_edit_scene_production: z.object({ sceneId: id, operationId: id, expectedRevision: z.number().int().nonnegative(), ops: z.array(z.record(z.unknown())).min(1) }),
@@ -41,6 +42,7 @@ export const productionWorkspaceDescriptions = {
     production_ensure_canvas: "幂等准备分集固定画布、剧目共享资产画布或制作场次固定画布；不改绑、不提交媒体生成。",
     production_get_canvas_context: "读取画布制作角色、所属剧目/分集/场次与正式 production owner。",
     production_list_scenes: "分页列出剧目的制作场次目录，含环境引用、顺序、制作状态与已绑定画布；默认每页 20 条、最多 100 条。默认只列出已归属分集的场次，includeOrphaned=true 可包含未归属场次；不创建场次或画布。",
+    production_sync_scenes: "从指定分集或其固定画布的当前已保存导演源稿，将 script_scenes 场次幂等登记/更新到剧目制作场次目录，并返回稳定 sceneId。先读取当前 revision；不会删除已存在场次、修改剧本文本、准备画布节点、编译或生成媒体。",
     production_get_scene: "读取单个制作场次的身份、环境引用、内容哈希与已绑定画布上下文。",
     production_get_scene_production: "默认读取单场次制作摘要；通过 view、sourceSection 和 targetIds 定向读取源对象或产物；fields 仅用于 source 视图，选择顶层字段并返回部分读取标记。不会读取或修改所属分集制作稿。",
     production_edit_scene_production: "按 expectedRevision 与 operationId 编辑单场次独立制作草稿；编辑仅落到场次制作记录与其固定画布。",
@@ -62,6 +64,10 @@ export function productionWorkspaceRequest(name: string, raw: unknown) {
     if (name === "production_get_canvas_context") return { method: "GET" as const, path: `/canvas/projects/${encodeURIComponent(input.projectId)}/production-context` };
     if (name === "production_list_scenes") return { method: "GET" as const, path: `/dramas/${encodeURIComponent(input.dramaId)}/scenes?${new URLSearchParams({ ...(input.episodeId ? { episodeId: input.episodeId } : {}), ...(input.includeOrphaned ? { includeOrphaned: "true" } : {}), page: String(input.page), pageSize: String(input.pageSize) })}` };
     if (name === "production_get_scene") return { method: "GET" as const, path: `/drama/scenes/${encodeURIComponent(input.sceneId)}` };
+    if (name === "production_sync_scenes") {
+        const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : `/drama/episodes/${encodeURIComponent(input.id)}/production`;
+        return { method: "POST" as const, path: `${base}/sync-scenes`, body: { expectedRevision: input.expectedRevision, operationId: input.operationId } };
+    }
     if (["production_get_continuity", "production_check_continuity"].includes(name)) {
         const base = input.kind === "canvas" ? `/canvas/projects/${encodeURIComponent(input.id)}/production` : input.kind === "scene" ? `/drama/scenes/${encodeURIComponent(input.id)}/production` : `/drama/episodes/${encodeURIComponent(input.id)}/production`;
         if (name === "production_get_continuity") {

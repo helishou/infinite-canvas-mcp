@@ -224,3 +224,27 @@ test("Prompt SourceMap uses exact UTF-16 offsets and binds a rendered span to it
     assert.equal(valid.entries.length, 1);
     assert.equal(promptSourceMapSchema.safeParse({ ...valid, entries: [{ ...valid.entries[0], sourceText: "wrong" }] }).success, false);
 });
+
+test("共享来源绑定与本地副本绑定用途重叠时，保存前报重复来源", () => {
+    // 本地导入共享资产会再登记一条资产记录：一条绑定走共享来源、一条走本地节点，
+    // 用途又都是 identity，编译后同一主体就出现两张一模一样的参考图。
+    const value = source() as any;
+    value.asset_plan[0].sharedSource = { dramaId: "drama", assetId: "SHARED_SHUANZI", sourceProjectId: "shared-canvas", sourceNodeId: "shared-shuanzi" };
+    value.asset_plan.push({ id: "AST_SHUANZI_COPY", kind: "character", entity_id: "SHUANZI" });
+    value.subject_registry[0].pictureBindings.push({
+        id: "SHUANZI_ID_COPY", assetId: "AST_SHUANZI_COPY", sourceNode: { projectId: "CANVAS", nodeId: "IMG_SHUANZI_COPY" },
+        selection: { mode: "node_selection" }, provides: ["identity"], retain: ["face"], exclude: ["pose"], applicableState: {}, defaultFor: [],
+    });
+    assert.ok(directorSourceV2Diagnostics(value).some(item => item.message.includes("共享来源绑定与本地绑定")), JSON.stringify(directorSourceV2Diagnostics(value)));
+});
+
+test("同一 Subject 的多用途绑定（身份/尾部）不算重复来源", () => {
+    const value = source() as any;
+    value.asset_plan[0].sharedSource = { dramaId: "drama", assetId: "SHARED_SHUANZI", sourceProjectId: "shared-canvas", sourceNodeId: "shared-shuanzi" };
+    value.asset_plan.push({ id: "AST_SHUANZI_COPY", kind: "character", entity_id: "SHUANZI" });
+    value.subject_registry[0].pictureBindings.push({
+        id: "SHUANZI_TAIL", assetId: "AST_SHUANZI_COPY", sourceNode: { projectId: "CANVAS", nodeId: "IMG_SHUANZI_TAIL" },
+        selection: { mode: "node_selection" }, provides: ["tail"], retain: ["tail"], exclude: ["pose"], applicableState: {}, defaultFor: [],
+    });
+    assert.deepEqual(directorSourceV2Diagnostics(value), []);
+});

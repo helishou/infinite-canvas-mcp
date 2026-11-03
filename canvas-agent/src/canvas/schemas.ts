@@ -75,6 +75,7 @@ export const toolNames = [
   "canvas_connect_nodes",
   "canvas_select_nodes",
   "canvas_image_input_manifest",
+  "canvas_image_ops",
   "canvas_run_generation",
   "canvas_task_status",
   "canvas_task_cancel",
@@ -274,9 +275,16 @@ const generationFlowSchema = z.object({
     .array(z.string())
     .optional()
     .describe("参考节点 ID 数组，按此顺序连线；空数组=无参考"),
+  reuseNodeId: z
+    .string()
+    .optional()
+    .describe(
+      "复用已有生成节点：传入节点 ID 后不新建节点，只把本次的提示词、模型、尺寸与 params 写到这个节点上再重跑。生成失败、想换参数继续调同一张图时必须用它，不要重复创建节点。",
+    ),
 });
 
 const imageBatchItemSchema = generationFlowSchema
+  .omit({ reuseNodeId: true })
   .extend({
     key: z
       .string()
@@ -541,6 +549,26 @@ export const toolInputSchemas = {
     referenceNodeIds: z.array(z.string()).optional().describe("可选的新参考节点顺序；省略时按当前连线预检"),
     characterImageKeys: z.record(z.array(z.string())).optional().describe("按 character 节点 ID 明确选中的图片 storageKey 列表"),
   }),
+  canvas_image_ops: z.object({
+    op: z
+      .enum(["pixel_diff", "colors", "crop"])
+      .describe("本地计算类型：pixel_diff=逐像素比较两图并给出差异率/最差区域；colors=统计主色与占比；crop=按区域裁剪并输出 PNG。"),
+    storageKey: z.string().min(1).describe("Backend 媒体库中的图片 storageKey；来自生成结果、assets_get 或画布节点活动媒体。"),
+    compareKey: z.string().min(1).optional().describe("pixel_diff 的对照图 storageKey；尺寸不同时贴合到主图分析区域。"),
+    region: z
+      .object({
+        left: z.number().describe("左边界，0-1 相对整图宽度"),
+        top: z.number().describe("上边界，0-1 相对整图高度"),
+        width: z.number().describe("区域宽度，0-1 相对整图宽度"),
+        height: z.number().describe("区域高度，0-1 相对整图高度"),
+      })
+      .optional()
+      .describe("可选分析区域，使用 0-1 归一化坐标；越界部分按图片尺寸钳制。省略=整图。"),
+    colorCount: z.number().int().min(1).max(24).optional().describe("colors 返回的主色数量上限，默认 8。"),
+    threshold: z.number().int().min(0).max(255).optional().describe("pixel_diff 的像素差异阈值（0-255 平均通道差），默认 8。"),
+    grid: z.number().int().min(1).max(32).optional().describe("pixel_diff 的最差区域网格，默认 8x8。"),
+    includeHeatmap: z.boolean().optional().describe("pixel_diff 是否输出灰度热力图；结果为 PNG 并写入媒体库。"),
+  }),
   canvas_run_generation: canvasProjectSchema.extend({
     nodeId: z.string().describe("要触发生成的配置/媒体节点 ID，必填"),
     segmentId: z
@@ -637,6 +665,14 @@ export const toolInputSchemas = {
       .enum(["image", "video", "text", "audio"])
       .optional()
       .describe("按模型能力过滤；不传返回全部"),
+    model: z
+      .string()
+      .optional()
+      .describe("按模型 id（channelId::name）或名称精确查询；传了只返回这一个模型"),
+    detail: z
+      .enum(["compact", "params"])
+      .default("compact")
+      .describe("compact 只给模型摘要与参数个数；params 附带每个可调参数的定义（id、标签、类型、默认值、取值范围、选项）"),
     page: z.number().int().min(1).default(1),
     pageSize: z.number().int().min(1).max(100).default(20).describe("每页最多返回 100 个模型"),
   }),
@@ -840,15 +876,15 @@ export const toolDescriptions: Record<ToolName, string> = {
   canvas_create_generation_flow:
     "创建智能生成节点并添加参考连线。提示词、参数和结果保存在智能节点中，不创建普通文本节点；mode 不传则默认生图，autoRun=true 立即触发。",
   canvas_generate_text:
-    "创建文本生成流程并立即触发（autoRun=true 强制）。例：{ prompt: '为《婚书未烬》写一段 30 秒短剧开场独白，120 字以内' }",
+    "创建文本生成流程并立即触发（autoRun=true 强制）。例：{ prompt: '为《婚书未烬》写一段 30 秒短剧开场独白，120 字以内' }。重跑请传 reuseNodeId 复用原节点。",
   canvas_generate_image:
-    "创建图片生成流程并立即触发。提示词默认可省略，当前工作流声明必填提示词时仍需传入。",
+    "创建图片生成流程并立即触发。提示词默认可省略，当前工作流声明必填提示词时仍需传入。生成失败、想换参数继续调同一张图，或只是想重跑时，传 reuseNodeId=已有节点 ID 就地改写并重跑，不要为每次尝试新建节点。",
   canvas_generate_image_batch:
     "批量创建并提交图片生成流程。Backend 在 MCP 内部串行处理画布 revision，并一次返回每项的业务键、节点 ID 和 taskId；可用 waitForCompletion=true 让 MCP 内部统一轮询，不再编写外部 JSON-RPC/轮询脚本。",
   canvas_generate_video:
-    "创建视频生成流程并立即触发。例：{ prompt: '...', size: '16:9', seconds: '6', referenceNodeIds: [...] }",
+    "创建视频生成流程并立即触发。例：{ prompt: '...', size: '16:9', seconds: '6', referenceNodeIds: [...] }。重跑同一段请传 reuseNodeId 复用原节点，不要新建。",
   canvas_generate_audio:
-    "创建音频生成流程并立即触发。可传 audioVoice/audioInstructions 控制声线与情感。",
+    "创建音频生成流程并立即触发。可传 audioVoice/audioInstructions 控制声线与情感。重跑同一段请传 reuseNodeId 复用原节点。",
   canvas_set_generation_references:
     "替换指定生成节点的参考资源。会删除该节点现有的图片、视频、音频等参考输入，保留文本提示词输入，再按 referenceNodeIds 的顺序重新连接；适合第二次生成或重做分镜时清理旧参考图。例：{ nodeId: 'n-h3-1', referenceNodeIds: ['n-char-1', 'n-outfit-2', 'n-scene-1'] }",
   canvas_update_node:
@@ -861,6 +897,8 @@ export const toolDescriptions: Record<ToolName, string> = {
     "批量追加连接节点。connections 是数组，每项含 fromNodeId/toNodeId 必填，可选 role（reference/prompt/control）和 order。需要替换生成节点参考图时使用 canvas_set_generation_references，不要直接追加到旧参考输入上。",
   canvas_select_nodes: "设置当前选中节点；空数组=清空选区。",
   canvas_image_input_manifest: "只读预检图片生成的实际输入顺序和 storageKey；角色有多张图时必须明确选图。返回指纹供 canvas_run_generation 锁定输入。",
+  canvas_image_ops:
+    "纯本地图像计算，不调用视觉模型、不建任务、不绑定画布。op=pixel_diff 比较两张图的像素差异（差异率、平均/最大差值、最差网格、可选热力图），常用于首尾帧、接缝、重绘验收；op=colors 统计主色 hex/rgb/占比；op=crop 按区域裁剪并存回媒体库，返回的 storageKey 可用 agent_view_image 直接回看。输入只接受 Backend 媒体库 storageKey，不接受 URL 或本地路径。",
   canvas_run_generation:
     "触发指定节点生成。图片模式提交前解析真实参考图；多图 character 节点须通过 characterImageKeys 或节点已有选择指定具体图片，可传 expectedReferenceManifestHash 锁定预检清单。referenceNodeIds 会替换现有媒体参考连线；H3 节点可用 segmentId 单跑某分镜。预检返回 ready=false 时先修复 blockingIssues，不要重提同一输入。",
   canvas_task_status:
@@ -877,7 +915,7 @@ export const toolDescriptions: Record<ToolName, string> = {
     "读取脱敏 MCP 诊断。默认返回聚合摘要，可用 from/to/tool 筛选，view=full 查看逐日和工具转换明细。传 traceId 只读取单次事件链，不能同时传聚合筛选。",
   mcp_get_command_receipt: "按原 operationId 查询简短状态（found/status）；后台翻译会返回 queued、translating、applying、committed 或 retry_required。拒绝时附 errorCode。",
   models_list:
-    "分页列出可用于生成的模型及其能力；默认每页 20 项，支持按能力筛选。工作流是模型内部实现，不直接对外暴露。",
+    "分页列出可用于生成的模型及其能力；默认每页 20 项，支持按能力筛选，也可用 model 精确取一个模型。detail='params' 会同时返回该模型可调的自定义参数定义（参数 id、标签、类型、默认值、取值范围、下拉选项），把这些 id 作为 canvas_generate_image / canvas_generate_video 的 params 键名传回即可覆盖默认值；批量查看时建议先用 compact 拿到 paramCount，再用 model + detail='params' 逐个取详细定义，避免输出过长。",
   h3_get_node_materials:
     "读取 H3 视频节点的历史运行产物（视频 url/storageKey/segmentId/createdAt），按时间倒序去重。可选 segmentId 仅返回该片段的历史。替代老的 metadata.materials 与 segments[i].results[].params 字段——这两类从画布 schema 迁出（v4/v5）后不再随 canvas_get_state 返回，模型要看历史需要主动调用本工具。需要 prompt / refs / comfy params 等输入快照用 generation_get_status({scope: 'video', nodeIds, segmentIds})。",
   comfyui_status: "检查本地 ComfyUI 连接和系统状态。",
@@ -921,6 +959,6 @@ export const toolDescriptions: Record<ToolName, string> = {
   production_get_compilation: "按 owner 和原 operationId 查询后台编译状态及应用回执；也可传 production_edit 的 operationId 一次汇总该编辑登记的多个 Clip 定向返修、引用同步和翻译状态。默认返回短状态、首条 blockingDiagnostic 和 nextAction；诊断/目标列表按 offset 分页，默认每页 20 条、最多 50 条。queued/running 沿原 ID 查询，blocked/failed 不继续轮询同一终态；reusedFromOperationId 保留原阻塞身份。只读，不重跑编译。",
   production_apply_compilation: "用精确 preparedId 原子接入 Backend 编译产物；沿用冻结的 expectedRevision/operationId，重复调用恢复原回执，源稿或绑定冲突拒绝覆盖。保存草稿，不发布或生成。",
   production_translate_compiled_prompts: "把指定且当前有效的正式 H3 编译提示词交给已配置翻译模型。expectedRevision 是读取基线；只要目标的编译提示词哈希、节点归属和当前 H3 提示词快照未变，无关制作稿修订不会阻断翻译写回。调用立即返回 queued；用同一 operationId 调用 mcp_get_command_receipt 查看 translating/applying/committed/retry_required 状态。超时或进程重载后重复提交完全相同的请求可恢复原操作，不创建第二次翻译。跳过 SHA-256 缓存命中项；画面描述、镜头/表演指令和发声指导（声线、情绪、语速、音量、停顿、画外音等）翻成英文并轻度润色；实际对白、歌词，以及画面中可见的门牌、标识、字幕、道具文字、手机/电脑/系统界面和提示文字都保留原文，无论是否加引号。对白标记外的中文发声指导即使复述对白片段也必须翻译，不能因为邻接对白而保留。目标输入实际变化时整批拒绝写入。不改导演源稿、不发布、不生成媒体。",
-  production_diagnose_bindings: "分页只读核对源资产版本、草稿/发布绑定、节点活动媒体、归档字节哈希与消费者；默认每页 20 条、最多 50 条，用 cursor 续读。",
+  production_diagnose_bindings: "分页只读核对源资产版本、草稿/发布绑定、节点活动媒体、归档字节哈希与消费者；integrity 段另巡检共享资产副本（SHARED_ASSET_COPIED_LOCALLY）、同主体重复绑定（SUBJECT_PICTURE_DUPLICATED）与片段重复参考（DUPLICATE_REFERENCE_MEDIA）。默认每页 20 条、最多 50 条，用 cursor 续读。",
   production_diagnose_clips: "只读逐段对照 H3 Clip 现场正文与当前权威编译产物：已发布且有编译正文时以发布稿为基线（baseline=published），否则以当前制作稿为基线（baseline=draft）；返回状态（一致/不同/无法比较）、两侧归一哈希、导演源哈希、任务状态与只读下一步。一次调用完成排障。nodeId 与 nodeIds 同时出现时以 nodeIds 为准。默认最多返回 200 行，超出时给出 nextOffset。正文「不同」可能来自译文或人工编辑，保持信息级，不单独代表失败；生成是否放行由就绪与执行入口的同一派生新鲜度判定（当前产物有效且现场 Clip 已应用该产物），不以正文相等为前提。",
 };

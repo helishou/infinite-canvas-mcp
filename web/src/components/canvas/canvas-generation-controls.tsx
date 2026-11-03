@@ -29,6 +29,7 @@ export type CanvasGenerationControlsProps = {
     textCount?: number;
     onTextCountChange?: (count: number) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
+    onImageCompatibilityChange?: (compatible: boolean) => void;
     onImagePromptRequiredChange?: (required: boolean) => void;
     /** grid 用于配置节点，compact 用于节点浮动面板。 */
     layout?: "grid" | "inline" | "compact";
@@ -51,6 +52,7 @@ export function CanvasGenerationControls({
     onTextCountChange,
     onImageSettingsOpenChange,
     onImagePromptRequiredChange,
+    onImageCompatibilityChange,
     layout = "inline",
     placement = "topLeft",
     className,
@@ -141,6 +143,8 @@ export function CanvasGenerationControls({
             value={config.model}
             onChange={changeModel}
             capability={mode}
+            onImageCompatibilityChange={onImageCompatibilityChange}
+            imageReferenceCount={mode === 'image' ? imageReferenceCount ?? referenceCounts.image : undefined}
             sortByCanvasUsage
             onMissingConfig={() => openConfigDialog(true)}
             fullWidth

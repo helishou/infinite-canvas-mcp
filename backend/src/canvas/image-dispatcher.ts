@@ -1,3 +1,4 @@
+import { workflowImageInputs } from "../workflows/image-input-capability.js";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
@@ -21,6 +22,7 @@ import {
 } from "./model-workflow.js";
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "../workflows/executor.js";
+import { convertComfyWorkflowToApi } from "../workflows/comfyui-workflow-conversion.js";
 import type { WorkflowStore } from "../workflows/store.js";
 import type { BackendEventBus } from "../events.js";
 import {
@@ -135,16 +137,8 @@ export class CanvasImageDispatcher {
         logId: undefined,
         executor: active.executor || plan.executor,
       };
-    if (plan.executor === "comfy-workflow" && plan.workflow) {
-      const imageSlotCount = this.workflows.getConfig?.(plan.workflow)?.fields
-        .filter((field) => field.type === "image").length;
-      const requestedImageCount = executionImageInputs(plan.input).length;
-      if (imageSlotCount && requestedImageCount > imageSlotCount) {
-        throw new Error(
-          `工作流「${plan.workflow}」只有 ${imageSlotCount} 个图片输入槽，本轮需要 ${requestedImageCount} 张（${plan.input.loopInputImages?.length || 0} 张循环图 + ${plan.input.references?.length || 0} 张固定参考图）；请减少参考输入后再提交`,
-        );
-      }
-    }
+    // Exact image capacity is derived from the compiled execution graph in dispatchWorkflow,
+    // not raw field.type counts (legacy LoadImage mappings and aliases differ).
     const prepared = prepareCanvasGenerationTarget(this.stores, { ...plan.input, mode: "image" }, taskId);
     plan = { ...plan, input: prepared.command as CanvasImageGenerationInput };
     const normalized = plan.input;
@@ -653,7 +647,7 @@ export class CanvasImageDispatcher {
     const media = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
     const failure = rejected.length
       ? new Error(rejected.map((result) => result.status === "rejected" ? String(result.reason) : "").filter(Boolean).join("；"))
-      : media.length === count ? undefined : new Error(`图片批量生成只返回了 ${media.length}/${count} 张结果`);
+      : media.length >= count ? undefined : new Error(`图片批量生成只返回了 ${media.length}/${count} 张结果`);
     return { taskId, media, ...(failure ? { failure } : {}) };
   }
 
@@ -788,6 +782,7 @@ export class CanvasImageDispatcher {
     suffix = "",
   ) {
     const detail = await this.workflows.get(workflowName);
+    if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
     const fields = detail.config?.fields || [];
     const { fieldValues, dimensions, expectedRatio } = imageWorkflowFieldValues(input, fields, input.params || {});
     // Prompt is optional at the workflow level. Only an explicitly mapped prompt
@@ -800,12 +795,14 @@ export class CanvasImageDispatcher {
       }
     }
 
-    const imageFields = fields.filter((field) =>
-      isImageField(field, detail.workflow),
-    );
+    const capability = workflowImageInputs(detail.workflow, fields, detail.config?.outputNodes);
+    const imageFields = capability.fields;
     const references = executionImageInputs(input);
     if (references.length > imageFields.length) {
-      throw new Error(`工作流「${workflowName}」只有 ${imageFields.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请配置支持三图的工作流或调整参考输入`);
+      throw new Error(`工作流「${workflowName}」只有 ${imageFields.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请减少参考输入或更换工作流`);
+    }
+    if (!capability.counts.includes(references.length)) {
+      throw new Error(`工作流「${workflowName}」不支持 ${references.length} 张参考图；可用输入张数：${capability.counts.join('、') || '无'}，未提交生成任务`);
     }
     for (let index = 0; index < imageFields.length; index++) {
       const field = imageFields[index];
@@ -1137,17 +1134,6 @@ function activeGraphUsesImage(
 function linkedNodeId(value: unknown) {
   if (!Array.isArray(value) || typeof value[0] !== "string") return undefined;
   return value[0];
-}
-
-function isImageField(field: WorkflowField, workflow: Record<string, unknown>) {
-  if (field.type === "image") return true;
-  return field.node
-    .split(",")
-    .some(
-      (id) =>
-        (workflow[id] as { class_type?: string } | undefined)?.class_type ===
-        "LoadImage",
-    );
 }
 
 function sizeFromDimensions(width?: number, height?: number) {

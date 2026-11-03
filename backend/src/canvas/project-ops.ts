@@ -608,6 +608,13 @@ export function registerH3ReferenceAssets(project: Record<string, unknown>, node
             const resolved = byId.get(id);
             if (resolved) {
                 if (conflicts(resolved, binding)) throw new Error(`参考资产 ID 冲突：${id}`);
+                // 同一 assetId 换了首帧素材（例如把首帧换成洗过的图）时，目录条目必须一起换。
+                // 之前只补空字段，于是 storageKey 永远停在旧图：执行按 binding 跑新图，
+                // 设置面板与缩略图却按目录显示老图，两边各说各话。
+                const refreshed = ["storageKey", "url", "mimeType"].filter(
+                    (field) => binding[field] && String(binding[field]) !== String(resolved[field] || ""),
+                );
+                for (const field of refreshed) { resolved[field] = binding[field]; changed = true; }
                 for (const field of ["storageKey", "url", "mimeType", "sourceNodeId", "mediaType"]) {
                     if (!resolved[field] && binding[field]) { resolved[field] = binding[field]; changed = true; }
                 }

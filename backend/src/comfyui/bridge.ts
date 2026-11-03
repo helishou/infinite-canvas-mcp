@@ -1614,7 +1614,9 @@ export async function buildExpandedNanFengV10Workflow(
         samplingModel = lock(0); samplingLatent = lock(1); exactAudio = lock(2);
     }
 
-    const ready = node("nf_sampling_release", "NanFengH3ReleaseBeforeSamplingV15", { model: samplingModel, conditioning, latent: samplingLatent });
+    const samplingReleaseInputs: Record<string, any> = { model: samplingModel, conditioning, latent: samplingLatent };
+    if (params.nativeClipReleaseSupported === true) samplingReleaseInputs.clip = clip(0);
+    const ready = node("nf_sampling_release", "NanFengH3ReleaseBeforeSamplingV15", samplingReleaseInputs);
     let samplingModelRef: [string, number] = ready(0);
     if (params.realtimePreviewEnabled !== false) {
         samplingModelRef = node("nf_preview", "NanFengH3KJPreviewBridgeV15", {
@@ -1761,6 +1763,9 @@ export function splitH3Confirmation(graph: Record<string, any>, phase: string, c
         ready.inputs.conditioning = [checkpoint, 1];
         ready.inputs.latent = [checkpoint, 0];
         graph[secondId].inputs.sigmas = [checkpoint, 2];
+        // The second pass restores encoded conditioning from disk; it must not
+        // load the CLIP encoder again just to satisfy the sampling release node.
+        delete graph.nf_sampling_release.inputs.clip;
     } else throw new Error(`无效的 H3 确认阶段：${phase}`);
 
     // 只保留落盘出口（VHS）的祖先：一采阶段必须看不到放大器，二采阶段必须看不到一采采样器。
@@ -2006,7 +2011,20 @@ export async function resolveNanFengWorkflowParams(comfyUrl: string, params: Rec
             ["modelName", "模型"], ["textEncoder", "文本编码器"], ["videoVae", "视频VAE"],
             ["audioVae", "音频VAE"], ["latentUpscaleModel", "H3潜空间放大模型"],
         ];
-        const next: Record<string, unknown> = { ...resolved, nativeLoaderCacheSupported: Object.hasOwn(required, "复用加载器缓存") || Object.hasOwn(body[NANFENG_H3_CLASS]?.input?.optional || {}, "复用加载器缓存") };
+        const nativeLoaderCacheSupported = Object.hasOwn(required, "复用加载器缓存") || Object.hasOwn(body[NANFENG_H3_CLASS]?.input?.optional || {}, "复用加载器缓存");
+        const next: Record<string, unknown> = { ...resolved, nativeLoaderCacheSupported };
+        if (nativeLoaderCacheSupported) {
+            try {
+                const releaseResponse = await fetch(`${comfyUrl}/object_info/NanFengH3ReleaseBeforeSamplingV15`, { signal });
+                if (releaseResponse.ok) {
+                    const releaseBody = await releaseResponse.json() as Record<string, any>;
+                    next.nativeClipReleaseSupported = Object.hasOwn(releaseBody.NanFengH3ReleaseBeforeSamplingV15?.input?.optional || {}, "clip");
+                }
+            } catch (error) {
+                if (signal.aborted) throw error;
+                // An older or unreachable release-node schema keeps the established global release node path.
+            }
+        }
         for (const [paramName, inputName] of pathFields) {
             const available = choices(inputName);
             if (paramName === 'latentUpscaleModel' && next.latentUpscaleEnabled !== true) continue;

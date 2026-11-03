@@ -5,6 +5,7 @@ import { DATA_DIR } from "../config.js";
 import type { BackendDatabase } from "../db.js";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
 import { mergeInheritedFields } from "./workflow-field-inherit.js";
+import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
@@ -257,9 +258,14 @@ export class WorkflowStore {
         if (typeof workflow !== "object" || workflow === null || Object.keys(workflow).length === 0) {
             throw new Error("工作流 JSON 为空");
         }
-        const sample = Object.values(workflow)[0];
-        if (typeof sample !== "object" || sample === null || !("class_type" in sample)) {
-            throw new Error("不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）");
+        // UI source (including virtual nodes, widgets and layout) is authoritative.
+        // Compilation here is validation only; the derived prompt is never stored.
+        if (Array.isArray(workflow.nodes)) convertComfyWorkflowToApi(workflow);
+        else {
+            const sample = Object.values(workflow)[0];
+            if (typeof sample !== "object" || sample === null || !("class_type" in sample)) {
+                throw new Error("不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）");
+            }
         }
         const storedName = `${CUSTOM_SUBDIR}/${finalName}`;
         const dir = path.join(workflowDir(), CUSTOM_SUBDIR);
@@ -346,6 +352,7 @@ export class WorkflowStore {
         const filePath = workflowFilePath(name);
         try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
         if (!workflow || typeof workflow !== "object" || Object.keys(workflow).length === 0) throw new Error("工作流不能为空");
+        if (Array.isArray(workflow.nodes)) convertComfyWorkflowToApi(workflow);
         await fs.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
         return { workflow };
     }
@@ -417,6 +424,7 @@ export class WorkflowStore {
 
     /** 扫描工作流中所有媒体输入引用 */
     scanMediaInputs(workflow: Record<string, unknown>): string[] {
+        if (Array.isArray(workflow.nodes)) workflow = convertComfyWorkflowToApi(workflow);
         const required: string[] = [];
         for (const nodeId of Object.keys(workflow)) {
             const node = workflow[nodeId];
@@ -453,6 +461,7 @@ export class WorkflowStore {
             workflow = JSON.parse(await fs.readFile(workflowFilePath(name), "utf8"));
         } catch { return {}; }
 
+        if (Array.isArray(workflow.nodes)) workflow = convertComfyWorkflowToApi(workflow);
         const classTypes = new Map<string, string>();
         for (const [nodeId, rawNode] of Object.entries(workflow)) {
             const node = typeof rawNode === "object" && rawNode !== null ? (rawNode as Record<string, unknown>) : {};

@@ -4,6 +4,7 @@ import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
 import { graphFieldTargetsNode, WorkflowGraphView, type WorkflowGraphJson } from "./workflow-graph-view";
 import { NodeFieldPopupShell } from "./node-field-popup";
+import { workflowDisplayGraph } from "./workflow-source";
 import { FieldEditor } from "./field-editor";
 
 type WorkflowJson = WorkflowGraphJson;
@@ -38,7 +39,8 @@ type Props = {
     onWorkflowChange: (workflow: WorkflowJson) => void;
 };
 
-export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onWorkflowChange }: Props) {
+export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onFieldsChange, onWorkflowChange }: Props) {
+    const workflow = useMemo(() => workflowDisplayGraph(sourceWorkflow), [sourceWorkflow]);
     const { t } = useTranslation();
     const [popupNodeId, setPopupNodeId] = useState<string | null>(null);
     const [comboOptions, setComboOptions] = useState<Record<string, Record<string, string[]>>>({});
@@ -114,9 +116,15 @@ export function WorkflowGraphPanel({ name, workflow, fields, onFieldsChange, onW
     return (
         <div className="relative h-full">
             <WorkflowGraphView
-                workflow={workflow}
+                workflow={sourceWorkflow}
                 fields={fields}
-                renderNodePopup={(nodeId, close) => (
+                renderNodePopup={(nodeId, close) => ["SetNode", "GetNode"].includes(workflow[nodeId]?.class_type || "") ? (
+                    <div className="rounded border border-border bg-card p-3 text-sm">
+                        <strong>{workflow[nodeId]?.class_type}: {String(workflow[nodeId]?.inputs?.Constant ?? "")}</strong>
+                        <p>命名路由节点：运行时自动解析为真实上游连线，不作为执行节点提交。</p>
+                        <button onClick={close}>关闭</button>
+                    </div>
+                ) : (
                     <NodeFieldPopup
                         nodeId={nodeId}
                         node={workflow[nodeId]}

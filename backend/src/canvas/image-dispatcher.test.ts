@@ -6,6 +6,15 @@ import { injectParams } from "../workflows/executor.js";
 
 import { CanvasImageDispatcher, type CanvasImageReference } from "./image-dispatcher.js";
 
+test("workflow invocation count is not an upper limit on output images", async () => {
+    const dispatcher = dispatcherWith();
+    (dispatcher as any).dispatchWorkflow = async () => ({ media: [{ url: "237.png" }, { url: "812.png" }] });
+    const result = await (dispatcher as any).dispatch({ executor: "comfy-workflow", workflow: "MJ", input: { count: 1, imageIds: ["slot"] } }, "task");
+    assert.equal(result.media.length, 2);
+    assert.equal(result.failure, undefined);
+    assert.deepEqual(result.media.map((item: any) => item.imageId), ["slot", "slot"]);
+});
+
 function task(id: string, input: Record<string, unknown>, status: "queued" | "running" | "succeeded" = "queued") {
     return { id, kind: "canvas-image", status, progress: status === "succeeded" ? 1 : 0, input, params: {}, result: status === "succeeded" ? { media: [] } : null, error: null, createdAt: "", updatedAt: "", executor: "direct-image", outputs: [] };
 }

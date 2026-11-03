@@ -107,6 +107,58 @@ test("a full projection inserts every current Clip, including rows lost earlier"
     assert.deepEqual(deletes(clipInputOperations(drifted, twoSceneProduction, layout, {}, new Set()).operations), ["clip-gone"]);
 });
 
+test("a Clip inserted mid-timeline inherits scene bindings, character groups, and mode from sibling rows", () => {
+    const sibling = {
+        ...projectedClip("clip-a", "CLIP_A"), taskMode: "ref2va",
+        referenceBindings: [
+            { id: "scene-binding", role: "scene", usage: "reference", picturePurpose: ["scene"], sourceNodeId: "scene-node", storageKey: "image:room", mediaType: "image", enabled: true },
+            { id: "shot-binding", role: "storyboard", usage: "first_last", sourceNodeId: "frame-node", storageKey: "image:frame", mediaType: "image", enabled: true },
+        ],
+        h3CharacterGroups: { "group-muli": { id: "group-muli", characterNodeId: "entity-muli", subjectId: "SUBJ-MULI", outfitEnabled: true, outfits: [{ id: "o1", name: "ritual", storageKey: "image:ritual", enabled: true }] } },
+    };
+    const sameNodeLayout = layoutFor({ id: "CLIP_A", nodeId: "H3-A", sceneId: "SC-A" }, { id: "CLIP_B", nodeId: "H3-A", sceneId: "SC-A" });
+    const inserted = structuredClone(twoSceneProduction);
+    inserted.clipGroups[1] = { id: "CLIP_B", shotIds: ["SH-B"], nodeId: "H3-A", segmentId: "clip-b-new" };
+    const canvas = project(h3Node("H3-A", "SC-A", [structuredClone(sibling)]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    const added = clipInputOperations(canvas, inserted, sameNodeLayout, {}, new Set(["CLIP_B"])).operations
+        .find(operation => operation.type === "add_h3_segment" && operation.nodeId === "H3-A");
+    assert.ok(added, "the inserted Clip must materialize on the shared scene node");
+    const segment = (added as any).segment;
+    assert.equal(segment.taskMode, "ref2va", "sibling mode is inherited when the source carries no derived mode");
+    assert.deepEqual(segment.referenceBindings.map(binding => binding.id), ["scene-binding"], "only role/usage scene bindings are inherited");
+    assert.deepEqual(Object.keys(segment.h3CharacterGroups), ["group-muli"], "character groups are inherited from the sibling row");
+
+    // A formal-source derived mode still wins over the inherited sibling mode.
+    const derived = structuredClone(inserted);
+    derived.director.source.segments[1].mode = "T2VA";
+    const derivedAdded = clipInputOperations(project(h3Node("H3-A", "SC-A", [structuredClone(sibling)]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")])),
+        derived, sameNodeLayout, {}, new Set(["CLIP_B"])).operations.find(operation => operation.type === "add_h3_segment" && operation.nodeId === "H3-A");
+    assert.equal((derivedAdded as any).segment.taskMode, "t2v", "derived source mode overrides the sibling-inherited mode");
+});
+
+test("a formal character group inherited from a sibling is scoped by the new Clip's Shot subjects", () => {
+    const sibling = {
+        ...projectedClip("clip-a", "CLIP_A"), taskMode: "ref2va",
+        h3CharacterGroups: { "group-muli": { id: "group-muli", characterNodeId: "entity-muli", subjectId: "Mu Li", outfitEnabled: true, outfits: [{ id: "o1", name: "ritual", storageKey: "image:ritual", enabled: true }] } },
+    };
+    const sameNodeLayout = layoutFor({ id: "CLIP_A", nodeId: "H3-A", sceneId: "SC-A" }, { id: "CLIP_B", nodeId: "H3-A", sceneId: "SC-A" });
+    const production: any = structuredClone(twoSceneProduction);
+    production.clipGroups[1] = { id: "CLIP_B", shotIds: ["SH-B"], nodeId: "H3-A", segmentId: "clip-b-new" };
+    production.director.source.subject_registry = [{ id: "EP2-SUBJ-MULI", pictureBindings: [{ id: "EP2-PB-MULI", sourceNode: { nodeId: "entity-muli" } }] }];
+    const canvas = project(h3Node("H3-A", "SC-A", [sibling]), h3Node("H3-B", "SC-B", [projectedClip("clip-b", "CLIP_B")]));
+    const addFor = (data: typeof production) => clipInputOperations(canvas, data, sameNodeLayout, {}, new Set(["CLIP_B"]))
+        .operations.find(operation => operation.type === "add_h3_segment" && operation.nodeId === "H3-A") as any;
+
+    const unused = addFor(production);
+    assert.deepEqual(unused.segment.h3CharacterGroups, {}, "a display-name subjectId is resolved through the exact character node and omitted when the new Shots do not use it");
+
+    const visible = structuredClone(production);
+    visible.director.source.shots.find((shot: any) => shot.id === "SH-B").subject_usages = [{ subjectId: "EP2-SUBJ-MULI", presentation: "visible" }];
+    const included = addFor(visible).segment.h3CharacterGroups["group-muli"];
+    assert.equal(included.subjectId, "EP2-SUBJ-MULI", "inherited formal groups use the stable Subject ID");
+    assert.equal(included.outfitEnabled, true);
+});
+
 test("a Shot-local projection neither adds outside its targets nor sweeps other nodes", () => {
     const missing = project(h3Node("H3-A", "SC-A", []), h3Node("H3-B", "SC-B", []));
     const scoped = clipInputOperations(missing, twoSceneProduction, layout, {}, new Set(), new Set(["CLIP_B"]));

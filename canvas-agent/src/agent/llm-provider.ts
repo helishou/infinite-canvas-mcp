@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 
+import { dataUrlBytes } from "./image-input.js";
+
 export type Json = Record<string, any>;
-export type LlmProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; systemPrompt: string; kind?: "codex-cli" };
+export type LlmProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; systemPrompt: string; kind?: "codex-cli"; supportsImages?: boolean };
+/** Agent 回看归档图片的工具名；历史占位文本与能力提示都引用同一常量。 */
+export const IMAGE_TOOL_NAME = "agent_view_image";
 export type LlmPart = { text: string } | { image: string } | { imageRef: string };
 export type LlmCall = { id: string; name: string; arguments: string };
 export type LlmMessage = { role: "user" | "assistant" | "tool"; parts: LlmPart[]; calls?: LlmCall[]; callId?: string; callName?: string; providerId?: string; providerFormat?: LlmProvider["apiFormat"]; native?: Json[] };
@@ -17,18 +21,41 @@ function imageDataOf(part: LlmPart): string {
 }
 export type LlmReply = { message: LlmMessage; usage?: { input_tokens: number; output_tokens: number; cached_input_tokens: number } };
 
+/** 每轮随历史带上的真图上限：更早的图片只留 storageKey 占位，模型需要时再回看。 */
+export const HISTORY_IMAGE_BUDGET = { maxCount: 12, maxBytes: 8 * 1024 * 1024 } as const;
+export type HistoryImageBudget = { maxCount: number; maxBytes: number };
+
+const omittedImageText = (storageKey: string) => `【较早的图片已省略（storageKey=${storageKey}）；需要查看时调用 ${IMAGE_TOOL_NAME}】`;
+
 /**
  * 展开历史里的 `imageRef` 为真实图片数据，仅用于本次请求，不写回存储。
  *
  * 历史里存的是媒体 storageKey：附件与工具图片以前把整段 base64 写进线程 JSON，
  * 单线程可涨到 31 MB，而同一份字节早已由媒体库持有（实测 sha256 全部能对上）。
+ *
+ * 每轮只解析最近的图片，超出张数或总字节的旧图替换成占位文本：既控制上下文体积，
+ * 又不丢信息（模型可凭 storageKey 用 `agent_view_image` 回看）。至少保留最新 1 张，
+ * 即使单张已超预算，也不让本轮完全看不到图。
  */
-export async function expandImageRefs(messages: LlmMessage[], resolve: (storageKey: string) => Promise<string>): Promise<LlmMessage[]> {
+export async function expandImageRefs(messages: LlmMessage[], resolve: (storageKey: string) => Promise<string>, budget: HistoryImageBudget = HISTORY_IMAGE_BUDGET): Promise<LlmMessage[]> {
     if (!messages.some(message => message.parts.some(part => "imageRef" in part))) return messages;
-    return await Promise.all(messages.map(async message => ({
-        ...message,
-        parts: await Promise.all(message.parts.map(async part => ("imageRef" in part ? { image: await resolve(part.imageRef) } : part))),
-    })));
+    const expanded = messages.map(message => ({ ...message, parts: [...message.parts] }));
+    let kept = 0, bytes = 0, closed = false;
+    for (let messageIndex = expanded.length - 1; messageIndex >= 0; messageIndex--) {
+        const parts = expanded[messageIndex].parts;
+        for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+            const part = parts[partIndex];
+            if (!("imageRef" in part)) continue;
+            // 一旦超出张数或字节预算，窗口就关闭：更早的图片不再回源读取，直接占位。
+            if (closed || kept >= budget.maxCount) { parts[partIndex] = { text: omittedImageText(part.imageRef) }; continue; }
+            const dataUrl = await resolve(part.imageRef);
+            const size = dataUrlBytes(dataUrl);
+            if (kept > 0 && bytes + size > budget.maxBytes) { parts[partIndex] = { text: omittedImageText(part.imageRef) }; closed = true; continue; }
+            parts[partIndex] = { image: dataUrl };
+            kept++; bytes += size;
+        }
+    }
+    return expanded;
 }
 const record = (value: unknown): Json => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const rows = (value: unknown): Json[] => Array.isArray(value) ? value.map(record) : [];
@@ -45,6 +72,7 @@ export function configuredLlmProviders(value: unknown): LlmProvider[] {
             id: `${channel.id}::${model.name}`, model: String(model.name), name: `${channel.name || channel.id} / ${model.name}`,
             baseUrl: cli ? "" : String(channel.baseUrl || config.baseUrl || "").trim(), apiKey: cli ? "" : String(channel.apiKey || config.apiKey || "").trim(), apiFormat,
             systemPrompt: String(config.systemPrompt || "").trim(),
+            ...(typeof model.supportsImages === "boolean" ? { supportsImages: model.supportsImages } : {}),
             ...(cli ? { kind: "codex-cli" as const } : {}),
         }));
     });
@@ -59,7 +87,7 @@ export function resolveLlmProvider(config: unknown, id?: string): LlmProvider {
     return provider;
 }
 
-function openAiBase(baseUrl: string) {
+export function openAiBase(baseUrl: string) {
     const base = baseUrl.replace(/\/+$/, "");
     return /\/v\d+(?:beta)?$/i.test(base) ? base : `${base}/v1`;
 }

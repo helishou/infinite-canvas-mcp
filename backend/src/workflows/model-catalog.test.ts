@@ -52,10 +52,12 @@ function fixtures() {
   };
 }
 
-test("现有工作流一次性转换为本地模型并推断能力", async () => {
+test("同步不自动创建模型；显式创建仍推断能力", async () => {
   const { values, catalog } = fixtures();
   const result = await catalog.syncStoredConfig();
-  assert.deepEqual(result.added, ["生图", "配音"]);
+  assert.deepEqual(result.added, []);
+  await catalog.exposeImportedWorkflow('custom/生图.json');
+  await catalog.exposeImportedWorkflow('custom/配音.json');
   const config = values.get("ai.config") as {
     channels: Array<{
       kind: string;
@@ -107,12 +109,12 @@ test("文生图工作流进入图片模型目录且拒绝参考图路由", async
     },
   );
 
-  const result = await catalog.syncStoredConfig();
+  const result = await catalog.exposeImportedWorkflow(detail.name);
   const config = values.get("ai.config");
   const model = (config as { channels: Array<{ kind: string; models: Array<Record<string, unknown>> }> })
     .channels.find((channel) => channel.kind === "comfyui")!.models[0];
 
-  assert.deepEqual(result.added, ["MiniMax H3 文生图"]);
+  assert.equal(result.model, "MiniMax H3 文生图");
   assert.equal(model.capability, "image");
   assert.deepEqual(model.workflowRouting, {
     text: detail.name,
@@ -181,7 +183,7 @@ test("旧工作流路径模型会并入真实模型并修正默认选择", async
   };
   assert.deepEqual(
     config.channels[0].models.map((model) => model.name),
-    ["生图", "配音"],
+    ["生图"],
   );
   assert.equal(config.imageModel, "local::生图");
   assert.deepEqual(config.models, ["local::生图"]);

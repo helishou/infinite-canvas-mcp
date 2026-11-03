@@ -12,7 +12,7 @@ import { BackendDatabase } from "../db.js";
 import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { createStores } from "../stores/index.js";
 import { BackendEventBus } from "../events.js";
-import { EpisodeProductionService } from "./production.js";
+import { EpisodeProductionService, legacySharedBindingIds } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
 import { ProductionCompilationService } from "./compilation.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
@@ -2042,6 +2042,34 @@ test("legacy entity IDs on H3 references resolve by exact source node and explic
     assert.equal(projected.segment?.referenceBindings.length, 1);
     assert.equal(projected.segment?.referenceBindings[0].subjectId, "production-entity-legacy");
 });
+test("legacy character-group display names normalize through the exact source node and unused groups stay inactive", t => {
+    const f = referenceClipFixture(t), initial = f.episode.get("ep"), director = initial.draft.director!;
+    const subjectId = "SUB_ROLE", pictureBindingId = "picture:SUB_ROLE:identity";
+    director.source.character_registry = [{ id: "ROLE", name: "Character" }];
+    director.source.subject_registry = [{ id: subjectId, kind: "character",
+        entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "ROLE" },
+        pictureBindings: [{ id: pictureBindingId, assetId: "ROLE", sourceNode: { projectId: f.projectId, nodeId: "identity" },
+            selection: { mode: "node_selection" }, provides: ["identity"], retain: [], exclude: [], applicableState: {}, defaultFor: ["identity"] }] }];
+    director.sourceHash = directorHash(director.source);
+    for (const artifact of director.artifacts) {
+        artifact.sourceHash = director.sourceHash;
+        artifact.receipt.sourceHash = director.sourceHash;
+        artifact.status = "ready";
+    }
+    const current = initial, group = current.draft.clipGroups.find(item => item.id === "seg1")!;
+    const project = f.db.getCanvasProject(f.projectId)!;
+    const baseline = productionClipProjection(project, current.draft, group, group.segmentId!);
+    assert.equal(baseline.result.status, "ready", JSON.stringify(baseline.result));
+    const legacyCharacterGroup = { id: "group-role", characterName: "Character", characterNodeId: "identity", subjectId: "Character Display Name",
+        outfitEnabled: true, outfits: [{ id: "outfit-role", name: "Identity", role: "character_identity", pictureBindingId,
+            url: "/media/approved.png", storageKey: "approved.png", mimeType: "image/png", enabled: true }] };
+    const existing = { ...baseline.segment!, h3CharacterGroups: { "group-role": legacyCharacterGroup } };
+
+    const projected = productionClipProjection(project, current.draft, group, group.segmentId!, existing);
+    assert.equal(projected.result.status, "ready", JSON.stringify(projected.result));
+    assert.equal(projected.segment?.h3CharacterGroups?.["group-role"]?.subjectId, subjectId, "display names are replaced by the registered stable Subject ID");
+    assert.equal(projected.segment?.h3CharacterGroups?.["group-role"]?.outfitEnabled, false, "a formal group is not restored as manual after unused Shot references are reconciled");
+});
 test("a changed formal Prompt marks the existing Clip input outdated", t => {
     const f = referenceClipFixture(t);
     const current = f.episode.get("ep"), group = current.draft.clipGroups.find(item => item.id === "seg1")!;
@@ -2402,4 +2430,23 @@ test("applying a scoped H3 compilation keeps an unchanged out-of-scope Clip read
     const untouchedReady = f.episode.workflowReadiness("ep").targets.find(item => item.id === "segment:seg2");
     assert.equal(untouchedReady?.status, "ready", JSON.stringify(untouchedReady));
     assert.ok(edit.revision < partialApply.revision);
+});
+
+test("共享绑定会顶掉同实体的本地副本绑定，含没有 entity_id 的导入记录", () => {
+    // 本地导入共享资产时只登记了 canvas_scope，assetId 与 entity_id 都对不上共享记录。
+    // 旧判据按 assetId 比对，于是旧绑定留在原地，Clip 里出现两条指向同一张图的参考。
+    const director = { source: { asset_plan: [
+        { id: "SHARED_ROLE", kind: "character", entity_id: "ROLE" },
+        { id: "LOCAL_COPY", kind: "character" },
+        { id: "OTHER_ROLE", kind: "character", entity_id: "OTHER" },
+    ], shots: [] }, assets: {} } as any;
+    const bindings = [
+        { id: "legacy-copy", assetId: "LOCAL_COPY", sourceNode: { nodeId: "image-copy" }, selection: { mode: "latest_success" }, provides: ["identity"] },
+        { id: "legacy-tail", assetId: "LOCAL_COPY", sourceNode: { nodeId: "image-tail" }, selection: { mode: "latest_success" }, provides: ["tail"] },
+        { id: "other-role", assetId: "OTHER_ROLE", sourceNode: { nodeId: "image-other" }, selection: { mode: "latest_success" }, provides: ["identity"] },
+        { id: "variant", assetId: "LOCAL_COPY", sourceNode: { nodeId: "image-copy" }, selection: { mode: "selected_result", resultId: "r1" }, provides: ["identity"] },
+        { id: "already-shared", assetId: "SHARED_ROLE", sourceNode: { nodeId: "entity-node" }, selection: { mode: "node_selection" }, provides: ["identity"] },
+    ];
+    const ids = legacySharedBindingIds(director, bindings, "SHARED_ROLE", "ROLE", "entity-node", "identity");
+    assert.deepEqual([...ids].sort(), ["legacy-copy"], "只顶掉占用同一用途的本地副本，服装变体/其他用途/其他角色保留");
 });

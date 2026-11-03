@@ -11,9 +11,26 @@ export type ClipRefreshJob = {
     segmentId: string; savedRevision: number; sourceHash: string; inputHash: string; status: Status;
     snapshot: DirectorProduction; affectedTargets: string[]; diagnostics: any[]; timings: Record<string, number>;
     createdAt: string; updatedAt: string; preparedId?: string; application?: any; compileRevision?: number; continuityRevision?: number;
+    /** 重排计数与下次尝试时间：异步校验期间被其它编辑打断时按退避重排，而不是直接 failed。 */
+    attempts?: number; nextAttemptAt?: string; retryReason?: string;
+    /** 实际投给编译器的 operationId；首次等于 compilationOperationId，重排后追加 :rN 以避开同 id 幂等重放。 */
+    compileOperationId?: string;
     translationOperationId?: string; translationExpectedRevision?: number; translationError?: string;
 };
 const activeStatuses = ["queued", "checking", "compiling", "applying"];
+/** 多会话同时编辑同一份制作稿时，异步校验窗口内被改写属于常态；这类失败重排就能过，不该落成终态。 */
+const MAX_REFRESH_ATTEMPTS = 3;
+const REFRESH_BACKOFF_MS = [400, 1200, 2500];
+const RETRYABLE_REFRESH_CODES = new Set(["SOURCE_CHANGED_DURING_VALIDATION", "PRODUCTION_CONFLICT", "COMPILATION_INPUT_CHANGED", "REVISION_CONFLICT"]);
+/** 判断一次刷新失败是否只是「别人在我校验期间改了稿」，属于可重排的瞬时冲突。 */
+export function retryableRefreshFailure(error: unknown) {
+    const code = String((error as any)?.code || "");
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (RETRYABLE_REFRESH_CODES.has(code)) return true;
+    if (/^\s*(SOURCE_CHANGED_DURING_VALIDATION|PRODUCTION_CONFLICT|REVISION_CONFLICT)/i.test(message)) return true;
+    if (error instanceof Error && "current" in error && error.message.includes("制作稿版本已变化")) return true;
+    return /SOURCE_CHANGED_DURING_VALIDATION/i.test(message);
+}
 /** Terminal jobs never resume, so their embedded DirectorProduction snapshot is dead weight (multi-MB rows made currentBySegment scan seconds). */
 const prunedOwners = new Set<string>();
 export const clipRefreshScope = (segmentId: string) => ({ targetIds: [segmentId], output: "selected" as const });
@@ -75,7 +92,8 @@ export function clipRefreshReceipt(job: ClipRefreshJob) {
         sourceHash: job.sourceHash, compilationOperationId: job.compilationOperationId, selectedTargets: [job.segmentId],
         createdAt: job.createdAt, updatedAt: job.updatedAt,
         affectedTargets: job.affectedTargets, affectedReason: "Registered target inputs changed", blockingDiagnostic: job.diagnostics[0],
-        timings: job.timings, ...(job.translationOperationId ? { translationOperationId: job.translationOperationId } : {}),
+        timings: job.timings,
+        ...(job.attempts ? { attempts: job.attempts, retryReason: job.retryReason, nextAttemptAt: job.nextAttemptAt } : {}), ...(job.translationOperationId ? { translationOperationId: job.translationOperationId } : {}),
         ...(job.translationError ? { translationError: job.translationError } : {}),
         ...(job.application ? { application: { revision: job.application.revision, sourceHash: job.application.sourceHash,
             referenceSync: (job.application.referenceSync || []).map((item: any) => ({ targetId: item.targetId, status: item.status,
@@ -85,6 +103,7 @@ export function clipRefreshReceipt(job: ClipRefreshJob) {
 /** Durable orchestration only: compiler packets and canvas ops remain authoritative. */
 export class ClipRefreshCoordinator {
     private active = new Set<string>();
+    private wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
     constructor(private service: EpisodeProductionService, private compilations: ProductionCompilationService, private owner: string) {}
     recover() { for (const id of this.service.clipRefreshStore("").owners()) this.wake(id); }
     wake(id: string) {
@@ -98,7 +117,7 @@ export class ClipRefreshCoordinator {
         }
         for (const job of pending) {
             if (latestBySegment.get(job.segmentId) === job) continue;
-            if (job.compileRevision !== undefined) this.compilations.cancel(id, this.owner, job.compilationOperationId);
+            if (job.compileRevision !== undefined) this.compilations.cancel(id, this.owner, job.compileOperationId || job.compilationOperationId);
             job.status = "superseded";
             job.diagnostics = [...job.diagnostics, { code: "CLIP_REFRESH_SUPERSEDED", targetId: job.segmentId, message: "同一 Clip 已保存更新版本，旧刷新已替代。" }];
             store.save(job);
@@ -109,8 +128,47 @@ export class ClipRefreshCoordinator {
                     this.service.cancelCompiledPromptTranslation(id, prior.translationOperationId);
                 }
             }
+            // 退避等待期内不推进，到点再自己唤醒；否则每次 compilation 结束都会白跑一轮。
+            const due = job.nextAttemptAt ? Date.parse(job.nextAttemptAt) : 0;
+            if (due > Date.now()) { this.scheduleWake(id, job, due - Date.now()); continue; }
             void this.advance(id, job, store);
         }
+    }
+    private scheduleWake(id: string, job: ClipRefreshJob, delayMs: number) {
+        const key = `${id}:${job.operationId}`;
+        if (this.wakeTimers.has(key)) return;
+        const timer = setTimeout(() => {
+            this.wakeTimers.delete(key);
+            let store: ClipRefreshStore;
+            try { store = this.service.clipRefreshStore(id); } catch { return; }
+            const current = store.get(job.operationId);
+            if (!current || !activeStatuses.includes(current.status)) return;
+            void this.advance(id, current, store);
+        }, Math.max(0, delayMs));
+        timer.unref?.();
+        this.wakeTimers.set(key, timer);
+    }
+    /**
+     * 异步校验期间被别的编辑改写时，原 operationId 的编译已落在 blocked/failed 终态，
+     * 同 id 重放拿不到新结果——所以换一个 `:rN` 的编译 id 重新排队，刷新任务本身的
+     * operationId 保持不变，客户端仍按原 id 查询进度。
+     */
+    private retryLater(id: string, job: ClipRefreshJob, store: ClipRefreshStore, reason: string): boolean {
+        const attempts = (job.attempts || 0) + 1;
+        if (attempts > MAX_REFRESH_ATTEMPTS) return false;
+        job.attempts = attempts;
+        job.retryReason = reason;
+        job.nextAttemptAt = new Date(Date.now() + REFRESH_BACKOFF_MS[Math.min(attempts, REFRESH_BACKOFF_MS.length) - 1]).toISOString();
+        job.compileOperationId = `${job.compilationOperationId}:r${attempts}`;
+        job.compileRevision = undefined;
+        job.preparedId = undefined;
+        job.application = undefined;
+        job.diagnostics = [{ code: "CLIP_REFRESH_RETRY_SCHEDULED", targetId: job.segmentId, severity: "warning",
+            message: `刷新在异步校验期间与其它编辑冲突（${reason}），已按退避重排第 ${attempts}/${MAX_REFRESH_ATTEMPTS} 次；同一 operationId 继续查询即可` }];
+        job.status = "queued";
+        store.save(job);
+        this.scheduleWake(id, job, Date.parse(job.nextAttemptAt) - Date.now());
+        return true;
     }
     wakeSourceCanvas(projectId: string, nodeIds: string[], revision: number, eventId: string) {
         const consumers = this.service.subjectClipConsumers(projectId, nodeIds);
@@ -148,8 +206,9 @@ export class ClipRefreshCoordinator {
             let compiler: Record<string, unknown> | undefined;
             if (job.compileRevision !== undefined) {
                 try {
-                    const status = this.compilations.getCompilation(id, this.owner, job.compilationOperationId);
-                    const targets: any = this.compilations.getCompilation(id, this.owner, job.compilationOperationId, "targets", 0, 1);
+                    const compileKey = job.compileOperationId || job.compilationOperationId;
+                    const status = this.compilations.getCompilation(id, this.owner, compileKey);
+                    const targets: any = this.compilations.getCompilation(id, this.owner, compileKey, "targets", 0, 1);
                     compiler = { status: status.status, verdict: status.verdict, preparedId: status.preparedId, blockingDiagnostic: status.blockingDiagnostic,
                         targets: (targets.items || []).map((item: any) => ({ targetId: item.targetId, status: item.status, diagnostics: item.diagnostics?.slice(0, 2) || [] })) };
                 } catch { /* Keep the durable refresh receipt readable if its compiler packet was pruned. */ }
@@ -207,13 +266,16 @@ export class ClipRefreshCoordinator {
         const key = job.compilationOperationId;
         if (this.active.has(key)) return;
         this.active.add(key);
+        // 走到这里说明退避等待已到期（或首次执行），下一次冲突要重新计时。
+        job.nextAttemptAt = undefined;
+        const compileKey = job.compileOperationId || key;
         const step = (status: Status) => { job.status = status; store.save(job); };
         const measure = <T>(name: string, fn: () => T): T => { const start = performance.now(); try { return fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
         const measureAsync = async <T>(name: string, fn: () => Promise<T>): Promise<T> => { const start = performance.now(); try { return await fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
         try {
             let compilation: any;
             // Recover original application even if inputs have since changed.
-            if (job.compileRevision !== undefined) compilation = this.compilations.getCompilation(id, this.owner, key);
+            if (job.compileRevision !== undefined) compilation = this.compilations.getCompilation(id, this.owner, compileKey);
             if (compilation?.application) {
                 job.application = compilation.application;
                 job.status = this.syncStatus(job); store.save(job);
@@ -230,14 +292,17 @@ export class ClipRefreshCoordinator {
                 step("checking");
                 // Persist intent before enqueue; an enqueue crash can be recovered by its exact identity.
                 job.compileRevision = current.revision; store.save(job);
-                compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, key, current.revision, undefined, clipRefreshScope(job.segmentId)));
+                compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, compileKey, current.revision, undefined, clipRefreshScope(job.segmentId)));
             }
             if (["queued", "running"].includes(compilation.status)) { step("compiling"); return; }
             if (compilation.status !== "succeeded") {
-                job.diagnostics = compilation.blockingDiagnostic ? [compilation.blockingDiagnostic] : [{ code: "COMPILATION_" + compilation.status.toUpperCase(), message: compilation.nextAction?.message }];
+                const blocking = compilation.blockingDiagnostic as Record<string, any> | undefined;
+                job.diagnostics = blocking ? [blocking] : [{ code: "COMPILATION_" + compilation.status.toUpperCase(), message: compilation.nextAction?.message }];
+                // 编译期间输入被改写 → 换新 revision 重排即可通过，属于瞬时冲突。
+                if (blocking?.code === "COMPILATION_INPUT_CHANGED" && this.retryLater(id, job, store, "编译期间输入被改写")) return;
                 step(compilation.status === "interrupted" ? "interrupted" : compilation.status === "blocked" ? "blocked" : "failed"); return;
             }
-            const targets: any = this.compilations.getCompilation(id, this.owner, key, "targets", 0, 1);
+            const targets: any = this.compilations.getCompilation(id, this.owner, compileKey, "targets", 0, 1);
             if (targets.items?.[0]?.status !== "ready" || targets.total !== 1) {
                 const diagnostics = (targets.items || []).flatMap((item: any) => Array.isArray(item.diagnostics) ? item.diagnostics : []);
                 job.diagnostics = diagnostics.length ? diagnostics.slice(0, 4) : [{ code: "CLIP_COMPILATION_NOT_READY", targetId: job.segmentId, message: "目标产物未就绪" }];
@@ -251,7 +316,10 @@ export class ClipRefreshCoordinator {
         } catch (error) {
             const code = String((error as any)?.code || "CLIP_REFRESH_FAILED");
             job.diagnostics = (error as any)?.diagnostics || [{ code, targetId: job.segmentId, message: error instanceof Error ? error.message : String(error) }];
-            step(code === "SUBJECT_PROMPT_COMPILER_UNSUPPORTED" || (error as any)?.diagnostics ? "blocked" : "failed");
+            const blockedByValidation = code === "SUBJECT_PROMPT_COMPILER_UNSUPPORTED" || Boolean((error as any)?.diagnostics);
+            // 只有「别的编辑在异步校验窗口里改了稿」才重排；真正的校验错误必须留给用户处理。
+            if (!blockedByValidation && retryableRefreshFailure(error) && this.retryLater(id, job, store, String((error as Error)?.message || code).slice(0, 120))) return;
+            step(blockedByValidation ? "blocked" : "failed");
         } finally { this.active.delete(key); }
     }
     private syncStatus(job: ClipRefreshJob): Status {

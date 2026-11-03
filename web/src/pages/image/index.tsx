@@ -500,7 +500,9 @@ export default function ImagePage() {
                 // 3) 把生图工作台选的 references 按 image field 顺序塞到 fields
                 // 4) runWorkflow 传真 config + fields，后端 processImageFields 会把 dataURL 上传到 ComfyUI 转文件名注入 workflow
                 const detail = await fetchWorkflowDetail(workflowName);
-                const imageFields = (detail.config?.fields || []).filter((field) => isWorkflowImageField(field, detail.workflow));
+                if (detail.imageInputCounts && !detail.imageInputCounts.includes(snapshot.references.length)) throw new Error(`工作流不支持 ${snapshot.references.length} 张参考图，请调整输入或模型`);
+                const imageFields = (detail.config?.fields || []).filter((field) => detail.imageInputFieldIds ? detail.imageInputFieldIds.includes(field.id) : isWorkflowImageField(field, detail.workflow));
+                if (snapshot.references.length > imageFields.length) throw new Error(`工作流只有 ${imageFields.length} 个有效图片输入，不能接收 ${snapshot.references.length} 张参考图`);
                 const promptFields = (detail.config?.fields || []).filter((field) => field.type === "text" && field.isPrompt);
                 const workflowFields: Record<string, unknown> = { prompt: snapshot.text };
                 for (const field of promptFields) {
@@ -743,7 +745,7 @@ export default function ImagePage() {
                             </div>
 
                             <section aria-label={t("workbench.groups.defaults")} className="hidden gap-4 border-t border-border pt-5 sm:grid sm:grid-cols-2">
-                                <GenerationSettings
+                                <GenerationSettings imageReferenceCount={references.length}
                                     config={effectiveConfig}
                                     model={model}
                                     updateConfig={updateConfig}
@@ -834,7 +836,7 @@ export default function ImagePage() {
             </Drawer>
             <Drawer title={t("workbench.groups.defaults")} placement="bottom" size="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="mx-auto grid max-w-2xl grid-cols-2 gap-4 pb-6">
-                    <GenerationSettings
+                    <GenerationSettings imageReferenceCount={references.length}
                         config={effectiveConfig}
                         model={model}
                         updateConfig={updateConfig}
@@ -855,6 +857,7 @@ export default function ImagePage() {
 }
 
 function GenerationSettings({
+    imageReferenceCount,
     config,
     model,
     updateConfig,
@@ -863,6 +866,7 @@ function GenerationSettings({
     customFieldValues,
     setCustomFieldValues,
 }: {
+    imageReferenceCount: number;
     config: AiConfig;
     model: string;
     updateConfig: UpdateAiConfig;
@@ -885,7 +889,7 @@ function GenerationSettings({
             </div>
             <div className="col-span-2 block min-w-0" role="group" aria-label={t("workbench.model")}>
                 <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("workbench.model")}</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" imageReferenceCount={imageReferenceCount} fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </div>
             {displayFields.length > 0 && (
                 <section className="col-span-2 space-y-2" aria-label={t("settingsPanels.image.workflowFields")}>

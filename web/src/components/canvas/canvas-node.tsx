@@ -2043,7 +2043,7 @@ function ImageContent({
                           />
                       ))
                 : null}
-            <div className="h-full w-full overflow-hidden rounded-3xl">
+            <div className="h-full w-full overflow-hidden rounded-3xl" data-canvas-image-id={primaryImage?.id}>
                 {primarySource ? (
                     <img
                         src={primarySource}
@@ -2171,6 +2171,7 @@ function ExpandedImageCard({
 
     return (
         <div
+            data-canvas-image-id={image.id}
             className={`absolute z-20 overflow-hidden rounded-3xl ${image.content ? "" : "border shadow-[0_18px_50px_rgba(28,25,23,.18)]"}`}
             style={
                 {

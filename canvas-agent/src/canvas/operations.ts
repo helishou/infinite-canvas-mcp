@@ -189,6 +189,63 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const mode = generationMode(input.mode);
     const prompt = sanitizeCanvasPrompt(String(input.prompt || ""));
     const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
+    const runOp = (nodeId: string) => runGenerationOp({
+        nodeId,
+        mode,
+        prompt,
+        params: input.params as Record<string, unknown> | undefined,
+        idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
+        resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
+    });
+    // 复用已有节点：生成失败或想换参数继续调同一张图时，就地改写参数重跑，
+    // 不再为每次尝试新建一个节点（画布会被几十个一次性节点挤爆）。
+    const reuseId = String(input.reuseNodeId || "").trim();
+    if (reuseId) {
+        if (!state) throw new Error("复用生成节点前必须先读取当前画布");
+        const existing = findNode(state, reuseId);
+        if (!existing) throw new Error(`找不到要复用的生成节点：${reuseId}`);
+        const previousParams = existing.metadata && typeof existing.metadata.comfyParams === "object" && existing.metadata.comfyParams
+            ? existing.metadata.comfyParams as Record<string, unknown>
+            : {};
+        const params = input.params && typeof input.params === "object" && !Array.isArray(input.params)
+            ? input.params as Record<string, unknown>
+            : undefined;
+        const oldReferenceConnectionIds = referenceNodeIds.length
+            ? (state.connections || [])
+                .filter((connection) => connection.toNodeId === reuseId)
+                .filter((connection) => (state.nodes || []).find((node) => node.id === connection.fromNodeId)?.type !== "text")
+                .map((connection) => connection.id)
+            : [];
+        return [
+            ...(oldReferenceConnectionIds.length ? [{ type: "delete_connections", ids: oldReferenceConnectionIds }] : []),
+            ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: reuseId, role: "reference", order })),
+            {
+                type: "update_node",
+                id: reuseId,
+                ...(input.title ? { patch: { title: String(input.title) } } : {}),
+                metadata: cleanRecord({
+                    ...(prompt ? { composerContent: prompt, prompt } : {}),
+                    generationMode: mode,
+                    model: input.model,
+                    size: input.size,
+                    quality: input.quality,
+                    count: input.count,
+                    seconds: input.seconds,
+                    vquality: input.vquality,
+                    generateAudio: input.generateAudio,
+                    watermark: input.watermark,
+                    audioVoice: input.audioVoice,
+                    audioFormat: input.audioFormat,
+                    audioSpeed: input.audioSpeed,
+                    audioInstructions: input.audioInstructions,
+                    // 面板读 comfyParams，运行读 params；两处都写，避免设置面板与实际参数脱节。
+                    ...(params ? { params, comfyParams: { ...previousParams, ...params } } : {}),
+                }),
+            },
+            { type: "select_nodes", ids: [reuseId] },
+            ...(input.autoRun ? [runOp(reuseId)] : []),
+        ];
+    }
     const configId = `config-${crypto.randomUUID()}`;
     // 提示词与生成参数统一保存在智能节点中，不再另造普通文本节点。
     const anchor = nextCanvasFlowAnchor(state, referenceNodeIds[0], { includePrompt: false });
@@ -199,14 +256,7 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
         configNodeOp(configId, { ...input, prompt: configPrompt }, x, y),
         ...referenceNodeIds.map((fromNodeId, order) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId, role: "reference", order })),
         { type: "select_nodes", ids: [configId] },
-        ...(input.autoRun ? [runGenerationOp({
-            nodeId: configId,
-            mode,
-            prompt: configPrompt,
-            params: input.params as Record<string, unknown> | undefined,
-            idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined,
-            resultPolicy: input.resultPolicy as "replace-active" | "append" | undefined,
-        })] : []),
+        ...(input.autoRun ? [runOp(configId)] : []),
     ];
 }
 

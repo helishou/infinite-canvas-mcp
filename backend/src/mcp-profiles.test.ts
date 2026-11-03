@@ -19,6 +19,7 @@ test("HTTP profile catalogs are isolated, frozen per session and retain task/rec
     app.get("/canvas/projects/:id", (_req, res) => res.json({ project: { id: "p", revision: 1, nodes: [{ id: "n", type: "image", title: "Fixture", metadata: { storageKey: "image:fixture" } }], connections: [] } }));
     app.post("/mcp/observability/events", (req, res) => { events.push(req.body); res.json({ ok: true }); });
     app.post("/canvas/generation", (_req, res) => { writes++; res.json({ ok: true }); });
+    app.post("/canvas/image-ops", (req, res) => res.json({ ok: true, op: "colors", echoed: req.body.op, colors: [{ hex: "#0000ff", rgb: { r: 0, g: 0, b: 255 }, ratio: 1 }] }));
     const server = app.listen(0, "127.0.0.1"); await once(server, "listening");
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const routes = registerBackendMcpHttpRoutes(app, { url, token: "fixture", port: 0, origins: [] });
@@ -39,8 +40,16 @@ test("HTTP profile catalogs are isolated, frozen per session and retain task/rec
         }
         assert.ok(tools.every(tool => isToolInProfile(profile, tool.name)));
         for (const name of ["canvas_get_state", "mcp_get_command_receipt", "canvas_wait_tasks", "production_get_compilation", "production_get_artifact_index"]) assert.ok(names.has(name), `${profile} missing ${name}`);
-        if (profile === "full") assert.equal(tools.length, 157);
-        else assert.ok(tools.length < 157);
+        if (profile === "full") assert.equal(tools.length, 159);
+        else assert.ok(tools.length < 159);
+        if (profile === "full") {
+            const imageOps = await client.callTool({ name: "canvas_image_ops", arguments: { op: "colors", storageKey: "image:fixture" } });
+            assert.notEqual(imageOps.isError, true);
+            const body = JSON.parse((imageOps.content as any)[0].text);
+            assert.equal(body.op, "colors");
+            assert.equal(body.echoed, "colors", "canvas_image_ops must forward op to the backend route without a project");
+            assert.equal(body.colors[0].hex, "#0000ff");
+        }
         if (profile === "h3") for (const name of ["production_edit", "h3_update_clips", "h3_run_clip", "h3_get_clip"]) assert.ok(names.has(name));
         const read = await client.callTool({ name: "canvas_get_state", arguments: { projectId: "p", nodeIds: ["n"], projection: "media" } });
         assert.notEqual(read.isError, true);

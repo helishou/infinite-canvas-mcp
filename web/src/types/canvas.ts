@@ -323,6 +323,8 @@ export type ContextMenuState =
           x: number;
           y: number;
           nodeId: string;
+          /** Image card actually hit by the contextmenu event; never changes primary selection. */
+          imageId?: string;
       }
 
     | {

@@ -330,6 +330,21 @@ test("组已建但槽数不足时补建缺失槽并同步 groupSlots", (t) => {
     assert.equal(prepared.command.nodeId, "g1-slot-2", "第 2 轮写进补建的槽");
 });
 
+test("MJ two archived outputs both survive real smart-node write-back", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [{ id: "smart", type: "config", metadata: {
+        smart: true, runtimeTaskId: "multi", primaryImageId: "slot", images: [{ id: "slot", status: "loading" }],
+    } }], connections: [] });
+    const task = { id: "multi", input: {}, params: {}, status: "succeeded" } as any;
+    const outputs = [{ imageId: "slot", url: "/media/237", storageKey: "image:237" }, { imageId: "slot", url: "/media/812", storageKey: "image:812" }];
+    const written = db.writeBackCanvasImageTask(task, { projectId: "p", nodeId: "smart", prompt: "MJ", model: "MJ", imageIds: ["slot"] }, outputs);
+    assert.ok(written);
+    const saved = db.getCanvasProject("p")!.nodes as any[];
+    assert.deepEqual(saved[0].metadata.images.map((image: any) => image.storageKey), ["image:237", "image:812"]);
+    assert.equal(saved[0].metadata.status, "success");
+});
+
 test("智能节点重生成不写入位置或尺寸布局", (t) => {
     const db = new BackendDatabase(":memory:");
     t.after(() => db.close());

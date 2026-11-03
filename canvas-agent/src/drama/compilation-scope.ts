@@ -234,7 +234,6 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                 if (!subjectAssembly) for (const factId of shot.continuity_facts || []) usedFacts.add(String(factId));
                 if (clipShots.has(stableId(shot))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
             }
-            for (const shot of allShots.filter(item => outputShotIds.has(stableId(item)))) for (const ref of rows(shot.utterance_refs)) outputUtteranceIds.add(String(ref.utteranceId));
             const outputUtterances = rows(source.utterances).filter(item => outputUtteranceIds.has(String(item.id)));
             // A clipped utterance depends on its registered speaker even when
             // that Subject has no visible picture usage in this Clip (text-only
@@ -299,11 +298,13 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
                 } : item);
             if (subjectAssembly) projected.source.shots = rows(projected.source.shots).map(shot => {
                 const { continuity_facts: _legacyFacts, ...retained } = shot;
-                return { ...retained, subject_usages: rows(shot.subject_usages).map(usage => ({
-                    ...usage,
-                    continuityFactIds: values(usage.continuityFactIds).filter(id => usedFacts.has(String(id))),
-                    stateRequirements: rows(usage.stateRequirements).filter(item => usedFacts.has(String(item.factId))),
-                })) };
+                return { ...retained,
+                    ...(Array.isArray(shot.utterance_refs) ? { utterance_refs: rows(shot.utterance_refs).filter(ref => outputUtteranceIds.has(String(ref.utteranceId))) } : {}),
+                    subject_usages: rows(shot.subject_usages).map(usage => ({
+                        ...usage,
+                        continuityFactIds: values(usage.continuityFactIds).filter(id => usedFacts.has(String(id))),
+                        stateRequirements: rows(usage.stateRequirements).filter(item => usedFacts.has(String(item.factId))),
+                    })) };
             });
             projected.source.utterances = outputUtterances;
         }

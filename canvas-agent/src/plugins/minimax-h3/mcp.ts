@@ -576,13 +576,30 @@ function buildCharacterCandidate(projectNodes: Array<Record<string, unknown>>, s
     const missingGroupIds = removeGroupIds.filter((id) => !Object.entries(existingGroups).some(([key, value]) => key === id || String((value as Record<string, unknown>)?.id || "") === id));
     if (missingGroupIds.length) throw new Error(`找不到要移除的角色组:${missingGroupIds.join(", ")}`);
     const requestedNodeIds = new Set<string>();
+    // 共享资产画布的节点 id 与本节画布的引用节点 id 不同。直接传共享 id 会找不到节点，
+    // 以前的出路是「导一份副本进来」——那正是画布上出现两张一样参考图的来源。
+    // 这里按 sharedAssetReference / sharedAssetOrigin 的源节点反查本集引用节点，
+    // 让调用方永远不需要为「复用已有资产」创建本地副本。
+    const resolveLocalCharacterNode = (requestedNodeId: string) => {
+        const direct = projectNodes.find((item) => String(item.id || "") === requestedNodeId);
+        if (direct) return direct;
+        return projectNodes.find((item) => {
+            const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata as Record<string, unknown> : undefined;
+            return [metadata?.sharedAssetReference, metadata?.sharedAssetOrigin].some((value) => {
+                const reference = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+                return Boolean(reference) && [reference!.sourceNodeId, reference!.nodeId].some((id) => String(id || "") === requestedNodeId);
+            });
+        });
+    };
     const built = rawCharacters.map((request) => {
-        const characterNodeId = String(request.characterNodeId || "");
-        if (!characterNodeId || requestedNodeIds.has(characterNodeId)) throw new Error(`characterNodeId 缺失或重复:${characterNodeId}`);
+        const requestedNodeId = String(request.characterNodeId || "");
+        if (!requestedNodeId) throw new Error("characterNodeId 缺失");
+        const sourceNode = resolveLocalCharacterNode(requestedNodeId);
+        if (!sourceNode) throw new Error(`找不到已有 character 节点:${requestedNodeId}；若这是共享资产画布上的节点，请先跑一次 production sync 生成本集引用节点，不要导入图片副本`);
+        if (String(sourceNode.type || "") !== "character") throw new Error(`只能绑定已有 character 节点:${requestedNodeId}`);
+        const characterNodeId = String(sourceNode.id || requestedNodeId);
+        if (requestedNodeIds.has(characterNodeId)) throw new Error(`characterNodeId 重复:${characterNodeId}`);
         requestedNodeIds.add(characterNodeId);
-        const sourceNode = projectNodes.find((item) => String(item.id || "") === characterNodeId);
-        if (!sourceNode) throw new Error(`找不到已有 character 节点:${characterNodeId}`);
-        if (String(sourceNode.type || "") !== "character") throw new Error(`只能绑定已有 character 节点:${characterNodeId}`);
         const selected = Array.isArray(request.selectedOutfitStorageKeys) ? request.selectedOutfitStorageKeys.map(String) : [];
         const existingGroup = Object.values(existingGroups).map((value) => value as Record<string, unknown>).find((group) => String(group.characterNodeId || "") === characterNodeId);
         return { characterNodeId, built: buildCharacterGroupFromExistingNode(sourceNode, { selectedOutfitStorageKeys: selected, ...(typeof request.subjectId === "string" ? { subjectId: request.subjectId } : {}), ...(typeof request.voiceEnabled === "boolean" ? { voiceEnabled: request.voiceEnabled } : {}), existingGroup }) };

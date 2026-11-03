@@ -171,6 +171,46 @@ function clearSubjectEntityLedgerReferences(source: Record<string, any>, subject
         event_ids: Array.isArray(item.event_ids) ? item.event_ids.filter((id: unknown) => !removedEvents.has(String(id))) : item.event_ids,
     }));
 }
+/**
+ * 旧绑定（可能指向本地导入的副本、另一个资产记录或另一张同媒体图片）在本集共享绑定落位后必须被顶掉，
+ * 否则同一 Subject 会解析出两张一模一样的参考图。判据不能只看 assetId：本地导入会为同一实体再登记一条
+ * 资产记录，assetId 不同但实体相同，旧绑定就会活下来。
+ */
+export function legacySharedBindingIds(director: DirectorProduction, bindings: Array<Record<string, any>>, assetId: string, entityId: string, boundNodeId: string, purpose: string) {
+    const planEntityByAsset = new Map(clipRows(director.source.asset_plan)
+        .map(plan => [String(plan.id || plan.asset_id || ""), String(plan.entity_id || "")]));
+    const sharedStorageKey = String((director.assets as Record<string, any> | undefined)?.[assetId]?.storageKey || "");
+    return new Set(bindings.filter(item => {
+        if (item.selection?.mode === "selected_result") return false;
+        if (String(item.sourceNode?.nodeId || "") === boundNodeId) return false;
+        const itemAssetId = String(item.assetId || "");
+        if (itemAssetId === assetId) return true;
+        const itemEntityId = itemAssetId ? String(planEntityByAsset.get(itemAssetId) || "") : "";
+        if (itemEntityId && itemEntityId === entityId) return true;
+        const purposes = new Set((Array.isArray(item.provides) ? item.provides : []).map(String));
+        // 本地导入的副本往往没有 entity_id（只登记了 canvas_scope），assetId 也对不上。
+        // 这类“来源不明”的本地绑定只要占用了同一用途，就视为共享资产的副本让位。
+        if (!itemEntityId && purposes.has(purpose)) return true;
+        const itemStorageKey = String(item.storageKey || "");
+        return Boolean(itemStorageKey && sharedStorageKey && itemStorageKey === sharedStorageKey);
+    }).map(item => String(item.id || "")).filter(Boolean));
+}
+/** 把镜头/关键帧里选中的旧绑定改指到新绑定，保证替换后引用不断。 */
+function remapSubjectPictureBindings(director: DirectorProduction, legacyIds: Set<string>, replacementId: string) {
+    if (!legacyIds.size) return;
+    const remap = (id: unknown) => legacyIds.has(String(id)) ? replacementId : String(id);
+    for (const shot of clipRows(director.source.shots)) {
+        for (const usage of clipRows(shot.subject_usages)) {
+            if (Array.isArray(usage.pictureBindingIds)) usage.pictureBindingIds = [...new Set(usage.pictureBindingIds.map(remap))];
+        }
+        for (const frame of clipRows(shot.keyframes)) {
+            const bySubject = frame.subjectPictureBindingIds && typeof frame.subjectPictureBindingIds === "object" ? frame.subjectPictureBindingIds as Record<string, unknown> : undefined;
+            for (const [key, ids] of Object.entries(bySubject || {})) {
+                if (Array.isArray(ids)) bySubject![key] = [...new Set(ids.map(remap))];
+            }
+        }
+    }
+}
 function ensureSharedSubjectPictureBinding(director: DirectorProduction, episodeId: string, canvasId: string, assetPlan: Record<string, any>, subjectId: string): boolean {
     const kind = String(assetPlan.kind || "");
     const assetId = String(assetPlan.id || assetPlan.asset_id || "");
@@ -183,27 +223,13 @@ function ensureSharedSubjectPictureBinding(director: DirectorProduction, episode
     const bindings = clipRows(subject.pictureBindings);
     const binding = sharedSubjectPictureBinding(subject, assetPlan, episodeId, canvasId);
     if (!binding) return false;
-    // A legacy binding can already point at the same shared asset through its mirror image node.
-    // Replace it and remap the Shots/keyframes that selected it, instead of leaving two entries
-    // for one picture (which reads as a duplicate "same image" reference in the Subject panel).
+    // A legacy binding can already point at the same shared asset through its mirror image node,
+    // or at a locally imported copy registered under a second asset record. Supersede it and remap
+    // the Shots/keyframes that selected it, instead of leaving two entries for one picture.
     // Costume variants stay untouched: they are explicit `selected_result` bindings.
-    const legacyIds = new Set(bindings.filter(item => String(item.assetId || "") === assetId
-        && item.selection?.mode === "node_selection"
-        && String(item.sourceNode?.nodeId || "") !== binding.sourceNode.nodeId).map(item => String(item.id || "")).filter(Boolean));
-    if (legacyIds.size) {
-        const remap = (id: unknown) => legacyIds.has(String(id)) ? binding.id : String(id);
-        for (const shot of clipRows(director.source.shots)) {
-            for (const usage of clipRows(shot.subject_usages)) {
-                if (Array.isArray(usage.pictureBindingIds)) usage.pictureBindingIds = [...new Set(usage.pictureBindingIds.map(remap))];
-            }
-            for (const frame of clipRows(shot.keyframes)) {
-                const bySubject = frame.subjectPictureBindingIds && typeof frame.subjectPictureBindingIds === "object" ? frame.subjectPictureBindingIds as Record<string, unknown> : undefined;
-                for (const [key, ids] of Object.entries(bySubject || {})) {
-                    if (Array.isArray(ids)) bySubject![key] = [...new Set(ids.map(remap))];
-                }
-            }
-        }
-    }
+    const legacyPurpose = kind === "scene" ? "environment" : kind === "prop" ? "prop" : "identity";
+    const legacyIds = legacySharedBindingIds(director, bindings, assetId, entityId, binding.sourceNode.nodeId, legacyPurpose);
+    remapSubjectPictureBindings(director, legacyIds, binding.id);
     subject.pictureBindings = [...bindings.filter(item => !legacyIds.has(String(item.id || ""))), binding];
     director.sourceHash = directorHash(director.source);
     director.executionAuthorized = false;
@@ -374,6 +400,59 @@ export class EpisodeProductionService {
         if (linked) return linked.service.ownerIdentity(linked.id);
         this.episode(id);
         return { kind: this.ownerKind, id };
+    }
+    syncSceneDirectory(id: string, expectedRevision: number, operationId: string): { episodeId: string; dramaId: string; revision: number; sourceHash: string; replayed: boolean; counts: { created: number; updated: number; unchanged: number }; scenes: Array<Record<string, unknown>> } {
+        const linked = this.linked(id);
+        if (linked) return linked.service.syncSceneDirectory(linked.id, expectedRevision, operationId);
+        this.db.db.exec("BEGIN IMMEDIATE");
+        try {
+            const current = this.get(id, false, false);
+            if (current.revision !== expectedRevision) throw new ProductionConflictError(current);
+            const episode = this.episode(id);
+            if (!episode.dramaId) throw new Error("SCENE_SYNC_REQUIRES_DRAMA_EPISODE: 只有归属剧目的分集可以同步正式场次");
+            const director = current.draft.director;
+            if (!director || !isSubjectPromptAssembly(director.source)) throw new Error("SCENE_SYNC_REQUIRES_CURRENT_SOURCE: 当前分集没有可同步的 Acheng v2 导演源稿");
+            const scenes = productionSceneEntries(director.source);
+            const sourceHash = crypto.createHash("sha256").update(JSON.stringify(scenes)).digest("hex");
+            const requestHash = crypto.createHash("sha256").update(JSON.stringify({ ownerKind: this.ownerKind, id, expectedRevision, sourceHash })).digest("hex");
+            const now = new Date().toISOString();
+            const prior = this.db.db.prepare("SELECT request_hash FROM production_operation_keys WHERE owner_kind=? AND owner_id=? AND operation_id=?")
+                .get(this.ownerKind, id, operationId) as { request_hash: string } | undefined;
+            if (prior && prior.request_hash !== requestHash) throw new Error("operationId 已用于不同场次同步请求");
+            const replayed = Boolean(prior);
+            let created = 0, updated = 0, unchanged = 0;
+            const find = this.db.db.prepare("SELECT id, episode_id, environment_id, scene_order, title, source_hash FROM drama_scene_instances WHERE drama_id=? AND source_scene_key=?");
+            const insert = this.db.db.prepare(`INSERT INTO drama_scene_instances(id,drama_id,episode_id,source_scene_key,environment_id,scene_order,title,source_hash,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?, 'active', ?, ?)
+                ON CONFLICT(drama_id,source_scene_key) DO UPDATE SET episode_id=excluded.episode_id, environment_id=excluded.environment_id,
+                scene_order=excluded.scene_order,title=excluded.title,source_hash=excluded.source_hash,updated_at=excluded.updated_at`);
+            for (const [index, scene] of scenes.entries()) {
+                const sourceSceneKey = scene.id;
+                const old = find.get(episode.dramaId, sourceSceneKey) as { id: string; episode_id: string | null; environment_id: string | null; scene_order: number; title: string; source_hash: string } | undefined;
+                if (old && old.episode_id !== id) throw new Error(`SCENE_SOURCE_KEY_CONFLICT: 场次源 ID ${sourceSceneKey} 已属于其他分集`);
+                const rowHash = crypto.createHash("sha256").update(JSON.stringify(scene)).digest("hex");
+                if (old && old.environment_id === scene.environmentId && Number(old.scene_order) === index && old.title === scene.title && old.source_hash === rowHash) {
+                    unchanged++;
+                    continue;
+                }
+                const sceneId = old?.id || sourceSceneKey;
+                const idCollision = this.db.db.prepare("SELECT drama_id, source_scene_key FROM drama_scene_instances WHERE id=?").get(sceneId) as { drama_id: string; source_scene_key: string } | undefined;
+                if (idCollision && (idCollision.drama_id !== episode.dramaId || idCollision.source_scene_key !== sourceSceneKey)) throw new Error(`SCENE_ID_CONFLICT: 正式场次 ID ${sceneId} 已被其他场次占用`);
+                insert.run(sceneId, episode.dramaId, id, sourceSceneKey, scene.environmentId || null, index, scene.title || scene.id, rowHash, now, now);
+                if (old) updated++; else created++;
+            }
+            if (!prior) this.db.db.prepare("INSERT INTO production_operation_keys(owner_kind,owner_id,operation_id,request_hash,committed_revision,created_at) VALUES(?,?,?,?,?,?)")
+                .run(this.ownerKind, id, operationId, requestHash, current.revision, now);
+            const rows = this.db.db.prepare(`SELECT id, source_scene_key, environment_id, scene_order, title, source_hash, status
+                FROM drama_scene_instances WHERE drama_id=? AND episode_id=? ORDER BY scene_order,id`).all(episode.dramaId, id) as Array<Record<string, unknown>>;
+            this.db.db.exec("COMMIT");
+            return { episodeId: id, dramaId: episode.dramaId, revision: current.revision, sourceHash, replayed,
+                counts: { created, updated, unchanged }, scenes: rows.map(row => ({ id: String(row.id), sourceSceneKey: String(row.source_scene_key), environmentId: row.environment_id ?? null,
+                    order: Number(row.scene_order), title: String(row.title), sourceHash: String(row.source_hash), status: String(row.status) })) };
+        } catch (error) {
+            this.db.db.exec("ROLLBACK");
+            throw error;
+        }
     }
     /** Check before accepting a preparation; create only after all targets are validated. */
     preparationCanvas(id: string, create = false): string | null {
@@ -561,13 +640,24 @@ export class EpisodeProductionService {
             // changes. Resolve a matching formal projection directly; otherwise use the canvas
             // image-reference resolver below. Archive, ownership, available task provenance,
             // and byte/hash checks remain authoritative.
-            const projectedAssetNode = Boolean(node && ["image", "character", "scene"].includes(String(node.type))
+            const projectedAssetNode = Boolean(node && ["image", "character", "scene", "prop"].includes(String(node.type))
                 && metadata.productionAssetId === assetId && old?.nodeId === nodeId
                 && old?.storageKey && old?.sha256 && old?.generationTaskId
                 && binding.selection?.mode === "node_selection");
             if (!project || !node) {
                 if (isSharedAsset) sharedBindingError("source_resolution", "binding_source_missing", "共享素材图片来源画布或节点不存在");
-                throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_SOURCE_MISSING", path: `${bindingPath}.sourceNode`, targetId: bindingId, message: "图片参考来源画布或节点不存在", severity: "error" }]);
+                const shotId = /^shots\.([^.]+)\./.exec(bindingPath)?.[1];
+                const clipIds = [...(bindingTargets.get(bindingId) || [])];
+                const location = [
+                    clipIds.length ? `Clip：${clipIds.join("、")}` : undefined,
+                    shotId ? `Shot：${shotId}` : undefined,
+                ].filter(Boolean).join("；");
+                throw new ProductionValidationError([{
+                    code: "SUBJECT_IMAGE_SOURCE_MISSING", path: `${bindingPath}.sourceNode`, targetId: bindingId,
+                    ...(shotId ? { shotId } : {}),
+                    message: `图片参考来源画布或节点不存在${location ? `（${location}）` : ""}`,
+                    severity: "error",
+                }]);
             }
             if (isSharedAsset) {
                 if (!sharedSource) sharedBindingError("source_resolution", "shared_source_missing", "共享素材计划缺少正式来源身份");
@@ -1126,7 +1216,7 @@ export class EpisodeProductionService {
         const meta = record(sourceNode?.metadata);
         const storageKey = String(asset.storageKey || resolveCanvasImageReferenceNode(sourceNode || {})[0]?.storageKey || meta.storageKey || meta.resultStorageKey || sourceNode?.content || "");
         if (!sourceNode || !storageKey || !JSON.stringify(sourceNode).includes(storageKey)) throw new Error("原分集节点未绑定待接入媒体");
-        if (!["image", "character", "scene"].includes(String(sourceNode.type)) && !(sourceNode.type === "config" && meta.generationMode === "image")) throw new Error("只有正式图片、角色或场景资产可以接入共享画布");
+        if (!["image", "character", "scene", "prop"].includes(String(sourceNode.type)) && !(sourceNode.type === "config" && meta.generationMode === "image")) throw new Error("只有正式图片、角色、场景或道具资产可以接入共享画布");
         const media = this.db.getMediaFile(storageKey);
         if (!media || !fs.existsSync(media.filePath)) throw new Error("原归档媒体不存在或不可访问");
         const sha256 = promptHashBytes(media.filePath);
@@ -1373,6 +1463,90 @@ export class EpisodeProductionService {
         return ref ? this.db.getMediaFile(ref.storageKey)?.filePath : undefined;
     }
 
+    /**
+     * 共享资产与参考的一致性巡检。保存期校验只能挡住新写入，已经落库的脏数据要靠这里一键体检。
+     * 三条不变量：
+     *  1. 共享资产在本集画布只有引用节点一个载体（`SHARED_ASSET_COPIED_LOCALLY`）；
+     *  2. 同一 Subject 不允许两条绑定解析到同一张图且用途重叠（`SUBJECT_PICTURE_DUPLICATED`）；
+     *  3. 同一段 Clip 里同一张图不占两个 Picture 槽位（`DUPLICATE_REFERENCE_MEDIA`）。
+     * 只读：不改任何数据，仅报告。
+     */
+    bindingIntegrityIssues(draft: DirectorProduction | undefined, nodes: Array<Record<string, any>>) {
+        const issues: Array<{ code: string; severity: "error" | "warning"; message: string; subjectId?: string; bindingIds?: string[]; segmentId?: string; nodeId?: string; assetId?: string }> = [];
+        if (!draft) return issues;
+        const imageKeysOf = (node: Record<string, any>) => new Set(resolveCanvasImageReferenceNode(node).map(item => String(item.storageKey || "")).filter(Boolean));
+        // 1) 共享资产被复制成本地节点：带 sharedAssetReference 的节点才是合法载体。
+        const carriers = nodes.filter(node => Object.keys(record(record(node.metadata).sharedAssetReference)).length)
+            .map(node => ({ nodeId: String(node.id || ""), assetId: String(record(record(node.metadata).sharedAssetReference).assetId || ""), keys: imageKeysOf(node) }))
+            .filter(carrier => carrier.keys.size);
+        for (const node of nodes) {
+            const metadata = record(node.metadata);
+            if (metadata.sharedAssetReference || metadata.sharedAssetOrigin) continue;
+            // 共享资产可能就是从本集画布生成出去的：那个 config 节点/产物节点持有同一张图是正常的。
+            // 只把「非生成方的普通节点」认定为重复副本，避免把资产源头误报成脏数据。
+            const generationNode = String(node.type || "") === "config" || Boolean(metadata.productionAssetId);
+            if (generationNode) continue;
+            for (const key of imageKeysOf(node)) for (const carrier of carriers) {
+                if (!carrier.keys.has(key)) continue;
+                issues.push({ code: "SHARED_ASSET_COPIED_LOCALLY", severity: "error", nodeId: String(node.id || ""), assetId: carrier.assetId,
+                    message: `节点 ${String(node.id || "")}（${String(node.title || "")}）与共享资产 ${carrier.assetId || carrier.nodeId} 携带同一张图 ${key}；共享资产在画布上只应有一个引用节点载体，多余副本应删除` });
+            }
+        }
+        // 2) 同一 Subject 两条绑定解析到同一张图且用途重叠。
+        const subjects = (Array.isArray(draft.source.subject_registry) ? draft.source.subject_registry : []).map(record);
+        const nodesById = new Map(nodes.map(node => [String(node.id || ""), node]));
+        for (const subject of subjects) {
+            const subjectId = String(subject.id || "");
+            const claims = new Map<string, Array<{ id: string; provides: Set<string> }>>();
+            for (const binding of (Array.isArray(subject.pictureBindings) ? subject.pictureBindings : []).map(record)) {
+                if (String(record(binding.selection).mode || "") === "selected_result") continue;
+                const bindingId = String(binding.id || "");
+                const keys = new Set<string>();
+                const direct = String(binding.storageKey || "");
+                if (direct) keys.add(direct);
+                const assetId = String(binding.assetId || "");
+                const assetKey = String(draft.assets?.[assetId]?.storageKey || "");
+                if (assetKey) keys.add(assetKey);
+                const sourceNodeId = String(record(binding.sourceNode).nodeId || "");
+                const sourceNode = sourceNodeId ? nodesById.get(sourceNodeId) : undefined;
+                if (sourceNode) for (const key of imageKeysOf(sourceNode)) keys.add(key);
+                if (!keys.size) continue;
+                const provides = new Set((Array.isArray(binding.provides) ? binding.provides : []).map(String));
+                for (const key of keys) {
+                    const prior = claims.get(key) || [];
+                    const clash = prior.find(claim => claim.id !== bindingId && (claim.provides.size === 0 || provides.size === 0 || [...claim.provides].some(value => provides.has(value))));
+                    if (clash) issues.push({ code: "SUBJECT_PICTURE_DUPLICATED", severity: "error", subjectId, bindingIds: [clash.id, bindingId],
+                        message: `Subject ${subjectId} 的绑定 ${clash.id} 与 ${bindingId} 指向同一张图 ${key} 且用途重叠；共享资产只保留指向引用节点的一条绑定` });
+                    claims.set(key, [...prior, { id: bindingId, provides }]);
+                }
+            }
+        }
+        // 3) 同一段 Clip 里同一张图占了两个 Picture 槽位。
+        for (const node of nodes) {
+            const segments = Array.isArray(record(node.metadata).segments) ? record(node.metadata).segments as Array<Record<string, any>> : [];
+            for (const segment of segments) {
+                const segmentId = String(segment.id || "");
+                const claimed = new Map<string, { bindingIds: string[]; subjectIds: Set<string> }>();
+                for (const binding of (Array.isArray(segment.referenceBindings) ? segment.referenceBindings : []).map(record)) {
+                    if (binding.enabled === false || String(binding.mediaType || "image") !== "image") continue;
+                    const key = String(binding.storageKey || "");
+                    if (!key) continue;
+                    const entry = claimed.get(key) || { bindingIds: [], subjectIds: new Set<string>() };
+                    entry.bindingIds.push(String(binding.id || ""));
+                    if (String(binding.subjectId || "")) entry.subjectIds.add(String(binding.subjectId));
+                    claimed.set(key, entry);
+                }
+                for (const [key, entry] of claimed) {
+                    if (entry.bindingIds.length < 2) continue;
+                    const sameSubject = entry.subjectIds.size <= 1;
+                    issues.push({ code: "DUPLICATE_REFERENCE_MEDIA", severity: sameSubject ? "error" : "warning", segmentId,
+                        message: `片段 ${segmentId} 的 ${entry.bindingIds.join(" / ")} 引用同一张图 ${key}${sameSubject ? "" : "（不同主体共用，确认是否为有意的氛围图）"}；同一张图不应占两个 Picture 槽位` });
+                }
+            }
+        }
+        return issues;
+    }
+
     diagnoseBindings(id: string) {
         const current = this.get(id), draft = current.draft.director, published = current.published?.director;
         const canvasId = this.episodeInfo(id).canvasId;
@@ -1380,7 +1554,9 @@ export class EpisodeProductionService {
         const nodes = (Array.isArray(rawNodes) ? rawNodes : []) as Array<Record<string, any>>;
         const plans = Array.isArray(draft?.source.asset_plan) ? draft.source.asset_plan as Array<Record<string, any>> : [];
         const assetIds = [...new Set([...plans.map(p => String(p.id || p.asset_id)), ...Object.keys(draft?.assets || {}), ...Object.keys(published?.assets || {})])];
+        const integrity = this.bindingIntegrityIssues(draft, nodes);
         return { revision: current.revision, publishedVersion: current.publishedVersion, canvasId, sourceHash: draft?.sourceHash, currentWork: draft?.workflow.currentWork,
+            integrity: { issues: integrity, errorCount: integrity.filter(item => item.severity === "error").length, warningCount: integrity.filter(item => item.severity === "warning").length },
             assets: assetIds.map(assetId => {
                 const plan = plans.find(p => (p.id || p.asset_id) === assetId), active = draft?.assets[assetId], old = published?.assets[assetId];
                 const node = nodes.find(n => n.id === active?.nodeId);
@@ -4559,7 +4735,16 @@ export class EpisodeProductionService {
                     && String(plan.entity_id || (entityKind === "prop" ? plan.id || plan.asset_id : "")) === String(ref.id || ""));
                 if (sharedPlan) {
                     const binding = sharedSubjectPictureBinding(incoming, sharedPlan, episodeId, String(this.db.getDramaEpisode(episodeId)?.canvasId || ""));
-                    if (binding) incoming.pictureBindings = [...incoming.pictureBindings, binding];
+                    if (binding) {
+                        // Same rule as ensureSharedSubjectPictureBinding: the shared binding supersedes
+                        // any legacy local-copy binding instead of sitting next to it.
+                        const currentBindings = clipRows(incoming.pictureBindings) as Array<Record<string, any>>;
+                        const legacyIds = legacySharedBindingIds(draft.director, currentBindings,
+                            String(sharedPlan.id || sharedPlan.asset_id || ""), String(sharedPlan.entity_id || sharedPlan.id || sharedPlan.asset_id || ""), binding.sourceNode.nodeId,
+                            entityKind === "scene" ? "environment" : entityKind === "prop" ? "prop" : "identity");
+                        remapSubjectPictureBindings(draft.director, legacyIds, binding.id);
+                        incoming.pictureBindings = [...currentBindings.filter(item => !legacyIds.has(String(item.id || ""))), binding] as typeof incoming.pictureBindings;
+                    }
                 }
             }
             const bindings = clipRows(incoming.pictureBindings);
@@ -5408,7 +5593,7 @@ export class EpisodeProductionService {
             if (!planned && !isKeyframe) throw new Error(`资产 ${op.assetId} 不属于当前 Acheng 制作稿`);
             const node = this.canvasNode(episodeId, op.nodeId);
             const metadata = record(node.metadata);
-            if (!["image", "character", "scene"].includes(String(node.type)) && !(node.type === "config" && metadata.generationMode === "image")) throw new Error("资产只能绑定图片、角色或场景节点");
+            if (!["image", "character", "scene", "prop"].includes(String(node.type)) && !(node.type === "config" && metadata.generationMode === "image")) throw new Error("资产只能绑定图片、角色、场景或道具节点");
             const prior = draft.director.assets[op.assetId];
             if (prior?.nodeId === op.nodeId) return;
             const entry = (Array.isArray(draft.director.source.asset_plan) ? draft.director.source.asset_plan : []).map(record).find(item => String(item.asset_id || item.id || "") === op.assetId);

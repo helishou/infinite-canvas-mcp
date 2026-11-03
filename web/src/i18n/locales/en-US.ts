@@ -1615,6 +1615,10 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
             scriptReady: "Script set",
             script: "Request script",
             empty: "Select models to fetch or manually add models.",
+            visionAuto: "Auto",
+            visionSupported: "Images",
+            visionUnsupported: "Text only",
+            visionHint: "Whether this text model accepts images. Auto checks the model name and a tiny image probe; only a confirmed miss stops image requests with an actionable error.",
             capabilities: {
                 image: "Image",
                 video: "Video",

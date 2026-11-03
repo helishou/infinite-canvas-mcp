@@ -178,3 +178,37 @@ test("工具层自带的默认尺寸与共享规格一致，不再让 Backend �
     const plugin = opsOf("canvas_create_node", { nodeType: "demo:panel" }).find((op) => op.type === "add_node")!;
     assert.deepEqual([plugin.width, plugin.height], [340, 240]);
 });
+
+test("reuseNodeId 就地改写参数重跑，不新建节点", () => {
+    const state = {
+        nodes: [
+            { id: "ref", type: "image", position: { x: 0, y: 0 }, width: 320, height: 240 },
+            { id: "config-1", type: "config", position: { x: 400, y: 0 }, width: 320, height: 240, metadata: { comfyParams: { f_a: 0.8, f_b: 0.5 } } },
+        ],
+        connections: [],
+    };
+    const ops = opsOf("canvas_generate_image", {
+        prompt: "same shot, retry",
+        reuseNodeId: "config-1",
+        referenceNodeIds: ["ref"],
+        params: { f_a: 0.4 },
+        autoRun: true,
+    }, state);
+    assert.equal(ops.filter((op) => op.type === "add_node").length, 0, "不再新增节点");
+    const update = ops.find((op) => op.type === "update_node");
+    assert.equal(update?.id, "config-1");
+    assert.equal(update?.metadata.prompt, "same shot, retry");
+    // 面板读 comfyParams：本次覆盖 f_a，保留之前调好的 f_b。
+    assert.deepEqual(update?.metadata.comfyParams, { f_a: 0.4, f_b: 0.5 });
+    assert.deepEqual(update?.metadata.params, { f_a: 0.4 });
+    assert.equal(ops.filter((op) => op.type === "connect_nodes" && op.toNodeId === "config-1").length, 1);
+    const run = ops.find((op) => op.type === "run_generation");
+    assert.equal(run?.nodeId, "config-1");
+});
+
+test("reuseNodeId 指向不存在的节点时直接报错", () => {
+    assert.throws(
+        () => opsOf("canvas_generate_image", { prompt: "x", reuseNodeId: "missing", autoRun: true }, { nodes: [], connections: [] }),
+        /找不到要复用的生成节点/,
+    );
+});

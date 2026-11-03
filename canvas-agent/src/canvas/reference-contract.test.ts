@@ -329,3 +329,19 @@ test("角色组没有任何启用服装时只提交手工参考，不产生空�
     assert.equal(result.references.filter((ref) => ref.groupId === "group-1").length, 0);
     assert.equal(result.issues.filter((issue) => issue.severity === "error").length, 0);
 });
+
+test("同一主体同一张图占两个 Picture 槽位时报重复参考，不同主体共用只报警", () => {
+    const binding = (id: string, subjectId: string) => ({
+        id, assetId: id, label: id, role: "character_identity", tags: [], enabled: true, usage: "reference", mediaType: "image",
+        subjectId, storageKey: "image:dup", url: "https://example.test/dup.png",
+    });
+    const duplicated = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "x",
+        referenceBindings: [binding("bind-a", "SUB_MULI"), binding("bind-b", "SUB_MULI")] });
+    assert.ok(duplicated.issues.some((issue) => issue.code === "duplicate_reference_media" && issue.severity === "error"),
+        duplicated.issues.map((issue) => `${issue.code}:${issue.message}`).join("；"));
+
+    const shared = compileReferenceSubmission({}, { taskMode: "ref2va", prompt: "x",
+        referenceBindings: [binding("bind-a", "SUB_MULI"), binding("bind-b", "SUB_LONGWANG")] });
+    assert.ok(shared.issues.some((issue) => issue.code === "shared_reference_media" && issue.severity === "warning"));
+    assert.equal(shared.issues.some((issue) => issue.code === "duplicate_reference_media"), false);
+});
