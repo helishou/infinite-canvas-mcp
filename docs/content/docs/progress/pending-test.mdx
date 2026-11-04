@@ -5,7 +5,7 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
-- Production canvas readiness: with several Clips sharing image references, check refresh responsiveness and unchanged readiness diagnostics. Shared media are read and hashed once per evaluation; a later refresh must still detect missing or modified files.
+- Production canvas readiness: with several Clips sharing image references and a large production draft, check refresh responsiveness and readiness diagnostics through both episode and linked canvas entry points. Each evaluation reuses its parsed draft, reads and hashes shared media once, and later refreshes still detect missing or modified files.
 
 - Canvas asset panel tabs: verify My assets and Online assets can be switched, drama and tag filters appear only under My assets, and the search applies to both tabs.
 

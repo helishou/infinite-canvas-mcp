@@ -292,6 +292,21 @@ function isNodePresent(workflow: Record<string, unknown>, id: string): boolean {
  * 3. 清理存活节点上指向已删除节点的悬空连线（删除该 input 而不是删节点）。
  */
 export function removeEmptyMediaNodes(workflow: Record<string, unknown>, fields: WorkflowField[], values: FieldValues) {
+    // Goohai's loader represents an absent image with its native empty selection.
+    // Keep its IMAGE/MASK outputs connected so its downstream optional chain survives.
+    const emptySelections: Record<string, Record<string, unknown>> = {};
+    for (const field of fields) {
+        if (field.type !== "image") continue;
+        for (const id of field.node.split(",").map(value => value.trim())) {
+            const node = workflow[id] as WfNode;
+            if (node?.class_type !== "LoadImageGoohai" || field.input !== "image") continue;
+            const image = node.inputs?.image;
+            if (typeof image === "string" && image.trim() && image !== "无") continue;
+            if (field.required === true) throw new Error(`工作流缺少必选媒体：${field.name || field.id}`);
+            emptySelections[id] = { image: "无" };
+        }
+    }
+    if (Object.keys(emptySelections).length) workflow = injectParams(workflow, emptySelections);
     // 用 graph 真相判断“哪些加载器未被提供”：只要节点的文件输入为空即视为缺失。
     // 不再依赖 values[field.id]（processedValues 在上传异常时可能为 null）。
     const present = getPresentMediaLoaders(workflow);
@@ -377,6 +392,8 @@ function isOptionalMediaLink(workflow: Record<string, unknown>, classType: strin
     // 未提供参考时只断开连线，不能把 H3 节点本身级联删掉。
     if (classType === "MiniMaxH3ReferenceToVideo" && H3_OPTIONAL_REF_INPUT.test(inputName)) return true;
     if (classType === "TextEncodeQwenImage21" && inputName.startsWith("images.")) return true;
+    if (classType === "TextEncodeQwenImage21GH" && /^image_\d{2}$/.test(inputName)) return true;
+    if (classType === "QwenImagePromptOptimizer" && /^图像_\d{2}$/.test(inputName)) return true;
     // ComfyUI declares every image input on this prompt enhancer optional. Removing
     // an unused LoadImage must clear that link, not delete the prompt/output chain.
     return classType === "TE_Qwen_Image_2_1_Prompt_Enhancer"

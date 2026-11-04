@@ -989,9 +989,12 @@ export class EpisodeProductionService {
     private continuityReports() { return new ProductionContinuityReports(this.db); }
 
     getContinuity(id: string, raw: unknown = {}): Record<string, any> {
-        const linked = this.linked(id); if (linked) return linked.service.getContinuity(linked.id, raw);
+        return this.readContinuity(id, raw, this.get(id));
+    }
+
+    private readContinuity(id: string, raw: unknown, current: ProductionRecord): Record<string, any> {
+        const linked = this.linked(id); if (linked) return linked.service.readContinuity(linked.id, raw, current);
         const query = productionContinuityReadSchema.parse(raw);
-        const current = this.get(id);
         const selected = query.snapshot === "published" ? current.published : current.draft;
         const director = selected?.director;
         if (!director) return { owner: { kind: this.ownerKind, id }, snapshot: query.snapshot, revision: current.revision, publishedVersion: current.publishedVersion,
@@ -2302,9 +2305,7 @@ export class EpisodeProductionService {
         const archivedKeyframeTargetIds = new Set(baseline.targets.filter(target => target.kind === "keyframe" && target.status === "complete").map(target => target.id));
         const ids = [...Object.keys(data.director.assets).filter(id => !keyframeIds.has(id)).map(id => `asset:${id}`), ...Object.keys(data.director.shotInputs).filter(id => data.director!.shotInputs[id].keyframeAssetId && !archivedKeyframeTargetIds.has(`frame:${id}`)).map(id => `frame:${id}`), ...data.clipGroups.map(group => `segment:${group.id}`)];
         try {
-            const checked = this.canvasExecution(episodeId, ids);
-            const project = checked.canvasId ? this.db.getCanvasProject(checked.canvasId) : null;
-            const nodes = (project?.nodes || []) as Array<Record<string, any>>;
+            const checked = this.readCanvasExecution(episodeId, ids, current);
             const ready = new Set(checked.targets.map(target => target.id));
             const dependencyBlocked = new Map(checked.targets.filter(target => target.dependencies.length && data.director!.workflow.mediaProductionMode !== "automatic").map(target => [target.id, target.dependencies.map(dependency => dependency.targetId)]));
             const targets = [...baseline.targets.filter(target => archivedKeyframeTargetIds.has(target.id)), ...ids.map(id => {
@@ -2430,7 +2431,7 @@ export class EpisodeProductionService {
         const subjectRows = objectList(director.source.subject_registry);
         const subjectById = new Map<string, Record<string, any>>(subjectRows.map(subject => [String(subject.id || ""), subject]));
         const pictureBindingsById = new Map(subjectRows.flatMap(subject => objectList(subject.pictureBindings).map(binding => [String(binding.id || ""), binding] as const)));
-        const continuityReport = this.getContinuity(episodeId, { snapshot: source, view: "summary" });
+        const continuityReport = this.readContinuity(episodeId, { snapshot: source, view: "summary" }, current);
         const hasContinuityV2 = (director.source.ledger as any)?.contract_version === 2;
         const moduleStates = Object.fromEntries(Object.entries(director.modules).map(([name, item]) => [name, {
             status: item.status, declaredStatus: item.status,
@@ -2874,8 +2875,12 @@ export class EpisodeProductionService {
     }
 
     canvasExecution(id: string, targets: string[], expectedCanvasRevision?: number): CanvasExecutionSnapshot {
-        const linked = this.linked(id); if (linked) return linked.service.canvasExecution(linked.id, targets, expectedCanvasRevision);
-        const current = this.get(id), canvasId = this.episodeInfo(id).canvasId;
+        return this.readCanvasExecution(id, targets, this.get(id), expectedCanvasRevision);
+    }
+
+    private readCanvasExecution(id: string, targets: string[], current: ProductionRecord, expectedCanvasRevision?: number): CanvasExecutionSnapshot {
+        const linked = this.linked(id); if (linked) return linked.service.readCanvasExecution(linked.id, targets, current, expectedCanvasRevision);
+        const canvasId = this.episodeInfo(id).canvasId;
         const project = canvasId && this.db.getCanvasProject(canvasId);
         if (!project) throw new Error("制作对象未关联可用画布");
         if (expectedCanvasRevision !== undefined && expectedCanvasRevision > Number(project.revision)) throw new Error("请求画布基线晚于当前画布版本");

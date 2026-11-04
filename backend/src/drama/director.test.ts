@@ -53,6 +53,26 @@ async function publish(service: EpisodeProductionService, director: DirectorProd
     return await service.publish(id, { operationId: `publish-${current.revision}`, expectedRevision: current.revision + 1, stage: "director" });
 }
 
+test("readiness shares its parsed production across continuity and canvas execution", async t => {
+    const { service, db } = fixture(t);
+    const director = doc(2);
+    await service.edit("ep", { operationId: "readiness-source", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    const originalGet = service.get.bind(service);
+    const reads = t.mock.method(service, "get", originalGet);
+    const readiness = service.workflowReadiness("ep");
+    assert.equal(reads.mock.callCount(), 1, "one readiness evaluation parses the production once");
+    assert.equal(readiness.targets.filter(target => target.kind === "segment").length, 2);
+    assert.equal(readiness.canvasId, "canvas");
+    assert.ok(readiness.targets.every(target => target.notice === "使用当前已保存内容"), "canvas overlay must execute instead of falling back after an error");
+    const continuity = service.getContinuity("ep", { view: "summary" });
+    assert.equal(continuity.owner.id, "ep");
+    const alias = new EpisodeProductionService(db, undefined, undefined, true, () => {});
+    const aliasReadiness = alias.workflowReadiness("canvas");
+    assert.deepEqual(aliasReadiness.targets, readiness.targets);
+    assert.deepEqual(alias.getContinuity("canvas", { view: "summary" }), continuity);
+    assert.deepEqual(alias.canvasExecution("canvas", []), service.canvasExecution("ep", []));
+});
+
 test("parallel H3 completion requires terminal task, active archived output and matching frozen inputs", async t => {
     const { service, stores, db, dir } = fixture(t), d = doc(1);
     await publish(service, d, "ep", "skip");
