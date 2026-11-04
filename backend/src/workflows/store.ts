@@ -93,6 +93,7 @@ export type WorkflowListItem = {
     title: string;
     builtin: boolean;
     fieldCount: number;
+    addedAt: number;
 };
 
 export type WorkflowDetail = {
@@ -173,7 +174,7 @@ export class WorkflowStore {
         await this.ensureBundledWorkflows();
         const dir = workflowDir();
         try { await fs.access(dir); } catch { return []; }
-        const items: WorkflowListItem[] = [];
+        const items: Array<Omit<WorkflowListItem, "addedAt">> = [];
         const seen = new Set<string>();
 
         // 扫描根目录（内置工作流）
@@ -210,8 +211,17 @@ export class WorkflowStore {
                 });
             }
         } catch { /* custom dir may not exist */ }
-        items.sort((a, b) => a.title.localeCompare(b.title));
-        return items;
+        const listed = await Promise.all(items.map(async (item) => {
+            try {
+                // File creation time represents when it was added; edits/reimports leave it unchanged.
+                const { birthtimeMs } = await fs.stat(workflowFilePath(item.name));
+                return { ...item, addedAt: birthtimeMs };
+            } catch {
+                return { ...item, addedAt: 0 };
+            }
+        }));
+        listed.sort((a, b) => a.title.localeCompare(b.title));
+        return listed;
     }
 
     async get(name: string): Promise<WorkflowDetail> {

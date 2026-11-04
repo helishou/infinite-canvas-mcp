@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
@@ -35,7 +36,19 @@ export function compilationInputsUnchanged(
 type Compiler = typeof compileAchengDirector;
 type MaterialItem = { digest: string; file: string };
 type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; requestFingerprint?: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; referenceDigests?: Record<string, string>; scope?: CompilationScope; scopeHash?: string; compilerInputFingerprint?: string; reusedFromOperationId?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; timingsMs?: Record<string, number>; createdAt: string };
-const compilerPool = new WorkPool(3);
+/**
+ * 编译并发：一次编辑会为每个受影响 Clip 排一个编译任务，串行 3 路时 18 段要排 6 轮。
+ * 编译跑在独立 worker 线程里（CPU 密集，主线程不受影响），按核数放开到 6 路；
+ * 每个 worker 会加载一次编译器并持有整份源稿快照，所以上限压在 6，避免内存尖峰。
+ * 可用 PRODUCTION_COMPILE_CONCURRENCY 覆盖（1–12）。
+ */
+const compilerConcurrency = (() => {
+    const override = Number(process.env.PRODUCTION_COMPILE_CONCURRENCY);
+    if (Number.isInteger(override) && override >= 1 && override <= 12) return override;
+    const cores = os.availableParallelism?.() ?? os.cpus().length;
+    return Math.max(3, Math.min(6, cores - 2));
+})();
+const compilerPool = new WorkPool(compilerConcurrency);
 type DiagnosticLike = Partial<ProductionDiagnostic> & { severity?: string; blockingActions?: string[] };
 // Only these known source/engine failures invalidate the whole compilation request.
 // A missing targetId is not evidence that an otherwise valid diagnostic is global.
@@ -141,6 +154,38 @@ function sha256File(file: string): Promise<string> {
         stream.once("end", () => resolve(digest.digest("hex")));
     });
 }
+
+/**
+ * 素材摘要在同一次编译里会被算两遍（collectMaterial + 编译后的输入清单校验），
+ * 多个片段又会重复算同一批参考图。归档媒体写入后内容不变，按「路径 + 大小 + mtime」
+ * 缓存结果即可，文件一旦改动大小或 mtime 就会失效重算。
+ */
+const MEDIA_DIGEST_CACHE_MAX = 8192;
+const mediaDigestCache = new Map<string, { size: number; mtimeMs: number; digest: string }>();
+/**
+ * 同一批片段并发编译时，多个任务会同时发现缓存未命中、同时开始算同一份文件（缓存击穿）。
+ * 按路径合并成同一个 Promise，让并发的首个任务之外的人直接等结果。
+ */
+const mediaDigestInflight = new Map<string, { size: number; mtimeMs: number; task: Promise<string> }>();
+
+async function sha256FileCached(file: string): Promise<string> {
+    const key = path.resolve(file);
+    const stat = await fs.promises.stat(key);
+    const hit = mediaDigestCache.get(key);
+    if (hit && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) return hit.digest;
+    const inflight = mediaDigestInflight.get(key);
+    if (inflight && inflight.size === stat.size && inflight.mtimeMs === stat.mtimeMs) return inflight.task;
+    const task = sha256File(key).then(digest => {
+        if (mediaDigestCache.size >= MEDIA_DIGEST_CACHE_MAX) mediaDigestCache.clear();
+        mediaDigestCache.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, digest });
+        return digest;
+    }).finally(() => {
+        if (mediaDigestInflight.get(key)?.task === task) mediaDigestInflight.delete(key);
+    });
+    mediaDigestInflight.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, task });
+    return task;
+}
+
 const MANIFEST_WORKER_SOURCE = `const { parentPort, workerData } = require("node:worker_threads");
 const crypto = require("node:crypto");
 const path = require("node:path");
@@ -931,7 +976,7 @@ export class ProductionCompilationService {
             const canonicalFile = path.resolve(file);
             let digest = digests.get(canonicalFile);
             if (!digest) {
-                try { digest = await sha256File(file); }
+                try { digest = await sha256FileCached(file); }
                 catch (error) {
                     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                         if (expected) throw Object.assign(new Error(`Backend MediaStore 文件在编译提交后丢失：${identity}`), { code: "COMPILATION_MEDIA_INTEGRITY_FAILED" });

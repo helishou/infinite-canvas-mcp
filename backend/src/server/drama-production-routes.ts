@@ -363,7 +363,29 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         }));
         try {
             const serviceStartedAt = performance.now();
-            const production = await service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
+            let production = await service.edit(req.params.episodeId, req.body, undefined, false, undefined, (name, durationMs) => { stages[name] = (stages[name] || 0) + durationMs; });
+            // A Clip repartition changes the formal canvas layout as well as the
+            // source. Materialize the affected Segment nodes before returning so a
+            // newly added Segment never remains without its H3 Clip node.
+            const repartitions = Array.isArray(req.body?.ops)
+                ? req.body.ops.filter((operation: Record<string, unknown>) => operation?.type === "repartition_director_clips")
+                : [];
+            if (runner && repartitions.length && !service.isSharedAssetCanvas(req.params.episodeId)) {
+                const affectedShots = new Set(repartitions.flatMap((operation: Record<string, any>) => Array.isArray(operation.shotIds) ? operation.shotIds.map(String) : []));
+                const targetIds = [...new Set(production.draft.clipGroups
+                    .filter(group => group.shotIds.some(shotId => affectedShots.has(shotId)) && (!group.nodeId || !group.segmentId))
+                    .map(group => group.id))];
+                if (targetIds.length) {
+                    // Reuse the edit identity so a replay after an unknown response
+                    // resumes the same idempotent layout preparation.
+                    const operationId = `clip-layout-${crypto.createHash("sha256")
+                        .update(`${req.params.episodeId}\0${String(req.body?.operationId || "")}\0${targetIds.slice().sort().join("\0")}`)
+                        .digest("hex").slice(0, 24)}`;
+                    const current = service.get(req.params.episodeId);
+                    production = await runner.prepareTargets(req.params.episodeId, current.revision,
+                        targetIds.map(targetId => `segment:${targetId}`), operationId);
+                }
+            }
             serviceMs = Math.round(performance.now() - serviceStartedAt);
             res.json({ ok: true, production: publicProductionRecord(production) });
             if (!events) queueMicrotask(() => refreshes.wake(req.params.episodeId));

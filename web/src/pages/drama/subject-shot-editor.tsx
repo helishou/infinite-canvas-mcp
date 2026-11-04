@@ -181,7 +181,6 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         if (editorialReasonMissing) return void message.error(t("director.atomic.editorialReasonRequired"));
         if (!Number.isInteger(value.duration_frames) || value.duration_frames < 1) return void message.error(t("director.workspace.durationFramesInvalid"));
         if (value.duration_frames < voiceMinimum) return void message.error(t("director.atomic.voiceDurationRequired", { frames: voiceMinimum }));
-        if (continuousVoice && value.duration_frames !== Number(shot.duration_frames)) return void message.error(t("director.atomic.continuousVoiceDuration"));
         if (invalid || changedSource) return;
         const submittedDraft = draftValue;
         setSaving(true);
@@ -225,7 +224,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         {section === "direction" && <div className="shot-editor-form-grid">
             <div className="shot-editor-fields shot-editor-span-all grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
                 <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.shotTitle")}</span><Input value={value.title} disabled={disabled} onChange={event => update({ title: event.target.value })} /></label>
-                <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.seconds")}</span><InputNumber className="w-full" min={0} step={1 / fps} precision={3} value={value.duration_frames / fps} disabled={disabled} onChange={seconds => update({ duration_frames: Math.round(Number(seconds || 0) * fps) })} /></label>
+                <div className="grid gap-1.5 text-xs text-muted-foreground"><label className="grid gap-1.5"><span>{t("director.atomic.seconds")}</span><InputNumber className="w-full" min={0} step={1 / fps} precision={3} value={value.duration_frames / fps} disabled={disabled} onChange={seconds => update({ duration_frames: Math.round(Number(seconds || 0) * fps) })} /></label>{continuousVoice && value.duration_frames > Number(shot.duration_frames) && <span>{t("director.atomic.continuousVoiceDuration")}</span>}</div>
             </div>
             <label className="shot-editor-span-all grid gap-2 text-sm"><span className="font-medium">{t("director.atomic.action")}</span><Input.TextArea value={value.visual} autoSize={{ minRows: 4, maxRows: 10 }} disabled={disabled} onChange={event => update({ visual: event.target.value })} /><span className="text-xs text-muted-foreground">{t("director.atomic.actionHint")}</span></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground">

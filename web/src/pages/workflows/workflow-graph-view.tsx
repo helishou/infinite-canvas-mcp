@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { workflowDisplayGraph, workflowSourcePositions } from "./workflow-source";
 import { useTranslation } from "react-i18next";
 
@@ -151,27 +151,45 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
     const { t } = useTranslation();
     const wrapRef = useRef<HTMLDivElement>(null);
     const [view, setView] = useState({ k: 1, x: 0, y: 0 });
-    const [layout, setLayout] = useState<GraphLayout | null>(null);
+    const layout = useMemo(() => {
+        if (!workflow || Object.keys(workflow).length === 0) return null;
+        try { return computeGraphLayout(workflow, fields); } catch { return null; }
+    }, [workflow, fields]);
+    const layoutRef = useRef<GraphLayout | null>(null);
     const [popupNodeId, setPopupNodeId] = useState<string | null>(null);
     const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
-    // 布局跟随节点图结构重算；字段变化只影响角标数，重算布局但不动视图。
-    useEffect(() => {
-        if (!workflow || Object.keys(workflow).length === 0) { setLayout(null); return; }
-        try { setLayout(computeGraphLayout(workflow, fields)); } catch { setLayout(null); }
-    }, [workflow, fields]);
-    // 视图重置只在节点图结构变化时执行；否则编辑字段（打字）会把缩放和平移打回原点。
-    useEffect(() => {
-        setView({ k: 1, x: 0, y: 0 });
-    }, [workflow]);
+    useLayoutEffect(() => { layoutRef.current = layout; }, [layout]);
 
     const fitToView = useCallback(() => {
-        if (!layout || !wrapRef.current) return;
+        const currentLayout = layoutRef.current;
+        if (!currentLayout || !wrapRef.current) return;
         const w = wrapRef.current;
         const pad = 20;
-        const k = Math.max(0.2, Math.min(2, Math.min((w.clientWidth - pad * 2) / layout.width, (w.clientHeight - pad * 2) / layout.height)));
-        setView({ k, x: (w.clientWidth - layout.width * k) / 2, y: (w.clientHeight - layout.height * k) / 2 });
-    }, [layout]);
+        const k = Math.max(0.2, Math.min(2, Math.min((w.clientWidth - pad * 2) / currentLayout.width, (w.clientHeight - pad * 2) / currentLayout.height)));
+        setView({ k, x: (w.clientWidth - currentLayout.width * k) / 2, y: (w.clientHeight - currentLayout.height * k) / 2 });
+    }, []);
+
+    // Auto-fit on entry or graph geometry changes, while field badge edits keep the user's view.
+    const layoutGeometry = layout
+        ? `${layout.width}x${layout.height}:${layout.nodes.map((node) => `${node.id}@${node.x},${node.y}`).join("|")}`
+        : "";
+    useEffect(() => {
+        const wrap = wrapRef.current;
+        if (!layoutGeometry || !wrap) return;
+        let frame = 0;
+        const scheduleFit = () => {
+            if (frame) cancelAnimationFrame(frame);
+            frame = requestAnimationFrame(fitToView);
+        };
+        scheduleFit();
+        const observer = new ResizeObserver(scheduleFit);
+        observer.observe(wrap);
+        return () => {
+            observer.disconnect();
+            if (frame) cancelAnimationFrame(frame);
+        };
+    }, [layoutGeometry, fitToView]);
 
     const handleWheel = useCallback((e: React.WheelEvent) => {
         if (!layout) return;

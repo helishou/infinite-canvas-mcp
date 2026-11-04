@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Move, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
 
+import { isH3NodeType } from "@/lib/canvas/canvas-delta";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { pickImageSource } from "@/lib/image-thumbnail";
@@ -13,7 +14,6 @@ import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { CanvasCollaborativeText } from "./canvas-collaborative-text";
-import { useParams } from "react-router-dom";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeText, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -303,7 +303,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const height = previewBounds?.height || data.height;
     const active = isSelected || isConnectionTarget || isFocusRelated;
     const image = overviewImageForNode(data);
-    const isH3 = !image && data.type.includes("minimax-h3");
+    const isH3 = !image && isH3NodeType(data.type);
     const videoSource = !image && !isH3 ? overviewVideoSource(data) : undefined;
     const isGroup = data.type === CanvasNodeType.Group;
     const isCharacter = data.type === CanvasNodeType.Character;
@@ -463,8 +463,9 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;
     else if (screenShortSide <= NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = false;
+    const isH3Node = isH3NodeType(resolvedProps.data.type);
     const overview =
-        (resolvedProps.overviewMode || !detailModeRef.current) &&
+        (isH3Node ? resolvedProps.scale < 0.1 : resolvedProps.overviewMode || !detailModeRef.current) &&
         !resolvedProps.isSelected &&
         !resolvedProps.isConnectionSource &&
         !resolvedProps.isGroupDropTarget &&
@@ -481,6 +482,7 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
 });
 
 type NodeContentRendererProps = {
+    projectId: string;
     node: CanvasNodeData;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     scale: number;
@@ -520,6 +522,7 @@ function imageAspectRatio(node: CanvasNodeData) {
 }
 
 export const CanvasNode = React.memo(function CanvasNode({
+    projectId,
     data,
     theme,
     previewPosition,
@@ -756,9 +759,13 @@ export const CanvasNode = React.memo(function CanvasNode({
     );
 
     const handleResizeUp = useCallback(() => {
+        if (!resizeRef.current.isResizing) return;
         resizeRef.current.isResizing = false;
         window.removeEventListener("mousemove", handleResizeMove);
         window.removeEventListener("mouseup", handleResizeUp);
+        window.removeEventListener("pointerup", handleResizeUp);
+        window.removeEventListener("pointercancel", handleResizeUp);
+        window.removeEventListener("blur", handleResizeUp);
         onResizeEnd(data.id);
     }, [data.id, handleResizeMove, onResizeEnd]);
 
@@ -780,22 +787,29 @@ export const CanvasNode = React.memo(function CanvasNode({
         };
         window.addEventListener("mousemove", handleResizeMove);
         window.addEventListener("mouseup", handleResizeUp);
+        window.addEventListener("pointerup", handleResizeUp);
+        window.addEventListener("pointercancel", handleResizeUp);
+        window.addEventListener("blur", handleResizeUp);
     };
 
     useEffect(() => {
         return () => {
             window.removeEventListener("mousemove", handleResizeMove);
             window.removeEventListener("mouseup", handleResizeUp);
+            window.removeEventListener("pointerup", handleResizeUp);
+            window.removeEventListener("pointercancel", handleResizeUp);
+            window.removeEventListener("blur", handleResizeUp);
         };
     }, [handleResizeMove, handleResizeUp]);
 
     const panelContent = showPanel && !isGroup && renderPanel ? renderPanel(data) : null;
     useCanvasTransientEscape(Boolean(panelContent && panelContainer), () => onClosePanel?.(), true);
-    const compact = scale < 0.24 && !isSelected && !hovered && !showPanel && !referenceSelectionState;
+    const compact = scale < (isH3NodeType(data.type) ? 0.1 : 0.24) && !isSelected && !hovered && !showPanel && !referenceSelectionState;
     // Drag/resize previews update the shell every frame. Reuse unchanged content so
     // Markdown and plugin editors do not rerender just because the shell moved.
     const nodeContent = useMemo(() => (
         <NodeContent
+            projectId={projectId}
             node={data}
             theme={theme}
             scale={scale}
@@ -820,7 +834,7 @@ export const CanvasNode = React.memo(function CanvasNode({
             groupChildCount={groupChildCount}
             compact={compact}
         />
-    ), [data, theme, scale, onEditCharacter, onEditScene, onEditProp, isEditingContent, isBatchRoot, batchCount, batchExpanded, renderNodeContent, pluginContext, mentionReferences, onRetry, onToggleBatch, onSetBatchPrimary, onDuplicateBatchImage, onDownloadBatchImage, onRetryBatchImage, onDeleteBatchImage, onViewImage, groupChildCount, compact]);
+    ), [projectId, data, theme, scale, onEditCharacter, onEditScene, onEditProp, isEditingContent, isBatchRoot, batchCount, batchExpanded, renderNodeContent, pluginContext, mentionReferences, onRetry, onToggleBatch, onSetBatchPrimary, onDuplicateBatchImage, onDownloadBatchImage, onRetryBatchImage, onDeleteBatchImage, onViewImage, groupChildCount, compact]);
 
     return (
         <div
@@ -1294,8 +1308,7 @@ function MissingPluginContent({ theme, type }: Pick<NodeContentRendererProps, "t
     );
 }
 
-function TextContent({ node, theme, isEditingContent, textareaRef, mentionReferences, batchExpanded, onStopEditing, onToggleBatch, onSetBatchPrimary }: NodeContentRendererProps) {
-    const { id: projectId = "" } = useParams();
+function TextContent({ projectId, node, theme, isEditingContent, textareaRef, mentionReferences, batchExpanded, onStopEditing, onToggleBatch, onSetBatchPrimary }: NodeContentRendererProps) {
     const { t } = useTranslation();
     const fontSize = node.metadata?.fontSize || 14;
     const textStyle = { fontSize: `${fontSize}px`, lineHeight: `${Math.round(fontSize * 1.65)}px`, color: theme.node.text, boxSizing: "border-box" } as React.CSSProperties;

@@ -157,7 +157,10 @@ export type H3Segment = {
     runtimeReserveEnabled?: boolean;
     uniBlockSwapEnabled?: boolean;
     uniBlockSwapBlocks?: number;
-    /** 连续生成模式：保留跨 Clip 的 H3 模型缓存，减少下一段冷启动。默认关闭。 */
+    /**
+     * 连续生成模式：保留跨 Clip 的 H3 模型缓存，减少下一段冷启动。
+     * 默认关闭；关闭时每个任务成功后由 Backend 调 /free 完整释放模型（H3 全套常驻 host 约 38 GB 提交）。
+     */
     keepModelCache?: boolean;
     latentUpscaleEnabled?: boolean;
     /** Only applies while latent upscaling is enabled; independent of face refinement confirmation. */

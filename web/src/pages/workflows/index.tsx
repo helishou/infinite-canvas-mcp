@@ -55,6 +55,7 @@ type WorkflowItem = {
     title: string;
     builtin: boolean;
     fieldCount: number;
+    addedAt: number;
 };
 
 type WorkflowDetail = {
@@ -736,13 +737,15 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
     /** 本地工作流库列表项：标题取配置标题，副标题是文件名，徽标是字段数。 */
     const libraryItems = useMemo<WorkflowLibraryItem[]>(
         () =>
-            workflows.map((wf) => ({
-                id: wf.name,
-                title: wf.title,
-                meta: wf.name.replace(/^custom\//, ""),
-                badge: `${wf.fieldCount} 字段`,
-                builtin: wf.builtin,
-            })),
+            [...workflows]
+                .sort((a, b) => b.addedAt - a.addedAt || a.title.localeCompare(b.title))
+                .map((wf) => ({
+                    id: wf.name,
+                    title: wf.title,
+                    meta: wf.name.replace(/^custom\//, ""),
+                    badge: `${wf.fieldCount} 字段`,
+                    builtin: wf.builtin,
+                })),
         [workflows],
     );
 

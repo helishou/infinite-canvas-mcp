@@ -61,7 +61,7 @@ import { auditAchengContinuity, validateAchengSource, preflightCompilationDirect
 import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, changedModelTextIdDiagnostics } from "@basketikun/canvas-agent/drama/production-validation";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
-import { directorHash, projectDirector, validateDirectorMedia, assertDirectorEngine, withoutDirectorProjection, publicProductionRecord } from "./director.js";
+import { directorHash, projectDirector, validateDirectorMedia, directorMediaReadContext, assertDirectorEngine, withoutDirectorProjection, publicProductionRecord } from "./director.js";
 import { DATA_DIR } from "../config.js";
 import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { BackendDatabase } from "../db.js";
@@ -2425,6 +2425,7 @@ export class EpisodeProductionService {
         const canvasId = this.episodeInfo(episodeId).canvasId || "";
         const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
         const canvasRole = canvasId ? productionCanvasContext(this.db, canvasId, project).role : "ordinary";
+        const mediaRead = project ? directorMediaReadContext(this.db, project) : undefined;
         const nodes = project?.nodes as Array<Record<string, any>> | undefined;
         const subjectRows = objectList(director.source.subject_registry);
         const subjectById = new Map<string, Record<string, any>>(subjectRows.map(subject => [String(subject.id || ""), subject]));
@@ -2475,8 +2476,7 @@ export class EpisodeProductionService {
         });
         const usableAssetMedia = (asset: NonNullable<DirectorProduction["assets"][string]>) => {
             if (!asset.storageKey || !asset.sha256 || !canvasId) return false;
-            const media = this.db.getMediaFile(asset.storageKey);
-            if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== asset.sha256) return false;
+            if (!mediaRead || mediaRead.digest(asset.storageKey) !== asset.sha256) return false;
             if (!asset.nodeId) {
                 // Quick Storyboard archived inputs are owned by the H3 clip's referenceBindings,
                 // not by an image node (Subject Prompt v2 resolves them directly by storageKey).
@@ -2501,7 +2501,7 @@ export class EpisodeProductionService {
             const all = [...blockers, ...assetScopeBlockers(id), ...compiled(artifact, `资产 ${id}`)];
             if (!reusable && !imageModelFor(id, asset?.nodeId)) all.push("缺少图片模型；请在现有模型设置中选择模型");
             if (artifact?.status === "ready" && canvasId) {
-                try { validateDirectorMedia(this.db, canvasId, director, [id]); }
+                try { validateDirectorMedia(this.db, canvasId, director, [id], mediaRead); }
                 catch (error) { all.push(error instanceof Error ? error.message : String(error)); }
             } else if (!canvasId) all.push("制作对象尚未关联画布");
             const status = reusable ? "complete" : all.length ? "blocked" : "ready";
@@ -2531,7 +2531,7 @@ export class EpisodeProductionService {
             if (!frameUsable && !imageModelFor(assetId || shotId, frameAsset?.nodeId || frame?.nodeId)) blockers.push("缺少图片模型；请在现有模型设置中选择模型");
             if (!canvasId) blockers.push("制作对象尚未关联画布");
             if (artifact?.status === "ready" && canvasId) {
-                try { validateDirectorMedia(this.db, canvasId, director, [assetId]); }
+                try { validateDirectorMedia(this.db, canvasId, director, [assetId], mediaRead); }
                 catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
             }
             if (input.keyframePolicy === "reuse" && !frameUsable) blockers.push("复用关键帧的绑定媒体不可用");
@@ -2643,7 +2643,7 @@ export class EpisodeProductionService {
             if (outgoingBoundary?.tailFrame && outgoingBoundary.motionContext) blockers.push(`边界 ${segmentId} 同时启用了尾帧参考与 Motion Context`);
             if (!canvasId) blockers.push("制作对象尚未关联画布");
             if (artifact?.status === "ready" && canvasId) {
-                try { validateDirectorMedia(this.db, canvasId, director, [segmentId]); }
+                try { validateDirectorMedia(this.db, canvasId, director, [segmentId], mediaRead); }
                 catch (error) { blockers.push(error instanceof Error ? error.message : String(error)); }
             }
             let chainStart = index, chainEnd = index;

@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import type { BackendDatabase } from "../db.js";
+import { directorMediaReadContext } from "./director.js";
+
+test("readiness shares media reads within one evaluation and rechecks changed bytes on the next", t => {
+    const dir = mkdtempSync(join(tmpdir(), "readiness-media-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const filePath = join(dir, "reference.png");
+    writeFileSync(filePath, "original");
+    let reads = 0;
+    const db = { getMediaFile: () => { reads++; return { filePath }; } } as unknown as BackendDatabase;
+    const project = { id: "canvas", nodes: [], connections: [] } as NonNullable<ReturnType<BackendDatabase["getCanvasProject"]>>;
+    const first = directorMediaReadContext(db, project);
+    const expected = crypto.createHash("sha256").update("original").digest("hex");
+    for (let clip = 0; clip < 18; clip++) assert.equal(first.digest("shared-reference"), expected);
+    assert.equal(reads, 1);
+    writeFileSync(filePath, "modified");
+    assert.notEqual(directorMediaReadContext(db, project).digest("shared-reference"), expected);
+    assert.equal(reads, 2);
+    rmSync(filePath);
+    const missing = directorMediaReadContext(db, project);
+    assert.equal(missing.digest("shared-reference"), null);
+    assert.equal(missing.digest("shared-reference"), null);
+    assert.equal(reads, 3);
+});

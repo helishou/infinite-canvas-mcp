@@ -106,7 +106,6 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={onStartReferenceSelection} />
             <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-medium" style={{ color: theme.node.muted }}>{t("canvas.nodeActions.input")}</span>
                 <div className="flex items-center gap-1">
                     <CanvasPromptLibrary onSelect={updatePrompt} />
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
@@ -119,9 +118,9 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                 references={mentionReferences}
                 editorRef={editorRef}
                 onSubmit={submit}
-                className="canvas-authored-prompt thin-scrollbar h-20 w-full cursor-text resize-none rounded-lg px-2.5 py-2 text-[13px] leading-5 outline-none"
-                style={{ background: "transparent", color: theme.node.text }}
-                placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
+                className="canvas-authored-prompt thin-scrollbar h-20 w-full cursor-text resize-none rounded-lg border px-2.5 py-2 text-[13px] leading-5 outline-none"
+                style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text }}
+                placeholder={t("canvas.nodeActions.input")}
             />
 
             {isSmartGenerationNode ? (

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sd
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { Button, Modal, Switch, message } from "antd";
 import type { H3Ref, H3Segment } from "../types";
-import { refsForSegment, withSegmentRefs } from "../services/h3-data";
+import { inferReferenceRole, refsForSegment, withSegmentRefs } from "../services/h3-data";
 import { addStoryboardShot, alignStoryboardReferenceOrder, insertStoryboardShotAfter, storyboardTrackItems } from "../services/h3-storyboard-track";
 import { h3ThemeVars } from "../h3-theme";
 
@@ -89,9 +89,11 @@ async function captureFrames(ctx: CanvasNodeContext, url: string, count: number,
 }
 
 async function composeStoryboardPreview(frames: Array<Frame | null>) {
-  const images = await Promise.all(frames.map((frame) => frame ? imageFromUrl(frame.url) : Promise.resolve(null)));
-  const columns = frames.length > 3 ? 2 : 1;
-  const rows = Math.ceil(frames.length / columns);
+  const occupied = frames.flatMap((frame, index) => frame ? [{ frame, shotNumber: index + 1 }] : []);
+  if (!occupied.length) return "";
+  const images = await Promise.all(occupied.map(({ frame }) => imageFromUrl(frame.url)));
+  const columns = occupied.length > 3 ? 2 : 1;
+  const rows = Math.ceil(occupied.length / columns);
   const width = 960;
   const height = Math.round(width * 9 / 16);
   const canvas = document.createElement("canvas");
@@ -104,17 +106,15 @@ async function composeStoryboardPreview(frames: Array<Frame | null>) {
   images.forEach((image, index) => {
     const x = (index % columns) * width;
     const y = Math.floor(index / columns) * height;
-    if (image) {
-      const scale = Math.max(width / image.width, height / image.height);
-      const drawWidth = image.width * scale;
-      const drawHeight = image.height * scale;
-      context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
-    }
+    const scale = Math.max(width / image.width, height / image.height);
+    const drawWidth = image.width * scale;
+    const drawHeight = image.height * scale;
+    context.drawImage(image, x + (width - drawWidth) / 2, y + (height - drawHeight) / 2, drawWidth, drawHeight);
     context.fillStyle = "rgba(0,0,0,.72)";
     context.fillRect(x + 12, y + 12, 105, 38);
     context.fillStyle = "white";
     context.font = "bold 24px sans-serif";
-    context.fillText(`Shot ${index + 1}`, x + 22, y + 40);
+    context.fillText(`Shot ${occupied[index].shotNumber}`, x + 22, y + 40);
   });
   return canvas.toDataURL("image/jpeg", 0.88);
 }
@@ -168,8 +168,14 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       id: ref.bindingId!, url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, storageKey: ref.storageKey,
       name: ref.name || `分镜帧 ${ref.bindingId}`, sourceTime: 0, fingerprint: ref.tags?.find((tag) => tag.startsWith("sha256:"))?.slice(7),
     }));
-    const framesById = new Map([...catalogDrafts, ...formalTrackFrames].map((frame) => [frame.id, frame]));
-    setDrafts(catalogDrafts);
+    const looseStoryboardDrafts = refs.filter((ref) => ref.type === "image" && inferReferenceRole(ref) === "storyboard" && ref.bindingId && !usedBindingIds.has(ref.bindingId)).map((ref) => ({
+      id: ref.bindingId!, url: ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url, storageKey: ref.storageKey,
+      name: ref.name || `分镜帧 ${ref.bindingId}`, sourceTime: 0, fingerprint: ref.tags?.find((tag) => tag.startsWith("sha256:"))?.slice(7),
+    }));
+    const draftById = new Map([...catalogDrafts, ...looseStoryboardDrafts].map((frame) => [frame.id, frame]));
+    const nextDrafts = [...draftById.values()];
+    const framesById = new Map([...nextDrafts, ...formalTrackFrames].map((frame) => [frame.id, frame]));
+    setDrafts(nextDrafts);
     setArranged(formalTrackFrames);
     const nextSlots = trackItems.map(item => item.ref?.bindingId ? framesById.get(item.ref.bindingId) || null : null);
     slotsRef.current = nextSlots;
@@ -308,12 +314,17 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       ...extraPatch,
     };
     const isFormalClip = Boolean(updatedSegment.productionClipProjection?.targetId);
+    const originalShotIds = baseSegment.id === selected?.id
+      ? storyboardTrackItems(selected).map((item) => item.id)
+      : [];
+    const preserveShotDurations = originalShotIds.length === storyboardShots.length
+      && storyboardShots.every((shot, index) => shot.id === originalShotIds[index]);
     writingTrackRef.current = true;
     setBusy(true);
     try {
       if (isFormalClip) {
         if (!ctx.production?.replaceStoryboardTrack) throw new Error("当前制作台未接收分镜修改；轨道与关键帧均未写入。");
-        const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: baseSegment.id, segment: updatedSegment as Record<string, unknown> });
+        const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: baseSegment.id, segment: updatedSegment as Record<string, unknown>, preserveShotDurations, readBackSegment: false });
         if (!result.sourceSaved) throw new Error("制作台未保存分镜 Shot 和关键帧；轨道未更新。");
       } else patchSelected(updatedSegment);
       draftsRef.current = nextDrafts;
@@ -327,6 +338,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
       return false;
     } finally { writingTrackRef.current = false; setBusy(false); }
     setError("");
+    setCollagePreview("");
     const revision = ++composeRevisionRef.current;
     if (!next.length) { setCollagePreview(""); return true; }
     void composeStoryboardPreview(nextSlots).then((preview) => {
@@ -454,8 +466,8 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
               {!slots.length ? <div className="minimax-quick-storyboard-empty">当前 Clip 尚无分镜，请先在分镜轨添加分镜</div> : null}
             </div>
           </div>
-          {slots.some(Boolean) ? <div className="minimax-quick-storyboard-preview"><div><b>宫格预览</b><span>{slots.length} 格 · {compositeEnabled ? "合并提交" : "预览，生成时仍按轨道单图提交"}</span></div>{collagePreview ? <img src={collagePreview} alt="当前排列生成的分镜宫格" /> : <div className="minimax-quick-storyboard-preview-empty">拖动分镜帧后生成预览</div>}</div> : null}
-          <div className="minimax-quick-storyboard-footer"><small>{busy ? "正在更新宫格…" : error ? " " : "拖放和顺序调整会同步至 H3 分镜轨及制作台"}{error ? <span role="alert">{error}</span> : null}</small></div>
+          {slots.some(Boolean) ? <div className="minimax-quick-storyboard-preview"><div><b>宫格预览</b><span>{slots.filter(Boolean).length} 张有效分镜 · {compositeEnabled ? "合并提交" : "预览，生成时仍按轨道单图提交"}</span></div>{collagePreview ? <img src={collagePreview} alt="当前排列生成的分镜宫格" /> : <div className="minimax-quick-storyboard-preview-empty">正在生成预览…</div>}</div> : null}
+          <div className="minimax-quick-storyboard-footer"><small>{busy ? "正在保存分镜…" : error ? " " : "拖放和顺序调整会同步至 H3 分镜轨及制作台"}{error ? <span role="alert">{error}</span> : null}</small></div>
         </>
       </section></div>
     </Modal>

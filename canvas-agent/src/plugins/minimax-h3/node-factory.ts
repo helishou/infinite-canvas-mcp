@@ -26,7 +26,9 @@ export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
     strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
     slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, mergedWorkflow: false, lockAudio: false, audioDrive: false,
     combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6, faceRefineEnabled: false,
-    loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: true,
+    // 默认不保留跨任务模型缓存：H3 全套权重常驻 host 时约占 38 GB 提交（pinned 池 ram*0.4），
+    // 空转期间代价高于下一段的冷启动。连续多段作业由用户在面板显式开启。
+    loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: false,
 };
 
 const NODE_LEVEL_KEYS = [

@@ -39,10 +39,10 @@ export function storyboardTrackItems(segment: H3Segment) {
         referenceBindingId: ref.bindingId,
         duration: segment.storyboardDurations?.[ref.bindingId || ""],
     }));
-    const attachedRefs = new Set(shots.flatMap((shot) => shot.referenceBindingId ? [shot.referenceBindingId] : []));
-    const allShots = [...shots, ...refs.filter((ref) => ref.bindingId && !attachedRefs.has(ref.bindingId)).map((ref) => ({
-        id: ref.bindingId!, referenceBindingId: ref.bindingId, duration: segment.storyboardDurations?.[ref.bindingId!],
-    }))];
+    // An explicit storyboardShots list is the slot structure. Unbound storyboard
+    // references stay available as draft material; appending them here invents
+    // phantom Shots beyond the Clip's actual Shot list.
+    const allShots = shots;
     const clipDuration = Math.max(0.5, Number(segment.duration || 1));
     const raw = allShots.map((shot) => {
         const value = Number(shot.duration || segment.storyboardDurations?.[shot.referenceBindingId || shot.id] || 0);

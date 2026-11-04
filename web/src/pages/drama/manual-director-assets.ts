@@ -44,6 +44,8 @@ export function createManualDirectorAsset(source: Source, draft: ManualAssetDraf
         id,
         asset_id: id,
         asset_kind: draft.kind,
+        target_skill: "im2-clean-image",
+        source_repository: "im2-image-skills",
         asset_version: "v1",
         prompt: draft.prompt.trim(),
         references: [],

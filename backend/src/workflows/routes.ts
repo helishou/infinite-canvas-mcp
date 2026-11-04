@@ -138,12 +138,29 @@ export function registerWorkflowRoutes(
       const relativePath = typeof req.body?.relativePath === "string" ? req.body.relativePath : "";
       const { selected, raw, sha256 } = await readLocalComfyWorkflow(instance, relativePath);
       const workflow = JSON.parse(raw) as Record<string, unknown>;
-      const existing = new Set((await store.list()).map((item) => item.name.toLocaleLowerCase()));
+      const workflows = await store.list();
+      const existing = new Set(workflows.map((item) => item.name.toLocaleLowerCase()));
       const sourceName = path.basename(relativePath);
       const extension = path.extname(sourceName) || ".json";
       const stem = path.basename(sourceName, extension);
-      let name = sourceName;
-      for (let suffix = 2; existing.has(`custom/${name}`.toLocaleLowerCase()) || existing.has(name.toLocaleLowerCase()); suffix += 1) name = `${stem} (${suffix})${extension}`;
+      const customName = `custom/${sourceName}`;
+      const sameName = workflows.find((item) => item.name.toLocaleLowerCase() === customName.toLocaleLowerCase());
+      let sameSource: (typeof workflows)[number] | undefined;
+      if (!sameName) {
+        for (const item of workflows) {
+          const source = await store.getSourceLink(item.name);
+          if (source?.instance === selected.instance && source.relativePath === selected.relativePath) {
+            sameSource = item;
+            break;
+          }
+        }
+      }
+      let name = sameName?.name ?? sameSource?.name ?? sourceName;
+      if (!sameName && !sameSource && existing.has(name.toLocaleLowerCase())) {
+        for (let suffix = 2; existing.has(`custom/${name}`.toLocaleLowerCase()) || existing.has(name.toLocaleLowerCase()); suffix += 1) {
+          name = `${stem} (${suffix})${extension}`;
+        }
+      }
       const result = await store.upload(name, workflow);
       await store.saveSourceLink(result.name, { instance: selected.instance, relativePath: selected.relativePath, syncedSha256: sha256, syncedAt: new Date().toISOString() });
       // Import/sync only changes workflow resources; model creation is explicit.

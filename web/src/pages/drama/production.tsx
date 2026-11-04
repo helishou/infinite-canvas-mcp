@@ -998,17 +998,19 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [hasActiveProductionWork, hasActiveSceneWork, target, canvasId, continuityOwnerKey, pollingTaskNodesKey]);
 
   const fail = (error: unknown) => {
-    // 同一失败已经进入顶部回执卡（当前工作区可见）时不再重复弹 toast。
     const recorded = commandNoticeRef.current;
-    if ((error as { commandRecorded?: boolean })?.commandRecorded && recorded && (recorded.workspace === workspace || !recorded.workspace)) return;
     if (error instanceof BackendApiError && error.status === 409) {
       const current = error.details.current as EpisodeProduction | undefined;
       setRemoteRevision(current?.revision ?? null);
       message.warning(t("drama.production.conflict"));
     } else if (error instanceof BackendApiError) {
       const summary = commandErrorSummary({ error: error.message, errorSummary: typeof error.details.error === "string" ? error.details.error : undefined });
-      message.error(summary || t("apiErrors.requestFailed"));
-    } else message.error(error instanceof Error ? error.message : String(error));
+      const commandRecorded = Boolean((error as { commandRecorded?: boolean }).commandRecorded && recorded && (recorded.workspace === workspace || !recorded.workspace));
+      if (!commandRecorded || recorded?.status === "rejected") message.error(summary || t("apiErrors.requestFailed"));
+    } else {
+      const commandRecorded = Boolean((error as { commandRecorded?: boolean }).commandRecorded && recorded && (recorded.workspace === workspace || !recorded.workspace));
+      if (!commandRecorded || recorded?.status === "rejected") message.error(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const setSourceDraft = (key: string, value: string | undefined) => {
@@ -1114,7 +1116,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
 
   const edit = async (ops: ProductionOperation[], revisionOverride?: number): Promise<boolean> => {
-    if (!production || busy) return false;
+    if (busy) { message.warning(t("drama.production.commandInProgress")); return false; }
+    if (!production) { message.warning(t("drama.production.draftNotReady")); return false; }
     if (pendingCommandRef.current) { warnPendingCommand(); return false; }
     setBusy(true);
     try {
@@ -1949,9 +1952,12 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     return edit([{ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
   };
   const deleteClip = async (clipId: string) => {
-    if (!production || busy || !clipId || !canvasId) return false;
-    const { project } = await fetchBackendProject(canvasId);
-    return edit([{ type: "delete_director_clip", segmentId: clipId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
+    if (busy) { message.warning(t("drama.production.commandInProgress")); return false; }
+    if (!production || !clipId || !canvasId) { message.warning(t("drama.production.draftNotReady")); return false; }
+    try {
+      const { project } = await fetchBackendProject(canvasId);
+      return await edit([{ type: "delete_director_clip", segmentId: clipId, expectedCanvasRevision: Number(project.revision), confirmed: true }]);
+    } catch (error) { fail(error); return false; }
   };
   const deleteAsset = async (assetId: string) => {
     if (!production || busy || !assetId) return false;

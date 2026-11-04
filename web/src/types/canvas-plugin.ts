@@ -145,7 +145,15 @@ export type CanvasTextEditorProps = {
     lineMap?: boolean;
 };
 
-export type CanvasProductionStoryboardEditor = { nodeId: string; segmentId: string; segment: Record<string, unknown> };
+export type CanvasProductionStoryboardEditor = {
+    nodeId: string;
+    segmentId: string;
+    segment: Record<string, unknown>;
+    /** Preserve authoritative Shot timing when this edit only changes frame bindings. */
+    preserveShotDurations?: boolean;
+    /** Skip the full canvas readback when the caller only needs the save receipt. */
+    readBackSegment?: boolean;
+};
 export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
 export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }> };
 export type CanvasProductionEditing = {

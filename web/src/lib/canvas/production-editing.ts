@@ -112,24 +112,38 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     const storyboard = Array.isArray(h3Segment.storyboardShots) ? h3Segment.storyboardShots as Array<Record<string, any>> : [];
     const previousRefs = rows(previousSegment?.referenceBindings);
     if (!storyboard.length) throw new Error("SHOT_LAST_IN_CLIP: Clip 至少保留一个镜头；删除整个 Clip 才能移除最后一镜");
+    const originalById = new Map(oldShots.map(shot => [String(shot.id), shot]));
     const v2 = (source.prompt_assembly as Record<string, unknown> | undefined)?.version === 2;
+    const preserveShotDurations = input.preserveShotDurations === true;
+    if (preserveShotDurations && storyboard.length !== oldShots.length) {
+        throw new Error("STORYBOARD_TIMING_PRESERVATION_MISMATCH: 分镜格数量与当前制作 Shot 数量不一致");
+    }
     const fpsNum = Number(source.fps_num || 24), fpsDen = Number(source.fps_den || 1), fps = fpsNum / fpsDen;
     const startFrame = v2 ? 0 : Number(planned.start_frame), endFrame = v2 ? 0 : Number(planned.end_frame);
     const totalFrames = v2 ? oldShots.reduce((sum, shot) => sum + Number(shot.duration_frames || 0), 0) : endFrame - startFrame;
     if (!Number.isFinite(fps) || fps <= 0 || totalFrames <= 0 || !v2 && (!Number.isInteger(startFrame) || !Number.isInteger(endFrame))) throw new Error("CLIP_FRAME_WINDOW: Clip 缺少可验证的帧范围或帧率");
-    const durations = storyboard.map(shot => Number(shot.duration));
-    if (durations.some(duration => !Number.isFinite(duration) || duration <= 0)) throw new Error("STORYBOARD_DURATION_INVALID: 每格都必须有正时长");
+    const durations = storyboard.map((slot, index) => {
+        if (preserveShotDurations) {
+            const existing = oldShots[index];
+            return v2
+                ? Number(existing.duration_frames || 0) / fps
+                : (Number(existing.end_frame) - Number(existing.start_frame)) / fps;
+        }
+        return Number(slot.duration);
+    });
+    if (!preserveShotDurations && durations.some(duration => !Number.isFinite(duration) || duration <= 0)) throw new Error("STORYBOARD_DURATION_INVALID: 每格都必须有正时长");
     const frameCounts = durations.map(duration => Math.round(duration * fps));
-    const frameDelta = totalFrames - frameCounts.reduce((sum, value) => sum + value, 0);
-    if (Math.abs(frameDelta) > storyboard.length) throw new Error("STORYBOARD_DURATION_TOTAL_MISMATCH: 分镜总时长必须覆盖当前 Clip");
-    frameCounts[frameCounts.length - 1] += frameDelta;
-    if (frameCounts.some(value => value <= 0)) throw new Error("STORYBOARD_DURATION_INVALID: 分镜时长小于一帧");
+    if (!preserveShotDurations) {
+        const frameDelta = totalFrames - frameCounts.reduce((sum, value) => sum + value, 0);
+        if (Math.abs(frameDelta) > storyboard.length) throw new Error("STORYBOARD_DURATION_TOTAL_MISMATCH: 分镜总时长必须覆盖当前 Clip");
+        frameCounts[frameCounts.length - 1] += frameDelta;
+        if (frameCounts.some(value => value <= 0)) throw new Error("STORYBOARD_DURATION_INVALID: 分镜时长小于一帧");
+    }
     const refs = Array.isArray(h3Segment.referenceBindings) ? h3Segment.referenceBindings as Array<Record<string, any>> : [];
     const shots: Record<string, any>[] = [];
     const shotInputs: Record<string, unknown> = {};
     const keyframeBindings: Array<{ shotId: string; assetId: string; bindingId: string; nodeId?: string; containerNodeId?: string; storageKey?: string; label?: string }> = [];
     const removedKeyframesByShot = new Map<string, Array<Record<string, any>>>();
-    const originalById = new Map(oldShots.map(shot => [String(shot.id), shot]));
     const firstOrder = Number(oldShots[0].story_order || 0);
     const mappedSceneIds = [...new Set(productionSceneEntries(source).filter(scene => oldShots.some(shot => scene.shotIds.includes(String(shot.id)))).map(scene => scene.id))];
     const explicitSceneId = String(oldShots[0].source_scene_id || "");
@@ -138,14 +152,20 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
     if (v2 && Array.isArray(source.script_scenes) && source.script_scenes.length && !sceneId) throw new Error("SCENE_ARCHIVE_OCCURRENCE_AMBIGUOUS: 无法唯一确认该 Clip 的场次");
     let cursor = startFrame;
     for (const [index, slot] of storyboard.entries()) {
-        const existing = originalById.get(String(slot.id));
+        const existing = preserveShotDurations ? oldShots[index] : originalById.get(String(slot.id));
+        const shotId = preserveShotDurations ? String(existing!.id) : String(slot.id);
         let next: Record<string, any>;
         if (v2) {
             next = existing ? structuredClone(existing) : {
                 id: String(slot.id), timeline_id: oldShots[0].timeline_id, story_order: firstOrder + index,
                 ...(sceneId ? { source_scene_id: sceneId } : {}), subject_usages: [], keyframes: [], utterance_refs: [],
             };
-            next.id = String(slot.id); next.timeline_id = oldShots[0].timeline_id; next.story_order = firstOrder + index; next.duration_frames = frameCounts[index];
+            next.id = shotId;
+            if (!preserveShotDurations) {
+                next.timeline_id = oldShots[0].timeline_id;
+                next.story_order = firstOrder + index;
+                next.duration_frames = frameCounts[index];
+            }
             delete next.start_frame; delete next.end_frame;
             // 重建改变了镜头时长时，按比例缩放 Subject 出现范围；否则克隆来的 localEndFrame 会超出
             // 新时长，触发「Subject 出现范围必须位于 Shot 时长内且起止递增」校验，整个 Clip 的
@@ -182,13 +202,15 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
             }
         } else {
             const template = existing || oldShots[0];
-            next = { ...structuredClone(template), id: String(slot.id), start_frame: cursor, end_frame: cursor + frameCounts[index],
-                ...(Number.isInteger(template.story_order) ? { story_order: firstOrder + index } : {}) };
+            next = preserveShotDurations && existing
+                ? structuredClone(existing)
+                : { ...structuredClone(template), id: shotId, start_frame: cursor, end_frame: cursor + frameCounts[index],
+                    ...(Number.isInteger(template.story_order) ? { story_order: firstOrder + index } : {}) };
         }
         const bindingId = String(slot.referenceBindingId || "");
         let keyframeAssetId: string | undefined;
         const slotFrames = oldShots.flatMap(ownerShot => rows(ownerShot.keyframes)
-            .filter(frame => storyboardKeyframeForSlot(frame, String(slot.id)))
+            .filter(frame => storyboardKeyframeForSlot(frame, String(slot.id)) || storyboardKeyframeForSlot(frame, shotId))
             .map(frame => ({ ownerShot, frame })));
         if (bindingId) {
             const binding = refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId);
@@ -199,7 +221,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                     && ["keyframe", "storyboard", "frame"].includes(String(assetPlan?.kind || assetPlan?.asset_type || "").toLowerCase());
             });
             keyframeAssetId = match?.[0] || `storyboard:${encodeURIComponent(bindingId)}`;
-            keyframeBindings.push({ shotId: String(slot.id), assetId: keyframeAssetId, bindingId,
+            keyframeBindings.push({ shotId, assetId: keyframeAssetId, bindingId,
                 ...(binding.sourceNodeId ? { nodeId: String(binding.sourceNodeId) } : { clearNodeId: true }),
                 ...((binding.containerNodeId || input.nodeId) ? { containerNodeId: String(binding.containerNodeId || input.nodeId) } : {}),
                 ...(binding.storageKey ? { storageKey: String(binding.storageKey) } : {}),
@@ -212,7 +234,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                 // archived result bound by storageKey instead of fabricating the
                 // H3 container as the image's source node.
                 const nodeId = String(binding.sourceNodeId || "");
-                const frameId = slotFrames[0]?.frame.id || `KF:${slot.id}:storyboard`;
+                const frameId = slotFrames[0]?.frame.id || `KF:${shotId}:storyboard`;
                 const previousFrame = slotFrames[0]?.frame || {};
                 // slotFrames 来自重建前的原镜头；时长已变时必须继承克隆帧上已缩放好的
                 // localFrame，否则回写的关键帧停在旧时点（例如 96→72 帧后仍指 48）。
@@ -232,7 +254,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                 const keptFrames = rows(next.keyframes);
                 next.keyframes = keptFrames.some(frame => String(frame.id || "") === String(frameId))
                     ? keptFrames.map(frame => String(frame.id || "") === String(frameId) ? keyframe : frame)
-                    : [...keptFrames.filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id))), keyframe];
+                    : [...keptFrames.filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id)) && !storyboardKeyframeForSlot(frame, shotId)), keyframe];
             }
         } else if (v2 && slotFrames.length) {
             for (const { ownerShot, frame } of slotFrames) {
@@ -246,14 +268,14 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
             next.keyframes = rows(next.keyframes).filter(frame => !removedFrameIds.has(String(frame.id)));
         }
         shots.push(next);
-        const previousInput = director.shotInputs[String(slot.id)];
+        const previousInput = director.shotInputs[shotId];
         const previousKeyframeAssetId = previousInput?.keyframeAssetId;
         const retainedAssetIds = (previousInput?.assetIds || []).filter(assetId => assetId !== previousKeyframeAssetId);
         const boundReference = bindingId ? refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId) : undefined;
-        shotInputs[String(slot.id)] = keyframeAssetId
+        shotInputs[shotId] = keyframeAssetId
             ? { ...previousInput, keyframePolicy: boundReference?.storageKey ? "reuse" : "new", assetIds: [...new Set([...retainedAssetIds, keyframeAssetId])], keyframeAssetId }
             : { ...previousInput, keyframePolicy: "none", assetIds: retainedAssetIds };
-        if (!keyframeAssetId) delete (shotInputs[String(slot.id)] as Record<string, unknown>).keyframeAssetId;
+        if (!keyframeAssetId) delete (shotInputs[shotId] as Record<string, unknown>).keyframeAssetId;
         cursor += frameCounts[index];
     }
     const removedKeyframeIds = new Set([...removedKeyframesByShot.values()].flat().map(frame => String(frame.id)));
@@ -262,7 +284,7 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
         const removed = removedKeyframesByShot.get(String(shot.id));
         if (removed?.length) removeKeyframeSubjectReferences(shot, removed, source);
     }
-    if (!v2 && cursor !== endFrame) throw new Error("STORYBOARD_COVERAGE: 分镜格未覆盖整个 Clip");
+    if (!preserveShotDurations && !v2 && cursor !== endFrame) throw new Error("STORYBOARD_COVERAGE: 分镜格未覆盖整个 Clip");
     const segment = { ...structuredClone(planned), shot_ids: shots.map(shot => shot.id) };
     const currentBindingIds = new Set(refs.map(ref => String(ref.id || ref.bindingId || "")));
     const previousTrackBindingIds = new Set(rows(previousSegment?.storyboardShots).map(shot => String(shot.referenceBindingId || "")).filter(Boolean));
@@ -397,6 +419,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
         const result = await editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } }, clip);
         if (!result.sourceSaved) return result;
+        if (input.readBackSegment === false) return result;
         // The production edit reprojects its authoritative Shot data to the H3 canvas.
         // Return that committed Clip so the caller can merge local-only Quick Storyboard
         // fields without replaying an older H3 projection over the new track.

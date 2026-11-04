@@ -3,16 +3,17 @@ import { Button, Input, InputNumber, Select } from "antd";
 import { Plus, Trash2, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-// Shot-level foley cues and optional low-frequency limit.
+// Shot-level ambience, foley cues and optional low-frequency limit.
 // 此前前端完全不可见——v2「声音」标签页的文本框只覆盖自由描述，逐条拟音与低频约束无法编辑。
 type AudioObject = Record<string, any>;
 const readAudio = (value: unknown): AudioObject => (value && typeof value === "object" && !Array.isArray(value) ? value as AudioObject : {});
 const cueTexts = (audio: AudioObject): string[] => Array.isArray(audio.foley) ? audio.foley.map(item => typeof item === "string" ? item : JSON.stringify(item)) : [];
+const ambienceOf = (audio: AudioObject): string => typeof audio.ambience === "string" ? audio.ambience : audio.ambience == null ? "" : String(audio.ambience);
 const hzOf = (audio: AudioObject): number | null | undefined => typeof audio.low_frequency_hz === "number" ? audio.low_frequency_hz : undefined;
-const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, keepPendingEmpty = false): AudioObject => {
+const nextAudioFrom = (base: unknown, cues: string[], hz: number | null | undefined, ambience: string, keepPendingEmpty = false): AudioObject => {
     // 标注为 AudioObject：把 Record<string,any> 展开进对象字面量时 TS 会丢掉索引签名，
     // 不标注的话 next 被收窄成 {foley, low_frequency_hz}，下面的 delete 和返回类型都站不住。
-    const next: AudioObject = { ...readAudio(base), foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null };
+    const next: AudioObject = { ...readAudio(base), ambience, foley: keepPendingEmpty ? cues : cues.filter(text => text.trim()), low_frequency_hz: hz ?? null };
     delete next.no_low_frequency_reason;
     return next;
 };
@@ -31,30 +32,34 @@ export function AudioDesignEditor({ value, disabled, onChange, onPersist }: Prop
     const source = readAudio(value);
     const [cues, setCues] = useState(() => cueTexts(source));
     const [hz, setHz] = useState<number | null | undefined>(() => hzOf(source));
+    const [ambience, setAmbience] = useState(() => ambienceOf(source));
     const [saving, setSaving] = useState(false);
     // 外部源稿更新（他人保存、重新加载）后把本地草稿同步回去，避免旧值覆盖新源。
     const sourceSnapshot = useRef(JSON.stringify(source));
     useEffect(() => {
         const now = JSON.stringify(readAudio(value));
-        if (now !== sourceSnapshot.current) { setCues(cueTexts(readAudio(value))); setHz(hzOf(readAudio(value))); sourceSnapshot.current = now; }
+        if (now !== sourceSnapshot.current) { setCues(cueTexts(readAudio(value))); setHz(hzOf(readAudio(value))); setAmbience(ambienceOf(readAudio(value))); sourceSnapshot.current = now; }
     }, [value]);
-    const dirty = JSON.stringify(cues) !== JSON.stringify(cueTexts(source)) || JSON.stringify(hz ?? null) !== JSON.stringify(hzOf(source) ?? null);
-    const applyChange = (patch: { cues?: string[]; hz?: number | null | undefined }) => {
-        const nextCues = patch.cues ?? cues, nextHz = patch.hz === undefined ? hz : patch.hz;
+    const dirty = JSON.stringify(cues) !== JSON.stringify(cueTexts(source)) || JSON.stringify(hz ?? null) !== JSON.stringify(hzOf(source) ?? null) || ambience !== ambienceOf(source);
+    const applyChange = (patch: { cues?: string[]; hz?: number | null | undefined; ambience?: string }) => {
+        const nextCues = patch.cues ?? cues, nextHz = patch.hz === undefined ? hz : patch.hz, nextAmbience = patch.ambience ?? ambience;
         if (onChange) {
             // 受控模式也要保留编辑期空槽位并同步本地草稿：否则新增的空串会被 filter 掉，父级判定"无变化"直接重置，按钮看起来完全没反应。
-            onChange(nextAudioFrom(value, nextCues, nextHz, true));
+            onChange(nextAudioFrom(value, nextCues, nextHz, nextAmbience, true));
             if (patch.cues !== undefined) setCues(patch.cues);
             if (patch.hz !== undefined) setHz(patch.hz);
+            if (patch.ambience !== undefined) setAmbience(patch.ambience);
             return;
         }
         if (patch.cues !== undefined) setCues(patch.cues);
         if (patch.hz !== undefined) setHz(patch.hz);
+        if (patch.ambience !== undefined) setAmbience(patch.ambience);
     };
-    const resetToSource = () => { setCues(cueTexts(source)); setHz(hzOf(source)); };
-    const persist = async () => { if (!onPersist || saving) return; setSaving(true); try { const saved = await onPersist(nextAudioFrom(value, cues, hz)); if (!saved) resetToSource(); } finally { setSaving(false); } };
+    const resetToSource = () => { setCues(cueTexts(source)); setHz(hzOf(source)); setAmbience(ambienceOf(source)); };
+    const persist = async () => { if (!onPersist || saving) return; setSaving(true); try { const saved = await onPersist(nextAudioFrom(value, cues, hz, ambience)); if (!saved) resetToSource(); } finally { setSaving(false); } };
     return <div className="space-y-3">
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground"><Volume2 className="size-3.5" />{t("director.atomic.soundDesign")}</p>
+        <label className="grid gap-1 text-xs text-muted-foreground"><span>{t("director.atomic.ambience")}</span><Input.TextArea value={ambience} autoSize={{ minRows: 2, maxRows: 6 }} disabled={disabled || saving} placeholder={t("director.atomic.ambiencePlaceholder")} onChange={event => applyChange({ ambience: event.target.value })} /></label>
         {cues.map((cue, index) => <div key={index} className="flex gap-2"><Input value={cue} aria-label={t("director.atomic.foleyCue", { count: index + 1 })} placeholder={t("director.atomic.foleyCuePlaceholder")} disabled={disabled} onChange={event => applyChange({ cues: cues.map((item, i) => i === index ? event.target.value : item) })} /><Button size="small" type="text" danger icon={<Trash2 className="size-3.5" />} aria-label={t("common.remove")} disabled={disabled} onClick={() => applyChange({ cues: cues.filter((_, i) => i !== index) })}>{t("common.remove")}</Button></div>)}
         <Button size="small" icon={<Plus className="size-3.5" />} disabled={disabled} onClick={() => applyChange({ cues: [...cues, ""] })}>{t("director.atomic.addFoleyCue")}</Button>
         <div className="grid gap-2 sm:grid-cols-[140px]">

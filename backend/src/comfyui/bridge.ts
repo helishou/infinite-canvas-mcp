@@ -407,7 +407,7 @@ export class ComfyUiBackend {
         this.comfyExecutions.set(task.id, { url: comfyUrl });
         let executionCacheCleared = false;
         let executionCompleted = false;
-        const keepModelCache = task.params.keepModelCache !== false;
+        const keepModelCache = task.params.keepModelCache === true;
         try {
             const completedTask = this.deps.tasks.get(task.id);
             if (controller.signal.aborted || !completedTask || !["queued", "running"].includes(completedTask.status)) return;
@@ -1285,7 +1285,7 @@ export async function buildNativeNanFengV15Workflow(input: Record<string, unknow
     for (const [target, source, fallback] of [
         ["DLSS_video_upscale_mode", "dlssVideoUpscaleMode", "1.5× (Quality)"], ["DLSS_video_require_neural_upscaling", "dlssVideoRequireNeuralUpscaling", false], ["DLSS_video_nr_preset", "dlssVideoNrPreset", "Default"], ["DLSS_video_nr_style", "dlssVideoNrStyle", "Default"], ["DLSS_video_nr_intensity", "dlssVideoNrIntensity", 1], ["DLSS_video_local_tone_strength", "dlssVideoLocalToneStrength", 1], ["DLSS_video_local_structure_strength", "dlssVideoLocalStructureStrength", 1], ["DLSS_video_skin_structure_strength", "dlssVideoSkinStructureStrength", -1], ["DLSS_video_automatic_mask", "dlssVideoAutomaticMask", false], ["DLSS_video_dlss_model_preset", "dlssVideoModelPreset", "Default"], ["DLSS_video_encoding_quality", "dlssVideoEncodingQuality", "Max"], ["DLSS_video_video_codec", "dlssVideoCodec", "H.264"], ["DLSS_video_container", "dlssVideoContainer", "MP4"], ["DLSS_video_rename", "dlssVideoRename", "Auto"], ["DLSS_video_custom_suffix", "dlssVideoCustomSuffix", "_DLSS5"], ["DLSS_video_hdr_mode", "dlssVideoHdrMode", false], ["DLSS_video_output_detail_strength", "dlssVideoOutputDetailStrength", 1], ["DLSS_fg_output_fps", "dlssFgOutputFps", "60"], ["DLSS_fg_dlss_engine", "dlssFgEngine", "Auto"], ["DLSS_fg_encoding_quality", "dlssFgEncodingQuality", "Max"], ["DLSS_fg_video_codec", "dlssFgVideoCodec", "H.264"], ["DLSS_fg_container", "dlssFgContainer", "MP4"], ["DLSS_fg_rename", "dlssFgRename", "Auto"], ["DLSS_fg_custom_suffix", "dlssFgCustomSuffix", "_DLSSFG"], ["DLSS_fg_hdr_mode", "dlssFgHdrMode", false]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
     for (const [target, source, fallback] of [["南风ER_solver_type", "erSolverType", "ER-SDE"], ["南风ER_max_stage", "erMaxStage", 3], ["南风ER_eta", "erEta", 1], ["南风ER_s_noise", "erSNoise", 1]] as Array<[string, string, unknown]>) inputs[target] = value(source, fallback);
-    if (params.nativeLoaderCacheSupported === true) inputs["复用加载器缓存"] = params.keepModelCache !== false;
+    if (params.nativeLoaderCacheSupported === true) inputs["复用加载器缓存"] = params.keepModelCache === true;
     const graph: Record<string, any> = { nf_v15: { class_type: NANFENG_H3_CLASS, inputs } };
     if (params.latentConfirmationPhase) {
         graph.nf_v15.class_type = "InfiniteCanvasH3ConfirmedGeneratorV15";
@@ -1435,7 +1435,7 @@ export async function buildExpandedNanFengV10Workflow(
     params = normalizeH3Params(params, true);
     const mode = normalizeNanFengMode(params.mode ?? params.taskMode ?? (typeof input.video === "string" ? "ref2va" : "t2v"));
     const value = (key: string, fallback: unknown) => params[key] ?? fallback;
-    const keepLoaderCache = params.nativeLoaderCacheSupported === true && params.keepModelCache !== false;
+    const keepLoaderCache = params.nativeLoaderCacheSupported === true && params.keepModelCache === true;
     const duration = Math.max(1, Math.min(15, Number(params.duration || 5)));
     const frames = durationToFrames(duration);
     const ratio = normalizeH3AspectRatio(String(params.aspectRatio || "16:9 (Widescreen)"));

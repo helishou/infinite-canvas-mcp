@@ -156,11 +156,26 @@ export function publicProductionRecord<T extends { draft: EpisodeProductionData;
         ...(legacyPublished ? { publishedFormatStatus: "legacy-maintenance-required" } : {}) };
 }
 
+/** Share disk verification only within one synchronous readiness evaluation. */
+export function directorMediaReadContext(db: BackendDatabase, project: NonNullable<ReturnType<BackendDatabase["getCanvasProject"]>>) {
+    const digests = new Map<string, string | null>();
+    return { project, digest(storageKey: string): string | null {
+        if (digests.has(storageKey)) return digests.get(storageKey)!;
+        const media = db.getMediaFile(storageKey);
+        const digest = media && fs.existsSync(media.filePath)
+            ? crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") : null;
+        digests.set(storageKey, digest);
+        return digest;
+    } };
+}
+
 /** Verify actual media bytes and project ownership, never a supplied PASS string. */
-export function validateDirectorMedia(db: BackendDatabase, projectId: string, d: DirectorProduction, targetIds?: string[]) {
-    const nodes = db.getCanvasProject(projectId)?.nodes as Array<Record<string, any>> | undefined;
+export function validateDirectorMedia(db: BackendDatabase, projectId: string, d: DirectorProduction, targetIds?: string[], context?: ReturnType<typeof directorMediaReadContext>) {
+    const project = context?.project ?? db.getCanvasProject(projectId);
+    const nodes = project?.nodes as Array<Record<string, any>> | undefined;
     if (!nodes) throw new Error("画布不存在");
-    const canvasRole = productionCanvasContext(db, projectId).role;
+    const mediaRead = context ?? directorMediaReadContext(db, project!);
+    const canvasRole = productionCanvasContext(db, projectId, project).role;
     const plan = new Map(list(d.source.asset_plan).map(a => [String(a.asset_id || a.id), a]));
     const visiting = new Set<string>(), visited = new Set<string>();
     const visit = (id: string) => {
@@ -220,8 +235,7 @@ export function validateDirectorMedia(db: BackendDatabase, projectId: string, d:
             const keys = node ? [...(node.type === "character" ? resolveCanvasCharacterImageReferences(node) : resolveCanvasImageReferenceNode(node)).map(r => r.storageKey), node.storageKey, meta.storageKey, meta.resultStorageKey,
                 ...(boundStoryboardMedia ? [ref.storageKey] : [])] : [];
             if ((!node || !keys.includes(ref.storageKey)) && !archivedStoryboardBinding) throw new Error(`参考不属于目标画布节点或正式分镜轨：${ref.label}`);
-            const media = db.getMediaFile(ref.storageKey);
-            if (!media || !fs.existsSync(media.filePath) || crypto.createHash("sha256").update(fs.readFileSync(media.filePath)).digest("hex") !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
+            if (mediaRead.digest(ref.storageKey) !== ref.sha256) throw new Error(`参考媒体字节或版本不一致：${ref.label}`);
             const selectedCanvasStyleAnchor = ref.role === "style" && ref.nodeId === styleAnchorNodeId;
             const registeredAssetBinding = ref.assetId
                 ? d.assets[ref.assetId]?.storageKey === ref.storageKey && d.assets[ref.assetId]?.sha256 === ref.sha256

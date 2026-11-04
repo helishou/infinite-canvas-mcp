@@ -19,8 +19,7 @@ export type ClipRefreshJob = {
 };
 const activeStatuses = ["queued", "checking", "compiling", "applying"];
 /** 多会话同时编辑同一份制作稿时，异步校验窗口内被改写属于常态；这类失败重排就能过，不该落成终态。 */
-const MAX_REFRESH_ATTEMPTS = 3;
-const REFRESH_BACKOFF_MS = [400, 1200, 2500];
+const MAX_REFRESH_ATTEMPTS = 3;const REFRESH_BACKOFF_MS = [400, 1200, 2500];
 const RETRYABLE_REFRESH_CODES = new Set(["SOURCE_CHANGED_DURING_VALIDATION", "PRODUCTION_CONFLICT", "COMPILATION_INPUT_CHANGED", "REVISION_CONFLICT"]);
 /** 判断一次刷新失败是否只是「别人在我校验期间改了稿」，属于可重排的瞬时冲突。 */
 export function retryableRefreshFailure(error: unknown) {
@@ -34,6 +33,12 @@ export function retryableRefreshFailure(error: unknown) {
 /** Terminal jobs never resume, so their embedded DirectorProduction snapshot is dead weight (multi-MB rows made currentBySegment scan seconds). */
 const prunedOwners = new Set<string>();
 export const clipRefreshScope = (segmentId: string) => ({ targetIds: [segmentId], output: "selected" as const });
+/**
+ * 同一次编辑的多片段合并编译，默认关闭（PRODUCTION_BATCH_CLIP_COMPILE=1 才启用）。
+ * 实测该路径会让部分片段读到的批量回执不含自己的目标，落成
+ * CLIP_REFRESH_FAILED「编译回执不存在或不属于当前制作对象」；修复前不要默认开启。
+ */
+const batchClipCompile = process.env.PRODUCTION_BATCH_CLIP_COMPILE === "1";
 
 export class ClipRefreshStore {
     constructor(private db: DatabaseSync, readonly owner: { kind: string; id: string }) {}
@@ -133,6 +138,24 @@ export class ClipRefreshCoordinator {
             if (due > Date.now()) { this.scheduleWake(id, job, due - Date.now()); continue; }
             void this.advance(id, job, store);
         }
+    }
+    /**
+     * 一次编辑改了多个片段时，把这些片段合并成一次编译。
+     * 实测编译开销对目标数是次线性的（1 个片段 2.3s、18 个片段 5.9s），
+     * 逐个片段编译会把同一份固定开销重复 N 次。
+     * 只改投编译的 scope，片段自身的 inputHash 预检仍按单片段判定，不参与合并结论。
+     */
+    private batchScope(job: ClipRefreshJob, store: ClipRefreshStore) {
+        if (!batchClipCompile) return undefined;
+        // 重排过的任务已换过编译 id，合并会命中旧的终态回执，直接走单片段路径。
+        if (job.attempts || job.compileOperationId) return undefined;
+        const siblings = store.byEditAll(job.parentOperationId)
+            .filter(item => item.savedRevision === job.savedRevision)
+            .map(item => item.segmentId).sort();
+        if (siblings.length < 2) return undefined;
+        const operationId = `clip-refresh-batch:${crypto.createHash("sha256")
+            .update(`${this.owner}\0${job.parentOperationId}\0${job.savedRevision}`).digest("hex").slice(0, 32)}`;
+        return { operationId, scope: { targetIds: siblings, output: "selected" as const } };
     }
     private scheduleWake(id: string, job: ClipRefreshJob, delayMs: number) {
         const key = `${id}:${job.operationId}`;
@@ -269,13 +292,17 @@ export class ClipRefreshCoordinator {
         // 走到这里说明退避等待已到期（或首次执行），下一次冲突要重新计时。
         job.nextAttemptAt = undefined;
         const compileKey = job.compileOperationId || key;
+        // 同一次编辑产生的多个片段刷新共用一次编译；operationId 只由 (owner, 父操作, 保存版本) 决定，
+        // 重启后与其它片段算出的值一致，能命中同一份编译回执。
+        const batch = this.batchScope(job, store);
+        const activeCompileKey = batch ? batch.operationId : compileKey;
         const step = (status: Status) => { job.status = status; store.save(job); };
         const measure = <T>(name: string, fn: () => T): T => { const start = performance.now(); try { return fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
         const measureAsync = async <T>(name: string, fn: () => Promise<T>): Promise<T> => { const start = performance.now(); try { return await fn(); } finally { job.timings[name] = (job.timings[name] || 0) + performance.now() - start; store.save(job); } };
         try {
             let compilation: any;
             // Recover original application even if inputs have since changed.
-            if (job.compileRevision !== undefined) compilation = this.compilations.getCompilation(id, this.owner, compileKey);
+            if (job.compileRevision !== undefined) compilation = this.compilations.getCompilation(id, this.owner, activeCompileKey);
             if (compilation?.application) {
                 job.application = compilation.application;
                 job.status = this.syncStatus(job); store.save(job);
@@ -291,8 +318,23 @@ export class ClipRefreshCoordinator {
             if (!compilation) {
                 step("checking");
                 // Persist intent before enqueue; an enqueue crash can be recovered by its exact identity.
-                job.compileRevision = current.revision; store.save(job);
-                compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, compileKey, current.revision, undefined, clipRefreshScope(job.segmentId)));
+                // 合并编译必须用同一个「保存版本」作基线：兄弟片段中先回写的那一个会把
+                // 当前 revision 推高，若各自拿 current.revision 入队，指纹不同会被判成
+                // 幂等冲突，合并就退化成各自单编。
+                const enqueueRevision = batch ? job.savedRevision : current.revision;
+                job.compileRevision = enqueueRevision; store.save(job);
+                // 单目标编译有约 2 秒的固定开销（实测 1 个片段 2.3s、18 个片段 5.9s），
+                // 同一次编辑产生的多个片段刷新合并成一次编译能省掉 N-1 份固定开销。
+                // 合并只改投编译的 scope，inputHash 预检仍按单片段比对，避免误判 superseded。
+                const batched = batch;
+                const target = batched ? batched.scope : clipRefreshScope(job.segmentId);
+                const enqueueKey = batched ? batched.operationId : compileKey;
+                try {
+                    compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, enqueueKey, enqueueRevision, undefined, target));
+                } catch (error) {
+                    if (!batched) throw error;
+                    compilation = measure("enqueueMs", () => this.compilations.enqueue(id, this.owner, compileKey, current.revision, undefined, clipRefreshScope(job.segmentId)));
+                }
             }
             if (["queued", "running"].includes(compilation.status)) { step("compiling"); return; }
             if (compilation.status !== "succeeded") {

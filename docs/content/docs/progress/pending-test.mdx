@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Production canvas readiness: with several Clips sharing image references, check refresh responsiveness and unchanged readiness diagnostics. Shared media are read and hashed once per evaluation; a later refresh must still detect missing or modified files.
+
 - Canvas asset panel tabs: verify My assets and Online assets can be switched, drama and tag filters appear only under My assets, and the search applies to both tabs.
 
 - Expand “Poses (online)” in the canvas asset panel and check the series, pose type, angle and search filters. Selecting a pose archives and inserts its original image, which remains available after reload. Network or source format failures should show an error and retry.
@@ -2228,6 +2230,9 @@ Inline `h3_update_clips` also requires `expectedRevision`; frozen `preparedId` m
 
 ## 工作流导入导出与模型对外能力
 
+- 本地工作流库按首次加入本地库的时间倒序排列；新添加的排在前面，编辑或覆盖已有工作流不改变其原有位置，RunningHub 列表顺序不变。
+- 打开工作流详情的「节点图」页签时，图形自动缩放到完整可视区域；缩放或平移后改字段不应重置视图，调整面板尺寸后应重新适应。
+- 从本机 ComfyUI 连续导入同名工作流，确认始终更新同一条本地工作流、节点图替换为最新内容、原字段配置保留，不会新建带 ` (2)` 的副本；若同名来自内置工作流，仍应保留内置工作流并将本地副本单独命名。
 - 在「工作流库」导入普通 ComfyUI API JSON 或 `.workflow.json` 完整包，确认工作流仍可正常管理，同时模型页立即出现对应模型；完整包中的节点图、中文标题、字段配置、默认值及媒体字段类型完整保留。
 - 导出内置和自定义工作流，确认两者都能下载；将内置工作流包重新导入时应创建可编辑的 `custom/` 副本，不应覆盖内置文件。
 - 删除自动迁移的模型后重启 Backend，确认该模型不会被重新强制创建；新增或导入尚未处理的内部实现仍会自动生成模型。
