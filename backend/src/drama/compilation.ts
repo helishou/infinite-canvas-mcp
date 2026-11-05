@@ -476,9 +476,12 @@ export class ProductionCompilationService {
         const targetIds = projection?.targetIds || this.compilationTargets(director);
         const reusable = this.reusableArtifacts(id, director, targetIds);
         const pending = targetIds.filter(id => !reusable.some(artifact => artifact.targetId === id));
-        const compileScope = scope && pending.length && reusable.length ? { ...scope, targetIds: pending } : scope;
+        // A full request still publishes all targets, but only stale outputs need
+        // compiler work. Keep the request scope separate from this input projection.
+        const incremental = pending.length > 0 && reusable.length > 0;
+        const compileScope = incremental ? { ...scope, targetIds: pending, output: "selected" as const } : scope;
         const compileProjection = compileScope === scope ? projection : compileScope ? compilationScopeInput(director, compileScope) : undefined;
-        return { targetIds, reusable, input: compileProjection && compileScope ? scopedCompilerInput(compileProjection.director, compileScope) : director };
+        return { targetIds, reusable, incremental, input: compileProjection && compileScope ? scopedCompilerInput(compileProjection.director, compileScope) : director };
     }
     private async manifestFingerprint(id: string, owner: string, director: DirectorProduction, scope: CompilationScope | undefined,
         effective: ReturnType<ProductionCompilationService["effectiveInput"]>, boundFiles: Record<string, string | undefined>, material: Map<string, MaterialItem>, workerKey?: string, includeResolvedSources = true) {
@@ -848,19 +851,24 @@ export class ProductionCompilationService {
                 });
                 job.timingsMs = { ...job.timingsMs, workerCompileMs: performance.now() - workerStarted };
                 if (this.cancelledJobs.has(key)) throw Object.assign(new Error("编译已被较新的目标输入替代"), { code: "COMPILATION_SUPERSEDED" });
-                if (projection && job.scope) {
+                {
                     // Reused targets may be absent from the narrowed compiler output.
                     compiled.director.artifacts = [...compiled.director.artifacts.filter(artifact => !reusable.some(prior => prior.targetId === artifact.targetId)), ...structuredClone(reusable)];
                     const projectedSourceHash = compiled.director.sourceHash;
-                    const artifacts = compiled.director.artifacts.filter(artifact => projection.targetIds.includes(artifact.targetId)).map(artifact => {
+                    const outputTargetIds = projection?.targetIds || targetIds;
+                    const artifacts = compiled.director.artifacts.filter(artifact => outputTargetIds.includes(artifact.targetId)).map(artifact => {
                         const prior = reusable.find(item => item.kind === artifact.kind && item.targetId === artifact.targetId && item.sha256 === artifact.sha256);
                         if (prior) return prior;
-                        const targetScope = { targetIds: [artifact.targetId], ...(job.scope?.output ? { output: job.scope.output } : {}) };
-                        return { ...artifact, sourceHash: job.director.sourceHash, receipt: { ...artifact.receipt, sourceHash: job.director.sourceHash,
-                            ...(artifact.receipt.sourceMap ? { sourceMap: { ...artifact.receipt.sourceMap, sourceHash: job.director.sourceHash } } : {}),
-                            compilationScope: { scope: targetScope, inputHash: compilationScopeInput(job.director, targetScope).inputHash, engine: artifact.receipt.engine || job.director.engine, projectedSourceHash } } };
+                        const targetScope = { targetIds: [artifact.targetId], output: "selected" as const };
+                        const ownerSourceHash = projection || effective.incremental ? job.director.sourceHash : compiled.director.sourceHash;
+                        return { ...artifact, sourceHash: ownerSourceHash, receipt: { ...artifact.receipt, sourceHash: ownerSourceHash,
+                            engine: artifact.receipt.engine || job.director.engine,
+                            ...(artifact.receipt.sourceMap ? { sourceMap: { ...artifact.receipt.sourceMap, sourceHash: ownerSourceHash } } : {}),
+                            compilationScope: { scope: targetScope, inputHash: compilationScopeInput(projection || effective.incremental ? job.director : compiled.director, targetScope).inputHash, engine: artifact.receipt.engine || job.director.engine, projectedSourceHash } } };
                     });
-                    compiled.director = { ...structuredClone(job.director), artifacts: [...job.director.artifacts.filter(item => !projection.targetIds.includes(item.targetId)), ...artifacts] };
+                    compiled.director = projection || effective.incremental
+                        ? { ...structuredClone(job.director), artifacts: [...job.director.artifacts.filter(item => !outputTargetIds.includes(item.targetId)), ...artifacts] }
+                        : { ...compiled.director, artifacts };
                 }
                 if (compiled.director.workflow.currentWork) compiled.director.workflow.currentWork = { ...compiled.director.workflow.currentWork, inputRevision: job.expectedRevision, sourceHash: compiled.director.sourceHash };
                 compiled.diagnostics = [...job.diagnostics, ...compiled.diagnostics];

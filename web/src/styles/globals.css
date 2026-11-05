@@ -64,6 +64,16 @@
     --ui-radius-control: 6px;
     --ui-radius-card: 10px;
     --ui-radius-overlay: 12px;
+    /* 画布节点的阴影/遮罩统一在这里按主题取值，组件内不再写死黑白 */
+    --canvas-node-shadow: 0 18px 48px rgba(28, 25, 23, .14);
+    --canvas-panel-shadow: 0 8px 32px rgba(28, 25, 23, .13);
+    --canvas-media-scrim: rgba(28, 25, 23, .70);
+    --canvas-media-scrim-soft: rgba(28, 25, 23, .45);
+    --canvas-badge-active: #cf1322;
+    --canvas-badge-awaiting: #ba7517;
+    /* 常驻控件毛玻璃底：半透明 + 极淡描边，保证文字可读但不是实色胶囊 */
+    --canvas-dock-bg: rgba(252, 251, 247, .7);
+    --canvas-dock-border: rgba(28, 25, 23, .08);
     --background: #f6f5f0;
     --foreground: #30352e;
     --card: #fcfbf7;
@@ -114,6 +124,14 @@
     --accent-foreground: #d6e4c0;
     --destructive: #f19689;
     --border: #3c4436;
+    --canvas-node-shadow: 0 18px 48px rgba(0, 0, 0, .48);
+    --canvas-panel-shadow: 0 8px 32px rgba(0, 0, 0, .55);
+    --canvas-media-scrim: rgba(12, 14, 11, .78);
+    --canvas-media-scrim-soft: rgba(12, 14, 11, .52);
+    --canvas-badge-active: #ff8a87;
+    --canvas-badge-awaiting: #fbbf24;
+    --canvas-dock-bg: rgba(32, 35, 31, .74);
+    --canvas-dock-border: rgba(245, 245, 244, .10);
     --input: #4b5643;
     --ring: #b3c796;
     --chart-1: #c1cfa3;

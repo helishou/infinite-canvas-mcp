@@ -1,5 +1,6 @@
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "react";
-import { createBrowserRouter, Outlet } from "react-router-dom";
+import { useTranslation } from "react-i18next";
+import { createBrowserRouter, Outlet, useRouteError } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
 import UserLayout from "@/layouts/user-layout";
@@ -28,6 +29,30 @@ const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
 
 const pageFallback = <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">加载中…</div>;
+
+/** 渲染期异常（含 dev HMR 后的 hook 错链）兜底：保留错误信息，给一次可恢复的重载入口，而不是整页白屏。 */
+function RouteErrorPage() {
+    const error = useRouteError();
+    const { t } = useTranslation();
+    const message = error instanceof Error ? error.message : typeof error === "string" ? error : String(error ?? "");
+    const stack = error instanceof Error ? error.stack || "" : "";
+    return (
+        <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3 p-8 text-center">
+            <h1 className="text-lg font-semibold">{t("routeError.title")}</h1>
+            <p className="max-w-[640px] text-sm text-muted-foreground">{t("routeError.hint")}</p>
+            {message ? <pre className="max-w-[720px] overflow-auto rounded-md border p-3 text-left text-xs">{message}</pre> : null}
+            <button type="button" className="rounded-md border px-4 py-2 text-sm" onClick={() => window.location.reload()}>
+                {t("routeError.reload")}
+            </button>
+            {stack ? (
+                <details className="max-w-[720px] text-left text-xs text-muted-foreground">
+                    <summary>{t("routeError.details")}</summary>
+                    <pre className="overflow-auto whitespace-pre-wrap">{stack}</pre>
+                </details>
+            ) : null}
+        </div>
+    );
+}
 
 function lazyPage(Page: LazyExoticComponent<ComponentType>) {
     return (
@@ -68,6 +93,7 @@ export const router = createBrowserRouter([
                 <Outlet />
             </UserLayout>
         ),
+        errorElement: <RouteErrorPage />,
         children: appRoutes,
     },
     { path: "/pelican-bike", element: <><AnalyticsTracker />{lazyPage(PelicanBikePage)}</> },

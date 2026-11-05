@@ -2,6 +2,12 @@ import { generationGroupsZhCN } from "../generation-groups";
 import { workspaceNavigationZhCN } from "../workspace-navigation";
 
 export default {
+    routeError: {
+        title: "页面渲染出错",
+        hint: "常见于开发热更新后组件状态未刷新。点击下方按钮重新加载页面；本机草稿与后台数据不会丢失。",
+        reload: "重新加载页面",
+        details: "详细堆栈",
+    },
     canvasRecovery: {
         suggestions: "改写候选", localDrafts: "本机草稿", loading: "正在读取…",
         summary: "{{pending}} 条待确认 · {{count}} 条记录", refresh: "刷新", empty: "当前画布没有改写候选",

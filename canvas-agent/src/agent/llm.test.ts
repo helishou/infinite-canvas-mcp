@@ -151,8 +151,47 @@ test("API delegation binds the actual parent/channel and preserves the frontend 
     assert.equal(requests, 2);
 });
 
-test("truncated tool stream cannot execute tools; upstream credentials are not exposed", async t => {
-    const url = await modelServer(t, (_body, response) => sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "partial", function: { name: "write", arguments: "{}" } }] } }] }]));
+test("重复发送 id/name 的分片不累加，累计快照式参数不重复拼接", () => {
+    const p = provider("http://unused");
+    const reply = parseLlmReply(p, [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-9", function: { name: "canvas_apply_ops", arguments: '{"ops":[{"type":"update_node"' } }] } }] },
+        // 网关重发同一 id/name，并把「目前为止的完整参数」再发一遍
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-9", function: { name: "canvas_apply_ops", arguments: '{"ops":[{"type":"update_node","id":"n1"}]}' } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    ]);
+    assert.equal(reply.message.calls?.length, 1);
+    const call = reply.message.calls![0];
+    assert.equal(call.id, "call-9");
+    assert.equal(call.name, "canvas_apply_ops");
+    assert.deepEqual(JSON.parse(call.arguments), { ops: [{ type: "update_node", id: "n1" }] });
+});
+
+test("工具参数被传输层复制成多份时，执行前修回一份", async t => {
+    const ops = [{ type: "update_h3_segment", nodeId: "n1", segmentId: "s1", patch: { visual: "慕璃站在条案后，面朝人群与镜头" } }];
+    let requests = 0, executed = 0;
+    const url = await modelServer(t, (_body, response) => {
+        requests++;
+        if (requests === 1) sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-dup", function: { name: "canvas_test_ops", arguments: JSON.stringify({ ops: [ops[0], ops[0], ops[0], ops[0], ops[0]] }) } }] }, finish_reason: "tool_calls" }] }]);
+        else sse(response, [{ choices: [{ delta: { content: "已完成" }, finish_reason: "stop" }] }]);
+    });
+    const { store } = settings(config(url));
+    const connect = async () => {
+        const server = new McpServer({ name: "fixture", version: "1" });
+        server.registerTool("canvas_test_ops", { inputSchema: { ops: z.array(z.unknown()) } }, async ({ ops: received }) => { executed++; assert.equal(received.length, 1, "同一个 op 被复制五份时只应执行一次"); return { content: [{ type: "text", text: "saved" }] }; });
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        await server.connect(serverTransport);
+        const client = new Client({ name: "fixture", version: "1" });
+        await client.connect(clientTransport);
+        return client;
+    };
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "canvas-llm-dedupe-"));
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const agent = new LlmAgent(store, url, "", connect), thread = agent.startThread(cwd);
+    await agent.run("改分镜", () => {}, [], { threadId: thread.id, cwd });
+    assert.equal(executed, 1);
+});
+
+test("truncated tool stream cannot execute tools; upstream credentials are not exposed", async t => {    const url = await modelServer(t, (_body, response) => sse(response, [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "partial", function: { name: "write", arguments: "{}" } }] } }] }]));
     await assert.rejects(requestLlm(provider(url), "", [{ role: "user", parts: [{ text: "x" }] }], [], new AbortController().signal), /响应流中断/);
     const errorUrl = await modelServer(t, (_body, response) => { response.writeHead(401); response.end("secret-test-key private upstream body"); });
     await assert.rejects(requestLlm(provider(errorUrl), "", [], [], new AbortController().signal), error => error instanceof Error && error.message.includes("401") && !error.message.includes("secret-test-key"));

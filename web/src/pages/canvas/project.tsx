@@ -496,6 +496,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const restoreGenerationRef = useRef(0);
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const didInitialCenterRef = useRef(false);
+    // 视口只有在项目加载并恢复完成后才允许写回；崩溃/热更新造成的早卸载不能把初始 (0,0,1) 落库。
+    const viewportRestoredRef = useRef(false);
     const nodeDraggingRef = useRef(false);
     const pendingNodeClickRef = useRef<{ nodeId: string; clientX: number; clientY: number } | null>(null);
     const dragRef = useRef<{
@@ -865,6 +867,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     useEffect(() => {
         if (!hydrated) return;
+        viewportRestoredRef.current = false;
         loadedProjectIdRef.current = null;
         setProjectLoaded(false);
         setProjectLoadError("");
@@ -884,6 +887,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 }
                 suppressNextViewportPersistRef.current = true;
                 commitViewport(project.viewport);
+                viewportRestoredRef.current = true;
                 didInitialCenterRef.current = true;
                 setSelectedNodeIds(readCanvasSelection(projectId, new Set(project.nodes.map((node) => node.id))));
                 setSelectedConnectionId(null);
@@ -906,7 +910,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [dialogNodeId]);
 
     useEffect(() => {
-        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId || !viewportRestoredRef.current) return;
         if (suppressNextViewportPersistRef.current) {
             suppressNextViewportPersistRef.current = false;
             return;
@@ -923,8 +927,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     // The debounced viewport writer is canceled when this surface unmounts. Flush its latest
     // value on exit so a fast route change cannot lose the position the user just left.
+    // 未恢复过视口时不要注册这个 cleanup：否则白屏/热更新的早卸载会把默认 (0,0,1) 写回项目。
     useEffect(() => {
-        if (!projectLoaded || loadedProjectIdRef.current !== projectId) return;
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId || !viewportRestoredRef.current) return;
         return () => {
             if (viewportSaveTimerRef.current) {
                 clearTimeout(viewportSaveTimerRef.current);
@@ -1542,6 +1547,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         isAiConfigReady,
         openConfigDialog,
         theme,
+        nodes,
         nodesRef,
         connectionsRef,
         viewportRef,
@@ -2321,6 +2327,26 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const target = viewportForCanvasNodes(nodesRef.current, size);
         if (target) animateFocus(target);
     }, [animateFocus, size.height, size.width]);
+    // 后端默认视口 (0,0,1) 会把远处节点全部裁掉，看起来就是「节点和改动全没了」。
+    // 首次加载若当前视口一个节点都看不到，自动总览一次；正常视口不介入，也不改制作跟随的语义。
+    const recoveredBlankViewportRef = useRef(false);
+    useEffect(() => {
+        if (!projectLoaded || loadedProjectIdRef.current !== projectId || recoveredBlankViewportRef.current) return;
+        const currentNodes = nodesRef.current;
+        if (!currentNodes.length) return;
+        const view = normalizeViewportTransform(viewportRef.current);
+        const visible = currentNodes.some(node => {
+            const left = Number(node.position?.x || 0) * view.k + view.x;
+            const top = Number(node.position?.y || 0) * view.k + view.y;
+            return left + Number(node.width || 0) * view.k > 0 && left < size.width
+                && top + Number(node.height || 0) * view.k > 0 && top < size.height;
+        });
+        if (visible) { recoveredBlankViewportRef.current = true; return; }
+        const target = viewportForCanvasNodes(currentNodes, size);
+        if (!target) return;
+        recoveredBlankViewportRef.current = true;
+        commitViewport(target);
+    }, [projectLoaded, projectId, size.width, size.height, commitViewport]);
     const openBatchRename = useCallback(() => {
         setRenameTargetIds(nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id)).map((node) => node.id));
     }, []);

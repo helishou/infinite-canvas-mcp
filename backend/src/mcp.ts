@@ -6,6 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { isMcpProfile, isToolInProfile, MCP_PROFILES, type McpProfile } from "@basketikun/canvas-agent/tool-profiles";
 import { compactProductionEditSchema, COMPACT_EDIT_DESCRIPTION, compactEditOperationForIssue, isMcpSchemaMode, MCP_SCHEMA_MODES, DEFAULT_MCP_SCHEMA_MODE, type McpSchemaMode } from "@basketikun/canvas-agent/drama/production-edit-disclosure";
+import { repairMcpToolArguments } from "@basketikun/canvas-agent/server/mcp-arg-integrity";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery, assertProductionSourceFields, canonicalProduction } from "@basketikun/canvas-agent/drama/production-contract";
@@ -1343,18 +1344,21 @@ function registerBackendCanvasTools(
       async (rawInput: Record<string, unknown>, extra: { signal: AbortSignal }) => {
         const traceId = crypto.randomUUID();
         const startedAt = Date.now();
-        const inputSummary = { ...summarizeMcpToolInput(rawInput, name, optionalText(mcpInputProjectId(rawInput, state)), state.profile), schemaHash: state.runtimeInfo?.().toolSchemaHash, schemaMode: state.schemaMode };
+        // 宿主把模型输出流拼装成参数时偶发复制整个 ops 数组或吞掉 type；先修再校验。
+        const repaired = repairMcpToolArguments(rawInput);
+        if (repaired.changed) logger.warn("MCP 工具参数在传输层损坏，已按最小规则修复", { tool: name, ...repaired.repairs });
+        const inputSummary = { ...summarizeMcpToolInput(repaired.input, name, optionalText(mcpInputProjectId(repaired.input, state)), state.profile), schemaHash: state.runtimeInfo?.().toolSchemaHash, schemaMode: state.schemaMode, ...(repaired.changed ? { transportRepairs: repaired.repairs } : {}) };
         await recordMcpObservabilityEvent(recordEvent, {
           sessionId: state.clientId,
           traceId,
           event: "tool.started",
           tool: name,
-          projectId: optionalText(mcpInputProjectId(rawInput, state)),
-          nodeId: optionalText(mcpInputNodeId(rawInput)),
+          projectId: optionalText(mcpInputProjectId(repaired.input, state)),
+          nodeId: optionalText(mcpInputNodeId(repaired.input)),
           inputSummary,
         });
         try {
-          const input = schema.parse(rawInput) as Record<string, unknown>;
+          const input = schema.parse(repaired.input) as Record<string, unknown>;
           const raw = await executeDirectCanvasTool(
             config,
             backendApi,
@@ -1544,7 +1548,9 @@ function registerBackendCanvasTools(
       name,
       { description: toolDescriptions[name], inputSchema: schema },
       async (rawInput: Record<string, unknown>) => {
-        const input = schema.parse(rawInput) as Record<string, unknown>;
+        const repaired = repairMcpToolArguments(rawInput);
+        if (repaired.changed) logger.warn("素材工具参数在传输层损坏，已按最小规则修复", { tool: name, ...repaired.repairs });
+        const input = schema.parse(repaired.input) as Record<string, unknown>;
         if (name === "assets_list") {
           const query = new URLSearchParams({ view: "summary", page: String(Math.max(1, Number(input.page || 1))), pageSize: String(Math.max(1, Number(input.pageSize || 20))) });
           if (typeof input.kind === "string") query.set("kind", input.kind);
@@ -1876,7 +1882,9 @@ function registerBackendCanvasTools(
   for (const name of productionToolNames) {
     const compact = state.schemaMode === "compact" && name === "production_edit";
     server.registerTool(name, { description: compact ? COMPACT_EDIT_DESCRIPTION : toolDescriptions[name], inputSchema: compact ? compactProductionEditSchema : toolInputSchemas[name] }, async (raw: Record<string, unknown>) => {
-      const input = toolInputSchemas[name].parse(raw) as Record<string, any>;
+      const repaired = repairMcpToolArguments(raw);
+      if (repaired.changed) logger.warn("制作工具参数在传输层损坏，已按最小规则修复", { tool: name, ...repaired.repairs });
+      const input = toolInputSchemas[name].parse(repaired.input) as Record<string, any>;
       const blocked = await productionToolPreflight(backendApi, name, input);
       return textResult(blocked || await executeProductionTool(backendApi, name, input));
     });

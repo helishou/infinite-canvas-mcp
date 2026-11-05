@@ -4,12 +4,16 @@ import type { CSSProperties } from "react";
 // 弹框内部拿不到这些变量 → 依赖 var(--h3-*) 的边框/底色全部失效（表现为各区域黏在一起、看不出分区）。
 // 这里统一出口，弹框内容容器上再挂一次同样的变量。
 export type H3ThemeSource = {
+    canvas?: { selectionStroke?: string };
     node: { panel: string; fill: string; stroke: string; text: string; muted: string; faint: string; activeStroke: string };
     toolbar: { panel: string; itemHover: string; activeBg: string; activeText: string };
 };
 
 export function h3ThemeVars(theme: H3ThemeSource): CSSProperties {
     return {
+        // 画布选中蓝。--h3-active 是近黑/近白的节点描边色，--h3-active-bg 又与
+        // --h3-fill 几乎同色，拿它们做 Clip 选中态等于没有高亮（见 h3.css 末尾规则）。
+        "--h3-selection": theme.canvas?.selectionStroke || "#60a5fa",
         "--h3-panel": theme.node.panel,
         "--h3-fill": theme.node.fill,
         "--h3-border": theme.node.stroke,

@@ -1,3 +1,4 @@
+import { comfyWorkflowSwitch } from "../comfyui/workflow-switch.js";
 import type { WorkflowConfig, WorkflowField, RuntimeTask, BackendDatabase } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { collectOutputMedia } from "../comfyui/bridge.js";
@@ -828,7 +829,7 @@ export class WorkflowExecutor {
         const skipLog = Boolean(parentTaskId);
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
-            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes);
+            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
             if (!skipLog) this.db?.createGenerationLog({
@@ -970,6 +971,7 @@ export class WorkflowExecutor {
         clientId: string,
         /** 用户指定的输出节点；空数组表示不过滤。 */
         outputNodes: string[] = [],
+        workflowName = "custom",
     ) {
         const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
         this.comfyExecutions.set(task.id, activeExecution);
@@ -1020,26 +1022,29 @@ export class WorkflowExecutor {
             }
 
             const promptEndpoint = `${comfyUrl}/prompt`;
-            let response: Response;
-            try {
-                // 保持提交请求可读到 prompt_id：若此时取消，收到 ID 后再从 ComfyUI 队列移除。
-                response = await fetch(promptEndpoint, {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ prompt: workflow, client_id: task.id }),
-                });
-            } catch (error) {
-                throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
-            }
-            if (!response.ok) {
-                const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
-                throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`);
-            }
-            const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
-            if (!body.prompt_id) {
-                throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
-            }
-            const promptId = body.prompt_id;
+            const body = await comfyWorkflowSwitch.submit(comfyUrl, `workflow:${workflowName}`, async () => {
+                let response: Response;
+                try {
+                    // 保持提交请求可读到 prompt_id：若此时取消，收到 ID 后再从 ComfyUI 队列移除。
+                    response = await fetch(promptEndpoint, {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ prompt: workflow, client_id: task.id }),
+                    });
+                } catch (error) {
+                    throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
+                }
+                if (!response.ok) {
+                    const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
+                    throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`);
+                }
+                const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
+                if (!body.prompt_id) {
+                    throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+                }
+                return { ...body, prompt_id: body.prompt_id };
+            }, controller.signal);
+            const promptId = body.prompt_id!;
             capturedPromptId = promptId;
             activeExecution.promptId = promptId;
             this.tasks.addEvent(task.id, "submitted", { promptId });

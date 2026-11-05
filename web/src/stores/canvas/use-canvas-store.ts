@@ -338,7 +338,12 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
     if (getBackendUrl() !== commandBackend) throw new Error("后台地址已改变，请刷新后同步原后台草稿");
     for (const project of projects) {
         if (generation !== syncGeneration) return;
-        if (useCanvasStore.getState().canvasConflicts[project.id]) continue;
+        const blocked = useCanvasStore.getState().canvasConflicts[project.id];
+        if (blocked) {
+            // 旧版本把确定性 400 也做成全局冲突锁；加载新代码后自动拆掉这把锁。
+            if (blocked.reason === "rejected" && isDeterministicRejection(blocked.message)) useCanvasStore.getState().clearCanvasConflict(project.id);
+            else continue;
+        }
         let active: CanvasCommand<CanvasProject | CanvasConflictBaseline> | undefined;
         try {
             let base = syncBases.get(project.id);
@@ -367,6 +372,10 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
                                 continue;
                             }
                         } catch (error) { console.error("未能核对画布原操作回执，拒绝草稿仍保留", error); }
+                    }
+                    if (isDeterministicRejection(active.rejected)) {
+                        await settleDeterministicRejection(project.id, active.operationId, active.rejected);
+                        continue;
                     }
                     setCanvasCommandConflict(project.id, base, active.rejected);
                     break;
@@ -402,11 +411,18 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
             }
         } catch (error) {
             if (active && error instanceof BackendApiError && [400, 401, 403, 404, 409].includes(error.status)) {
-                // 拒绝也保留原命令，只有用户明确选择后才替换/丢弃，刷新不能解除熔断。
                 await pendingCommands.reject(active.operationId, error.message).catch(() => {});
-                const remote = error.details.project as CanvasProject | undefined || syncBases.get(project.id) || project;
-                setCanvasCommandConflict(project.id, remote, error.message);
-                replayPendingCommandEvents(project.id);
+                if (error.status === 400) {
+                    // 确定性拒绝：这次编辑就是失败了。保留草稿、明确告知，绝不把整张画布锁成冲突态。
+                    await settleDeterministicRejection(project.id, active.operationId, error.message);
+                    replayPendingCommandEvents(project.id);
+                    scheduleCanvasSync(); // 立刻继续发送排在后面的命令
+                } else {
+                    // 版本冲突、权限或结果未知：保留原命令，由用户明确选择后替换/丢弃。
+                    const remote = error.details.project as CanvasProject | undefined || syncBases.get(project.id) || project;
+                    setCanvasCommandConflict(project.id, remote, error.message);
+                    replayPendingCommandEvents(project.id);
+                }
             } else console.error("画布命令尚未确认，已保留不可变请求和后续动作", error);
         }
     }
@@ -425,6 +441,19 @@ async function syncCanvasProjects(projects: CanvasProject[], generation: number,
     }
     await persistDeletedProjectIds();
     persistCurrentCanvasSnapshot();
+}
+
+/** 确定性 400 是内容/契约被明确拒绝，重放多少次结果都一样；只有 409 或结果未知才需要用户裁决。 */
+function isDeterministicRejection(message?: string) {
+    return typeof message === "string" && (/HTTP 400\b/.test(message) || /CAS 失败/.test(message));
+}
+
+/** 一次编辑明确失败：保留不可变草稿，但立刻放开画布，后续操作与生成入口照常可用。 */
+async function settleDeterministicRejection(projectId: string, operationId: string, reason: string) {
+    await pendingCommands.settle(operationId, reason).catch((error) => { console.error("未能结束被拒的画布命令", error); });
+    useCanvasStore.getState().clearCanvasConflict(projectId);
+    const detail = reason.replace(/^.*?HTTP 400\s*/, "").trim();
+    void antdMessage.warning(`这次画布编辑未保存：${detail || "后端拒绝了本次更改"}。草稿已保留，后续操作不受影响`, 6);
 }
 
 function setCanvasCommandConflict(id: string, remote: CanvasProject, message: string, targets?: CanvasConflictTarget[]) {

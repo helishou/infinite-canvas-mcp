@@ -1,3 +1,4 @@
+import { h3ClipNumber } from "../services/h3-data";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
 import { message } from "antd";
@@ -22,7 +23,7 @@ export function H3CurrentClipPanel({ ctx, selected, selectedIndex, imageRefs, vi
             <div className="minimax-current-title">
                 <span className="minimax-current-dot" />
                 <div className="minimax-current-labels">
-                    <div className="minimax-current-primary"><b>Clip {selectedIndex + 1}</b><span>{fmt(Number(selected?.start || 0))} - {fmt(Number(selected?.start || 0) + Number(selected?.duration || 0))}</span></div>
+                    <div className="minimax-current-primary"><b>Clip {h3ClipNumber(ctx, selected, selectedIndex)}</b><span>{fmt(Number(selected?.start || 0))} - {fmt(Number(selected?.start || 0) + Number(selected?.duration || 0))}</span></div>
                     {selected?.id ? <button type="button" className="minimax-current-id" title={`点击复制内部 ID：${selected.id}`} onClick={() => void copyClipId()}>内部 ID：{selected.id}</button> : null}
                 </div>
             </div>

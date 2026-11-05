@@ -29,7 +29,9 @@ import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
 import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
-const selectionBlue = "#2f80ff";
+// 选中态取画布主题：浅色 #2f80ff / 深色 #60a5fa。写死亮蓝会让暗色主题下的
+// canvasThemes.canvas.selectionStroke 形同虚设，缩略壳与主卡片也会用不同的蓝。
+const selectionStroke = (theme: CanvasTheme) => theme.canvas.selectionStroke;
 // 只有节点确实缩到难以承载编辑内容时才切换概览，避免常用缩放区间过早换壳。
 const NODE_DETAIL_MODE_ENTER_SCREEN_SIZE = 180;
 const NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE = 100;
@@ -331,13 +333,13 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const generatingTint = `color-mix(in srgb, ${generatingAccent} 16%, transparent)`;
     // 生成中的节点用活动色铺底/着色，缩小后和一个橙块一样好认，不依赖被 scale 压扁的边框。
     const generatingBaseFill = `color-mix(in srgb, ${generatingAccent} 16%, ${theme.node.fill})`;
-    const borderColor = active ? selectionBlue : generating ? generatingAccent : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
+    const borderColor = active ? selectionStroke(theme) : generating ? generatingAccent : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
     const summary = overviewSummary(data);
 
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none overflow-hidden rounded-3xl cursor-grab active:cursor-grabbing ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
+            className={`node-element group/node absolute flex select-none overflow-hidden rounded-[var(--ui-radius-overlay)] cursor-grab active:cursor-grabbing ${isH3 ? "border" : "border-2"} ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${generating && !active ? "canvas-node-generating" : ""}`}
             style={{
                 transform: `translate(${position.x}px, ${position.y}px)`,
                 width,
@@ -347,7 +349,9 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                 borderColor,
                 borderWidth: isGroup ? 3 : undefined,
                 borderStyle: isGroup ? "dashed" : "solid",
-                boxShadow: active ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                // 选中只换 borderColor，不再叠一圈 1px ring：边框处于 scale 变换层内，
+                // 两道描边叠在一起就是肉眼看到的「双边框」。
+                boxShadow: isRelated ? "var(--canvas-node-shadow)" : undefined,
                 ...(generating ? ({ "--canvas-generating": generatingAccent, "--canvas-generating-ring": `${Math.max(3, 6 / Math.max(scale, 0.01))}px` } as React.CSSProperties) : null),
                 // 画布节点处于父级 scale 变换层内；content-visibility:auto 在缩放到 24% 以下时
                 // 会被部分浏览器误判为视口外，从而把概览节点整块跳过绘制。轻量壳本身已足够省开销，
@@ -399,7 +403,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             {generating && (hasMediaPreview || isTextOverview) ? <div className="pointer-events-none absolute inset-0" style={{ background: generatingTint }} /> : null}
             {image || videoSource || isH3 ? (
                 <div
-                    className={`pointer-events-none absolute bottom-0 flex min-w-0 items-center text-white ${isCharacter ? "left-0 max-w-full rounded-tr-lg bg-black/70 font-semibold" : "inset-x-0 gap-1 bg-black/45 px-2 py-1 text-[10px]"}`}
+                    className={`pointer-events-none absolute bottom-0 flex min-w-0 items-center text-white ${isCharacter ? "left-0 max-w-full rounded-tr-lg bg-[var(--canvas-media-scrim)] font-semibold" : "inset-x-0 gap-1 bg-[var(--canvas-media-scrim-soft)] px-2 py-1 text-[10px]"}`}
                     style={isCharacter ? { gap: Math.min(5 / Math.max(scale, 0.01), width * 0.03), padding: `${characterBadgePaddingY}px ${characterBadgePaddingX}px`, fontSize: characterBadgeFontSize, lineHeight: 1.15 } : undefined}
                 >
                     <Icon className={isCharacter ? "shrink-0" : "size-3 shrink-0"} style={isCharacter ? { width: characterBadgeIconSize, height: characterBadgeIconSize } : undefined} />
@@ -408,8 +412,8 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             ) : null}
             {generating ? (
                 <div
-                    className="pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full font-medium text-white"
-                    style={{ background: "rgba(28,25,23,.68)", padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
+                    className="pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full font-medium"
+                    style={{ background: theme.toolbar.panel, color: theme.node.text, padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
                 >
                     {/* 缩略壳的存在意义就是省开销，角标只做静态色点，不加旋转/呼吸动画。 */}
                     <span
@@ -621,12 +625,12 @@ export const CanvasNode = React.memo(function CanvasNode({
     const transparentBg = Boolean(definition?.transparentBackground);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     // 概览和完整媒体节点共用同一条默认边框，缩放跨过详情阈值时不再像换了一套卡片皮肤。
-    const imageBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke;
-    const smartBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.stroke;
-    const characterBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.character;
-    const sceneBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.scene;
-    const propBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : theme.node.typeStroke.prop;
-    const groupBorderColor = isGroupDropTarget || isActive ? selectionBlue : theme.node.typeStroke.group;
+    const imageBorderColor = isActive ? selectionStroke(theme) : isRelated ? theme.node.muted : theme.node.stroke;
+    const smartBorderColor = isActive ? selectionStroke(theme) : isRelated ? theme.node.muted : theme.node.stroke;
+    const characterBorderColor = isActive ? selectionStroke(theme) : isRelated ? theme.node.muted : theme.node.typeStroke.character;
+    const sceneBorderColor = isActive ? selectionStroke(theme) : isRelated ? theme.node.muted : theme.node.typeStroke.scene;
+    const propBorderColor = isActive ? selectionStroke(theme) : isRelated ? theme.node.muted : theme.node.typeStroke.prop;
+    const groupBorderColor = isGroupDropTarget || isActive ? selectionStroke(theme) : theme.node.typeStroke.group;
     const nodeBorderColor = isGroup
         ? groupBorderColor
         : // 正在跑任务的节点统一用活动色描边，和选中蓝、关联灰拉开区分；选中态仍以蓝为优先。
@@ -643,7 +647,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 : hasImageContent || hasCharacterContent || hasSceneContent || hasPropContent
                   ? imageBorderColor
                   : isActive
-                    ? selectionBlue
+                    ? selectionStroke(theme)
                     : isRelated
                       ? theme.node.muted
                       : transparentBg
@@ -971,13 +975,14 @@ export const CanvasNode = React.memo(function CanvasNode({
             <div
                 data-character-drop={data.type === CanvasNodeType.Character ? "true" : undefined}
                 data-prop-drop={data.type === CanvasNodeType.Prop ? "true" : undefined}
-                className={`relative h-full w-full overflow-visible rounded-3xl ${data.type === "minimax-h3:video" ? "border" : "border-2"} ${generating && !isActive ? "canvas-node-generating" : ""}`}
+                className={`relative h-full w-full overflow-visible rounded-[var(--ui-radius-overlay)] ${data.type === "minimax-h3:video" ? "border" : "border-2"} ${generating && !isActive ? "canvas-node-generating" : ""}`}
                 style={{
                     background: isGroup || data.type === "minimax-h3:video" ? "transparent" : hasImageContent || hasVideoContent || hasCharacterContent || hasSceneContent || hasPropContent || transparentBg ? "transparent" : theme.node.fill,
                     borderColor: nodeBorderColor,
                     borderStyle: isGroup ? "dashed" : "solid",
                     borderWidth: isGroup ? 3 : undefined,
-                    boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                    // 拖放落点仍用临时高亮环；常驻选中态只靠单道边框表达。
+                    boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionStroke(theme)}66, inset 0 0 0 999px ${selectionStroke(theme)}10` : isRelated ? "var(--canvas-node-shadow)" : undefined,
                 }}
                 onMouseDown={(event) => {
                     const target = event.target as HTMLElement;
@@ -1080,7 +1085,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]"
                         style={{
                             background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`,
-                            boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined,
+                            boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionStroke(theme)}` : undefined,
                         }}
                     >
                         {referenceSelectionState !== "disabled" ? (
@@ -1323,7 +1328,7 @@ function TextContent({ projectId, node, theme, isEditingContent, textareaRef, me
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
             {batchExpanded ? texts.filter((text) => text.id !== primaryTextId).map((text, index) => <ExpandedTextCard key={text.id} node={node} text={text} index={index} onSetPrimary={() => onSetBatchPrimary?.(text.id)} />) : null}
-            <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl">
+            <div className="flex h-full w-full flex-col overflow-hidden rounded-[var(--ui-radius-overlay)]">
                 {isEditingContent ? (
                     <div ref={textareaRef} className="h-full w-full" data-canvas-no-zoom>
                         <CanvasCollaborativeText
@@ -1383,7 +1388,7 @@ function ExpandedTextCard({ node, text, index, onSetPrimary }: { node: CanvasNod
 
     return (
         <div
-            className="absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.14)]"
+            className="absolute z-20 overflow-hidden rounded-[var(--ui-radius-overlay)] border shadow-[var(--canvas-node-shadow)]"
             style={
                 {
                     left: x,
@@ -1412,7 +1417,7 @@ function ExpandedTextCard({ node, text, index, onSetPrimary }: { node: CanvasNod
                         style={{ color: theme.node.text }}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
-                        <Star className="size-3.5" style={{ color: selectionBlue }} />
+                        <Star className="size-3.5" style={{ color: selectionStroke(theme) }} />
                         {t("canvas.node.setPrimaryText")}
                     </button>
                 </>
@@ -1749,7 +1754,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
                                 key={idx}
                                 type="button"
                                 className="size-7 shrink-0 overflow-hidden rounded-md border p-0 transition hover:opacity-100"
-                                style={{ borderColor: active ? selectionBlue : theme.node.stroke, opacity: active ? 1 : 0.7 }}
+                                style={{ borderColor: active ? selectionStroke(theme) : theme.node.stroke, opacity: active ? 1 : 0.7 }}
                                 title={image.outfit || image.name}
                                 onClick={(event) => {
                                     event.stopPropagation();
@@ -1845,8 +1850,8 @@ function ExpandedCharacterImageCard({
 
     return (
         <div
-            className="absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.14)]"
-            style={{ left: x, top: y, width: node.width, height: node.height, background: "transparent", borderColor: primary ? selectionBlue : theme.node.stroke, animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both` }}
+            className="absolute z-20 overflow-hidden rounded-[var(--ui-radius-overlay)] border shadow-[var(--canvas-node-shadow)]"
+            style={{ left: x, top: y, width: node.width, height: node.height, background: "transparent", borderColor: primary ? selectionStroke(theme) : theme.node.stroke, animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both` }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
             onDoubleClick={(event) => {
@@ -1877,7 +1882,7 @@ function ExpandedCharacterImageCard({
                         title={t("canvas.character.setMain")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
-                        <Star className="size-3 shrink-0" style={{ color: primary ? selectionBlue : theme.node.muted }} />
+                        <Star className="size-3 shrink-0" style={{ color: primary ? selectionStroke(theme) : theme.node.muted }} />
                         <span className="truncate">{t("canvas.character.setMain")}</span>
                     </button>
                     <button
@@ -1926,7 +1931,7 @@ function VideoNodeContent({ node, theme, scale }: NodeContentRendererProps) {
                 role="button"
                 aria-label={t("canvas.node.dragVideo")}
                 title={t("canvas.node.dragVideo")}
-                className="pointer-events-none absolute left-2 top-2 z-10 grid size-7 cursor-grab place-items-center rounded-md bg-black/45 text-white opacity-0 transition-opacity group-hover/node:pointer-events-auto group-hover/node:opacity-100 active:cursor-grabbing"
+                className="pointer-events-none absolute left-2 top-2 z-10 grid size-7 cursor-grab place-items-center rounded-md bg-[var(--canvas-media-scrim-soft)] text-white opacity-0 transition-opacity group-hover/node:pointer-events-auto group-hover/node:opacity-100 active:cursor-grabbing"
             >
                 <Move className="size-4" />
             </div>
@@ -2056,7 +2061,7 @@ function ImageContent({
                           />
                       ))
                 : null}
-            <div className="h-full w-full overflow-hidden rounded-3xl" data-canvas-image-id={primaryImage?.id}>
+            <div className="h-full w-full overflow-hidden rounded-[var(--ui-radius-overlay)]" data-canvas-image-id={primaryImage?.id}>
                 {primarySource ? (
                     <img
                         src={primarySource}
@@ -2185,7 +2190,7 @@ function ExpandedImageCard({
     return (
         <div
             data-canvas-image-id={image.id}
-            className={`absolute z-20 overflow-hidden rounded-3xl ${image.content ? "" : "border shadow-[0_18px_50px_rgba(28,25,23,.18)]"}`}
+            className={`absolute z-20 overflow-hidden rounded-[var(--ui-radius-overlay)] ${image.content ? "" : "border shadow-[var(--canvas-node-shadow)]"}`}
             style={
                 {
                     left: x,
@@ -2241,7 +2246,7 @@ function ExpandedImageCard({
                         title={t("canvas.node.setPrimary")}
                         onClick={(event) => (event.stopPropagation(), onSetPrimary())}
                     >
-                        <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
+                        <Star className="size-3 shrink-0" style={{ color: selectionStroke(theme) }} />
                         {node.width >= 200 ? <span className="truncate">{t("canvas.node.setPrimary")}</span> : null}
                     </button>
                 </div>

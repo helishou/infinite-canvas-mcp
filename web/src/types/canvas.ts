@@ -101,6 +101,8 @@ export type CanvasNodeMetadata = {
     productionEntity?: ProductionEntityBinding;
     productionLayoutUnitId?: string;
     productionSceneId?: string;
+    productionOwnerKind?: "episode" | "canvas";
+    productionOwnerId?: string;
     /** Formal screenplay block and scene identities projected by Backend. */
     productionScriptId?: string;
     productionScriptSceneId?: string;

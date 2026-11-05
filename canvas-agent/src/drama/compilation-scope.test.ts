@@ -20,6 +20,39 @@ test("same-environment scene occurrences have isolated compiler inputs and real 
     assert.notEqual(compilationScopeInput(b, { sceneId: "A" }).inputHash, a.inputHash);
 });
 
+test("replay photography does not invalidate later Clips while timing and target photography do", () => {
+    const d = scopedDirector();
+    d.source.version = 2;
+    d.source.prompt_assembly = { version: 2 };
+    d.source.subject_registry = [];
+    d.source.ledger = { contract_version: 2, facts: [], timelines: [{ id: "T" }], initial: [], events: [], requirements: [], coverage: [] };
+    d.source.shots = (d.source.shots as any[]).map((shot, order) => ({ ...shot,
+        timeline_id: "T", story_order: order, duration_frames: 96, subject_usages: [], keyframes: [], utterance_refs: [] }));
+    const scope = { targetIds: ["GB"], output: "selected" as const };
+    const original = compilationScopeInput(d, scope);
+    assert.deepEqual((original.director.source.shots as any[]).map(shot => shot.id), ["SA", "SB"]);
+    const prompt = "compiled later Clip", promptHash = crypto.createHash("sha256").update(prompt).digest("hex");
+    const artifact: DirectorProduction["artifacts"][number] = { id: "h3-GB", kind: "h3", targetId: "GB", prompt, sha256: promptHash,
+        sourceHash: d.sourceHash, status: "ready", references: [], receipt: { sourceHash: d.sourceHash, promptHash,
+            compilationScope: { scope, inputHash: original.inputHash } } };
+    const legacyArtifact = structuredClone(artifact);
+    (legacyArtifact.receipt.compilationScope as any).inputHash = original.contextInputHash;
+    assert.equal(currentCompilationArtifact(d, legacyArtifact), true, "unchanged older receipt remains valid");
+    (d.source.shots as any[])[0].visual = "Different earlier framing";
+    (d.source.shots as any[])[0].camera = { framing: "CU" };
+    const changed = compilationScopeInput(d, scope);
+    assert.equal(changed.inputHash, original.inputHash);
+    assert.notEqual(changed.contextInputHash, original.contextInputHash);
+    assert.equal(currentCompilationArtifact(d, artifact), true, "current receipt survives unrelated replay photography");
+    assert.equal((changed.director.source.shots as any[])[0].visual, "Different earlier framing", "validation retains authored context");
+    (d.source.shots as any[])[0].duration_frames = 120;
+    assert.notEqual(compilationScopeInput(d, scope).inputHash, original.inputHash);
+    assert.equal(currentCompilationArtifact(d, artifact), false, "replay timing still invalidates the receipt");
+    (d.source.shots as any[])[0].duration_frames = 96;
+    (d.source.shots as any[])[1].visual = "Target framing changed";
+    assert.notEqual(compilationScopeInput(d, scope).inputHash, original.inputHash);
+});
+
 test("scene compiler scope identifies output Shots separately from retained continuity context", () => {
     const d = scopedDirector();
     const scope = { sceneId: "A" };

@@ -8,7 +8,7 @@ import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, promptSourceMapSchema, resolveSubjectPictureBindingIds, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, shotStoryboardKeyframe, promptSourceMapSchema, resolveSubjectPictureBindingIds, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
 import type { SharedSubjectPictureMedia } from "./shared-subject-picture.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
@@ -297,8 +297,7 @@ function hasMissingPromptReferenceBindings(segment: Record<string, any>) {
 function requiredSubjectStoryboardFrame(director: NonNullable<EpisodeProductionData["director"]>, shotId: string) {
     if (!isSubjectPromptAssembly(director.source)) return undefined;
     const shot = (Array.isArray(director.source.shots) ? director.source.shots : []).map(object).find(item => String(item.id || "") === shotId);
-    const frames = Array.isArray(shot?.keyframes) ? shot.keyframes.map(object).filter(frame => frame.requiredForSubmission === true && frame.anchor !== "composition") : [];
-    return frames.find(frame => frame.anchor === "opening") || frames[0];
+    return shotStoryboardKeyframe(Array.isArray(shot?.keyframes) ? shot.keyframes.map(object) : []);
 }
 function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionData["director"]>, frame: Record<string, any>, reference: Record<string, any>) {
     const assetId = String(frame.assetId || frame.id || "");
@@ -315,6 +314,59 @@ function referenceMatchesSubjectFrame(director: NonNullable<EpisodeProductionDat
     if (!nodeId) return false;
     return Boolean(referenceNodeId === nodeId && (!storageKey || referenceStorageKey === storageKey));
 }
+/**
+ * 同一张参考图只允许占一个 Picture 槽位。
+ *
+ * 历史投影里，环境（scene）绑定会同时从编译产物与兄弟片段继承各进一次，
+ * 于是数组里出现两行完全相同的绑定：节点侧按顺序编号时会各占一个
+ * <Picture N>，而编译产物只按真实条目编号，两边就此错开一位。
+ * 结果是提示词里的 <Picture 2>（本应是角色）实际指向环境图，甚至越界报缺图。
+ * 这里按“绑定 id（无 id 时退回 来源节点+资源键+角色）”去重，保留首次出现的顺序。
+ */
+function dedupeReferenceBindings<T>(bindings: T[]): T[] {
+    const seen = new Set<string>();
+    const unique: T[] = [];
+    for (const value of bindings) {
+        const reference = object(value);
+        const id = String(reference.id || reference.bindingId || "");
+        const key = id
+            ? `id:${id}`
+            : ["node", reference.sourceNodeId || reference.nodeId, reference.storageKey, reference.assetId, reference.role, reference.usage, reference.label]
+                .map(item => String(item || "")).join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(value);
+    }
+    return unique;
+}
+
+/** 按编译产物的参考顺序重排：提示词的 <Picture N> 就是产物里的序号。 */
+function orderReferenceBindingsByArtifact<T>(bindings: T[], compiled: Array<Record<string, any>>): T[] {
+    if (!compiled.length || !bindings.length) return bindings;
+    const rank = new Map<string, { index: number; label: string }>();
+    compiled.forEach((reference, index) => {
+        const reference_ = object(reference);
+        // 用资源键做主键：节点侧 role 写法（character_turnaround / character_identity）
+        // 与产物里的 role（identity / scene / prop）并不一致，按 role 拼键会全部落空。
+        const storageKey = String(reference_.storageKey || "");
+        const key = storageKey ? `k:${storageKey}` : `a:${String(reference_.assetId || "")}`;
+        if (!rank.has(key)) rank.set(key, { index, label: String(reference_.label || "") });
+    });
+    return bindings
+        .map((value, index) => {
+            const reference = object(value);
+            const storageKey = String(reference.storageKey || "");
+            const key = storageKey ? `k:${storageKey}` : `a:${String(reference.assetId || "")}`;
+            const hit = rank.get(key);
+            // 产物里的 label 就是提示词使用的 <Picture N>，一并写回，避免节点侧
+            // 继续沿用旧编号（例如环境图还挂着上一版的 <Picture 1>）。
+            if (hit?.label) reference.label = hit.label;
+            return { value, index, rank: hit?.index ?? Number.MAX_SAFE_INTEGER };
+        })
+        .sort((left, right) => left.rank - right.rank || left.index - right.index)
+        .map(item => item.value);
+}
+
 function formalSubjectIndexes(subjects: Array<Record<string, any>>) {
     const subjectsById = new Map(subjects.map(subject => [String(subject.id || ""), subject]));
     const subjectIdsBySourceNode = new Map<string, Set<string>>();
@@ -589,14 +641,27 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
     const fps = Number(director.source.fps_num || 24) / Number(director.source.fps_den || 1);
     if (!Number.isFinite(fps) || fps <= 0) return undefined;
     const refs = Array.isArray(existing.referenceBindings) ? existing.referenceBindings as Array<Record<string, any>> : [];
-    const catalogRefs = referenceCatalog.map(object).filter(reference => reference.role === "storyboard"
-        && (reference.mediaType === "image" || reference.type === "image") && reference.storageKey);
-    const projectedRefs = [...refs];
+    const isShotFrameBinding = (reference: Record<string, any>) =>
+        ["storyboard", "keyframe"].includes(String(reference.role || ""))
+        && (reference.mediaType === "image" || reference.type === "image");
+    const catalogRefs = referenceCatalog.map(object).filter(reference => isShotFrameBinding(reference) && reference.storageKey);
+    // Projection must not mutate the caller's current canvas snapshot while it
+    // promotes a Shot keyframe into the corresponding H3 storyboard slot.
+    const projectedRefs = refs.map(reference => ({ ...reference }));
+    let referencesChanged = false;
     const bindingForArchivedKeyframe = (assetId: string, storageKey: string, sourceNodeId?: string) => {
-        const existingBinding = projectedRefs.find(reference => reference.role === "storyboard" && reference.mediaType === "image"
+        const existingBinding = projectedRefs.find(reference => isShotFrameBinding(reference)
             && (Boolean(assetId) && String(reference.assetId || "") === assetId || String(reference.storageKey || "") === storageKey
                 && (!sourceNodeId || !reference.sourceNodeId || String(reference.sourceNodeId) === sourceNodeId)));
-        if (existingBinding) return existingBinding;
+        if (existingBinding) {
+            if (existingBinding.role === "keyframe") {
+                // A keyframe is a valid source for its formal Shot; once it fills
+                // the H3 track slot, the H3 reference must use the track role.
+                existingBinding.role = "storyboard";
+                referencesChanged = true;
+            }
+            return existingBinding;
+        }
         const catalog = catalogRefs.find(reference => String(reference.storageKey || "") === storageKey
             && (!sourceNodeId || !reference.sourceNodeId || String(reference.sourceNodeId) === sourceNodeId));
         if (!catalog) return undefined;
@@ -608,6 +673,7 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
             usage: String(catalog.usage || "reference"), mediaType: "image",
         };
         projectedRefs.push(binding);
+        referencesChanged = true;
         return binding;
     };
     const storyboardShots = (shots as Record<string, any>[]).map(shot => {
@@ -632,23 +698,33 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
                 role: "storyboard", tags: Array.isArray(catalog?.tags) ? catalog.tags : [],
                 enabled: catalog?.enabled !== false, usage: String(catalog?.usage || "reference"), mediaType: "image",
                 storageKey: String(subjectFrameAsset.storageKey),
-                ...(frame.sourceNode?.nodeId ? { sourceNodeId: String(frame.sourceNode.nodeId) } : {}),
+                url: String(catalog?.url || ""),
+                sourceNodeId: frame.sourceNode?.nodeId ? String(frame.sourceNode.nodeId) : undefined,
             };
-            projectedRefs.push(binding);
+            const slotIndex = projectedRefs.findIndex(reference => String(reference.id || "") === priorTrackBindingId);
+            if (slotIndex < 0) projectedRefs.push(binding);
+            else projectedRefs[slotIndex] = { ...projectedRefs[slotIndex], ...binding };
+            referencesChanged = true;
             return binding;
         };
         const frameBinding = frame
-            ? projectedRefs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
+            ? bindToExistingTrackSlot()
+                || projectedRefs.find(ref => ref.role === "storyboard" && ref.mediaType === "image" && referenceMatchesSubjectFrame(director, frame, ref))
                 || (subjectFrameAsset?.storageKey ? bindingForArchivedKeyframe(String(frame.assetId || frame.id || ""), String(subjectFrameAsset.storageKey), subjectFrameAsset.nodeId) : undefined)
-                || bindToExistingTrackSlot()
             : undefined;
         const binding = subjectAssembly ? frameBinding
             : asset?.storageKey ? bindingForArchivedKeyframe(String(input?.keyframeAssetId || ""), String(asset.storageKey), asset.nodeId) : undefined;
         return { id: String(shot.id), duration, ...(binding?.id ? { referenceBindingId: String(binding.id) } : {}) };
     });
+    const priorSlotIds = new Set((Array.isArray(existing.storyboardShots) ? existing.storyboardShots : [])
+        .map(item => String(object(item).referenceBindingId || "")).filter(Boolean));
+    const currentSlotIds = new Set(storyboardShots.map(shot => shot.referenceBindingId).filter(Boolean));
+    const activeRefs = projectedRefs.filter(reference => !isShotFrameBinding(reference)
+        || !priorSlotIds.has(String(reference.id || "")) || currentSlotIds.has(String(reference.id || "")));
+    if (activeRefs.length !== projectedRefs.length) referencesChanged = true;
     return {
         storyboardModeEnabled: true, storyboardShots, duration: storyboardShots.reduce((sum, shot) => sum + shot.duration, 0),
-        ...(projectedRefs.length !== refs.length ? { referenceBindings: projectedRefs } : {}),
+        ...(referencesChanged ? { referenceBindings: activeRefs } : {}),
     };
 }
 
@@ -656,6 +732,11 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
         let segment = buildProductionClip(project, data, group, segmentId);
+        if (Array.isArray(segment.referenceBindings)) {
+            // 去重必须发生在合并/对齐之前：后面的 prompt 图片编号对齐、referenceCount
+            // 都按这个数组的槽位计算，重复行会让编号整体错开一位。
+            segment.referenceBindings = dedupeReferenceBindings(segment.referenceBindings as Array<Record<string, any>>);
+        }
         const authoritativeH3Mode = existing ? canonicalH3TaskMode(existing.taskMode ?? existing.mode) : "";
         if (existing && ["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(authoritativeH3Mode)) {
             // A bound H3 Clip owns its mode. The source-side mode is a synchronized
@@ -715,8 +796,8 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const compiledShotReferences = segment.referenceBindings.filter(isFormalShotReference);
             if (compiledCharacterReferences.length || compiledShotReferences.length) {
                 const currentReferences = Array.isArray(existing.referenceBindings) ? existing.referenceBindings : [];
-                const preservedReferences = currentReferences.filter(reference => !isFormalCharacterReference(reference) && !isFormalShotReference(reference));
-                segment.referenceBindings = [...compiledCharacterReferences, ...compiledShotReferences, ...preservedReferences];
+                const preservedReferences = dedupeReferenceBindings(currentReferences.filter(reference => !isFormalCharacterReference(reference) && !isFormalShotReference(reference)));
+                segment.referenceBindings = dedupeReferenceBindings([...compiledCharacterReferences, ...compiledShotReferences, ...preservedReferences]);
                 baseline.referenceBindings = inputHash(existing.referenceBindings);
             }
             const compiledCharacterGroups = Object.entries(segment.h3CharacterGroups || {}).filter(([, value]) => isFormalCharacterGroup(value));
@@ -743,6 +824,24 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             if (!hasExecutableH3Prompt(existing.prompt)) baseline.prompt = inputHash(existing.prompt);
             const merged = mergeDirectorInput(existing, segment, baseline, groups);
             const mergedSegment = merged.merged;
+            if (Array.isArray(mergedSegment.referenceBindings)) {
+                // 合并阶段会把 existing 里的旧行搬回来，重复行若留在这里，
+                // 后面的 prompt 槽位对齐会整体错一位。
+                mergedSegment.referenceBindings = dedupeReferenceBindings(mergedSegment.referenceBindings as Array<Record<string, any>>);
+                // 提示词里的 <Picture N> 按编译产物（artifact.references）的顺序编号。
+                // 保留行（故事板、手工参考）现在被追加到末尾，节点侧按数组序号重新编号就会
+                // 整体错位（故事板从 P1 变成 P6）。这里按产物顺序重排，产物里没有的行排到末尾。
+                mergedSegment.referenceBindings = orderReferenceBindingsByArtifact(
+                    mergedSegment.referenceBindings as Array<Record<string, any>>,
+                    (Array.isArray(data.director?.artifacts) ? data.director.artifacts : [])
+                        .map(artifact => object(artifact))
+                        .find(artifact => String(artifact.targetId || "") === String(group.id))?.references as Array<Record<string, any>> || [],
+                );
+                // 节点侧最终按 referenceOrder 渲染槽位（而不是数组顺序），
+                // 排序后必须把顺序表一起重写，否则换了数组顺序也白搭。
+                mergedSegment.referenceOrder = (mergedSegment.referenceBindings as Array<Record<string, any>>)
+                    .map(reference => String(object(reference).id || "")).filter(Boolean);
+            }
             const preserveManualCharacterGroups = merged.manualFields.includes("h3CharacterGroups");
             const rawCharacterGroups = object(mergedSegment.h3CharacterGroups);
             // Source-backed groups follow formal Subject/Shot usage; preserve only
@@ -814,6 +913,9 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             const projectionGroups = groups.flatMap(fields => fields.includes("referenceBindings")
                 ? [["referenceBindings", "prompt"], fields.filter(field => field !== "referenceBindings" && field !== "prompt")]
                 : fields.includes("prompt") ? [] : [fields]).filter(fields => fields.length > 0);
+            // nextValues 是应用编译时真正写进 Clip 的载荷；它在合并之前就从 segment 上取过一次，
+            // 所以必须用去重后的最终数组覆盖，否则重复的环境引用会绕过前面的去重写回画布。
+            if (Array.isArray(segment.referenceBindings)) nextValues.referenceBindings = segment.referenceBindings;
             const projection = { ...segment.productionClipProjection,
                 ...(repairDuration ? { fieldHashes: { ...segment.productionClipProjection.fieldHashes, duration: clipFieldHash(storyboardTotal) } } : {}),
                 nextValues, fieldGroups: projectionGroups, conflicts, manualFields };
@@ -849,12 +951,19 @@ function emptyProductionClip(project: Record<string, any>, data: EpisodeProducti
     const sourceSubjects = (Array.isArray(director.source.subject_registry) ? director.source.subject_registry : []).map(object);
     const { subjectsById, subjectIdsBySourceNode } = formalSubjectIndexes(sourceSubjects);
     const presentationsBySubject = new Map<string, Set<string>>();
+    const selectedPicturesBySubject = new Map<string, Set<string>>();
+    const subjectAssembly = isSubjectPromptAssembly(director.source);
     for (const shot of shots) for (const usage of (Array.isArray(shot.subject_usages) ? shot.subject_usages : []).map(object)) {
         const subjectId = String(usage.subjectId || "");
         if (!subjectsById.has(subjectId)) continue;
         const presentations = presentationsBySubject.get(subjectId) || new Set<string>();
         presentations.add(String(usage.presentation || ""));
         presentationsBySubject.set(subjectId, presentations);
+        if (subjectAssembly && usage.presentation === "visible") {
+            const selected = selectedPicturesBySubject.get(subjectId) || new Set<string>();
+            for (const id of resolveSubjectPictureBindingIds(subjectsById.get(subjectId), usage).bindingIds) selected.add(id);
+            selectedPicturesBySubject.set(subjectId, selected);
+        }
     }
     const node = (project.nodes || []).find((item: Record<string, any>) => item.id === group.nodeId);
     // A Clip inserted into an established scene node must inherit the scene's
@@ -868,19 +977,33 @@ function emptyProductionClip(project: Record<string, any>, data: EpisodeProducti
     const inheritedMode = siblings.map((item: Record<string, any>) => String(item.taskMode ?? item.mode ?? "")).find((mode: string) => ["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(mode)) || "";
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(sourceSegment.mode)]
         || (inheritedMode || "ref2va");
-    const inheritedBindings = siblings.flatMap((item: Record<string, any>) => (Array.isArray(item.referenceBindings) ? (item.referenceBindings as Array<Record<string, any>>).map(object) : []))
+    const inheritedBindings = dedupeReferenceBindings(siblings.flatMap((item: Record<string, any>) => (Array.isArray(item.referenceBindings) ? (item.referenceBindings as Array<Record<string, any>>).map(object) : []))
         .filter((binding: Record<string, any>) => binding.role === "scene" || (Array.isArray(binding.picturePurpose) ? binding.picturePurpose : [binding.usage]).map(String).includes("scene") || String(binding.usage || "") === "scene")
-        .filter((binding: Record<string, any>) => binding.id && binding.storageKey);
+        .filter((binding: Record<string, any>) => binding.id && binding.storageKey));
     const inheritedGroups = siblings.map((item: Record<string, any>) => object(item.h3CharacterGroups)).find((groups: Record<string, any>) => Object.keys(groups).length) || {};
     const scopedInheritedGroups = Object.fromEntries(Object.entries(inheritedGroups).flatMap(([id, value]) => {
         const subjectId = formalSubjectIdForCharacterGroup(value, subjectsById, subjectIdsBySourceNode);
-        if (!subjectId) return [[id, value]];
+        if (!subjectId) return subjectAssembly ? [] : [[id, value]];
         const presentations = presentationsBySubject.get(subjectId);
         if (!presentations?.has("visible") && !presentations?.has("offscreen_voice")) return [];
-        // A visible Subject inherits its outfit group; offscreen dialogue keeps
-        // voice settings but does not pull the character's image into the Clip.
+        // A pending Clip has no compiler reference manifest yet. Never turn a
+        // sibling's full asset catalog into selected images for the new Shot.
         const characterGroup: Record<string, any> = { ...object(value), subjectId };
-        if (!presentations.has("visible")) characterGroup.outfitEnabled = false;
+        if (subjectAssembly) {
+            const selected = selectedPicturesBySubject.get(subjectId) || new Set<string>();
+            const selectedSnapshots = siblings.flatMap((sibling: Record<string, any>) =>
+                Array.isArray(sibling.referenceBindings) ? sibling.referenceBindings.map(object) : [])
+                .filter((binding: Record<string, any>) => selected.has(String(binding.pictureBindingId || ""))
+                    && String(binding.sourceNodeId || "") === String(characterGroup.characterNodeId || ""));
+            characterGroup.outfits = (Array.isArray(characterGroup.outfits) ? characterGroup.outfits : []).map((raw: unknown) => {
+                const outfit = object(raw), pictureBindingId = String(outfit.pictureBindingId || outfit.id || "");
+                const enabled = selected.has(pictureBindingId) || !outfit.pictureBindingId && selectedSnapshots.some((binding: Record<string, any>) =>
+                    binding.outfitId === outfit.id || Boolean(outfit.storageKey && binding.storageKey === outfit.storageKey)
+                    || Boolean(!outfit.storageKey && outfit.url && binding.url === outfit.url));
+                return { ...outfit, enabled };
+            });
+            characterGroup.outfitEnabled = characterGroup.outfits.some((outfit: Record<string, any>) => outfit.enabled);
+        } else if (!presentations.has("visible")) characterGroup.outfitEnabled = false;
         return [[id, characterGroup]];
     }));
     const segment: Record<string, any> = {

@@ -1,3 +1,4 @@
+import { comfyWorkflowSwitch } from "./workflow-switch.js";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -596,11 +597,14 @@ export class ComfyUiBackend {
             }
             closeWs = () => { try { ws?.close(); } catch {} };
 
-            const response = await fetch(`${comfyUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: workflow, client_id: task.id }), signal: controller.signal });
-            if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
-            const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
-            if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
-            const promptId: string = body.prompt_id;
+            const body = await comfyWorkflowSwitch.submit(comfyUrl, `preset:${preset}`, async () => {
+                const response = await fetch(`${comfyUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: workflow, client_id: task.id }), signal: controller.signal });
+                if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
+                const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
+                if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+                return { ...body, prompt_id: body.prompt_id };
+            }, controller.signal);
+            const promptId: string = body.prompt_id!;
             capturedPromptId = promptId;
             const pendingPreview = this.pendingPreviews.get(task.id);
             if (pendingPreview) {
@@ -778,22 +782,28 @@ export class ComfyUiBackend {
     async cancelPromptExecution(comfyUrl: string, promptId: string | undefined, taskId: string) {
         const url = comfyUrl.replace(/\/$/, "");
         const errors: string[] = [];
-        if (promptId) {
-            const finishQueueDelete = watchSlowOperation(slowOperationLogger, "comfy.cancel.queue-delete");
+        // ComfyUI 执行重节点时 HTTP 响应普遍滞后 1~8s（GIL 饥饿），服务挂死时永不返回。
+        // /interrupt 与 /queue delete 都是服务端标志位，客户端超时放弃不影响其最终生效；
+        // 但取消 Promise 必须有上限，否则 execute 的清理 await 与 h3 队列槽位会被永久占用。
+        const cancelFetch = async (label: "queue-delete" | "interrupt", path: string, body: string) => {
+            const finish = watchSlowOperation(slowOperationLogger, `comfy.cancel.${label}`);
             try {
-                const response = await fetch(`${url}/queue`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ delete: [promptId] }) });
-                finishQueueDelete(`http-${response.status}`);
-                if (!response.ok) errors.push(`/queue HTTP ${response.status}`);
-            } catch (error) { finishQueueDelete("network-error"); errors.push(error instanceof Error ? error.message : String(error)); }
-        }
-        // ComfyUI uses /interrupt for the currently executing prompt;
-        // queued prompts are handled by the /queue delete above.
-        const finishInterrupt = watchSlowOperation(slowOperationLogger, "comfy.cancel.interrupt");
-        try {
-            const response = await fetch(`${url}/interrupt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(promptId ? { prompt_id: promptId } : {}) });
-            finishInterrupt(`http-${response.status}`);
-            if (!response.ok) errors.push(`/interrupt HTTP ${response.status}`);
-        } catch (error) { finishInterrupt("network-error"); errors.push(error instanceof Error ? error.message : String(error)); }
+                const response = await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(5_000) });
+                finish(`http-${response.status}`);
+                if (!response.ok) errors.push(`${path} HTTP ${response.status}`);
+            } catch (error) {
+                const timedOut = error instanceof Error && error.name === "TimeoutError";
+                finish(timedOut ? "timeout" : "network-error");
+                errors.push(timedOut
+                    ? `${path} 等待超过 5s（ComfyUI 忙碌或挂起；取消标志已发出，将在其空闲后生效）`
+                    : error instanceof Error ? error.message : String(error));
+            }
+        };
+        // 两个请求相互独立：并行发出，取消 Promise 的上限就是单个请求的超时而不是两者之和。
+        await Promise.all([
+            ...(promptId ? [cancelFetch("queue-delete", "/queue", JSON.stringify({ delete: [promptId] }))] : []),
+            cancelFetch("interrupt", "/interrupt", JSON.stringify(promptId ? { prompt_id: promptId } : {})),
+        ]);
         if (errors.length) this.deps.tasks.addEvent(taskId, "cancel_error", { promptId, errors });
     }
 

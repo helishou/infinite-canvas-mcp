@@ -1,4 +1,5 @@
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { repairMcpToolArguments } from "./mcp-arg-integrity.js";
 import { compilePluginInputSchema } from "./plugin-json-schema.js";
 
 import { BackendClient } from "../runtime/backend-client.js";
@@ -312,8 +313,11 @@ export class PluginMcpRegistry {
                 inputSchema: compiled!.inputSchema,
                 ...(tool.annotations ? { annotations: tool.annotations as never } : {}),
             }, async (input: Record<string, unknown>, request) => {
-                current.validateInput(input);
-                const result = await current.handler(input, this.context, request);
+                // 宿主流式拼装参数时可能复制整个 ops 数组或吞掉 type；先做最小修复再校验。
+                const repaired = repairMcpToolArguments(input);
+                if (repaired.changed) logger.warn("插件 MCP 参数在传输层损坏，已按最小规则修复", { tool: tool.id, ...repaired.repairs });
+                current.validateInput(repaired.input);
+                const result = await current.handler(repaired.input, this.context, request);
                 return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
             });
             if (!this.isToolVisible(tool.id)) current.handle.disable();

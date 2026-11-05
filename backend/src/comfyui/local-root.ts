@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, realpath, stat } from "node:fs/promises";
+import { copyFile, mkdir, realpath, rename, stat, unlink } from "node:fs/promises";
 
 export function resolveComfyRoot(value: string) {
     if (!value.trim()) throw new Error("请输入 ComfyUI 根目录或绘世安装目录");
@@ -69,13 +69,23 @@ export async function copyComfyInput(file: string, mediaDir: string, comfyRoot: 
     if (!validTargetDir || (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink())) {
         throw new Error("ComfyUI 输入缓存不可链接到外部目录或文件");
     }
+    if (await hasSameContents(source, target)) return name;
+    // Publish only a complete copy. Overwriting the visible file can make
+    // ComfyUI's concurrent /view reads fail with PermissionError (HTTP 403).
+    const temporary = path.join(targetDir, `.infinite-canvas-${randomUUID()}.tmp`);
     try {
-        await copyFile(source, target);
-    } catch (error) {
-        // Windows can reject an overwrite while ComfyUI has the input open. If
-        // the complete cached file is already identical, it is ready to use;
-        // otherwise preserve the original copy error.
-        if ((error as NodeJS.ErrnoException).code !== "EBUSY" || !(await hasSameContents(source, target))) throw error;
+        await copyFile(source, temporary, fs.constants.COPYFILE_EXCL);
+        try {
+            await rename(temporary, target);
+        } catch (error) {
+            // Another preparation may have published the same input, or a
+            // Windows reader may prevent replacement of an identical copy.
+            if (!(await hasSameContents(temporary, target))) throw error;
+        }
+    } finally {
+        await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== "ENOENT") throw error;
+        });
     }
     return name;
 }

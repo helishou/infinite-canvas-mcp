@@ -10,6 +10,8 @@ import { AGENT_PROMPT } from "../config.js";
 import type { AgentAttachment, AgentEmit } from "./types.js";
 import { configuredLlmProviders, resolveLlmProvider, requestLlm, textOf, llmHistoryForProvider, expandImageRefs, IMAGE_TOOL_NAME, type Json, type LlmMessage, type LlmPart, type LlmTool } from "./llm-provider.js";
 import { normalizeImageDataUrl } from "./image-input.js";
+import { repairMcpToolArguments } from "../server/mcp-arg-integrity.js";
+import { logger } from "../utils/logger.js";
 import { ensureImageSupport, hasImageParts } from "./vision-capability.js";
 
 export type LlmSettings = { get(key: string): unknown; set(key: string, value: unknown): void };
@@ -273,7 +275,10 @@ export class LlmAgent {
                     // `input` 提到 try 之外：工具图片要按它的 storageKey 决定「只留引用」还是内联 base64。
                     let input: Json = {};
                     try {
-                        input = JSON.parse(call.arguments);
+                        // 参数由模型输出流拼装而来，长中文大嵌套时偶发重复或丢字段；先修再执行。
+                        const parsed = repairMcpToolArguments(JSON.parse(call.arguments) as Json);
+                        if (parsed.changed) logger.warn("API 工具参数在流式拼装中损坏，已按最小规则修复", { tool: call.name, ...parsed.repairs });
+                        input = parsed.input;
                         if (call.name === "director_subagent") {
                             input.parentThreadId = thread.id;
                             if (input.action === "spawn") {

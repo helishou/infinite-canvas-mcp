@@ -5,6 +5,24 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Formal storyboard tracks and the production workbench use the same Shot keyframe. Replace and clear an image from either editor, then refresh: verify the same opening keyframe and track slot update, no duplicate opening is added, and unrelated composition or timed keyframes remain intact. Check failed saves are reported as failed.
+
+- Clip status: editing only an earlier Shot's camera or visual description must not recompile later Clips; continuity validation still retains the authored context. Target Shot content, replay timing and continuity input changes must still invalidate affected outputs. Saving locked Clips must not create doomed refresh jobs, and current valid compilation must take precedence over historical failures or unloaded workbench data. Older receipts retain their original dependency checks and acquire the narrower fingerprint on their next compile.
+
+- Incremental production compilation: after a full compile, change one Clip camera setting and compile again without selecting a range. Verify only stale targets are compiled, unchanged prompts retain their receipts, and the complete source and output list remain available. Shared input or compiler changes must still invalidate affected outputs. Older outputs acquire target dependency receipts on their next compile.
+
+- Backend shutdown ends Backend and Agent event streams and closes their connections after flushing, so idle development reloads can close the HTTP server. Verify the shutdown log reaches `closed` without reaching the existing forced-exit fallback even with long keep-alive settings. Backend file logs include timestamps to correlate request, reload and main-thread diagnostics. Task summaries project routing scalars before returning rows to JavaScript; compare legacy TEXT and gzip inputs, pagination, parent links, output media and corrupt-input errors with task details.
+
+- Backend availability: verify `start:backend` builds shared and Backend outputs, uses the existing data configuration, and keeps its PID when source or build files change. Development reload logs report the trigger, idle wait, shutdown, startup and unavailable duration; proxy readiness summaries count held and expired requests. Main-thread stalls exceeding the existing slow-operation threshold log CPU, event-loop utilization and memory. Collaboration polling reads the current revision without hydrating canvas assets, preserves revision zero, and retains authentication and missing-project behavior.
+
+- During Backend development reloads, verify collaboration reads wait for readiness through repeated reload status notifications and resume once. Requests that exceed the existing readiness window should still report temporary unavailability.
+
+- Switch between imported ComfyUI workflows and built-in H3, and verify memory and VRAM release is requested before submission. Repeating the same workflow with different prompts or seeds should retain its cache. Verify separate ComfyUI endpoints remain independent and release failures are reported.
+
+- Reuse the same reference across H3 Clips and verify concurrent input preparation remains readable by ComfyUI. Identical inputs reuse the existing copy, changed inputs publish a complete update, and copy or publication failures preserve the previous copy and clean up temporary files.
+
+- Goohai Qwen Image 2.1 workflows with optional image slots should remain selectable on canvas with zero, one or multiple references. Check that unused slots preserve the prompt and output chain, and the Goohai loader receives its native empty selection when its image is absent.
+
 - Production canvas readiness: with several Clips sharing image references and a large production draft, check refresh responsiveness and readiness diagnostics through both episode and linked canvas entry points. Each evaluation reuses its parsed draft, reads and hashes shared media once, and later refreshes still detect missing or modified files.
 
 - Canvas asset panel tabs: verify My assets and Online assets can be switched, drama and tag filters appear only under My assets, and the search applies to both tabs.

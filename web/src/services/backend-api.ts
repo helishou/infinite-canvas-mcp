@@ -331,6 +331,17 @@ export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject
     const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
     return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
 }
+export async function fetchProductionClipNumbers(owner: ProductionTarget) {
+    const clipNumbers: Record<string, number> = {};
+    let cursor: string | null = null;
+    do {
+        const query: URLSearchParams = new URLSearchParams({ view: "numbering", snapshot: "draft", pageSize: "50", ...(cursor ? { cursor } : {}) });
+        const result: { production: { numbering: { items: Array<{ segmentId: string; clipNumber: number }>; nextCursor: string | null } } } = await request("GET", productionPath(owner) + "?" + query);
+        for (const clip of result.production.numbering.items) clipNumbers[clip.segmentId] = clip.clipNumber;
+        cursor = result.production.numbering.nextCursor;
+    } while (cursor);
+    return clipNumbers;
+}
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
 export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }

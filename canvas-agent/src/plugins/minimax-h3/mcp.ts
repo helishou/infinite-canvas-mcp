@@ -431,6 +431,11 @@ function h3NodeSummary(node: AgentCanvasNode) {
         segments: segments.map((segment, index) => ({
             id: String(segment.id || ""), index, title: String(segment.title || ""),
             sourceShotId: String(segment.sourceShotId || ""),
+            ...((segment.productionClipProjection as Record<string, unknown> | undefined)?.targetId ? {
+                sourceSegmentId: String((segment.productionClipProjection as Record<string, unknown>).targetId),
+                numberingBasis: "production_source_order_1_based",
+                numbering: segment.productionNumbering || null,
+            } : { clipNumber: index + 1, numberingBasis: "standalone_node_order_1_based" }),
             status: String(segment.status || "idle"),
             hasResult: Boolean(segment.result || segment.resultStorageKey),
         })),

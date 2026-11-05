@@ -28,11 +28,12 @@ function applyCorsHeaders(req, res) {
 }
 
 /** Keep the public development Backend endpoint bound while its watched child restarts. */
-export function createStableBackendProxy({ port, targetPort, readyWaitMs = DEFAULT_READY_WAIT_MS, listenHost = '127.0.0.1', backendHost = '127.0.0.1' }) {
+export function createStableBackendProxy({ port, targetPort, readyWaitMs = DEFAULT_READY_WAIT_MS, listenHost = '127.0.0.1', backendHost = '127.0.0.1', log = console }) {
     let backendReady = false;
     let closed = false;
     let currentListenHost = listenHost;
     let listenRetry;
+    let heldRequests = 0, timedOutRequests = 0;
     const waiting = new Set();
     const tunnels = new Set();
     const server = http.createServer((req, res) => {
@@ -61,10 +62,12 @@ export function createStableBackendProxy({ port, targetPort, readyWaitMs = DEFAU
         }
         if (backendReady) return dispatch();
         waiting.add(dispatch);
+        heldRequests++;
         timer = setTimeout(() => {
             if (settled || res.destroyed) return;
             settled = true;
             waiting.delete(dispatch);
+            timedOutRequests++;
             sendError(req, res, 503, 'BACKEND_RELOADING', `Backend 正在开发重载，等待 ${readyWaitMs}ms 后仍未就绪；稍后可沿原 operationId/taskId 恢复。`);
         }, readyWaitMs);
         timer.unref?.();
@@ -96,10 +99,13 @@ export function createStableBackendProxy({ port, targetPort, readyWaitMs = DEFAU
         setBackendReady(value) {
             backendReady = Boolean(value);
             if (!backendReady) {
-                for (const dispatch of [...waiting]) dispatch.reject();
+                // Reload status can arrive repeatedly (accepted, exit, start).
+                // Keep unforwarded requests within their original readiness window.
                 for (const socket of [...tunnels]) socket.destroy();
                 return;
             }
+            if (heldRequests) log.log(`[backend-proxy] readiness ${JSON.stringify({ heldRequests, timedOutRequests, pendingRequests: waiting.size })}`);
+            heldRequests = 0; timedOutRequests = 0;
             for (const dispatch of [...waiting]) dispatch();
         },
         setListenHost(nextHost) {

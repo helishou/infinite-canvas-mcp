@@ -141,6 +141,19 @@ test("ordinary Shot saves queue one Clip refresh and replay the saved intent wit
     assert.equal((receipt as any).clipRefreshSummary.blocked, 0);
 });
 
+test("locked Clip saves do not enqueue doomed automatic or explicit refresh jobs", t => {
+    const service = fixture(t), director = directorV2();
+    (director.source.segments as any[])[0].locked = true;
+    const initial = service.edit("ep", { operationId: "locked-initial", expectedRevision: service.get("ep").revision,
+        ops: [{ type: "set_director_production", director }] });
+    const saved = service.edit("ep", { operationId: "locked-save", expectedRevision: initial.revision, ops: [
+        { type: "patch_director_source", entity: "shot", id: "S1", patch: { visual: "A new camera composition." } },
+        { type: "request_director_clip_refresh", segmentId: "C1" },
+    ] });
+    assert.equal((saved.draft.director!.source.shots as any[])[0].visual, "A new camera composition.");
+    assert.deepEqual(service.clipRefreshStore("ep").byEditAll("locked-save"), []);
+});
+
 test("an explicit refresh repairs an unchanged Clip with no current artifact", t => {
     const service = fixture(t, true), director = directorV2();
     const initial = service.edit("ep", { operationId: "refresh-initial", expectedRevision: service.get("ep").revision,

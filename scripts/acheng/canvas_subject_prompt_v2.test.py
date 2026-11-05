@@ -60,7 +60,28 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
         self.assertEqual(binding_ids(character, {"subjectId": "SUB_CHAR", "presentation": "state_context", "referencePurpose": ["identity"]}), [])
         self.assertEqual(binding_ids(character, {"subjectId": "SUB_CHAR", "presentation": "visible", "referencePurpose": ["identity"]}), ["CHAR_IMG"])
 
+    def test_legacy_scene_binding_serves_environment_without_changing_source(self):
+        subject = {"id": "YARD", "entityRef": {"kind": "scene"}, "pictureBindings": [
+            {"id": "PB", "provides": ["scene"], "defaultFor": [], "applicableState": {}}]}
+        usage = {"presentation": "visible", "referencePurpose": ["environment"], "pictureBindingIds": [], "pictureBindingMode": "default"}
+        original = deepcopy(subject)
+        self.assertEqual(binding_ids(subject, usage), ["PB"])
+        self.assertEqual(binding_ids(subject, {**usage, "presentation": "state_context"}), ["PB"])
+        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingMode": "explicit"}), [])
+        self.assertEqual(subject, original)
+        subject["pictureBindings"][0]["applicableState"] = {"weather": "dry"}
+        self.assertEqual(binding_ids(subject, usage, allow_missing=True), [])
+        subject["pictureBindings"][0]["applicableState"] = {}
+        subject["pictureBindings"].append({"id": "NEW", "provides": ["environment"], "defaultFor": []})
+        self.assertEqual(binding_ids(subject, usage), ["NEW"])
+
+    def test_legacy_scene_default_image_compiles_into_ref2va_without_source_mutation(self):
+        self._assert_scene_default_image_compiles("scene")
+
     def test_state_context_scene_default_image_compiles_into_the_clip(self):
+        self._assert_scene_default_image_compiles("environment")
+
+    def _assert_scene_default_image_compiles(self, purpose):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / "scene.png"
             image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=")
@@ -71,8 +92,8 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                 "scene_registry": [{"id": "PALACE", "name": "Palace", "prompt_description": "A dim palace hall."}],
                 "subject_registry": [{
                     "id": "SUB_SCENE", "kind": "scene", "entityRef": {"kind": "scene", "id": "PALACE", "ownerKind": "episode", "ownerId": "EP"},
-                    "pictureBindings": [{"id": "SCENE_IMG", "assetId": "SCENE_ASSET", "provides": ["environment"],
-                                         "retain": ["palace layout"], "exclude": ["people"], "defaultFor": ["environment"]}],
+                    "pictureBindings": [{"id": "SCENE_IMG", "assetId": "SCENE_ASSET", "provides": [purpose],
+                                         "retain": ["palace layout"], "exclude": ["people"], "defaultFor": []}],
                 }],
                 "asset_plan": [], "asset_cards": [],
                 "shots": [{
@@ -81,7 +102,7 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                                         "referencePurpose": ["environment"], "continuityFactIds": [], "stateRequirements": []}],
                     "keyframes": [], "utterance_refs": [],
                 }],
-                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"]}],
+                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"], "mode": "Ref2VA", "mode_lock": "Ref2VA"}],
                 "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
                            "initial": [], "events": [], "requirements": [], "coverage": []},
                 "_canvas_subject_picture_sources": {
@@ -90,9 +111,12 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
                                   "retain": ["palace layout"], "exclude": ["people"], "defaultFor": ["environment"]},
                 },
             }
+            original = deepcopy(source)
             self.assertEqual(_infer_segment_mode(source, source["segments"][0]), "Ref2VA")
             projected = adapt_production(source)
+            self.assertEqual(source, original)
             segment = projected["segments"][0]
+            self.assertEqual(segment["mode"], "Ref2VA")
             self.assertEqual([reference["asset_id"] for reference in segment["references"]], ["SCENE_ASSET"])
             self.assertEqual(segment["subjects"][0]["retention"],
                              "<Subject 1> (appears in [Shot 1]): partially_preserved - retain palace layout; exclude people.")

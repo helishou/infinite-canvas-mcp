@@ -3,7 +3,7 @@ import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { Button, Modal, Switch, message } from "antd";
 import type { H3Ref, H3Segment } from "../types";
 import { inferReferenceRole, refsForSegment, withSegmentRefs } from "../services/h3-data";
-import { addStoryboardShot, alignStoryboardReferenceOrder, insertStoryboardShotAfter, storyboardTrackItems } from "../services/h3-storyboard-track";
+import { addStoryboardShot, alignStoryboardReferenceOrder, insertStoryboardShotAfter, storyboardTrackItems, syncStoryboardPictureOrder } from "../services/h3-storyboard-track";
 import { h3ThemeVars } from "../h3-theme";
 
 type Frame = { id: string; url: string; storageKey?: string; name: string; sourceTime: number; fingerprint?: string };
@@ -189,14 +189,20 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
 
   useEffect(() => {
     let active = true;
-    void ctx.references.list().then((assets) => {
-      if (!active) return;
+    // 参考目录接口在 Backend 卡顿窗口可能超时；静默失败会让分镜目录帧一直空缺，带退避重试。
+    void (async () => {
+      let assets: Awaited<ReturnType<typeof ctx.references.list>> | undefined;
+      for (let attempt = 0; attempt <= 2; attempt++) {
+        try { assets = await ctx.references.list(); break; }
+        catch { if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 800 * 2 ** attempt)); }
+      }
+      if (!active || !assets) return;
       const quickAssets = assets.filter((asset) => asset.tags?.includes("quick-storyboard") && asset.mediaType === "image");
       setCatalogRefs(quickAssets.map((asset) => ({
         url: asset.url || (asset.storageKey ? ctx.mediaUrl(asset.storageKey) : ""), storageKey: asset.storageKey, type: "image" as const, name: asset.label,
         mimeType: asset.mimeType, role: "storyboard" as const, bindingId: asset.id, assetId: asset.id, tags: asset.tags,
       })).filter((ref) => ref.url));
-    }).catch(() => undefined);
+    })();
     return () => { active = false; };
   }, [ctx.projectId, ctx.references]);
 
@@ -324,6 +330,7 @@ export function QuickStoryboardPanel({ ctx, selected, patchSelected }: { ctx: Ca
     try {
       if (isFormalClip) {
         if (!ctx.production?.replaceStoryboardTrack) throw new Error("当前制作台未接收分镜修改；轨道与关键帧均未写入。");
+        if (!await syncStoryboardPictureOrder(ctx, baseSegment, updatedSegment)) throw new Error("提示词尚未同步，分镜图片顺序未更新。");
         const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: baseSegment.id, segment: updatedSegment as Record<string, unknown>, preserveShotDurations, readBackSegment: false });
         if (!result.sourceSaved) throw new Error("制作台未保存分镜 Shot 和关键帧；轨道未更新。");
       } else patchSelected(updatedSegment);

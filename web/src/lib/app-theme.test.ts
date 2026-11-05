@@ -33,4 +33,14 @@ for (const mode of ["light", "dark"] as const) {
             }
         }
     });
+    test(`${mode} antd surfaces stay derived from canvasThemes`, () => {
+        const token = getAntThemeConfig(mode === "dark").token!;
+        const canvas = canvasThemes[mode];
+        assert.equal(token.colorBgBase, canvas.canvas.background);
+        assert.equal(token.colorBgContainer, canvas.node.panel);
+        assert.equal(token.colorBgLayout, canvas.canvas.background);
+        assert.equal(token.colorText, canvas.node.text);
+        assert.equal(token.colorTextSecondary, canvas.node.muted);
+        assert.equal(token.colorBorderSecondary, canvas.node.stroke);
+    });
 }

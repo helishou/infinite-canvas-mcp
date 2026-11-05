@@ -70,7 +70,9 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm run dev
 ```
 
-访问 `http://localhost:3001`。根命令从源码构建官方插件和共享的 `canvas-agent/dist`，再启动 Backend（17370）和 Web（3001），不清理已有服务。Backend 已集成 `/agent` 和 `/mcp`；17371 只用于可选旧客户端代理，使用 `corepack pnpm run dev:services`。`dev:services` 和 `dev:local` 会核对源码、依赖配置与产物内容，复用未变化的构建，变化或缺失时自动重建。Backend 默认不自动重启，需要时显式使用 `corepack pnpm run dev:watch`；Windows 的 `dev:local` 会清理旧服务，不能当作探活命令。
+访问 `http://localhost:3001`。根命令从源码构建官方插件和共享的 `canvas-agent/dist`，再启动 Backend（17370）和 Web（3001），不清理已有服务。Backend 已集成 `/agent` 和 `/mcp`；17371 只用于可选旧客户端代理，使用 `corepack pnpm run dev:services`。`dev:services` 和 `dev:local` 会核对源码、依赖配置与产物内容，复用未变化的构建，变化或缺失时自动重建。Backend 开发命令在源码变化后等待业务空闲再重载；Windows 的 `dev:local` 会清理旧服务，不能当作探活命令。
+
+日常制作可在 Backend 空闲并停止原 Backend 后，运行 `corepack pnpm run start:backend`。该命令构建共享 Agent 与 Backend，再通过常驻入口运行 Backend 构建产物；源码保存和后续构建不会触发自动重载，更新时重新执行启动流程。前端可继续使用已有网页，或另开终端运行 `corepack pnpm run dev:web`。数据目录和连接配置沿用现有设置。
 
 侧边栏 Codex 对话需自行安装 `@openai/codex@0.160.0` 并登录；基础画布和外部 MCP 可跳过。原生部署的监听、数据目录、密钥和来源可以通过环境变量配置，见[部署说明](docs/content/docs/overview/docker.zh-CN.mdx)与[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx)。
 

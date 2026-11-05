@@ -9,6 +9,7 @@
 | Backend dev / dev:watch | 带空闲保护的开发重载器，监听 Backend src 和共享 Agent dist | 核对 pending / ready 日志与新 PID；运行任务、待确认、Agent 回合或写请求会延后重载 |
 | Backend dev:once | `tsx src/index.ts`，单次启动 | 核对实际进程是否加载源码，需要时再处理必要重载 |
 | Backend start 或明确的 dist 消费方 | `backend/dist` | 根目录 `corepack pnpm --filter @helishou/infinite-canvas-backend run build` |
+| 根目录 start:backend | 构建共享包与 Backend 后，由常驻代理加载 Backend dist，关闭源码监听 | 空闲后停止原 Backend，再启动；源码和构建变化需下次启动应用 |
 | Backend 导入 canvas-agent | 包 exports 指向 `canvas-agent/dist` | 根目录 `corepack pnpm --filter @basketikun/canvas-agent run build`，确认消费进程加载 |
 | 普通画布插件 | `web/public/plugins` 的 bundle | 根目录 `corepack pnpm run build:plugins`，核对实际加载 URL |
 | H3 内置 UI，Vite dev | HOST_SYSTEM_PLUGINS 引用源码 | HMR 后验证页面 |

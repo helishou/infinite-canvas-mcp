@@ -1,8 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clipInputOperations, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
+import { clipInputOperations, formalStoryboardTrack, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
+import { refsForSegment } from "../../../plugins/canvas/minimax-h3/src/services/h3-data.js";
 
 const OWNER = { kind: "episode" as const, id: "EP" };
+
+test("workbench keyframe edits refresh the existing storyboard slot instead of retaining old media", () => {
+    const data = { director: { source: { version: 2, prompt_assembly: { version: 2 }, ledger: { contract_version: 2 },
+        fps_num: 24, fps_den: 1, shots: [{ id: "S", duration_frames: 24,
+            keyframes: [{ id: "KF-S-WORKBENCH", assetId: "FRAME", requiredForSubmission: true, anchor: "opening", sourceNode: { nodeId: "NEW" } }] }] },
+        assets: { FRAME: { storageKey: "image:new", nodeId: "NEW" } } }, shots: [] } as any;
+    const existing = { storyboardShots: [{ id: "S", duration: 1, referenceBindingId: "slot" }],
+        referenceBindings: [{ id: "slot", assetId: "FRAME", role: "storyboard", mediaType: "image", storageKey: "image:old", sourceNodeId: "OLD" }] };
+    const track = formalStoryboardTrack(data, { shotIds: ["S"] } as any, existing)!;
+    assert.equal(track.storyboardShots[0].referenceBindingId, "slot");
+    assert.equal(track.referenceBindings?.length, 1);
+    assert.equal(track.referenceBindings?.[0].storageKey, "image:new");
+    assert.equal(track.referenceBindings?.[0].sourceNodeId, "NEW");
+    assert.equal(existing.referenceBindings[0].storageKey, "image:old");
+    data.director.source.shots[0].keyframes = [];
+    const cleared = formalStoryboardTrack(data, { shotIds: ["S"] } as any, existing)!;
+    assert.equal(cleared.storyboardShots[0].referenceBindingId, undefined);
+    assert.deepEqual(cleared.referenceBindings, []);
+});
 
 function layoutFor(...groups: Array<{ id: string; nodeId: string; sceneId: string }>) {
     return {
@@ -157,6 +177,62 @@ test("a formal character group inherited from a sibling is scoped by the new Cli
     const included = addFor(visible).segment.h3CharacterGroups["group-muli"];
     assert.equal(included.subjectId, "EP2-SUBJ-MULI", "inherited formal groups use the stable Subject ID");
     assert.equal(included.outfitEnabled, true);
+});
+
+test("new Subject Clips do not inherit a sibling's unrelated asset-library character images", () => {
+    const production = structuredClone(twoSceneProduction);
+    Object.assign(production.director.source, { version: 2, prompt_assembly: { version: 2 }, ledger: { contract_version: 2 }, subject_registry: [] });
+    production.clipGroups[1] = { id: "CLIP_B", shotIds: ["SH-B"], nodeId: "H3-A", segmentId: "clip-b-new" };
+    const sibling = { ...projectedClip("clip-a", "CLIP_A"), taskMode: "ref2va",
+        referenceBindings: [{ id: "scene", assetId: "scene", role: "scene", storageKey: "image:room", mediaType: "image", enabled: true }],
+        h3CharacterGroups: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`library-${index}`, {
+            id: `library-${index}`, characterNodeId: `library-node-${index}`, subjectId: `old-subject-${index}`,
+            outfitEnabled: true, outfits: [{ id: `outfit-${index}`, storageKey: `image:library-${index}`, enabled: true }],
+        }])),
+    };
+    assert.equal(refsForSegment(sibling as any).length, 18, "the H3 reference-list resolver expands the contaminated sibling to 18 images");
+    const before = structuredClone(sibling);
+    const operations = clipInputOperations(project(h3Node("H3-A", "SC-A", [sibling])), production,
+        layoutFor({ id: "CLIP_B", nodeId: "H3-A", sceneId: "SC-A" }), {}, new Set(["CLIP_B"]), new Set(["CLIP_B"]), undefined, undefined, new Set(["CLIP_B"])).operations;
+    const added = operations.find(operation => operation.type === "add_h3_segment") as any;
+    assert.ok(added);
+    assert.deepEqual(added.segment.h3CharacterGroups, {}, "a new Shot without Subject usages must not acquire the sibling's entire library");
+    assert.deepEqual(added.segment.referenceBindings.map((binding: any) => binding.id), ["scene"]);
+    assert.equal(refsForSegment(added.segment).length, 1, "the rendered Clip inputs stay at the single inherited scene image");
+    assert.deepEqual(sibling, before, "planning must not mutate sibling inputs");
+});
+
+test("new Subject Clips inherit only outfits selected by the new Shot, including default and explicit-empty selection", () => {
+    const production = structuredClone(twoSceneProduction);
+    const picture = (id: string) => ({ id, assetId: id, provides: ["identity"], defaultFor: id === "selected" ? ["identity"] : [], sourceNode: { nodeId: "actor" } });
+    Object.assign(production.director.source, { version: 2, prompt_assembly: { version: 2 }, ledger: { contract_version: 2 },
+        subject_registry: [{ id: "SUB-ACTOR", pictureBindings: [picture("selected"), picture("other")] }] });
+    production.clipGroups[1] = { id: "CLIP_B", shotIds: ["SH-B"], nodeId: "H3-A", segmentId: "clip-b-new" };
+    const sibling = { ...projectedClip("clip-a", "CLIP_A"), h3CharacterGroups: { actor: {
+        id: "actor-group", subjectId: "SUB-ACTOR", characterNodeId: "actor", outfitEnabled: true,
+        voiceEnabled: true, voice: { url: "/voice.wav" },
+        outfits: ["selected", "other"].map(id => ({ id: `outfit-${id}`, pictureBindingId: id, storageKey: `image:${id}`, enabled: true })),
+    } } };
+    const before = structuredClone(sibling);
+    const addFor = (presentation: string, mode: string, ids: string[]) => {
+        production.director.source.shots[1].subject_usages = [{ subjectId: "SUB-ACTOR", presentation, pictureBindingMode: mode, pictureBindingIds: ids }];
+        return (clipInputOperations(project(h3Node("H3-A", "SC-A", [sibling])), production,
+            layoutFor({ id: "CLIP_B", nodeId: "H3-A", sceneId: "SC-A" }), {}, new Set(["CLIP_B"]), new Set(["CLIP_B"]), undefined, undefined, new Set(["CLIP_B"]))
+            .operations.find(operation => operation.type === "add_h3_segment") as any).segment.h3CharacterGroups.actor;
+    };
+    assert.deepEqual(addFor("visible", "default", []).outfits.map((outfit: any) => [outfit.pictureBindingId, outfit.enabled]), [["selected", true], ["other", false]]);
+    assert.equal(addFor("visible", "explicit", []).outfitEnabled, false);
+    assert.deepEqual(addFor("visible", "explicit", ["other"]).outfits.map((outfit: any) => [outfit.pictureBindingId, outfit.enabled]), [["selected", false], ["other", true]]);
+    const offscreen = addFor("offscreen_voice", "default", []);
+    assert.equal(offscreen.outfitEnabled, false);
+    assert.equal(offscreen.voiceEnabled, true);
+    assert.deepEqual(sibling, before);
+
+    // Older groups lack pictureBindingId on outfit rows, but their saved
+    // reference snapshots still link the exact selected binding to its slot.
+    (sibling as any).referenceBindings = [{ id: "snapshot", pictureBindingId: "selected", sourceNodeId: "actor", outfitId: "outfit-selected", storageKey: "image:selected" }];
+    for (const outfit of sibling.h3CharacterGroups.actor.outfits) delete (outfit as any).pictureBindingId;
+    assert.deepEqual(addFor("visible", "default", []).outfits.map((outfit: any) => [outfit.id, outfit.enabled]), [["outfit-selected", true], ["outfit-other", false]]);
 });
 
 test("a Shot-local projection neither adds outside its targets nor sweeps other nodes", () => {

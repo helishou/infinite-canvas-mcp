@@ -3,7 +3,7 @@ import test from "node:test";
 
 // 模块在导入时读取阈值，先设短阈值再动态导入，避免测试真等 1 秒。
 process.env.INFINITE_CANVAS_SLOW_OPERATION_MS = "120";
-const { safeOperationPath, watchHttpOperation } = await import("./slow-operation.js");
+const { safeOperationPath, watchHttpOperation, startRuntimeMonitor } = await import("./slow-operation.js");
 
 type Warning = { message: string; details: Record<string, unknown> };
 
@@ -76,4 +76,24 @@ test("媒体路径归一化到 storageKey，不再按每个媒体文件分桶", 
     assert.equal(safeOperationPath("/runtime/media-file/audio%3Aabc"), "/runtime/media-file/:storageKey");
     assert.equal(safeOperationPath("/drama/episodes/ep1/production/readiness?token=x"), "/drama/episodes/:id/production/readiness");
     assert.equal(safeOperationPath("/mcp"), "/mcp");
+});
+
+test("runtime monitor reports main-thread blocking with CPU and memory and stops cleanly", async t => {
+    const { warnings, logger } = recorder();
+    const stop = startRuntimeMonitor(logger);
+    t.after(stop);
+    await sleep(40);
+    const blockedUntil = performance.now() + 200;
+    while (performance.now() < blockedUntil) { /* reproduce synchronous CPU work */ }
+    await sleep(1_050);
+    const warning = warnings.find(item => item.message === "slow-operation-main-thread");
+    assert.ok(warning);
+    assert.ok(Number(warning.details.maxDelayMs) >= 120);
+    assert.ok(Number(warning.details.cpuPercent) > 0);
+    assert.ok(Number(warning.details.rss) > 0);
+    assert.ok(Number(warning.details.eventLoopUtilization) > 0);
+    stop();
+    const count = warnings.length;
+    await sleep(1_050);
+    assert.equal(warnings.length, count);
 });

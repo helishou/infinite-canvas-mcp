@@ -286,6 +286,34 @@ test("referenceBindings CAS 使用结构比较，且项目参考资产不会改�
     assert.throws(() => applyCanvasProjectOperations(project, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { referenceBindings: [] }, expectedFields: { referenceBindings: [{ ...bindings[0], label: "旧人物" }] } }]));
 });
 
+test("referenceBindings CAS 忽略键顺序与 undefined 字段，真实改动仍明确拒绝", () => {
+    const bindings = [
+        { id: "b1", assetId: "a1", storageKey: "image:1", enabled: true },
+        { id: "b2", assetId: "a2", storageKey: "image:2", enabled: true },
+    ];
+    const project = makeProject([makeH3Node({ segments: [{ id: "s1", referenceBindings: bindings }] })]) as Project & Record<string, unknown>;
+    const reordered = bindings.map(binding => ({ enabled: binding.enabled, storageKey: binding.storageKey, assetId: binding.assetId, id: binding.id, legacy: undefined }));
+    assert.doesNotThrow(() => applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "ok" }, expectedFields: { referenceBindings: reordered } },
+    ]));
+    const changed = bindings.map(binding => ({ ...binding, assetId: binding.id === "b2" ? "a9" : binding.assetId }));
+    assert.throws(() => applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "ok" }, expectedFields: { referenceBindings: changed } },
+    ]), /CAS 失败/);
+});
+
+test("referenceBindings CAS 与写入去重规则一致：带重复项的脏快照不判冲突", () => {
+    const first = { id: "b1", assetId: "a1", storageKey: "image:1" };
+    const second = { id: "b2", assetId: "a2", storageKey: "image:2" };
+    const project = makeProject([makeH3Node({ segments: [{ id: "s1", referenceBindings: [first, second] }] })]) as Project & Record<string, unknown>;
+    assert.doesNotThrow(() => applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "ok" }, expectedFields: { referenceBindings: [first, second, { ...first }] } },
+    ]));
+    assert.throws(() => applyCanvasProjectOperations(project, [
+        { type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "ok" }, expectedFields: { referenceBindings: [first, { ...second, assetId: "a9" }, first] } },
+    ]), /CAS 失败/, "去重后仍有真实改动时必须明确拒绝");
+});
+
 test("移除 H3 绑定时允许请求夹带与保存前绑定相同的旧参考副本", () => {
     const bindings = ["first", "second"].map((name) => ({ id: `binding-${name}`, assetId: `asset-${name}`, storageKey: `image:${name}`, mediaType: "image" }));
     const legacy = bindings.map((binding) => ({ bindingId: binding.id, storageKey: binding.storageKey, type: "image" }));
@@ -454,4 +482,30 @@ test("run_generation 前的提示词更新会持久化到智能节点", () => {
     const metadata = project.nodes[0].metadata as Record<string, unknown>;
     assert.equal(metadata.composerContent, "新的场景提示词");
     assert.equal(metadata.prompt, "新的场景提示词");
+});
+
+test("历史重放不执行 CAS：旧 Clip 的过期 expectedFields 不再拒绝无关节点的请求", () => {
+    const bindings = [
+        { id: "binding-a", assetId: "asset-a", label: "角色" },
+        { id: "binding-b", assetId: "asset-b", label: "场景" },
+    ];
+    // 真实事故形态：提交时 patch.referenceBindings 被 dedupe，但 expectedFields 原样带着重复项落进历史批次。
+    const historical = {
+        type: "update_h3_segment",
+        nodeId: "h3-1",
+        segmentId: "s1",
+        patch: { referenceBindings: [...bindings, bindings[0]] },
+        expectedFields: { referenceBindings: [...bindings, bindings[0]] },
+    };
+    const current = { id: "s1", prompt: "开场", status: "idle", referenceBindings: bindings };
+    const project = makeProject([
+        makeH3Node({ segments: [structuredClone(current)] }),
+        { id: "config-1", type: "config", title: "配置", position: { x: 0, y: 0 }, width: 320, height: 240, metadata: { composerContent: "" } },
+    ]);
+    // 当前段值已规范化成 2 项，与历史期望的 3 项不一致；重放只重建状态，不能被旧 CAS 拦下整批事务。
+    assert.doesNotThrow(() => applyCanvasProjectOperations(project, [historical], { committedReplay: true }));
+    assert.ok(Array.isArray(((project.nodes[0].metadata as any).segments[0] as any).referenceBindings));
+    // 正常提交路径的 CAS 保护保持不变：目标字段确实被别的写入改过时仍明确拒绝。
+    const live = makeProject([makeH3Node({ segments: [{ id: "s1", referenceBindings: [{ id: "binding-c" }] }] })]);
+    assert.throws(() => applyCanvasProjectOperations(live, [historical]), /CAS 失败/);
 });

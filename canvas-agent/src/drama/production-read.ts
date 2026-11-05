@@ -1,11 +1,15 @@
 import { z } from "zod";
+import { productionNumbering } from "./production-numbering.js";
 import { productionSourceFieldsSchema, projectProductionSourceFields, validateProductionSourceFields } from "./production-source-fields.js";
 
 export const productionSourceSectionSchema = z.enum(["context", "script", "production_shots", "clip_groups", "keyframes", "keyframe_reviews", "settings", "asset_plan", "asset_cards", "shots", "segments", "script_scenes", "character_registry", "scene_registry", "subject_registry", "utterances", "ledger.facts", "ledger.timelines", "ledger.initial", "ledger.events", "ledger.requirements", "ledger.coverage"]);
 export const productionReadSchema = z.object({
-    view: z.enum(["summary", "source", "artifacts", "artifact_index", "full", "subject_workbench", "shot_workbench", "clip_workbench"]).default("summary"),
+    view: z.enum(["summary", "numbering", "source", "artifacts", "artifact_index", "full", "subject_workbench", "shot_workbench", "clip_workbench"]).default("summary"),
     snapshot: z.enum(["draft", "published"]).default("draft"),
     targetIds: z.array(z.string().min(1)).optional(),
+    clipNumber: z.coerce.number().int().positive().optional(),
+    shotNumber: z.coerce.number().int().positive().optional(),
+    shotInClip: z.coerce.number().int().positive().optional(),
     sourceSection: productionSourceSectionSchema.optional(),
     sourceSections: z.array(productionSourceSectionSchema).min(1).max(8).optional()
         .describe("一次读取多个完整源稿段（如 shots、segments、script_scenes、settings），替代同一秒内多次单段调用；与 sourceSection 二选一，体积受 fields 约束，需要分块时退回单段"),
@@ -25,7 +29,7 @@ export function productionReadQuery(raw: unknown) {
     const query = new URLSearchParams({ view: input.view, snapshot: input.snapshot });
     if (input.targetIds) query.set("targetIds", input.targetIds.join(","));
     if (input.fields) query.set("fields", JSON.stringify(input.fields));
-    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "includeContext", "includeRuntime", "ifRevision"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
+    for (const key of ["sourceSection", "pageSize", "cursor", "chunkBytes", "includeContext", "includeRuntime", "ifRevision", "clipNumber", "shotNumber", "shotInClip"] as const) if (input[key] !== undefined) query.set(key, String(input[key]));
     if (input.sourceSections) query.set("sourceSections", input.sourceSections.join(","));
     return `?${query}`;
 }
@@ -41,7 +45,8 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
     const selected = production[input.snapshot];
     if (input.snapshot === "published" && selected?.director && !subjectPromptV2(selected.director.source)) throw new Error("UNSUPPORTED_PRODUCTION_FORMAT: 历史发布稿是旧版 Director 格式，只能通过维护命令检查；当前 v2 草稿仍可继续编辑。");
     const d = selected?.director;
-    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, section: input.sourceSection, sections: input.sourceSections, chunkBytes: input.chunkBytes, ...(input.fields ? { fields: input.fields, pageSize: input.pageSize } : {}), includeContext: input.includeContext, includeRuntime: input.includeRuntime });
+    const numbering = productionNumbering(d?.source || {});
+    const selection = JSON.stringify({ owner: production.episodeId, snapshot: input.snapshot, revision: production.revision, versionHash: production.versionHash, workbenchVersion: production.workbenchVersion, sourceHash: d?.sourceHash, view: input.view, targetIds: input.targetIds, clipNumber: input.clipNumber, shotNumber: input.shotNumber, shotInClip: input.shotInClip, pageSize: input.pageSize, section: input.sourceSection, sections: input.sourceSections, chunkBytes: input.chunkBytes, ...(input.fields ? { fields: input.fields } : {}), includeContext: input.includeContext, includeRuntime: input.includeRuntime });
     let offset = 0;
     // 多段读取没有游标语义；在解码旧游标之前就明确拒绝，避免报成 INVALID_CURSOR 误导调用方。
     if (input.cursor && input.sourceSections?.length) throw new Error("SOURCE_SECTIONS_CURSOR: 多段读取不支持续页；需要分页请退回单段 sourceSection + pageSize");
@@ -72,6 +77,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
         return { sha256: digest(value), bytes: bytes.length, offset, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor: end < bytes.length ? next(end) : null };
     };
     if (input.view === "full") return { ...header, snapshot: input.snapshot, chunk: chunk(JSON.stringify(withoutDirectorProjection(fullValue))) };
+    if (input.view === "numbering") {
+        const clips = numbering.clips.filter(clip => !input.targetIds || input.targetIds.includes(clip.segmentId));
+        return { ...header, view: "numbering", snapshot: input.snapshot, sourceHash: d?.sourceHash, numbering: paginate(clips),
+            numberingBasis: "source_order_1_based" };
+    }
     if (["clip_workbench", "shot_workbench", "subject_workbench"].includes(input.view)) {
         if (input.targetIds?.length !== 1) throw new Error("CLIP_WORKBENCH_TARGET: select exactly one Segment");
         const workbench = input.view === "subject_workbench" ? production.subjectWorkbench
@@ -84,7 +94,11 @@ export function projectProductionRead(production: any, raw: unknown = {}, digest
                 if (key === "runtime") return input.includeRuntime === true;
                 return true;
             }));
+        const target = input.targetIds[0];
+        const targetNumbering = input.view === "clip_workbench" ? numbering.clips.find(clip => clip.segmentId === target)
+            : input.view === "shot_workbench" ? numbering.shots.find(shot => shot.shotId === target) : undefined;
         return { ...header, snapshot: input.snapshot, sourceHash: d?.sourceHash, workbenchVersion: production.workbenchVersion,
+            ...(targetNumbering ? { numbering: targetNumbering } : {}),
             ...(input.chunkBytes ? { chunk: chunk(JSON.stringify(selectedWorkbench)) } : { workbench: selectedWorkbench }) };
     }
     if (input.view === "source") {

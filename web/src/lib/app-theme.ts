@@ -1,6 +1,8 @@
 import type { ThemeConfig } from "antd";
 import { theme as antdTheme } from "antd";
 
+import { canvasThemes } from "./canvas-theme";
+
 const neutral = {
     light: {
         primary: "#4e6048",
@@ -30,6 +32,8 @@ const neutral = {
 
 export function getAntThemeConfig(dark: boolean): ThemeConfig {
     const color = dark ? neutral.dark : neutral.light;
+    // antd 的容器、文本与次级边框与画布主题同源，避免两套色板手工同步后漂移。
+    const canvas = canvasThemes[dark ? "dark" : "light"];
 
     return {
         algorithm: dark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
@@ -46,14 +50,14 @@ export function getAntThemeConfig(dark: boolean): ThemeConfig {
             controlHeight: 36,
             controlHeightSM: 32,
             controlHeightLG: 44,
-            colorBgBase: dark ? "#20231f" : "#f6f5f0",
-            colorBgContainer: dark ? "#272b25" : "#fcfbf7",
-            colorBgLayout: dark ? "#20231f" : "#f6f5f0",
-            colorText: dark ? "#e9ece3" : "#30352e",
-            colorTextSecondary: dark ? "#adb5a5" : "#62695b",
+            colorBgBase: canvas.canvas.background,
+            colorBgContainer: canvas.node.panel,
+            colorBgLayout: canvas.canvas.background,
+            colorText: canvas.node.text,
+            colorTextSecondary: canvas.node.muted,
             colorTextPlaceholder: dark ? "#929c89" : "#62695b",
             colorBorder: dark ? "#4b5643" : "#cdd1c3",
-            colorBorderSecondary: dark ? "#3c4436" : "#dddfd4",
+            colorBorderSecondary: canvas.node.stroke,
             colorPrimary: color.primary,
             colorInfo: color.primary,
             // antd 默认 error 色在深色底（#272b25）上只有 3.4:1，删除类文字按钮读不清。

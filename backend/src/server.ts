@@ -111,6 +111,8 @@ export function startServer(
     for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision, ...(update.reason ? { reason: update.reason } : {}) } });
   });
   const app = express();
+  const eventStreams = new Set<Response>();
+  let drainingConnections = false;
   if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
   const draftSessionLeases = new CanvasDraftSessionLeases();
   const FRONTEND_SETTINGS_KEY = "frontend.settings";
@@ -207,12 +209,19 @@ export function startServer(
     const originalWriteHead = res.writeHead;
     res.writeHead = function writeHead(this: Response, ...args: unknown[]) {
       const result = (originalWriteHead as (...rest: unknown[]) => Response).apply(this, args);
-      watch.markFirstByte(String(this.getHeader("content-type") ?? ""));
+      const contentType = String(this.getHeader("content-type") ?? "");
+      if (contentType.toLowerCase().startsWith("text/event-stream")) eventStreams.add(this);
+      watch.markFirstByte(contentType);
       return result;
     } as Response["writeHead"];
-    const finish = (outcome: string) =>
+    const finish = (outcome: string) => {
+      eventStreams.delete(res);
       watch.finish(outcome, String(res.getHeader("content-type") ?? ""));
-    res.once("finish", () => finish(`http-${res.statusCode}`));
+    };
+    res.once("finish", () => {
+      if (drainingConnections) req.socket.end();
+      finish(`http-${res.statusCode}`);
+    });
     res.once("close", () => finish("connection-closed"));
     next();
   });
@@ -846,6 +855,10 @@ export function startServer(
         conflictTargets?: string[];
         committed?: boolean;
         snapshotAvailable?: boolean;
+        field?: string;
+        nodeId?: string;
+        segmentId?: string;
+        currentValue?: unknown;
       };
       if (req.body?.mcpCommand && typeof req.body.mcpCommand === "object") db.rejectMcpCommand(operationId, value.code || "MCP_COMMAND_REJECTED", value.message);
       if (
@@ -900,9 +913,15 @@ export function startServer(
           targetNodeIdForText: operation?.target ? { nodeId: String((operation.target as { nodeId?: unknown }).nodeId || ""), segmentId: String((operation.target as { segmentId?: unknown }).segmentId || ""), field: String((operation.target as { field?: unknown }).field || "") } : undefined,
         })),
       });
+      // 确定性失败也要可判定：给出稳定 code，字段 CAS 附当前值，调用方一次就能修正或明确放弃。
       res
         .status(400)
-        .json({ ok: false, error: value.message || String(error) });
+        .json({
+          ok: false,
+          code: value.code || "CANVAS_OPS_REJECTED",
+          error: value.message || String(error),
+          ...(value.code === "STALE_EXPECTED_FIELD" ? { conflict: { field: value.field, nodeId: value.nodeId, segmentId: value.segmentId, currentValue: value.currentValue } } : {}),
+        });
     }
   });
   app.delete("/canvas/projects/:id", (req, res) => {
@@ -2162,7 +2181,15 @@ export function startServer(
   registerMcpExportRoutes(app, stores.projects, deps.snapshotExports);
   registerBackendErrorHandler(app);
 
-  return { app: app as Express, stores, events };
+  return {
+    app: app as Express, stores, events,
+    drainHttpConnections() {
+      // Responses completing after server.close() also need to release keep-alive.
+      drainingConnections = true;
+      for (const response of eventStreams) response.end();
+      eventStreams.clear();
+    },
+  };
 }
 
 function canvasEventSource(value: unknown): CanvasEventSource {

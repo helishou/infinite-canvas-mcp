@@ -46,13 +46,17 @@ async function captureOutputFrame(url: string, position: "current" | "first" | "
 }
 
 export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = false, onRestore, restoreTitle, onRemove, onOpenPreview, storyboardFrameTimes = [] }: { ctx: CanvasNodeContext; ref: H3Ref; locale: H3Locale; compact?: boolean; removable?: boolean; onRestore?: () => void; restoreTitle?: string; onRemove?: () => void; onOpenPreview?: () => void; storyboardFrameTimes?: number[] }) {
-    const compactMedia = ctx.scale < 0.2;
+    // 素材卡不按画布缩放卸载视频：工作台是 data-canvas-no-zoom 内容，画布拉远时
+    // 卡片尺寸不变；视频按需加载交给 Output 卡片的 IntersectionObserver。
     // Output 区域通过 removable 明确传入；不能依赖名称是否以 “Clip” 开头，
     // 旧输出可能叫“H3 输出”，但同样应该显示下载/还原按钮。
     const isOutput = compact && removable;
     const cardRef = useRef<HTMLDivElement | null>(null);
     const captureMenuRef = useRef<HTMLDivElement | null>(null);
     const [previewReady, setPreviewReady] = useState(false);
+    // Backend main-thread stalls in bursts of 2~5s (production editing/GC); media first bytes can't be sent in time and the browser drops the request, leaving cards black forever.
+    // On load failure, automatically change the src and retry up to 2 times; most stalled loads can be recovered after the stall window ends.
+    const [mediaRetry, setMediaRetry] = useState(0);
     const [captureMenu, setCaptureMenu] = useState<{ x: number; y: number } | null>(null);
     useEffect(() => {
         if (!isOutput) return;
@@ -80,6 +84,9 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
         return () => { document.removeEventListener("pointerdown", close, true); window.removeEventListener("keydown", onKey); };
     }, [captureMenu]);
     const mediaUrl = ref.storageKey ? ctx.mediaUrl(ref.storageKey) : ref.url;
+    useEffect(() => { setMediaRetry(0); }, [mediaUrl]);
+    const mediaUrlWithRetry = mediaRetry ? `${mediaUrl}${mediaUrl.includes("?") ? "&" : "?"}h3-retry=${mediaRetry}` : mediaUrl;
+    const retryMediaLoad = () => setMediaRetry((n) => Math.min(n + 1, 2));
     const cardClass = isOutput ? "minimax-material-card minimax-output-item" : compact ? "minimax-material-card minimax-asset-item" : "minimax-material-card";
     const dragStart = (event: React.DragEvent<HTMLDivElement>) => {
         event.dataTransfer.effectAllowed = "copy";
@@ -104,7 +111,7 @@ export function H3MaterialCard({ ctx, ref, locale, compact = false, removable = 
         event.preventDefault(); event.stopPropagation();
         setCaptureMenu({ x: event.clientX, y: event.clientY });
     }} onDoubleClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }} title={onOpenPreview ? "双击放大预览" : undefined} style={{ position: "relative", flex: `0 0 ${compact ? 82 : 118}px`, height: compact ? (isOutput ? 78 : 58) : 64, overflow: "hidden", border: `1px solid ${ctx.theme.node.stroke}`, borderRadius: 5, background: ctx.theme.node.fill, cursor: "grab" }}>
-        {ref.type === "video" ? compactMedia || isOutput && !previewReady ? <H3Icon name="clapperboard" /> : <video src={mediaUrl} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ref.type === "image" ? <img src={mediaUrl} alt={ref.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ padding: 16, fontSize: 22 }}>♫ {ref.name}</span>}
+        {ref.type === "video" ? isOutput && !previewReady ? <H3Icon name="clapperboard" /> : <video src={mediaUrlWithRetry} muted playsInline preload="metadata" onError={retryMediaLoad} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : ref.type === "image" ? <img src={mediaUrlWithRetry} alt={ref.name} onError={retryMediaLoad} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ padding: 16, fontSize: 22 }}>♫ {ref.name}</span>}
         {/* Output 卡片必须显示名字：历史输出同属一个 Clip 但有 N 个版本，类型标签无法区分。 */}
         {isOutput ? <span className="minimax-output-name" title={ref.name}>{ref.name}</span> : <span>{h3Label(locale, ref.type === "image" ? "image" : ref.type === "video" ? "video" : "audio")}</span>}
         {isOutput ? <span style={{ position: "absolute", right: 4, top: 4, display: "flex", gap: 3 }}><button type="button" title="放大预览" aria-label="放大预览" onClick={(event) => { event.stopPropagation(); onOpenPreview?.(); }}><H3Icon name="zoom" /></button><button type="button" title="下载输出视频" aria-label="下载输出视频" onClick={(event) => { event.stopPropagation(); saveAs(mediaUrl, ref.name || "h3-output"); }}><H3Icon name="download" /></button>{onRestore ? <button type="button" title={restoreTitle || "设为当前 Clip（还原提示词与参数）"} aria-label={restoreTitle || "设为当前 Clip（还原提示词与参数）"} onClick={(event) => { event.stopPropagation(); onRestore(); }}><H3Icon name="restore" /></button> : null}</span> : null}

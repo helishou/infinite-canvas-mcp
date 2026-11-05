@@ -82,7 +82,7 @@ test("a compile blocker without targetId is retained as a diagnostic, not promot
     const compilations = new ProductionCompilationService(service, path.join(root, "unscoped-diagnostic"), compiler);
     const started = compilations.enqueue("episode", "episode", "unscoped-diagnostic", 1);
     const job = await done(compilations, started.operationId);
-    assert.equal(job.status, "succeeded");
+    assert.equal(job.status, "succeeded", JSON.stringify(compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 10)));
     assert.equal(job.verdict, "passed_with_warnings");
     assert.equal(job.blockingDiagnostic?.code, unscopedBlocker.code, "the diagnostic stays visible without making the job globally blocked");
     const diagnostics = compilations.getCompilation("episode", "episode", started.operationId, "diagnostics", 0, 10);
@@ -288,7 +288,7 @@ function fixture(t: test.TestContext) {
     return { root, db, service, compilations, director };
 }
 
-test("unchanged full compilation reuses artifacts and a scoped edit compiles only its invalid target", async t => {
+for (const scoped of [true, false]) test(`unchanged full compilation reuses artifacts and a ${scoped ? "scoped" : "full"} edit compiles only its invalid target`, async t => {
     const { root, service, director, db } = fixture(t);
     director.source.asset_plan = ["A", "B"].map(id => ({ id, kind: "prop", depends_on: [] }));
     director.source.asset_cards = ["A", "B"].map(id => ({ id, prompt: `authored ${id}` }));
@@ -311,12 +311,12 @@ test("unchanged full compilation reuses artifacts and a scoped edit compiles onl
         await jobs.apply("episode", "episode", job.preparedId!);
         return job;
     };
-    await run("initial", { targetIds: ["A", "B"] });
+    await run("initial", scoped ? { targetIds: ["A", "B"] } : undefined);
     await run("unchanged-full");
     assert.deepEqual(calls, [["A", "B"]], "an unscoped unchanged request must not invoke the compiler again");
     const current = service.get("episode"), originalA = structuredClone(current.draft.director!.artifacts.find(item => item.targetId === "A"));
     await service.edit("episode", { operationId: "change-B", expectedRevision: current.revision, ops: [{ type: "patch_director_source", entity: "asset_card", id: "B", patch: { prompt: "revised B" } }] });
-    await run("partial", { targetIds: ["A", "B"] });
+    await run("partial", scoped ? { targetIds: ["A", "B"] } : undefined);
     assert.deepEqual(calls, [["A", "B"], ["B"]]);
     const after = service.get("episode").draft.director!;
     assert.deepEqual(after.artifacts.find(item => item.targetId === "A"), originalA, "reuse retains the actual original receipt and bytes");
@@ -325,6 +325,49 @@ test("unchanged full compilation reuses artifacts and a scoped edit compiles onl
     const prepared = await jobs.prepare("episode", "episode", service.get("episode").revision);
     assert.equal(prepared.audit.status, "REUSED");
     assert.equal(calls.length, 2, "synchronous preparation uses the same reuse rules");
+});
+
+test("a camera edit in a full Clip compile preserves the other Clip and owner source", async t => {
+    const { root, service, director } = fixture(t);
+    director.source.asset_cards = [];
+    director.source.scene_registry = [{ id: "ROOM", name: "Room" }];
+    director.source.script_scenes = [{ id: "SCENE", scene_id: "ROOM", text: "Doorway", beat_ids: ["BEAT"] }];
+    director.source.shots = ["A", "B"].map(id => ({ id: `SHOT-${id}`, duration_frames: 96,
+        scene_id: "ROOM", story_beat_ids: ["BEAT"], timeline_id: "main", story_order: id === "A" ? 0 : 1, subject_usages: [],
+        camera: { framing: "MS", movement: "locked" }, visual: `Doorway ${id}` }));
+    director.source.segments = ["A", "B"].map(id => ({ id, shot_ids: [`SHOT-${id}`], mode: "T2VA" }));
+    director.sourceHash = directorHash(director.source);
+    service.edit("episode", { operationId: "seed-clips", expectedRevision: 1, ops: [{ type: "set_director_production", director }] });
+    const calls: string[][] = [];
+    const jobs = new ProductionCompilationService(service, root, input => {
+        const segments = input.source.segments as Array<{ id: string }>;
+        calls.push(segments.map(item => item.id));
+        return { director: { ...input, artifacts: segments.map(({ id }) => {
+            const prompt = JSON.stringify((input.source.shots as any[]).find(shot => shot.id === `SHOT-${id}`).camera);
+            return { id: `h3-${id}`, targetId: id, kind: "h3" as const, prompt, sha256: promptHash(prompt), sourceHash: input.sourceHash,
+                status: "ready" as const, references: [], receipt: { sourceHash: input.sourceHash, promptHash: promptHash(prompt), engineRuntimeId: input.engine.runtimeId, validator: "fixture" } };
+        }) }, exitCode: 0, diagnostics: [], audit: {}, sourceAdjustments: [], acceptance: {} };
+    });
+    const run = async (operationId: string) => {
+        jobs.enqueue("episode", "episode", operationId, service.get("episode").revision);
+        const job = await done(jobs, operationId);
+        assert.equal(job.status, "succeeded", JSON.stringify(job));
+        await jobs.apply("episode", "episode", job.preparedId!);
+    };
+    await run("clips-initial");
+    const before = service.get("episode");
+    service.edit("episode", { operationId: "camera-B", expectedRevision: before.revision,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "SHOT-B", patch: { camera: { framing: "CU", movement: "locked" } } }] });
+    const originalA = service.get("episode").draft.director!.artifacts.find(item => item.targetId === "A");
+    await run("clips-camera-edit");
+    assert.deepEqual(calls, [["A", "B"], ["B"]]);
+    const after = service.get("episode").draft.director!;
+    assert.deepEqual(after.artifacts.find(item => item.targetId === "A"), originalA);
+    assert.equal((after.source.shots as any[]).length, 2);
+    assert.equal((after.source.segments as any[]).length, 2);
+    assert.ok(after.artifacts.every(item => currentCompilationArtifact(after, item)));
+    await run("clips-unchanged");
+    assert.equal(calls.length, 2);
 });
 
 test("prompt bytes and receipt hashes must match before a ready artifact is reused", async t => {

@@ -6,7 +6,7 @@ import { stripDuplicateTransition } from "../../../../../canvas-agent/src/plugin
 import { orderStoryboardReferencesFirst, remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 import { sameRef } from "./h3-compatibility";
 import { storyboardShotLabelMarkers } from "./h3-storyboard-markers";
-import { inferReferenceRole, refsForSegment, withSegmentRefs } from "./h3-data";
+import { inferReferenceRole, refsForSegment, refsForSubmission, withSegmentRefs } from "./h3-data";
 
 export const H3_STORYBOARD_MIN_DURATION = 0.5;
 
@@ -405,37 +405,52 @@ function normalizeTransition(body: string, hasPrecedingShot: boolean) {
     ].filter(Boolean).join(" ");
 }
 
-function syncPromptShots(content: string, segment: H3Segment, activeItems: ReturnType<typeof storyboardTrackItems>) {
-    const refs = refsForSegment(segment);
+function syncPromptShots(
+    content: string,
+    segment: H3Segment,
+    activeItems: ReturnType<typeof storyboardTrackItems>,
+    previousContent: string,
+    previousSegment: H3Segment,
+) {
+    const refs = refsForSubmission(segment);
     const storyboardRefs = storyboardRefsForSegment(segment);
     const storyboardIds = new Set(storyboardRefs.flatMap((ref) => ref.bindingId ? [ref.bindingId] : []));
     const parsed = promptShotsOf(content, storyboardIds, refs.filter((ref) => ref.type === "image"));
-    if (!activeItems.length && !parsed.shots.some((shot) => shot.managed)) return content;
+    const previousRefs = refsForSubmission(previousSegment);
+    const previousStoryboardRefs = storyboardRefsForSegment(previousSegment);
+    const previousStoryboardIds = new Set(previousStoryboardRefs.flatMap((ref) => ref.bindingId ? [ref.bindingId] : []));
+    const previousParsed = promptShotsOf(previousContent, previousStoryboardIds, previousRefs.filter((ref) => ref.type === "image"));
+    const previousItems = storyboardTrackItems(previousSegment);
+    if (!activeItems.length && !previousItems.length && !parsed.shots.some((shot) => shot.managed)) return content;
 
-    const activeIds = new Set(activeItems.map((item) => item.id));
-    const bindingToShotId = new Map(activeItems.flatMap((item) => item.ref?.bindingId ? [[item.ref.bindingId, item.id] as const] : []));
-    const oldShots = new Map<string, PromptShot>();
-    const assigned = new Set<PromptShot>();
-    for (const shot of parsed.shots) {
-        const shotId = shot.bindingId ? bindingToShotId.get(shot.bindingId) : undefined;
-        if (shotId && activeIds.has(shotId) && !oldShots.has(shotId)) {
-            oldShots.set(shotId, shot);
-            assigned.add(shot);
+    // Read the old prompt against the old reference order. A deleted storyboard image can
+    // shift every later <Picture N>; parsing against the new order would attach the deleted
+    // shot's text to the next surviving card.
+    const previousBindingToShotId = new Map(previousItems.flatMap((item) => item.ref?.bindingId ? [[item.ref.bindingId, item.id] as const] : []));
+    const previousShotIndexById = new Map<string, number>();
+    const assignedPrevious = new Set<number>();
+    previousParsed.shots.forEach((shot, index) => {
+        const shotId = shot.bindingId ? previousBindingToShotId.get(shot.bindingId) : undefined;
+        if (shotId && !previousShotIndexById.has(shotId)) {
+            previousShotIndexById.set(shotId, index);
+            assignedPrevious.add(index);
         }
-    }
-    // 老提示词常有逐镜描述但没有图片绑定；按顺序关联到当前分镜项目。
-    const unboundShots = parsed.shots.filter((shot) => !assigned.has(shot) && !shot.managed && !shot.bindingId);
+    });
+    // 老提示词常有逐镜描述但没有图片绑定；先按变更前的分镜顺序关联，增删后才能正确保留/移除。
+    const unboundShots = previousParsed.shots.flatMap((shot, index) =>
+        !assignedPrevious.has(index) && !shot.managed && !shot.bindingId ? [{ shot, index }] : []);
     let unboundIndex = 0;
-    for (const item of activeItems) {
-        if (oldShots.has(item.id)) continue;
+    for (const item of previousItems) {
+        if (previousShotIndexById.has(item.id)) continue;
         const shot = unboundShots[unboundIndex++];
         if (!shot) break;
-        oldShots.set(item.id, shot);
-        assigned.add(shot);
+        previousShotIndexById.set(item.id, shot.index);
+        assignedPrevious.add(shot.index);
     }
 
     const tracked = activeItems.flatMap((item, index) => {
-        const existing = oldShots.get(item.id);
+        const previousIndex = previousShotIndexById.get(item.id);
+        const existing = previousIndex === undefined ? undefined : parsed.shots[previousIndex];
         let body = existing ? stripShotTime(existing.body) : "";
         if (item.ref?.bindingId) {
             const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === item.ref?.bindingId);
@@ -447,10 +462,12 @@ function syncPromptShots(content: string, segment: H3Segment, activeItems: Retur
         return [formatShot(index, existing?.preciseCut ? item.start : undefined, body)];
     });
 
-    const remaining = parsed.shots.filter((shot) => !assigned.has(shot)).flatMap((shot, index) => {
-        if (!shot.managed) return [shot.body];
-        const bindingId = shot.bindingId;
-        if (bindingId && storyboardIds.has(bindingId)) {
+    const remaining = parsed.shots.flatMap((shot, index) => {
+        if (assignedPrevious.has(index)) return [];
+        const previousShot = previousParsed.shots[index];
+        if (previousShot?.managed) {
+            const bindingId = previousShot.bindingId;
+            if (!bindingId || !storyboardIds.has(bindingId)) return [];
             let body = stripShotTime(shot.body);
             const pictureIndex = refs.filter((ref) => ref.type === "image").findIndex((ref) => ref.bindingId === bindingId);
             const pictureTag = `<Picture ${pictureIndex + 1}>`;
@@ -471,7 +488,51 @@ function escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment) {
+const storyboardPromptSyncQueues = new Map<string, Promise<boolean>>();
+
+function enqueueStoryboardPromptSync(ctx: CanvasNodeContext, segmentId: string, sync: () => Promise<boolean>) {
+    const key = JSON.stringify([ctx.node.id, segmentId]);
+    const pending = storyboardPromptSyncQueues.get(key) ?? Promise.resolve(true);
+    const operation = pending.catch(() => false).then(sync);
+    storyboardPromptSyncQueues.set(key, operation);
+    const clearQueue = () => {
+        if (storyboardPromptSyncQueues.get(key) === operation) storyboardPromptSyncQueues.delete(key);
+    };
+    void operation.then(clearQueue, clearQueue);
+    return operation;
+}
+
+export function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment): Promise<boolean> {
+    if (!segment.id) return Promise.resolve(false);
+    return enqueueStoryboardPromptSync(ctx, segment.id, () => syncStoryboardPromptNow(ctx, segment, previous));
+}
+
+/** Remap prompt Picture ordinals when a formal storyboard edit changes submission order. */
+export function syncStoryboardPictureOrder(ctx: CanvasNodeContext, previous: H3Segment, updated: H3Segment): Promise<boolean> {
+    if (!updated.id) return Promise.resolve(false);
+    return enqueueStoryboardPromptSync(ctx, updated.id, async () => {
+        const previousPictures = refsForSubmission(previous).filter((ref) => ref.type === "image");
+        const updatedPictures = refsForSubmission(updated).filter((ref) => ref.type === "image");
+        if (previousPictures.length === updatedPictures.length
+            && previousPictures.every((ref, index) => ref.bindingId === updatedPictures[index]?.bindingId)) return true;
+        const target = { nodeId: ctx.node.id, segmentId: updated.id, field: "prompt" as const };
+        try {
+            const document = ctx.textDocument(target);
+            await document.flush();
+            const snapshot = document.getSnapshot();
+            if (!snapshot.ready || snapshot.blocked) return false;
+            const next = remapPictureTags(snapshot.text, previousPictures, updatedPictures,
+                (ref) => ref.bindingId, (ref) => ref.type === "image");
+            if (next === snapshot.text) return true;
+            return await ctx.replaceText(target, document.getDocumentId(), snapshot.text, next);
+        } catch (error) {
+            console.warn("H3 分镜图片顺序同步失败", error);
+            return false;
+        }
+    });
+}
+
+async function syncStoryboardPromptNow(ctx: CanvasNodeContext, segment: H3Segment, previous?: H3Segment): Promise<boolean> {
     if (!segment.id) return false;
     // 无 before 的调用来自自动归一化；正式稿只在显式编辑后同步。
     if (segment.productionClipProjection && !previous) return true;
@@ -481,9 +542,10 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         await document.flush();
         const snapshot = document.getSnapshot();
         if (!snapshot.ready || snapshot.blocked) return false;
-        const currentRefs = refsForSegment(segment);
+        const currentRefs = refsForSubmission(segment);
+        const previousPrompt = previous ? removeLegacyTimelineSection(snapshot.text) : undefined;
         const prompt = removeLegacyTimelineSection(previous
-            ? remapPictureTags(snapshot.text, refsForSegment(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
+            ? remapPictureTags(snapshot.text, refsForSubmission(previous), currentRefs, (ref) => ref.bindingId, (ref) => ref.type === "image")
             : snapshot.text);
         const enabled = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment) && storyboardTrackItems(segment).length > 0;
         const mode = String(segment.taskMode || segment.mode || "ref2va");
@@ -493,7 +555,10 @@ export async function syncStoryboardPrompt(ctx: CanvasNodeContext, segment: H3Se
         const imageRefs = refs.filter((ref) => ref.type === "image");
         const normalizedSection = normalizeLegacyPictureTokens(sectionText, imageRefs);
         const activeItems = enabled ? storyboardTrackItems(segment) : [];
-        const syncedSection = syncPromptShots(normalizedSection, segment, activeItems);
+        const previousSectionText = previousPrompt ? readH3PromptSection(previousPrompt, section) : normalizedSection;
+        const previousImageRefs = refsForSubmission(previous || segment).filter((ref) => ref.type === "image");
+        const normalizedPreviousSection = normalizeLegacyPictureTokens(previousSectionText, previousImageRefs);
+        const syncedSection = syncPromptShots(normalizedSection, segment, activeItems, normalizedPreviousSection, previous || segment);
         const next = replaceH3PromptSection(prompt, section, syncedSection, mode);
         if (next === snapshot.text) return true;
         return await ctx.replaceText(target, document.getDocumentId(), snapshot.text, next);

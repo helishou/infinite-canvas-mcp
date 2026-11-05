@@ -242,6 +242,9 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
             const nodeId = String(operation.nodeId || "");
             const segmentId = String(operation.segmentId || "");
             const patch = { ...recordOf(operation.patch) };
+            if (Object.hasOwn(patch, "referenceBindings")) {
+                patch.referenceBindings = dedupeH3ReferenceBindings(patch.referenceBindings);
+            }
             if (!nodeId) throw new Error("update_h3_segment 缺少 nodeId");
             if (!segmentId) throw new Error("update_h3_segment 缺少 segmentId");
             const node = nodes.find((item) => String(item.id) === nodeId);
@@ -259,11 +262,18 @@ export function applyCanvasProjectOperations(project: Record<string, unknown>, o
                 patch.mode = mode;
                 operation.patch = patch;
             }
-            // CAS：expectedFields 中的每一个字段都必须与当前值匹配，否则抛错（用于任务回写防止被新任务接管后被覆盖）。
-            if (operation.expectedFields && typeof operation.expectedFields === "object") {
+            // CAS：expectedFields 用于防止旧任务回写覆盖新任务，不是快照字节比对。
+            // 对可编辑数组字段按语义比较，避免 Backend 自身规范化/共享同步补字段造成永久冲突。
+            // expectedFields 是提交时的一次性校验条件，会随 ops 落进 canvas_operation_batches；
+            // 历史重放只重建已提交状态，再校验旧期望值会让无关节点的请求整批回滚。
+            if (!options.committedReplay && operation.expectedFields && typeof operation.expectedFields === "object") {
                 for (const [field, expected] of Object.entries(operation.expectedFields as Record<string, unknown>)) {
-                    if (!sameValue(segments[index][field], expected)) {
-                        throw new Error(`update_h3_segment CAS 失败：${nodeId}/${segmentId}.${field} 已不是期望值`);
+                    const current = segments[index][field];
+                    if (!sameExpectedFieldValue(field, current, expected)) {
+                        throw Object.assign(
+                            new Error(`update_h3_segment CAS 失败：${nodeId}/${segmentId}.${field} 已不是期望值（当前 ${describeExpectedField(field, current)}，期望 ${describeExpectedField(field, expected)}）`),
+                            { code: "STALE_EXPECTED_FIELD", currentValue: current, field, nodeId, segmentId },
+                        );
                     }
                 }
             }
@@ -689,6 +699,32 @@ function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+/**
+ * 同一绑定在一段 Clip 里只能占一个 Picture 槽位。
+ *
+ * 环境（scene）绑定会被多条写路径重复追加：编译投影、兄弟片段继承、故事板同步各写一次，
+ * 于是数组里出现两行同一 id 的绑定。节点按数组顺序编号 <Picture N>，而编译产物按真实条目编号，
+ * 两边从第二张起就错开一位——提示词里的 <Picture 2> 实际指向环境图，甚至越界报缺图。
+ * 所有写入 update_h3_segment 的 referenceBindings 都在这里按 id 去重（无 id 时按来源+资源键）。
+ */
+function dedupeH3ReferenceBindings(value: unknown): unknown {
+    if (!Array.isArray(value)) return value;
+    const seen = new Set<string>();
+    const unique: unknown[] = [];
+    for (const item of value) {
+        const row = recordOf(item);
+        const id = String(row.id || row.bindingId || "");
+        const key = id
+            ? `id:${id}`
+            : ["node", row.sourceNodeId || row.nodeId, row.storageKey, row.assetId, row.role, row.usage, row.label]
+                .map(field => String(field || "")).join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(item);
+    }
+    return unique;
+}
+
 function orderedGroupForMember(nodes: Array<Record<string, unknown>>, member: Record<string, unknown>) {
     const groupId = String(recordOf(member.metadata).groupId || "");
     return nodes.find((node) => String(node.id) === groupId && recordOf(node.metadata).orderedGroup === true);
@@ -754,6 +790,44 @@ function sameValue(left: unknown, right: unknown) {
         try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
     }
     return String(left ?? "") === String(right ?? "");
+}
+
+/**
+ * expectedFields 的语义基线：只用于判断「这段值是否已被别处改写」，不是请求快照的字节校验。
+ * 数组保持顺序语义（参考顺序有意义），但单项忽略对象键顺序与 undefined 字段，
+ * 这样 Backend 规范化、资产目录登记、共享派生补的字段不会把一次正常写入永久判成冲突。
+ */
+function canonicalExpectedField(value: unknown): string {
+    if (value === undefined) return "<missing>";
+    const normalizeObject = (source: Record<string, unknown>) => {
+        const normalized: Record<string, unknown> = {};
+        for (const key of Object.keys(source).sort()) {
+            const entry = source[key];
+            if (entry !== undefined) normalized[key] = entry;
+        }
+        return JSON.stringify(normalized);
+    };
+    if (Array.isArray(value)) return value.map((item) =>
+        item && typeof item === "object" && !Array.isArray(item)
+            ? normalizeObject(item as Record<string, unknown>)
+            : JSON.stringify(item) ?? String(item)).join("\u0000");
+    if (value && typeof value === "object") return normalizeObject(value as Record<string, unknown>);
+    return JSON.stringify(value) ?? String(value);
+}
+
+function sameExpectedFieldValue(field: string, current: unknown, expected: unknown) {
+    // 写入时 patch.referenceBindings 会强制去重，期望值必须按同一规则归一化。
+    // 否则客户端/派生流程读到带重复项的快照后，「读自己的写」也会永远判成冲突，形成确定性死锁。
+    const normalize = (value: unknown) => field === "referenceBindings" ? dedupeH3ReferenceBindings(value) : value;
+    const left = normalize(current), right = normalize(expected);
+    if (sameValue(left, right)) return true;
+    if (!["referenceBindings", "h3CharacterGroups"].includes(field)) return false;
+    return canonicalExpectedField(left) === canonicalExpectedField(right);
+}
+
+function describeExpectedField(field: string, value: unknown) {
+    if (Array.isArray(value)) return `${value.length} 项[${value.map((item) => String(recordOf(item).id || "")).filter(Boolean).join(",")}]`;
+    return JSON.stringify(value) ?? String(value);
 }
 
 /**

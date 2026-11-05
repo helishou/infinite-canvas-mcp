@@ -1,3 +1,4 @@
+import { h3ClipNumber } from "../services/h3-data";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useEffect, useRef, useState, useCallback, useMemo } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContentProps } from "@infinite-canvas/plugin-sdk";
@@ -5,14 +6,14 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
-import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, refsForSubmission, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
+import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
 import { patchSelectedSegment } from "../services/h3-segment-utils";
 import { patchAllH3Clips } from "../services/h3-global-settings";
 import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { h3ThemeVars } from "../h3-theme";
-import { alignStoryboardReferenceOrder, assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, isStoryboardModeEnabled, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPrompt } from "../services/h3-storyboard-track";
+import { alignStoryboardReferenceOrder, assignStoryboardShotRef, assignStoryboardShotRefs, dropUnboundStoryboardReferences, isStoryboardModeEnabled, rebindStoryboardShot, removeStoryboardImageReference, storyboardRefsForSegment, storyboardTrackItems, syncStoryboardPictureOrder, syncStoryboardPrompt } from "../services/h3-storyboard-track";
 import { H3PaneHandles, H3PreviewPlayer, H3RulerScrubber, H3StatusBadge, H3_TIMELINE_MIN, h3SolveRows, requestH3Run } from "./H3WorkbenchPrimitives";
 import { SmartStoryboardModal } from "./SmartStoryboardModal";
 import { H3CurrentClipPanel } from "./H3CurrentClipPanel";
@@ -22,7 +23,6 @@ import { H3MaterialLibrary } from "./H3MaterialLibrary";
 import { H3Runner } from "./H3Runner";
 import { H3WorkbenchToolbar } from "./H3WorkbenchToolbar";
 import { H3ReferenceModal } from "./H3ReferenceModal";
-import { remapPictureTags } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
 export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctx = useH3LocalView(sharedContext);
@@ -72,7 +72,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             }
             const url = resultUrl(segment.result);
             if (url) {
-                rawOutputs.push({ url, type: "video", name: h3OutputName(ctx.node, segmentIndex + 1), storageKey: segment.resultStorageKey, segmentId: segment.id });
+                rawOutputs.push({ url, type: "video", name: h3OutputName(ctx.node, h3ClipNumber(ctx, segment, segmentIndex)), storageKey: segment.resultStorageKey, segmentId: segment.id });
                 if (!segmentByUrl.has(url)) segmentByUrl.set(url, segment.id);
             }
         }
@@ -141,7 +141,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const selectedResultRef = (selected?.results || []).find((item) => resultUrl(item.url) === preview || item.url === preview);
     const previewKind: H3Ref["type"] = showLivePreview ? (livePreview!.mime.startsWith("image/") ? "image" : "video") : (selectedResultRef?.type || (resultUrl(selected?.result) ? "video" : selectedVideo ? "video" : selectedImage ? "image" : "video"));
     const previewStorageKey = showLivePreview ? undefined : selectedResultRef?.storageKey || (resultUrl(selected?.result) ? selected?.resultStorageKey : (upstream.find((item) => item.url === preview)?.storageKey)) || undefined;
-    const previewName = selectedResultRef?.name || (resultUrl(selected?.result) ? `Clip ${selectedIndex + 1}` : "H3 输出");
+    const previewName = selectedResultRef?.name || (resultUrl(selected?.result) ? `Clip ${h3ClipNumber(ctx, selected, selectedIndex)}` : "H3 输出");
     const imageRefs = selectedRefs.filter((item) => item.type === "image");
     const videoRefs = selectedRefs.filter((item) => item.type === "video");
     const audioRefs = selectedRefs.filter((item) => item.type === "audio");
@@ -312,11 +312,6 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         const current = segmentsFor(liveMetadata);
         const previous = current.find((item) => item.id === updated.id);
         if (!previous) return false;
-        const previousPictures = refsForSubmission(previous).filter((ref) => ref.type === "image");
-        const updatedPictures = refsForSubmission(updated).filter((ref) => ref.type === "image");
-        const updatedPictureIds = new Set(updatedPictures.map((ref) => ref.bindingId).filter((id): id is string => Boolean(id)));
-        const addsPicturesWithoutRemovingExisting = updatedPictures.length > previousPictures.length
-            && previousPictures.every((ref) => Boolean(ref.bindingId && updatedPictureIds.has(ref.bindingId)));
         const previousItems = storyboardTrackItems(previous);
         const previousIds = new Set(previousItems.map((item) => item.id));
         const addedStoryboards = storyboardTrackItems(updated).filter((item) => !previousIds.has(item.id));
@@ -341,33 +336,21 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             }
             if (!ctx.production) { message.error("正式制作 Clip 的分镜需要制作台编辑器接收；当前工作台未连接"); return false; }
         }
-        if (addsPicturesWithoutRemovingExisting) {
-            try {
-                const textTarget = { nodeId: ctx.node.id, segmentId: updated.id, field: "prompt" as const };
-                const document = ctx.textDocument(textTarget);
-                await document.flush();
-                const snapshot = document.getSnapshot();
-                if (!snapshot.ready || snapshot.blocked) {
-                    message.error(snapshot.error || "提示词尚未同步，无法保持 Picture 引用对应关系。");
-                    return false;
-                }
-                const remappedPrompt = remapPictureTags(snapshot.text, previousPictures, updatedPictures,
-                    (ref) => ref.bindingId, (ref) => ref.type === "image");
-                if (remappedPrompt !== snapshot.text && !await ctx.replaceText(textTarget, document.getDocumentId(), snapshot.text, remappedPrompt)) {
-                    message.error("参考图顺序更新时提示词发生并发修改，请重试。");
-                    return false;
-                }
-            } catch (error) {
-                message.error(error instanceof Error ? error.message : "同步 Picture 引用编号失败，参考未保存。");
-                return false;
-            }
-        }
         if (formalStoryboardChanged) {
             if (!ctx.production) return false;
-            void ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> })
-                .then(result => { if (result.sourceSaved) message.success("分镜图已写入制作稿"); else message.error("制作台未保存分镜更改"); })
-                .catch(error => message.error(error instanceof Error ? error.message : String(error)));
-            return true;
+            if (!await syncStoryboardPictureOrder(ctx, previous, updated)) {
+                message.error("提示词尚未同步，无法保持 Picture 引用对应关系。");
+                return false;
+            }
+            try {
+                const result = await ctx.production.replaceStoryboardTrack({ nodeId: ctx.node.id, segmentId: updated.id, segment: updated as unknown as Record<string, unknown> });
+                if (!result.sourceSaved) { message.error("制作台未保存分镜更改"); return false; }
+                message.success("分镜图已写入制作稿");
+                return true;
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : String(error));
+                return false;
+            }
         }
         ctx.updateMetadata({ ...(select ? { selectedSegmentId: updated.id } : {}), segments: current.map((item) => item.id === updated.id ? updated : item) });
         void syncStoryboardPrompt(ctx, updated, previous);

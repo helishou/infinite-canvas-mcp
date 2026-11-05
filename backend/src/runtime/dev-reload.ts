@@ -16,6 +16,7 @@ export function createDevReloadGate() {
     };
     return {
         middleware,
+        get mutationsInFlight() { return mutations; },
         tryReload: (busy: () => boolean) => {
             if (draining || mutations || busy()) return false;
             draining = true;

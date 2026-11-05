@@ -43,7 +43,8 @@
     "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js",
     "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js",
     "./tool-profiles": "./dist/canvas/tool-profiles.js",
-    "./drama/production-edit-disclosure": "./dist/drama/production-edit-disclosure.js"
+    "./drama/production-edit-disclosure": "./dist/drama/production-edit-disclosure.js",
+    "./server/mcp-arg-integrity": "./dist/server/mcp-arg-integrity.js"
   },
   "types": "./dist/index.d.ts",
   "bin": {

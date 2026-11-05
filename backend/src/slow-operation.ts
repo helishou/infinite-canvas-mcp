@@ -1,4 +1,4 @@
-import { performance } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 
 type SlowOperationLogger = {
     warn: (message: string, details?: Record<string, unknown>) => unknown;
@@ -13,6 +13,38 @@ let nextOperationId = 0;
 
 function nextId() {
     return `slow-${Date.now().toString(36)}-${(++nextOperationId).toString(36)}`;
+}
+
+/** Correlate slow requests with main-thread stalls using the existing diagnostic threshold. */
+export function startRuntimeMonitor(logger: SlowOperationLogger) {
+    const delay = monitorEventLoopDelay({ resolution: 20 });
+    delay.enable();
+    let lastSampleAt = performance.now();
+    let previousCpu = process.cpuUsage();
+    let previousUtilization = performance.eventLoopUtilization();
+    const timer = setInterval(() => {
+        const now = performance.now();
+        const elapsedMs = now - lastSampleAt;
+        const maxDelayMs = Math.max(delay.max / 1e6, elapsedMs - 1_000);
+        const cpu = process.cpuUsage();
+        const utilization = performance.eventLoopUtilization();
+        if (maxDelayMs >= SLOW_OPERATION_THRESHOLD_MS) {
+            logger.warn("slow-operation-main-thread", {
+                pid: process.pid,
+                elapsedMs: Math.round(elapsedMs),
+                maxDelayMs: Math.round(maxDelayMs),
+                cpuPercent: Math.round((cpu.user - previousCpu.user + cpu.system - previousCpu.system) / (elapsedMs * 10)),
+                eventLoopUtilization: performance.eventLoopUtilization(utilization, previousUtilization).utilization,
+                ...process.memoryUsage(),
+            });
+        }
+        lastSampleAt = now;
+        previousCpu = cpu;
+        previousUtilization = utilization;
+        delay.reset();
+    }, 1_000);
+    timer.unref();
+    return () => { clearInterval(timer); delay.disable(); };
 }
 
 /** Log only operations that exceed the local threshold; never include input or output payloads. */

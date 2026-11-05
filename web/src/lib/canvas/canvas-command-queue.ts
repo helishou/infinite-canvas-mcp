@@ -9,6 +9,8 @@ export type CanvasCommand<T> = {
     /** 首次发送前固定；丢回执后不允许改基线或请求内容。 */
     baseRevision?: number;
     rejected?: string;
+    /** 确定性 400：本次编辑已明确失败，保留草稿但不再参与发送、冲突阻断与生成门禁。 */
+    settled?: string;
     /** 用户明确重选冲突结果时，先落新记录再清旧记录，刷新按此集合屏蔽旧意图。 */
     supersedes?: string[];
 };
@@ -19,11 +21,18 @@ export class CanvasCommandQueue<T> {
     private commands = new Map<string, CanvasCommand<T>>();
     private writes = new Map<string, Promise<unknown>>();
     constructor(private storage: Storage<T>) {}
+    /** 待发送命令。已 settle 的确定性拒绝仍是用户数据，但不参与发送、冲突判定与生成门禁。 */
     list(projectId?: string) {
+        const superseded = new Set([...this.commands.values()].flatMap((item) => item.supersedes || []));
+        return [...this.commands.values()].filter((item) => !item.settled && !superseded.has(item.operationId) && (!projectId || item.projectId === projectId)).sort((a, b) => a.order - b.order || a.operationId.localeCompare(b.operationId));
+    }
+    /** 含已 settle 失败草稿的完整列表，供恢复 UI 与显式丢弃使用。 */
+    listAll(projectId?: string) {
         const superseded = new Set([...this.commands.values()].flatMap((item) => item.supersedes || []));
         return [...this.commands.values()].filter((item) => !superseded.has(item.operationId) && (!projectId || item.projectId === projectId)).sort((a, b) => a.order - b.order || a.operationId.localeCompare(b.operationId));
     }
     has(projectId: string) { return this.list(projectId).length > 0; }
+    hasSettled(projectId: string) { return this.listAll(projectId).some((item) => Boolean(item.settled)); }
     restore(command: CanvasCommand<T>) {
         if (!this.commands.has(command.operationId)) this.commands.set(command.operationId, command);
     }
@@ -65,6 +74,19 @@ export class CanvasCommandQueue<T> {
         if (!current?.rejected) return;
         const command = { ...current };
         delete command.rejected;
+        delete command.settled;
+        this.commands.set(operationId, command);
+        try { await this.write(command); }
+        catch (error) { this.commands.set(operationId, current); throw error; }
+    }
+    /**
+     * 确定性 400：这次编辑已明确失败。保留不可变草稿与拒因，但把它移出活动队列，
+     * 让后续编辑立刻继续发送；刷新不复活自动重试，也不再把整张画布锁在冲突态。
+     */
+    async settle(operationId: string, reason: string) {
+        const current = this.commands.get(operationId);
+        if (!current || current.settled) return;
+        const command = { ...current, rejected: current.rejected || reason, settled: reason };
         this.commands.set(operationId, command);
         try { await this.write(command); }
         catch (error) { this.commands.set(operationId, current); throw error; }
@@ -86,10 +108,11 @@ export class CanvasCommandQueue<T> {
         this.writes.delete(operationId);
     }
     async discard(projectId: string) {
-        for (const command of this.list(projectId)) await this.acknowledge(command.operationId);
+        for (const command of this.listAll(projectId)) await this.acknowledge(command.operationId);
     }
     async replace(command: CanvasCommand<T>) {
-        const old = this.list(command.projectId);
+        // 用户明确重提/采用远端时，连同已 settle 的失败草稿一起替代，避免旧意图残留。
+        const old = this.listAll(command.projectId);
         const replacement = { ...command, order: old[0]?.order ?? command.order, supersedes: old.flatMap((item) => [item.operationId, ...(item.supersedes || [])]) };
         this.enqueue(replacement);
         await this.writes.get(replacement.operationId);

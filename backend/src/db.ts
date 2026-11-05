@@ -1,3 +1,4 @@
+import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import { syncEntityNodeEdits, syncH3SceneImageReferences, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
 import { resolveSharedAssetNode, type AssetNode } from "@basketikun/canvas-agent/shared-asset-reference";
 import { effectiveTargetInput, inputHash } from "./drama/canvas-inputs.js";
@@ -1900,11 +1901,18 @@ export class BackendDatabase {
     }
 
     getCanvasH3NodeSummary(id: string, nodeId: string): Record<string, unknown> | null {
-        const rows = this.db.prepare(`SELECT p.id, p.updated_at AS updatedAt, json_extract(p.data_json,'$.title') AS projectTitle, COALESCE(json_extract(p.data_json,'$.revision'),0) AS revision, json_extract(n.value,'$.id') AS nodeId, json_extract(n.value,'$.type') AS nodeType, json_extract(n.value,'$.title') AS nodeTitle, json_extract(s.value,'$.id') AS segmentId, json_extract(s.value,'$.sourceShotId') AS sourceShotId, json_extract(s.value,'$.title') AS segmentTitle, json_extract(s.value,'$.status') AS segmentStatus, (json_type(s.value,'$.result') IS NOT NULL OR json_extract(s.value,'$.resultStorageKey') IS NOT NULL) AS hasResult FROM canvas_projects p LEFT JOIN json_each(p.data_json,'$.nodes') n ON json_extract(n.value,'$.id') = ? LEFT JOIN json_each(n.value,'$.metadata.segments') s WHERE p.id = ? ORDER BY CAST(s.key AS INTEGER)`).all(nodeId, id) as Array<Record<string, unknown>>;
+        const rows = this.db.prepare(`SELECT p.id, p.updated_at AS updatedAt, json_extract(p.data_json,'$.title') AS projectTitle, COALESCE(json_extract(p.data_json,'$.revision'),0) AS revision, json_extract(n.value,'$.id') AS nodeId, json_extract(n.value,'$.type') AS nodeType, json_extract(n.value,'$.title') AS nodeTitle, json_extract(s.value,'$.id') AS segmentId, json_extract(s.value,'$.sourceShotId') AS sourceShotId, json_extract(s.value,'$.productionClipProjection.targetId') AS targetId, json_extract(s.value,'$.title') AS segmentTitle, json_extract(s.value,'$.status') AS segmentStatus, (json_type(s.value,'$.result') IS NOT NULL OR json_extract(s.value,'$.resultStorageKey') IS NOT NULL) AS hasResult FROM canvas_projects p LEFT JOIN json_each(p.data_json,'$.nodes') n ON json_extract(n.value,'$.id') = ? LEFT JOIN json_each(n.value,'$.metadata.segments') s WHERE p.id = ? ORDER BY CAST(s.key AS INTEGER)`).all(nodeId, id) as Array<Record<string, unknown>>;
         if (!rows.length) return null;
         const first = rows[0];
-        const segments = rows.filter(row => row.segmentId != null).map(row => ({ id: row.segmentId, sourceShotId: row.sourceShotId || "", title: row.segmentTitle || "", status: row.segmentStatus || "idle", ...(Number(row.hasResult) === 1 ? { result: true } : {}) }));
-        const nodes = first.nodeId == null ? [] : [{ id: first.nodeId, type: first.nodeType, title: first.nodeTitle || "", metadata: { segments } }];
+        const production = this.db.prepare(`SELECT p.episode_id AS ownerId, 'episode' AS ownerKind, p.revision, p.draft_json AS snapshot
+            FROM episode_productions p JOIN drama_episodes e ON e.id=p.episode_id WHERE e.canvas_id=?
+            UNION ALL SELECT project_id AS ownerId, 'canvas' AS ownerKind, revision, draft_json AS snapshot
+            FROM canvas_productions WHERE project_id=?`).get(id, id) as { ownerId: string; ownerKind: string; revision: number; snapshot: string } | undefined;
+        const numbering = production ? productionNumbering(JSON.parse(production.snapshot).director?.source || {}) : undefined;
+        const segments = rows.filter(row => row.segmentId != null).map(row => ({ id: row.segmentId, sourceShotId: row.sourceShotId || "", title: row.segmentTitle || "", status: row.segmentStatus || "idle",
+            ...(row.targetId ? { productionClipProjection: { targetId: row.targetId }, productionNumbering: numbering?.clips.find(clip => clip.segmentId === row.targetId) || null } : {}),
+            ...(Number(row.hasResult) === 1 ? { result: true } : {}) }));
+        const nodes = first.nodeId == null ? [] : [{ id: first.nodeId, type: first.nodeType, title: first.nodeTitle || "", metadata: { segments, ...(production ? { productionOwnerKind: production.ownerKind, productionOwnerId: production.ownerId, productionRevision: production.revision } : {}) } }];
         return { id: first.id, title: first.projectTitle || "", updatedAt: first.updatedAt, revision: Number(first.revision || 0), nodes };
     }
 
@@ -4270,15 +4278,22 @@ export class BackendDatabase {
      */
     listTaskSummaries(filter: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number } = {}): RuntimeTask[] {
         const { where, values, limit, offset } = this.taskListWhere(filter);
-        // 不把 params_json 原文取回 Node；只由 SQLite 抽取 parentTaskId 标量。input_json/result_json 仅用于抽取
-        // 路由标量(input.projectId/scope)与输出媒体引用，不把原文塞回响应体。
-        const rows = this.db.prepare(`SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
+        // Page before decoding. Extract routing fields in SQLite so large workflow snapshots
+        // never become JavaScript object graphs during task-list polling.
+        const rows = this.db.prepare(`WITH page AS MATERIALIZED (
+            SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
             CASE WHEN json_valid(params_json) THEN json_extract(params_json, '$.parentTaskId') END AS parent_task_id,
-            input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
+            input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+        ) SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
+            parent_task_id, result_json,
+            CASE WHEN typeof(input_json) = 'blob' THEN json_extract(stored_json_text(input_json), '$.projectId', '$.scope')
+                WHEN json_valid(input_json) THEN json_extract(input_json, '$.projectId', '$.scope')
+                ELSE '[null,null]' END AS input_summary_json
+            FROM page ORDER BY created_at DESC, id DESC`).all(...values, limit, offset) as Array<Record<string, unknown>>;
         return rows.map((row) => {
-            const input = parseJsonObject(row.input_json);
-            const inputScope = typeof input.scope === "string" && input.scope ? input.scope : undefined;
-            const inputProjectId = typeof input.projectId === "string" && input.projectId ? input.projectId : undefined;
+            const [projectId, scope] = JSON.parse(String(row.input_summary_json)) as unknown[];
+            const inputScope = typeof scope === "string" && scope ? scope : undefined;
+            const inputProjectId = typeof projectId === "string" && projectId ? projectId : undefined;
             const result = row.result_json ? parseJsonObject(row.result_json) : null;
             const outputs = result && Array.isArray(result.media)
                 ? (result.media as Array<Record<string, unknown>>).filter((item) => item && typeof item === "object")

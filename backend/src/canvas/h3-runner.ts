@@ -43,7 +43,7 @@ type H3RunInput = {
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
 type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean };
-type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; continuation?: { group: string; index: number } };
+type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; numbering?: import("@basketikun/canvas-agent/drama/production-contract").ProductionNumbering["clips"][number] | null; continuation?: { group: string; index: number } };
 type H3ResumeSeed = { nodeId: string; sourceNodeId: string; group: string; previousIndex: number; sourceParentTaskId: string; sourceChildTaskId: string; sourceSegmentId: string; sourceStorageKey: string; contextParams: Record<string, unknown> };
 type H3RunPlan = { referenceDigests?: Record<string, string>; version: 1; plans: H3Plan[]; project: { nodes: Array<Record<string, unknown>>; referenceCatalog: Array<Record<string, unknown>> }; defaults: Record<string, unknown>; requirements?: import('../stores/types.js').H3ProductionRequirements | null; resumeSeed?: H3ResumeSeed };
 type PendingH3 = { nodeId: string; segmentId: string; firstPassFingerprint: string; firstPassResult: string; firstPassStorageKey?: string; firstPassChildTaskId: string; previousOutput: { result?: string; resultStorageKey?: string; cacheFingerprint?: string } };
@@ -438,7 +438,13 @@ export class CanvasH3Runner {
         if (!project) throw new Error("H3 画布不存在");
         const nodes = project.nodes as Array<Record<string, unknown>>;
         const wanted = input.nodeIds?.length ? new Set(input.nodeIds) : input.nodeId ? new Set([input.nodeId]) : null;
-        return nodes.filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || "")))).flatMap((node) => this.planNode(node, input));
+        const requirements = this.stores.projects.getH3DraftRequirements?.(input.projectId);
+        return nodes.filter((node) => String(node.type || "").includes("minimax") && (!wanted || wanted.has(String(node.id || "")))).flatMap((node) => this.planNode(node, input).map(plan => {
+            const segments = recordOf(node.metadata).segments as H3Segment[];
+            const targetId = recordOf(segments[plan.segmentIndex]?.productionClipProjection).targetId;
+            const numbering = requirements?.clips.find(clip => clip.nodeId === plan.nodeId && clip.segmentId === plan.segmentId)?.numbering;
+            return { ...plan, ...(targetId ? { numbering: numbering || null } : {}) };
+        }));
     }
 
     /** Resolve only the task that produced the predecessor currently bound to this canvas Clip. */
@@ -451,8 +457,8 @@ export class CanvasH3Runner {
         const previous = segments[plan.segmentIndex - 1];
         const selected = segments[plan.segmentIndex];
         const storageKey = String(previous?.resultStorageKey || "");
-        if (!previous?.id) throw new Error(`H3_RESUME_PREVIOUS_CLIP_MISSING: Clip ${plan.segmentIndex + 1} 找不到上一段 Clip 身份`);
-        if (!selected) throw new Error(`H3_RESUME_TARGET_CLIP_MISSING: Clip ${plan.segmentIndex + 1} 不在当前运行快照中`);
+        if (!previous?.id) throw new Error(`H3_RESUME_PREVIOUS_CLIP_MISSING: Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 找不到上一段 Clip 身份`);
+        if (!selected) throw new Error(`H3_RESUME_TARGET_CLIP_MISSING: Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 不在当前运行快照中`);
         if (!storageKey) throw new Error(`H3_RESUME_PREVIOUS_RESULT_MISSING: 上一段 Clip ${previous.id} 缺少已归档结果 storageKey；需从组首运行`);
         const selectedParams = extractParams(selected, input.params || {}, metadata, defaults);
         for (const status of ["succeeded", "cancelled"] as const) {
@@ -476,7 +482,7 @@ export class CanvasH3Runner {
                         || descriptor.run !== parent.id || descriptor.index !== continuation.index - 1) continue;
                     for (const key of ["aspectRatio", "megapixels", "latentUpscaleAlign", "modelName", "videoVae", "audioVae"] as const) {
                         if (JSON.stringify(child.params[key]) !== JSON.stringify(selectedParams[key])) {
-                            throw new Error(`Clip ${plan.segmentIndex + 1} 的 ${key} 与上一段潜变量不匹配，请恢复参数或从组首运行`);
+                            throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 的 ${key} 与上一段潜变量不匹配，请恢复参数或从组首运行`);
                         }
                     }
                     return {
@@ -488,7 +494,7 @@ export class CanvasH3Runner {
                 if (parents.length < 500) break;
             }
         }
-        throw new Error(`Clip ${plan.segmentIndex + 1} 找不到与上一段当前成片匹配的潜空间续写任务，请从组首运行`);
+        throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 找不到与上一段当前成片匹配的潜空间续写任务，请从组首运行`);
     }
 
     private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = [], inspectedReferenceDigests?: Map<string, string>): H3RunPlan {
@@ -799,10 +805,10 @@ export class CanvasH3Runner {
                     });
                     continue;
                 }
-                if (child.status !== "succeeded" || !output) throw new Error(child.error || `Clip ${plan.segmentIndex + 1} 生成失败或缺少视频`);
+                if (child.status !== "succeeded" || !output) throw new Error(child.error || `Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 生成失败或缺少视频`);
                 const segment = this.segmentFor(input.projectId, plan);
                 const alreadyWritten = String(segment.resultStorageKey || "") === String(output.storageKey || "") && segment.status === "success";
-                if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child, { cacheFingerprint: cache.fingerprint, firstPassReady: false })) throw new Error(`Clip ${plan.segmentIndex + 1} 终态回写失败`);
+                if (!alreadyWritten && !await writeBackH3Task(this.stores, this.events, child, { cacheFingerprint: cache.fingerprint, firstPassReady: false })) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 终态回写失败`);
                 if (alreadyWritten && (segment.cacheFingerprint !== cache.fingerprint || segment.firstPassReady !== false)) {
                     this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { cacheFingerprint: cache.fingerprint, firstPassReady: false });
                 }
@@ -929,10 +935,10 @@ export class CanvasH3Runner {
         const metadata = recordOf(node?.metadata);
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const source = segments[plan.segmentIndex - 1];
-        if (!source) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
+        if (!source) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
         const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const sourceParams = extractParams(source, override, metadata, defaults);
-        if (sourceParams.motionContextEnabled !== true) throw new Error(`Clip ${plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
+        if (sourceParams.motionContextEnabled !== true) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
         return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
     }
 
@@ -1211,6 +1217,7 @@ export class CanvasH3Runner {
             if (digest && (!media || !fs.existsSync(media.filePath) || await sha256File(media.filePath) !== digest)) throw new Error(`参考文件在提交前已变化：${key}`);
         }
         const submission = {
+            ...(plan.numbering ? { numbering: plan.numbering } : {}),
             authoredPrompt: String(segment.prompt || ""),
             editableReferences,
             semanticPrompt: compilation.semanticPrompt,
@@ -1328,7 +1335,7 @@ export class CanvasH3Runner {
         const node = project && (project.nodes as Array<Record<string, unknown>>).find((item) => String(item.id || "") === plan.nodeId);
         const segment = Array.isArray(recordOf(node?.metadata).segments)
             ? (recordOf(node?.metadata).segments as H3Segment[]).find((item) => item.id === plan.segmentId) : undefined;
-        if (!segment) throw new Error(`Clip ${plan.segmentIndex + 1} 已不存在，请刷新画布后重试`);
+        if (!segment) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 已不存在，请刷新画布后重试`);
         return segment;
     }
 

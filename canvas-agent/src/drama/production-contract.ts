@@ -223,13 +223,17 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
     // purpose-specific prop bindings, while new prop bindings use the explicit prop purpose.
     const isPropSubject = subject.kind === "prop" || subject.entityRef?.kind === "asset";
     const legacyPropBindings = isPropSubject && !bindings.some(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("prop"));
+    // Historical scene assets used their entity kind as the picture purpose.
+    // Modern environment bindings win; compatibility never bypasses state/selection gates.
+    const legacySceneBindings = sceneEnvironment && !bindings.some(binding => Array.isArray(binding.provides) && binding.provides.map(String).includes("environment"));
+    const matchesPurpose = (values: unknown, purpose: string) => Array.isArray(values)
+        && (values.map(String).includes(purpose)
+            || purpose === "prop" && legacyPropBindings && values.map(String).includes("identity")
+            || purpose === "environment" && legacySceneBindings && values.map(String).includes("scene"));
     const selected: string[] = [], issues: string[] = [];
     for (const purpose of purposes) {
-        const eligible = bindings.filter(binding => Array.isArray(binding.provides)
-            && (binding.provides.map(String).includes(purpose) || purpose === "prop" && legacyPropBindings && binding.provides.map(String).includes("identity"))
-            && applicable(binding));
-        const matches = eligible.filter(binding => Array.isArray(binding.defaultFor)
-            && (binding.defaultFor.map(String).includes(purpose) || purpose === "prop" && legacyPropBindings && binding.defaultFor.map(String).includes("identity")));
+        const eligible = bindings.filter(binding => matchesPurpose(binding.provides, purpose) && applicable(binding));
+        const matches = eligible.filter(binding => matchesPurpose(binding.defaultFor, purpose));
         const fixedResults = eligible.filter(binding => binding.selection?.mode === "selected_result");
         if (matches.length === 1) selected.push(String(matches[0].id));
         else if (matches.length > 1) issues.push(purpose + " 默认图片绑定有歧义：" + matches.map(binding => binding.id).join(", "));
@@ -592,6 +596,7 @@ function rowsForContract(value: unknown): Array<Record<string, any>> {
     return Array.isArray(value) ? value.filter(item => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, any>> : [];
 }
 export { productionReadSchema, productionReadQuery, projectProductionRead, projectProductionVersion, productionWriteReceipt } from "./production-read.js";
+export { productionNumbering, resolveProductionTarget, type ProductionNumbering } from "./production-numbering.js";
 export { assertProductionSourceFields, validateProductionSourceFields } from "./production-source-fields.js";
 
 /** Stable wire hashing input shared by offline adapters and Backend. */
@@ -862,4 +867,10 @@ export type ProductionPublish = z.infer<typeof productionPublishSchema>;
 
 export function emptyEpisodeProduction(): EpisodeProductionData {
     return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {}, reviewPolicy: { ...defaultDirectorReviewPolicy } }, legacyImports: [] };
+}
+
+/** The H3 storyboard slot is a projection of this authored Shot keyframe. */
+export function shotStoryboardKeyframe<T extends { anchor?: unknown; requiredForSubmission?: unknown }>(frames: readonly T[]): T | undefined {
+    const submitted = frames.filter(frame => frame.requiredForSubmission === true && frame.anchor !== "composition");
+    return submitted.find(frame => frame.anchor === "opening") || submitted[0];
 }

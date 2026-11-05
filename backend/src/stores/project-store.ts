@@ -1,3 +1,4 @@
+import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase, CanvasProject } from "../db.js";
 import { createHash } from 'node:crypto';
 import { h3PromptContent, h3ExpectedDialogues } from '@basketikun/canvas-agent/plugins/minimax-h3/runtime-params';
@@ -27,10 +28,12 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
             FROM canvas_productions WHERE project_id=?`).get(projectId, projectId) as { ownerId: string; revision: number; version: number; snapshot: string | null } | undefined;
         if (!row?.snapshot) return null;
         const snapshot = JSON.parse(row.snapshot);
+        const numbering = productionNumbering(snapshot.director?.source || {});
         const declaredGroups = Array.isArray(snapshot.clipGroups) ? snapshot.clipGroups : [];
         const groups = declaredGroups.length ? declaredGroups : draftGroups(snapshot, projectId);
         return { ownerId: row.ownerId, revision: row.revision, version: row.version, videoAspectRatio: snapshot.settings?.videoAspectRatio,
             clips: groups.filter((group: any) => group.nodeId && group.segmentId).map((group: any) => ({ nodeId: group.nodeId, segmentId: group.segmentId, targetId: String(group.id || ""),
+                numbering: numbering.clips.find(clip => clip.segmentId === group.id),
                 storyboardRequired: group.shotIds.length > 0 && group.shotIds.every((id: string) => {
                     const input = snapshot.director?.shotInputs?.[id];
                     return input?.keyframeAssetId && input.keyframePolicy !== "none";

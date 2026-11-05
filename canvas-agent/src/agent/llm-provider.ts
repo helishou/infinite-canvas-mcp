@@ -159,6 +159,20 @@ export async function requestLlm(provider: LlmProvider, instructions: string, me
     }
 }
 
+/**
+ * 拼装流式工具参数分片。
+ *
+ * 标准 OpenAI 语义是增量分片，直接累加即可。部分兼容网关（含中转）每个分片都发
+ * 「到目前为止的完整参数」，累加会把同一份 ops 数组复制多份——症状和宿主截断重拼一致：
+ * 同一参数重试时好时坏。这类快照分片一定比已拼内容长且以已拼内容为前缀，据此整体替换。
+ */
+function appendArgumentsFragment(current: string, fragment: string) {
+    if (!fragment) return current;
+    if (!current) return fragment;
+    if (fragment.length > current.length && fragment.startsWith(current)) return fragment;
+    return current + fragment;
+}
+
 export function textOf(message: LlmMessage) { return message.parts.map(part => "text" in part ? part.text : "").join(""); }
 
 function geminiImage(url: string) {
@@ -215,7 +229,12 @@ export function parseLlmReply(provider: LlmProvider, chunks: Json[]): LlmReply {
             for (const item of rows(delta.tool_calls)) {
                 const index = Number(item.index ?? callMap.size);
                 const call = callMap.get(index) || { id: "", name: "", arguments: "" };
-                call.id += String(item.id || ""); call.name += String(item.function?.name || ""); call.arguments += String(item.function?.arguments || ""); callMap.set(index, call);
+                const id = String(item.id || ""), name = String(item.function?.name || ""), fragment = String(item.function?.arguments || "");
+                // 部分网关每个分片都重发 id/name，直接累加会拼成 ididid、canvas_apply_opscanvas_apply_ops。
+                if (id && !call.id) call.id = id;
+                if (name && !call.name) call.name = name;
+                call.arguments = appendArgumentsFragment(call.arguments, fragment);
+                callMap.set(index, call);
             }
         }
         if (!finished) throw new Error("模型响应流中断，未执行未完成的工具调用");

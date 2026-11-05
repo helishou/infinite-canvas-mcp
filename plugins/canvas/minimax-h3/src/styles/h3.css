@@ -43,8 +43,9 @@
 .minimax-player-load-error { position:absolute; z-index:7; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; color:#fca5a5; background:rgba(11,12,14,.76); font-size:16px; }
 .minimax-player-load-error button { border:1px solid #64748b; border-radius:6px; padding:6px 12px; color:#e2e8f0; background:#252a31; cursor:pointer; }
 .minimax-player-load-error button:hover { border-color:#94a3b8; background:#303844; }
-/* 预览左下角分辨率角标：图片/视频加载后实时显示真实尺寸（见 H3PreviewPlayer mediaResolution） */
-.minimax-player-resolution { position:absolute; left:8px; bottom:8px; z-index:6; padding:2px 8px; border-radius:5px; background:rgba(15,23,42,.82); color:#e2e8f0; font-size:12px; line-height:1.4; letter-spacing:.02em; pointer-events:none; font-variant-numeric:tabular-nums; box-shadow:0 1px 6px rgba(0,0,0,.4); }
+/* 图片预览左下角分辨率角标（视频输出分辨率已移到 Clip 卡片 "Clip N" 上方）。
+   播放器里的角标同样受画布缩放，字号不能停在 12px。 */
+.minimax-player-resolution { position:absolute; left:8px; bottom:8px; z-index:6; padding:3px 10px; border-radius:5px; background:rgba(15,23,42,.86); color:#e2e8f0; font-size:18px; line-height:1.35; letter-spacing:.02em; pointer-events:none; font-variant-numeric:tabular-nums; box-shadow:0 1px 6px rgba(0,0,0,.4); }
 .minimax-edit-timeline { position:relative; min-width:0; min-height:140px; display:grid; grid-template-columns:36px minmax(0,1fr) 54px; grid-template-rows:36px minmax(0,1fr) 96px 26px; border:1px solid #111827; border-radius:6px; background:#17191c; overflow:hidden; }
 
 /* 左侧标签列：与右侧 Video / Refs 行精确对齐，第一行占满剩余高度，第二行固定 96px */
@@ -110,6 +111,11 @@
 .minimax-clip-empty { height:100%; display:flex; align-items:center; justify-content:center; color:#64748b; }
 .minimax-clip-meta { position:absolute; left:7px; right:7px; bottom:7px; z-index:2; display:flex; flex-direction:column; align-items:center; gap:4px; text-align:center; text-shadow:0 1px 3px #000; pointer-events:none; }
 .minimax-clip-meta b { font-size:22px; color:#f8fafc; font-weight:700; }.minimax-clip-meta span { font-size:22px; color:#cbd5e1; }
+/* Clip 输出的真实分辨率：紧贴在 "Clip N" 上方。深底 + 高亮描边是叠在缩略图上的角标，
+   不随主题面板变色；选择器带 .minimax-clip-meta 前缀，压过下方主题区的通用 span 规则。 */
+.minimax-clip-meta .minimax-clip-resolution { max-width:100%; box-sizing:border-box; padding:2px 10px; border:1px solid rgba(125,211,252,.6); border-radius:6px; background:rgba(8,15,24,.88); color:#7dd3fc; font-size:22px; font-weight:800; line-height:1.25; letter-spacing:.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-shadow:none; font-variant-numeric:tabular-nums; box-shadow:0 2px 10px rgba(0,0,0,.45); }
+/* 时长很短的 Clip 卡片放不下大号徽标，H3ClipCard 会改用 "864×480" 紧凑格式。 */
+.minimax-clip-meta .minimax-clip-resolution.is-compact { padding:1px 5px; font-size:14px; letter-spacing:0; }
 /* ❌ 删除按钮：右上角。
    尺寸必须用固定 px：这里曾经是 width:10%（相对 Clip 卡片宽度），
    而 Clip 宽度按时长变化，于是同一行里时长越长的 Clip 按钮越大。
@@ -715,6 +721,21 @@
 .minimax-tl-clip { border-radius:8px; box-shadow:none; }
 .minimax-tl-clip.active { box-shadow:0 0 0 1px var(--h3-active) inset; }
 .minimax-ref-clip { border-radius:8px; }
+/* 选中 Clip 的最终视觉（放在所有主题化规则之后，按层叠顺序生效）。
+   上面几条 .active 规则最后只剩 1px inset 阴影 + 与 --h3-fill 几乎同色的底色，
+   而 .minimax-clip-media 铺满卡片会把 inset 阴影和背景一起盖住，观感就是「完全没高亮」。
+   改用卡片自身的外阴影：不受 overflow:hidden 与子层遮挡，也不改 border-color，
+   这样 error/loading 等状态色仍能保留。z-index 防止描边被相邻卡片压住。 */
+.minimax-tl-clip.active,.minimax-ref-clip.active {
+    box-shadow:0 0 0 2px var(--h3-selection,#60a5fa),0 0 14px color-mix(in srgb,var(--h3-selection,#60a5fa) 45%,transparent);
+    z-index:3;
+}
+.minimax-tl-clip.active .minimax-clip-meta b { color:var(--h3-selection,#60a5fa); }
+/* 参考轨同一列跟随选中 Clip 高亮；之前 .active 只设了 z-index，没有任何可见差别。 */
+.minimax-ref-grid.active {
+    z-index:3;
+    box-shadow:inset 0 0 0 2px color-mix(in srgb,var(--h3-selection,#60a5fa) 70%,transparent);
+}
 .minimax-current-head { padding-inline:15px; }
 .minimax-current-title { min-width:0; flex:1 1 auto; gap:10px; }
 .minimax-current-labels { min-width:0; display:flex; flex-direction:column; gap:2px; }

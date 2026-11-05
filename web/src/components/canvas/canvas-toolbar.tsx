@@ -80,7 +80,7 @@ export function CanvasToolbar({
         ...(extensionDefs.length ? [{ type: "group" as const, label: t("canvas.toolbar.extensions"), children: extensionDefs.map(def => ({ key: `extension:${def.type}`, label: getNodeSpec(def.type).title, icon: <span>{def.icon}</span>, onClick: () => onAddExtensionNode(def.type) })) }] : []),
     ];
     return <>
-        <div data-canvas-create-tools className="canvas-create-dock" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
+        <div data-canvas-create-tools className="canvas-create-dock" style={{ color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
             <Tooltip title={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")}><Button type="text" aria-label={t(canvasTool === "select" ? "canvas.toolbar.select" : "canvas.toolbar.pan")} onClick={() => onCanvasToolChange(canvasTool === "select" ? "pan" : "select")} icon={canvasTool === "select" ? <MousePointer2 className="size-4" /> : <Hand className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.undo")}><Button type="text" aria-label={t("canvas.undo")} disabled={!canUndo} onClick={onUndo} icon={<Undo2 className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.redo")}><Button type="text" aria-label={t("canvas.redo")} disabled={!canRedo} onClick={onRedo} icon={<Redo2 className="size-4" />} /></Tooltip>
@@ -89,7 +89,7 @@ export function CanvasToolbar({
             <Tooltip title={t("canvas.toolbar.upload")}><Button type="text" aria-label={t("canvas.toolbar.upload")} onClick={onUpload} icon={<Upload className="size-4" />} /></Tooltip>
             <Dropdown destroyOnHidden trigger={["click"]} placement="topRight" menu={{ items: [{ type: "group", label: t("canvasChrome.danger"), children: [{ key: "clear", danger: true, label: t("canvas.toolbar.clear"), onClick: onClear }] }] }}><Button type="text" aria-label={t("canvasChrome.canvasActions")} icon={<Ellipsis className="size-4" />} /></Dropdown>
         </div>
-        {showSelectionActions && selectedCount > 0 && <div className="canvas-selection-actions" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
+        {showSelectionActions && selectedCount > 0 && <div className="canvas-selection-actions" style={{ color: theme.toolbar.item }} onPointerDown={event => event.stopPropagation()}>
             <Tooltip title={t("canvasChrome.selected", { count: selectedCount })}><span className="canvas-selection-count" aria-label={t("canvasChrome.selected", { count: selectedCount })}>{selectedCount}</span></Tooltip>
             <Tooltip title={t("canvas.navigation.focusSelection")}><Button type="text" aria-label={t("canvas.navigation.focusSelection")} onClick={onFocusSelection} icon={<Focus className="size-4" />} /></Tooltip>
             {selectedCount > 1 && <Tooltip title={t("canvas.navigation.rename")}><Button type="text" aria-label={t("canvas.navigation.rename")} onClick={onBatchRename} icon={<PencilLine className="size-4" />} /></Tooltip>}

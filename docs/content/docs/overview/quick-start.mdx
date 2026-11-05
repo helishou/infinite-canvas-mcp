@@ -20,6 +20,8 @@ Open `http://localhost:3001`.
 
 `corepack pnpm run dev` builds the official plugin registry and `canvas-agent/dist` before starting either service and does not clear existing services. Root-level `dev:backend`, `dev:web`, and `dev:services` also build those shared assets first; direct workspace `dev` commands do not. Backend `dev` and `dev:watch` reload after source changes when tasks, confirmations, Agent turns and writes are idle. Use `dev:once` for a single run. Rebuild shared Agent sources to update the watched `dist` outputs.
 
+For daily production, stop the existing Backend while it is idle, then run `corepack pnpm run start:backend`. This builds the shared Agent and Backend and serves the compiled Backend through the persistent public endpoint. Source edits and later builds leave the running process on its loaded version. Repeat the startup procedure to apply updates. Keep using the existing frontend, or run `corepack pnpm run dev:web` in another terminal. Existing data directories and connection settings are reused.
+
 | Address | Purpose |
 | --- | --- |
 | `http://localhost:3001` | Local development frontend |

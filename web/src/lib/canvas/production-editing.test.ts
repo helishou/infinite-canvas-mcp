@@ -30,6 +30,32 @@ const formalV2Director = (): DirectorProduction => ({
     }, assets: {}, shotInputs: { v2a: { keyframePolicy: "none", assetIds: [] }, v2b: { keyframePolicy: "none", assetIds: [] } },
 } as unknown as DirectorProduction);
 
+test("storyboard replacement and clearing edit the workbench opening keyframe regardless of its ID", () => {
+    const director = formalV2Director();
+    const source = director.source as Record<string, any>;
+    const authored = { id: "KF-v2a-WORKBENCH", assetId: "old", anchor: "opening", requiredForSubmission: true,
+        subjectIds: [], retain: ["构图"], exclude: [], sourceNode: { projectId: "canvas", nodeId: "OLD" } };
+    source.shots[0].keyframes = [authored, { id: "composition", anchor: "composition", requiredForSubmission: false }];
+    const request = { nodeId: "H3", segmentId: "canvas-clip", segment: {
+        id: "canvas-clip", productionClipProjection: { targetId: "SOURCE_V2" },
+        storyboardShots: [{ id: "v2a", duration: 1, referenceBindingId: "slot" }, { id: "v2b", duration: 1 }],
+        referenceBindings: [{ id: "slot", role: "storyboard", mediaType: "image", sourceNodeId: "NEW", storageKey: "image:new" }],
+    } };
+    const replace = buildDirectorClipStoryboardOperation(director, "SOURCE_V2", request, undefined, "canvas");
+    if (replace.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    const frames = (replace.shots[0] as any).keyframes;
+    assert.equal(frames.length, 2);
+    assert.equal(frames[0].id, authored.id);
+    assert.equal(frames[0].sourceNode.nodeId, "NEW");
+    assert.deepEqual(frames[0].retain, ["构图"]);
+    const clear = buildDirectorClipStoryboardOperation(director, "SOURCE_V2", { ...request, segment: {
+        ...request.segment, storyboardShots: [{ id: "v2a", duration: 1 }, { id: "v2b", duration: 1 }],
+    } }, request.segment, "canvas");
+    if (clear.type !== "replace_director_clip_storyboard") throw new Error("wrong operation");
+    assert.deepEqual((clear.shots[0] as any).keyframes.map((frame: any) => frame.id), ["composition"]);
+    assert.equal((source.shots[0].keyframes[0]).sourceNode.nodeId, "OLD");
+});
+
 test("compilation apply retries only a pre-forward BACKEND_RELOADING response with the same preparedId", async t => {
     const originalFetch = globalThis.fetch;
     t.after(() => { globalThis.fetch = originalFetch; });

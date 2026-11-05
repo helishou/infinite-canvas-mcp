@@ -3,8 +3,8 @@ import { createPortal } from "react-dom";
 import { Alert, App, Button, Dropdown, Input, Modal, Progress, Radio, Select, Tag } from "antd";
 import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Database, Eye, GripHorizontal, Image as ImageIcon, LoaderCircle, Locate, Lock, LockOpen, Play, Search, Trash2, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { productionNumbering, isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
+import { compilationArtifactFreshness, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds, readableText } from "./director-display";
@@ -432,11 +432,13 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     };
     const compileStaleReason = (artifact: DirectorProduction["artifacts"][number] | undefined, projection?: Record<string, unknown>) => {
         if (!artifact) return t("compileStaleReason.generic");
-        const receipt = artifact.receipt as Record<string, any> | undefined;
-        const compiledEngine = receipt?.engine as Record<string, unknown> | undefined;
-        if (String(compiledEngine?.compilerHash || "") !== String(director.engine.compilerHash || "")) return t("compileStaleReason.compilerChanged");
-        if (!receipt?.compilationScope && (artifact.sourceHash !== director.sourceHash || receipt?.sourceHash !== director.sourceHash)) return t("compileStaleReason.sourceChanged");
-        if (projection?.current === false || receipt?.compilationScope) return t("compileStaleReason.inputChanged");
+        const freshness = compilationArtifactFreshness(director, artifact);
+        if (!freshness.current) {
+            if (freshness.staleReason === "compiler_changed") return t("compileStaleReason.compilerChanged");
+            if (freshness.staleReason === "source_changed") return t("compileStaleReason.sourceChanged");
+            if (freshness.staleReason === "scope_input_changed") return t("compileStaleReason.inputChanged");
+        }
+        if (projection?.current === false) return t("compileStaleReason.inputChanged");
         return t("compileStaleReason.generic");
     };
     const staleReceiptTargets = compileBasisMatches
@@ -454,17 +456,22 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const readyByPromptMatch = compiledArtifactMatchesCanvas(clipId, artifact);
         const artifactDiagnostics = artifact?.receipt?.diagnostics as Record<string, unknown> | undefined;
         const hasPersistedBlockers = Array.isArray(artifactDiagnostics?.blockers) && artifactDiagnostics.blockers.length > 0;
-        if (job && !(readyByLatestReceipt || status === "ready" || readyByPromptMatch) ) {
+        // Current authoritative success wins over historical refresh failures
+        // and an unloaded workbench projection (which reports "recorded").
+        if (readyByLatestReceipt || status === "ready" || readyByPromptMatch) return {
+            label: t("director.atomic.stateReady"), color: "green", tone: "ready" as const,
+        };
+        if (job && (isCompileActive(job.status) || ["blocked", "failed"].includes(job.status))) {
             const active = isCompileActive(job.status);
-            return { label: t(active ? "director.atomic.stateCompiling" : "director.atomic.stateBlocked"), color: active ? "processing" : "red",
+            return { label: t(active ? "director.atomic.stateCompiling" : "director.atomic.clipRefreshPhase." + job.status), color: active ? "processing" : "red",
                 tone: active ? "live" as const : "blocked" as const, reason: t("director.atomic.clipRefreshPhase." + job.status) };
         }
         if ((notReadyByLatestReceipt || hasPersistedBlockers) && !readyByPromptMatch) return { label: t("director.atomic.stateBlocked"), color: "red", tone: "blocked" as const, reason: compileStaleReason(artifact, projection) };
         if (status === "pending") return { label: t("director.atomic.statePending"), color: undefined, tone: "pending" as const };
-        if (status === "recorded" && !readyByPromptMatch) return { label: t("director.atomic.stateBlocked"), color: undefined, tone: "recorded" as const };
+        if (status === "recorded" && !readyByPromptMatch) return { label: t("director.atomic.compileStale"), color: undefined, tone: "recorded" as const, reason: compileStaleReason(artifact, projection) };
         return status === "ready" || readyByLatestReceipt || readyByPromptMatch
             ? { label: t("director.atomic.stateReady"), color: "green", tone: "ready" as const }
-            : { label: t("director.atomic.stateBlocked"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
+            : { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const lockedClipIds = new Set(clips.filter(item => clipLockOverrides[String(item.id)] ?? item.locked === true).map(item => String(item.id)));
@@ -721,7 +728,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         });
         scrollToRow();
     };
-    const clipLabel = (index: number) => t("director.atomic.clipHeading", { number: index + 1 });
+    const numbering = productionNumbering(source);
+    const clipLabel = (index: number) => t("director.atomic.clipHeading", { number: numbering.clips[index]?.clipNumber ?? index + 1 });
     const saveClipPartition = async (shotIds: string[], groups: Array<Record<string, unknown>>) => {
         if (!onRepartitionClips) return false;
         const invalid = groups.map((group, index) => {

@@ -42,6 +42,8 @@ import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-route
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { createDevReloadGate } from "./runtime/dev-reload.js";
+import { startRuntimeMonitor } from "./slow-operation.js";
+import { registerCanvasCollaborationRoutes } from "./server/canvas-collaboration-routes.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
 import { SharedAssetCoordinator } from "./drama/shared-assets.js";
@@ -162,7 +164,7 @@ async function startBackendHttpServer() {
   const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
   const devReload = process.env.INFINITE_CANVAS_DEV_WATCH === "1" && process.send ? createDevReloadGate() : null;
   const devActiveTask = devReload ? db.db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running','awaiting_confirmation') LIMIT 1") : null;
-  const { app } = startServer(runtime.db, config, {
+  const { app, drainHttpConnections } = startServer(runtime.db, config, {
     devReloadMiddleware: devReload?.middleware,
     comfy: runtime.comfy,
     events: runtime.events,
@@ -253,7 +255,12 @@ async function startBackendHttpServer() {
     retainHistory: (threadId, title) => productionLlm.retainHistory(threadId, title, process.cwd()),
   }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
   process.once("exit", () => productionAgents.stop());
-  app.get("/production/worker-status", (_req, res) => res.json({ ok: true, busy: productionAgents.busy }));
+  app.get("/production/worker-status", (_req, res) => res.json({
+    ok: true,
+    busy: productionAgents.busy,
+    compilationBusy: productionCompilationBusy(),
+    ...(devReload ? { reload: { activeTask: Boolean(devActiveTask?.get()), mutationsInFlight: devReload.mutationsInFlight } } : {}),
+  }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
@@ -432,17 +439,7 @@ async function startBackendHttpServer() {
   void episodeProductionRunner.resumePending();
   void canvasProductionRunner.resumePending();
   markStartupStage("recoveryDispatch");
-  app.get("/canvas/projects/:id/collaboration", (req, res) => {
-    const project = db.getCanvasProject(req.params.id);
-    if (!project)
-      return void res.status(404).json({ ok: false, error: "画布不存在" });
-    res.json({
-      ok: true,
-      projectId: project.id,
-      revision: Number(project.revision || 0),
-      participants: canvasRealtime.participants(project.id),
-    });
-  });
+  registerCanvasCollaborationRoutes(app, db, canvasRealtime);
   registerBackendErrorHandler(app);
   // The dev watcher keeps the public MCP port bound while each child serves on its loopback target port.
   const internalListenPort = Number(process.env.INFINITE_CANVAS_BACKEND_LISTEN_PORT);
@@ -459,9 +456,11 @@ async function startBackendHttpServer() {
         startupTimingsMs,
         startupTotalMs: Math.round(performance.now()),
       });
+      process.send?.({ type: "dev:ready", pid: process.pid, listenHost: config.listenHost });
     },
   );
   canvasRealtime.attach(server);
+  const stopRuntimeMonitor = startRuntimeMonitor(logger);
 
   // ── 连接泄漏/僵尸连接防护 ────────────────────────────────────────────
   // 浏览器（Edge 等）频繁开关连接时，若 server 不主动释放半关闭 socket，
@@ -490,16 +489,24 @@ async function startBackendHttpServer() {
   );
 
   const shutdown = (signal: string) => {
+    const shutdownStartedAt = performance.now();
     logger.info(`${signal} received, shutting down…`);
+    stopRuntimeMonitor();
     releaseInstanceLock();
     canvasRealtime.close();
-    void mcpHttp.closeAll().finally(() =>
+    void mcpHttp.closeAll().finally(() => {
+      logger.info("backend-shutdown-stage", { stage: "mcp", elapsedMs: Math.round(performance.now() - shutdownStartedAt) });
+      drainHttpConnections();
       server.close(() => {
         db.close();
+        logger.info("backend-shutdown-stage", { stage: "closed", elapsedMs: Math.round(performance.now() - shutdownStartedAt) });
         process.exit(0);
-      }),
-    );
-    setTimeout(() => process.exit(1), 10_000).unref();
+      });
+    });
+    setTimeout(() => {
+      logger.warn("backend-shutdown-stage", { stage: "forced-exit", elapsedMs: Math.round(performance.now() - shutdownStartedAt) });
+      process.exit(1);
+    }, 10_000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -510,7 +517,6 @@ async function startBackendHttpServer() {
         || productionCompilationBusy() || Boolean(devActiveTask?.get()));
       process.send?.({ type: "dev:reload-status", accepted }, undefined, undefined, () => { if (accepted) shutdown("DEV_RELOAD"); });
     });
-    process.send({ type: "dev:ready", pid: process.pid, listenHost: config.listenHost });
   }
   // tsx --watch 默认用 SIGINT 重启：Express 5 异步关闭、可能不触发 SIGINT 监听器，
   // 补一个 beforeExit 走同样收尾，避免每次热重载都卡到 10s 兜底才退。

@@ -865,7 +865,8 @@ export function H3PreviewPlayer({ ctx, url, kind, aspectRatio = "16:9", storageK
                 setRetryNonce((current) => { const next = [...current] as [number, number]; next[active] += 1; return next; });
             }}>重试加载</button></div> : null}
             {aspectGuide}
-            {mediaResolution ? <div className="minimax-player-resolution">{mediaResolution.width} × {mediaResolution.height}</div> : null}
+            {/* 视频输出的分辨率已移到时间线 Clip 卡片的 "Clip N" 上方，这里不再叠一个小角标；
+                mediaResolution 仍用于画幅辅助框（frameRatio），不要从这个组件删掉。 */}
             {frameMenuPosition ? <div ref={frameMenuRef} className="minimax-frame-menu" role="menu" style={{ left: frameMenuPosition.x, top: frameMenuPosition.y }}>
                 {storyboardFrameTimes.length ? <button type="button" role="menuitem" onClick={() => {
                     const video = videosRef.current[activeRef.current];

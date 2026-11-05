@@ -1,3 +1,4 @@
+import { h3ClipNumber } from "../services/h3-data";
 import { useCallback, useEffect, useMemo, useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3Ref, H3Segment } from "../types";
@@ -28,6 +29,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     const [outputFilter, setOutputFilter] = useState<"all" | "current">(String(ctx.node.metadata?.minimaxOutputFilter || "") === "current" ? "current" : "all");
     const [historyOutputs, setHistoryOutputs] = useState<H3Ref[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyError, setHistoryError] = useState("");
     const [historyHasMore, setHistoryHasMore] = useState(true);
     const historyStateRef = useRef<{ key: string; offset: number; loading: boolean; hasMore: boolean; perSegmentCount: Map<string, number>; seenLogIds: Set<string> }>({ key: "", offset: 0, loading: false, hasMore: true, perSegmentCount: new Map(), seenLogIds: new Set() });
     // Output 固定单行横向滚动：卡片高度实测面板可用高度自适应（78–380px），宽度=高度×2 保持 2:1。
@@ -57,7 +59,16 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
         setHistoryLoading(true);
         const pageOffset = state.offset;
         try {
-            const logs = await ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: HISTORY_PAGE_SIZE, offset: pageOffset });
+            // Backend main-thread stalls in bursts of 2~5s; requests may time out and fail —
+            // silently clearing here would permanently leave the output bar blank. Retry with backoff,
+            // and show a visible retry entry on final failure.
+            let logs: Awaited<ReturnType<typeof ctx.generationLogs.list>> | undefined;
+            let lastError: unknown;
+            for (let attempt = 0; attempt <= 2; attempt++) {
+                try { logs = await ctx.generationLogs.list({ projectId: ctx.projectId, nodeId: ctx.node.id, limit: HISTORY_PAGE_SIZE, offset: pageOffset }); break; }
+                catch (error) { lastError = error; if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 800 * 2 ** attempt)); }
+            }
+            if (logs === undefined) throw lastError;
             if (historyStateRef.current !== state) return;
             state.offset += logs.length;
             state.hasMore = logs.length === HISTORY_PAGE_SIZE;
@@ -77,7 +88,7 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
                     const seq = (state.perSegmentCount.get(clipKey) || 0) + 1;
                     state.perSegmentCount.set(clipKey, seq);
                     const clipNo = clipKey ? segmentIndexes.get(clipKey) ?? -1 : -1;
-                    const clipLabel = clipNo >= 0 ? `Clip ${clipNo + 1}` : clipKey ? "已删除 Clip" : "未知 Clip";
+                    const clipLabel = clipNo >= 0 ? `Clip ${h3ClipNumber(ctx, segments[clipNo], clipNo)}` : clipKey ? "已删除 Clip" : "未知 Clip";
                     const stamp = formatOutputTime(log.finishedAt || log.createdAt);
                     refs.push({
                         url,
@@ -93,10 +104,11 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
                 }
             }
             setHistoryOutputs((current) => pageOffset === 0 ? refs : [...current, ...refs]);
+            setHistoryError("");
         } catch {
             state.hasMore = false;
             setHistoryHasMore(false);
-            if (pageOffset === 0) setHistoryOutputs([]);
+            if (pageOffset === 0) { setHistoryOutputs([]); setHistoryError("输出历史加载失败（Backend 忙碌或连接中断）"); }
         } finally {
             if (historyStateRef.current === state) {
                 state.loading = false;
@@ -180,6 +192,6 @@ export function H3MaterialLibrary({ ctx, outputs, segments, selected }: Props) {
     };
     return <aside className="minimax-library">
         <div key="library-head" className="minimax-library-head"><H3Icon name="output" /> <span>{h3Label(locale, "output")}</span><span className="minimax-output-actions"><button type="button" aria-label="切换输出筛选" aria-pressed={outputFilter === "current"} title={outputFilter === "all" ? "当前显示全部输出，点击只显示当前 Clip" : "当前只显示当前 Clip，点击显示全部输出"} onClick={() => changeOutputFilter(outputFilter === "all" ? "current" : "all")} className={`minimax-output-filter${outputFilter === "current" ? " active" : ""}`}><H3Icon name={outputFilter === "all" ? "filter-all" : "filter-current"} /></button></span></div>
-        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties} onScroll={(event) => { const list = event.currentTarget; if (outputFilter === "all" && list.scrollLeft + list.clientWidth >= list.scrollWidth - 240) void loadNextHistoryPage(); }}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={ref.generationLogId ? `log:${ref.generationLogId}:${ref.storageKey || ref.url}` : `media:${ref.segmentId || ref.type}:${ref.storageKey || ref.url}`} ctx={ctx} ref={ref} locale={locale} compact removable storyboardFrameTimes={storyboardFrameTimesBySegment[ref.segmentId || selected?.id || ""] || []} restoreTitle={selected?.productionClipProjection ? "设为当前输出（保留当前提示词与参数）" : undefined} onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl, ctx.node.id, storyboardFrameTimesBySegment); if (preview) ctx.openMediaPreview(preview); }} />)}{!visibleOutputs.length ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
+        <div key="library-list" ref={listRef} className="minimax-library-list minimax-output-list" style={{ "--h3-out-card-h": `${cardH}px` } as React.CSSProperties} onScroll={(event) => { const list = event.currentTarget; if (outputFilter === "all" && list.scrollLeft + list.clientWidth >= list.scrollWidth - 240) void loadNextHistoryPage(); }}>{visibleOutputs.map((ref, index) => <H3MaterialCard key={ref.generationLogId ? `log:${ref.generationLogId}:${ref.storageKey || ref.url}` : `media:${ref.segmentId || ref.type}:${ref.storageKey || ref.url}`} ctx={ctx} ref={ref} locale={locale} compact removable storyboardFrameTimes={storyboardFrameTimesBySegment[ref.segmentId || selected?.id || ""] || []} restoreTitle={selected?.productionClipProjection ? "设为当前输出（保留当前提示词与参数）" : undefined} onRestore={() => void restoreOutput(ref)} onOpenPreview={() => { const preview = buildH3OutputPreview(visibleOutputs, index, ctx.mediaUrl, ctx.node.id, storyboardFrameTimesBySegment); if (preview) ctx.openMediaPreview(preview); }} />)}{historyError ? <div key="history-error" className="minimax-library-empty"><H3Icon name="output" /><span>{historyError}</span><button type="button" onClick={() => { const state = historyStateRef.current; state.offset = 0; state.hasMore = true; state.seenLogIds.clear(); state.perSegmentCount.clear(); setHistoryError(""); void loadNextHistoryPage(); }} style={{ cursor: "pointer", textDecoration: "underline" }}>重试</button></div> : null}{!visibleOutputs.length && !historyError ? <div key="empty-output" className="minimax-library-empty"><H3Icon name="output" /><span>{h3Label(locale, "output")}</span></div> : null}</div>
     </aside>;
 }

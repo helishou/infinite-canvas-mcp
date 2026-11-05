@@ -1,6 +1,6 @@
 import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasProductionEditing, CanvasProductionStoryboardEditor } from "@/types/canvas-plugin";
-import { productionSceneEntries, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { productionSceneEntries, shotStoryboardKeyframe, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { nanoid } from "nanoid";
 import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
 
@@ -210,7 +210,8 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
         const bindingId = String(slot.referenceBindingId || "");
         let keyframeAssetId: string | undefined;
         const slotFrames = oldShots.flatMap(ownerShot => rows(ownerShot.keyframes)
-            .filter(frame => storyboardKeyframeForSlot(frame, String(slot.id)) || storyboardKeyframeForSlot(frame, shotId))
+            .filter(frame => (String(ownerShot.id) === shotId && frame === shotStoryboardKeyframe(rows(ownerShot.keyframes)))
+                || storyboardKeyframeForSlot(frame, String(slot.id)) || storyboardKeyframeForSlot(frame, shotId))
             .map(frame => ({ ownerShot, frame })));
         if (bindingId) {
             const binding = refs.find(ref => String(ref.id || ref.bindingId || "") === bindingId);
@@ -234,8 +235,8 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                 // archived result bound by storageKey instead of fabricating the
                 // H3 container as the image's source node.
                 const nodeId = String(binding.sourceNodeId || "");
-                const frameId = slotFrames[0]?.frame.id || `KF:${shotId}:storyboard`;
-                const previousFrame = slotFrames[0]?.frame || {};
+                const previousFrame = slotFrames.find(item => String(item.ownerShot.id) === shotId)?.frame || slotFrames[0]?.frame || {};
+                const frameId = previousFrame.id || `KF:${shotId}:storyboard`;
                 // slotFrames 来自重建前的原镜头；时长已变时必须继承克隆帧上已缩放好的
                 // localFrame，否则回写的关键帧停在旧时点（例如 96→72 帧后仍指 48）。
                 const rescaledFrame = rows(next.keyframes).find(frame => String(frame.id || "") === String(frameId));
@@ -252,8 +253,10 @@ export function buildDirectorClipStoryboardOperation(director: DirectorProductio
                     // the selected storageKey directly instead of requiring a fake node.
                     requiredForSubmission: Boolean(binding.storageKey) };
                 const keptFrames = rows(next.keyframes);
+                const replacedIds = new Set(slotFrames.filter(item => item.frame.anchor === "opening" && item.frame.requiredForSubmission === true).map(item => String(item.frame.id)));
                 next.keyframes = keptFrames.some(frame => String(frame.id || "") === String(frameId))
-                    ? keptFrames.map(frame => String(frame.id || "") === String(frameId) ? keyframe : frame)
+                    ? keptFrames.filter(frame => !replacedIds.has(String(frame.id)) || String(frame.id) === String(frameId))
+                        .map(frame => String(frame.id || "") === String(frameId) ? keyframe : frame)
                     : [...keptFrames.filter(frame => !storyboardKeyframeForSlot(frame, String(slot.id)) && !storyboardKeyframeForSlot(frame, shotId)), keyframe];
             }
         } else if (v2 && slotFrames.length) {

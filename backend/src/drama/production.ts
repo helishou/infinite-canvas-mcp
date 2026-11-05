@@ -339,6 +339,16 @@ const PRODUCTION_TABLES = {
     canvas: { productions: "canvas_productions", operations: "canvas_production_operations", versions: "canvas_production_versions", runs: "canvas_production_runs", batches: "canvas_production_batches", key: "project_id" },
 } as const;
 
+/**
+ * 同一次操作内多次解析共享的只读中间结果：制作画布解析结果与 H3 Clip mode 映射。
+ * 画布对象仅被读取不被修改；同一操作的事务期间画布不会变化，跨调用复用是安全的。
+ * 不传（默认）时行为与逐次全量解析完全一致。
+ */
+export type SubjectPictureResolutionContext = {
+    canvasProjects?: Map<string, ReturnType<BackendDatabase["getCanvasProject"]>>;
+    h3ModesByTarget?: Map<string, string>;
+};
+
 export class EpisodeProductionService {
     private subjectDependencyIndexReady = false;
     /** 归档媒体 sha256 缓存：按 storageKey + (size, mtimeMs) 失效，避免工作包/编译每次请求重复读盘哈希。 */
@@ -466,9 +476,14 @@ export class EpisodeProductionService {
         return create ? ensureProductionCanvas(this.db, "episode", id, this.events).project.id : null;
     }
     compilationRoot() { return path.join(this.legacyDataDir, "production-compilations"); }
-    resolveSubjectPictureInputs(id: string, input: DirectorProduction, targetIds?: string[], forCompilation = false, previewSubjectIds?: string[], compileInputDiagnostics?: ProductionDiagnostic[]): DirectorProduction {
+    private cachedCanvasProject(id: string, cache?: SubjectPictureResolutionContext["canvasProjects"]): ReturnType<BackendDatabase["getCanvasProject"]> {
+        if (!cache) return this.db.getCanvasProject(id);
+        if (!cache.has(id)) cache.set(id, this.db.getCanvasProject(id));
+        return cache.get(id)!;
+    }
+    resolveSubjectPictureInputs(id: string, input: DirectorProduction, targetIds?: string[], forCompilation = false, previewSubjectIds?: string[], compileInputDiagnostics?: ProductionDiagnostic[], shared?: SubjectPictureResolutionContext): DirectorProduction {
         const linked = this.linked(id);
-        if (linked) return linked.service.resolveSubjectPictureInputs(linked.id, input, targetIds, forCompilation, previewSubjectIds, compileInputDiagnostics);
+        if (linked) return linked.service.resolveSubjectPictureInputs(linked.id, input, targetIds, forCompilation, previewSubjectIds, compileInputDiagnostics, shared);
         if (!isSubjectPromptAssembly(input.source)) return structuredClone(input);
         const director = structuredClone(input), productionCanvasId = this.episodeInfo(id).canvasId;
         stripLegacySharedAssetPointers(director);
@@ -476,8 +491,8 @@ export class EpisodeProductionService {
         if (!productionCanvasId) throw new Error("SUBJECT_IMAGE_PRODUCTION_CANVAS_MISSING: 制作对象尚未绑定画布");
         const assetPlans = clipRows(director.source.asset_plan), subjects = clipRows(director.source.subject_registry);
         const shotsById = new Map(clipRows(director.source.shots).map(shot => [String(shot.id), shot]));
-        const canvas = this.db.getCanvasProject(productionCanvasId);
-        const h3ModesByTarget = new Map<string, string>();
+        const canvas = this.cachedCanvasProject(productionCanvasId, shared?.canvasProjects);
+        const h3ModesByTarget = shared?.h3ModesByTarget ?? new Map<string, string>();
         for (const node of clipRows(canvas?.nodes)) {
             if (!isH3NodeType(String(node.type || ""))) continue;
             const metadata = record(node.metadata);
@@ -490,6 +505,7 @@ export class EpisodeProductionService {
                 if (targetId && mode) h3ModesByTarget.set(targetId, mode);
             }
         }
+        if (shared && !shared.h3ModesByTarget) shared.h3ModesByTarget = h3ModesByTarget;
         let sourceModeChanged = false;
         for (const segment of clipRows(director.source.segments)) {
             const segmentId = String(segment.id || "");
@@ -564,7 +580,7 @@ export class EpisodeProductionService {
             for (const targetId of targets.length ? targets : [bindingId]) compileInputDiagnostics.push({ ...diagnostic, targetId, severity: "warning", blocksCompilation: false, blockingActions: ["generate"] });
         };
         const taskOrderCache = new Map<string, ReturnType<BackendDatabase["getTask"]>>();
-        const projectCache = new Map<string, ReturnType<BackendDatabase["getCanvasProject"]>>();
+        const projectCache = shared?.canvasProjects ?? new Map<string, ReturnType<BackendDatabase["getCanvasProject"]>>();
         for (const shot of shots) {
             if (!subjectReferenceShotIds || subjectReferenceShotIds.has(String(shot.id))) for (const usage of clipRows(shot.subject_usages)) for (const bindingId of resolveSubjectPictureBindingIds(subjectById.get(String(usage.subjectId)), usage).bindingIds) markBindingUsed(String(bindingId), String(shot.id));
             for (const frame of clipRows(shot.keyframes)) if (frame.requiredForSubmission && frame.anchor !== "composition") markBindingUsed(String(frame.id), String(shot.id));
@@ -630,7 +646,13 @@ export class EpisodeProductionService {
                 const media = this.db.getMediaFile(storageKey);
                 if (!media || !fs.existsSync(media.filePath)) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_NOT_ARCHIVED", path: `${bindingPath}.selection`, targetId: bindingId, message: "所选图片尚未归档，不能作为模型参考", severity: "error" }]);
                 if (media.mimeType && !String(media.mimeType).toLowerCase().startsWith("image/")) throw new ProductionValidationError([{ code: "SUBJECT_IMAGE_TYPE_INVALID", path: `${bindingPath}.selection`, targetId: bindingId, message: "所选归档素材不是受支持的图片类型", severity: "error" }]);
-                const digest = promptHashBytes(media.filePath);
+                // promptHashBytes 与下方主路径同为文件字节 sha256，按 (size, mtimeMs) 复用同一缓存。
+                const stat = fs.statSync(media.filePath), digestCacheKey = `${stat.size}:${stat.mtimeMs}`, cachedDigest = this.mediaDigestCache.get(storageKey);
+                const digest = cachedDigest && cachedDigest.statKey === digestCacheKey ? cachedDigest.digest : promptHashBytes(media.filePath);
+                if (!cachedDigest || cachedDigest.statKey !== digestCacheKey) {
+                    if (this.mediaDigestCache.size >= 512) this.mediaDigestCache.delete(this.mediaDigestCache.keys().next().value!);
+                    this.mediaDigestCache.set(storageKey, { statKey: digestCacheKey, digest });
+                }
                 director.assets[assetId] = { ...old, storageKey, sha256: digest, status: old.status === "approved" ? "approved" : "generated",
                     selectedResult: { imageId: bindingId, taskId: old.generationTaskId, storageKey, sha256: digest, projectId: "", nodeId: "" } };
                 continue;
@@ -3739,6 +3761,9 @@ export class EpisodeProductionService {
                         || (segment.shot_ids || []).some((id: string) => shotProjectionIds.has(id))).map(segment => String(segment.id));
                 const targetIds = [...new Set([...requestedTargets, ...automaticTargets])];
                 const changedTargets = measure("clip_refresh_input_hash_comparison", () => targetIds.filter(segmentId => {
+                    // Locked Clips retain their compiled inputs; ordinary saves
+                    // must not create refresh jobs that can only fail CLIP_LOCKED.
+                    if (clipRows(after.source.segments).some(segment => String(segment.id) === segmentId && segment.locked === true)) return false;
                     try {
                         const nextHash = compilationScopeInput(after, clipRefreshScope(segmentId)).inputHash;
                         const priorHash = compilationScopeInput(before, clipRefreshScope(segmentId)).inputHash;
@@ -3750,9 +3775,12 @@ export class EpisodeProductionService {
                 for (const targetId of [...changedTargets, ...requestedTargets, ...(overwriteCompiledPromptTargets || []), ...forceBoundaryTargets]) clipSync.targets?.add(targetId);
                 const store = this.clipRefreshStore(episodeId);
                 measure("clip_refresh_binding_resolution", () => {
+                    // 同一操作内的逐 Segment 解析共享画布解析结果与 H3 mode 映射；
+                    // 画布在本次事务里不会再变，逐次全量重解析是纯浪费。
+                    const shared: SubjectPictureResolutionContext = { canvasProjects: new Map() };
                     for (const segmentId of changedTargets.filter(id => !overwriteCompiledPromptTargets?.has(id))) {
                         let resolvedAfter = after;
-                        try { resolvedAfter = this.resolveSubjectPictureInputs(episodeId, after, [segmentId], true); } catch { /* Saving the draft is allowed; the refresh job will report the unresolved source. */ }
+                        try { resolvedAfter = this.resolveSubjectPictureInputs(episodeId, after, [segmentId], true, undefined, undefined, shared); } catch { /* Saving the draft is allowed; the refresh job will report the unresolved source. */ }
                         store.register(input.operationId, record.revision + 1, before, resolvedAfter, segmentId);
                         clipSync.pending.add(segmentId);
                     }

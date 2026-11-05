@@ -48,6 +48,28 @@ test("落盘失败不能发送；后续动作仍保留；确定拒绝在刷新�
     assert.equal(saved.has("a"), false);
 });
 
+test("确定性 400 只结束本次命令：草稿保留，后续命令与生成门禁不受阻", async () => {
+    const saved = new Map<string, CanvasCommand<{ title: string }>>();
+    const storage = { save: async (item: CanvasCommand<{ title: string }>) => { saved.set(item.operationId, structuredClone(item)); }, remove: async (id: string) => { saved.delete(id); } };
+    const queue = new CanvasCommandQueue(storage);
+    queue.enqueue(command("a", 1));
+    queue.enqueue(command("b", 2));
+    await queue.persisted();
+    await queue.reject("a", "Backend POST /canvas/projects/p/ops failed: HTTP 400 CAS 失败");
+    await assert.rejects(queue.prepare("a", 5), /CAS 失败/);
+    await queue.settle("a", "已明确失败");
+    assert.deepEqual(queue.list().map((item) => item.operationId), ["b"]);
+    assert.equal(queue.listAll().length, 2, "失败草稿仍是可恢复的用户数据");
+    assert.ok(queue.listAll().find((item) => item.operationId === "a")?.settled);
+    assert.equal(queue.hasSettled("p"), true);
+    await assert.doesNotReject(queue.prepare("b", 5), "后续命令照常发送");
+    const restored = new CanvasCommandQueue(storage);
+    saved.forEach((item) => restored.restore(item));
+    assert.deepEqual(restored.list().map((item) => item.operationId), ["b"], "刷新不复活自动重试");
+    await restored.settle("b", "已明确失败");
+    assert.equal(restored.has("p"), false, "全部结束后不再阻断生成门禁");
+});
+
 test("冲突选择先保存替代记录，清理中断后刷新仍只恢复新意图", async () => {
     const saved = new Map<string, CanvasCommand<{ title: string }>>();
     let failRemoval = true;

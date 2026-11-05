@@ -1,3 +1,4 @@
+import { h3ClipNumber } from "../services/h3-data";
 import { useRef, useState } from "@infinite-canvas/plugin-sdk";
 import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import { Button, Input, message, Modal, Radio, Select, Switch } from "antd";
@@ -238,7 +239,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
             <p role="status">{h3Label(locale, globalScope ? "globalScopeNotice" : "clipScopeNotice")}</p>
         </div>
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
-        {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${motionGroup.head + 1}–${motionGroup.tail + 1}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
+        {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${h3ClipNumber(ctx, clips[motionGroup.head], motionGroup.head)}–${h3ClipNumber(ctx, clips[motionGroup.tail], motionGroup.tail)}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${h3ClipNumber(ctx, clips[motionGroup.head], motionGroup.head)}–${h3ClipNumber(ctx, clips[motionGroup.tail], motionGroup.tail)}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
         <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchClipSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
         <Modal title="管理视觉风格模板" open={stylesOpen} onCancel={() => { setStylesOpen(false); setStyleDraft(null); }} footer={null} width={720}>
             <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>

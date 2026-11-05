@@ -356,9 +356,19 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     delete hashSource._canvas_compilation_scope;
     delete hashSource._canvas_continuity_asset_registry;
     const inputs = { source: hashSource, assets: inputAssets, bindings, shotInputs: projected.shotInputs, boundaries: projected.boundaries };
-    const inputHash = compilationHash(inputs);
+    // Replay Shots supply continuity context, not the target Clip's photography.
+    // Keep the full projection for validation, but don't invalidate later Clips
+    // when an earlier Shot only changes its visual description or camera.
+    const identitySource = subjectAssembly && ledger?.contract_version === 2 ? { ...hashSource,
+        shots: rows(hashSource.shots).map(shot => {
+            if (outputShotIds.has(stableId(shot))) return shot;
+            const { camera: _camera, visual: _visual, ...continuityShot } = shot;
+            return continuityShot;
+        }) } : hashSource;
+    const inputHash = compilationHash({ ...inputs, source: identitySource });
+    const contextInputHash = compilationHash(inputs);
     const legacyInputHash = compilationHash({ ...inputs, engine: projected.engine });
-    return { director: projected, inputHash, legacyInputHash, targetIds };
+    return { director: projected, inputHash, contextInputHash, legacyInputHash, targetIds };
 }
 
 export type CompilationArtifactStaleReason = "receipt_missing" | "compiler_changed" | "prompt_hash_mismatch" | "source_changed" | "runtime_changed" | "scope_input_changed" | "scope_unavailable";
@@ -384,7 +394,7 @@ export function compilationArtifactFreshness(director: DirectorProduction, artif
         if (!sourceMatches && scoped.engine && receipt.engineRuntimeId && scoped.engine.runtimeId !== receipt.engineRuntimeId) return { current: false, staleReason: "runtime_changed" };
         try {
             const input = compilationScopeInput({ ...director, engine: scoped.engine || director.engine }, scoped.scope);
-            if (input.inputHash === scoped.inputHash || input.legacyInputHash === scoped.inputHash) return { current: true };
+            if ([input.inputHash, input.contextInputHash, input.legacyInputHash].includes(scoped.inputHash)) return { current: true };
             return { current: false, staleReason: "scope_input_changed" };
         } catch { return { current: false, staleReason: "scope_unavailable" }; }
     }

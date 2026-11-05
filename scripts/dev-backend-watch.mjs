@@ -44,7 +44,7 @@ function removeLockIfOwned(lockPath, pid) {
     } catch { /* process shutdown or another instance already released it */ }
 }
 
-function clearPreviousBackend(cwd, log, env = process.env) {
+function clearPreviousBackend(cwd, log, env = process.env, canStop = true) {
     const lockPath = path.join(backendDataDir(cwd, env), 'backend.lock');
     let record;
     try { record = JSON.parse(readFileSync(lockPath, 'utf8')); }
@@ -67,18 +67,21 @@ function clearPreviousBackend(cwd, log, env = process.env) {
         throw new Error(`Backend lock PID=${pid} belongs to another process; refusing to stop it. Lock: ${lockPath}`);
     }
 
+    if (!canStop) throw new Error(`Backend PID=${pid} is already running; stop it while idle before starting stable mode.`);
+
     process.kill(pid, 'SIGKILL');
     removeLockIfOwned(lockPath, pid);
     log.log(`[backend-watch] stopped previous Backend PID=${pid}`);
 }
 
-export function startBackendWatch({ cwd = backend, directories = [path.join(backend, 'src'), path.join(root, 'canvas-agent', 'dist')], log = console, publicPort: configuredPublicPort, backendPort: configuredBackendPort, env = process.env } = {}) {
+export function startBackendWatch({ cwd = backend, directories = [path.join(backend, 'src'), path.join(root, 'canvas-agent', 'dist')], watchSources = true, log = console, publicPort: configuredPublicPort, backendPort: configuredBackendPort, env = process.env } = {}) {
     let child, ready = false, dirty = false, requested = false, restarting = false, stopped = false, reportedBusy = false;
     let debounce, retry;
+    let changedAt, reloadStartedAt, lastChangedFile;
     const watchers = [];
-    const publicPort = configuredPublicPort ?? (Number(process.env.PORT) || 17370);
-    const backendPort = configuredBackendPort ?? (Number(process.env.INFINITE_CANVAS_BACKEND_LISTEN_PORT) || 17372);
-    const proxy = createStableBackendProxy({ port: publicPort, targetPort: backendPort });
+    const publicPort = configuredPublicPort ?? (Number(env.PORT) || 17370);
+    const backendPort = configuredBackendPort ?? (Number(env.INFINITE_CANVAS_BACKEND_LISTEN_PORT) || 17372);
+    const proxy = createStableBackendProxy({ port: publicPort, targetPort: backendPort, log });
 
     function requestReload() {
         if (stopped || !dirty || debounce) return;
@@ -92,9 +95,14 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
         if (stopped) return;
         dirty = false; ready = false; requested = false; restarting = false; reportedBusy = false;
         proxy.setBackendReady(false);
-        try { clearPreviousBackend(cwd, log, env); }
-        catch (error) { log.error(`[backend-watch] ${error.message}`); return; }
-        child = spawn(process.execPath, ['--import', tsx, 'src/index.ts'], {
+        try { clearPreviousBackend(cwd, log, env, watchSources); }
+        catch (error) {
+            log.error(`[backend-watch] ${error.message}`);
+            if (!watchSources) { proxy.close(); process.exitCode = 1; }
+            return;
+        }
+        const startedAt = performance.now();
+        child = spawn(process.execPath, watchSources ? ['--import', tsx, 'src/index.ts'] : ['dist/index.js'], {
             cwd, env: { ...env, PORT: String(publicPort), INFINITE_CANVAS_BACKEND_LISTEN_PORT: String(backendPort), INFINITE_CANVAS_DEV_WATCH: '1' }, stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         });
         child.on('message', message => {
@@ -105,6 +113,8 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
                     ready = true;
                     proxy.setBackendReady(true);
                     log.log(`[backend-watch] ready PID=${message.pid} publicHost=${proxy.server.address()?.address}`);
+                    log.log(`[backend-watch] timings ${JSON.stringify({ mode: watchSources ? 'watch' : 'stable', startupMs: Math.round(performance.now() - startedAt), ...(reloadStartedAt !== undefined ? { unavailableMs: Math.round(performance.now() - reloadStartedAt) } : {}) })}`);
+                    reloadStartedAt = undefined;
                     requestReload();
                 }).catch(error => log.error(`[backend-watch] public listener bind failed: ${error.message}`));
                 return;
@@ -113,9 +123,12 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
             requested = false;
             if (message.accepted) {
                 dirty = false; restarting = true;
+                reloadStartedAt = performance.now();
                 proxy.setBackendReady(false);
                 clearTimeout(retry);
                 log.log('[backend-watch] idle; reloading Backend');
+                log.log(`[backend-watch] trigger ${JSON.stringify({ file: lastChangedFile, waitForIdleMs: changedAt === undefined ? 0 : Math.round(performance.now() - changedAt) })}`);
+                changedAt = undefined;
             } else {
                 if (!reportedBusy) log.log('[backend-watch] reload pending; waiting for tasks, Agent turns and writes to finish');
                 reportedBusy = true;
@@ -124,6 +137,7 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
         });
         child.on('error', error => { log.error(`[backend-watch] ${error.message}`); child = undefined; ready = false; requested = false; });
         child.on('exit', code => {
+            if (reloadStartedAt !== undefined) log.log(`[backend-watch] shutdown ${JSON.stringify({ code, shutdownMs: Math.round(performance.now() - reloadStartedAt) })}`);
             const shouldRestart = restarting || dirty;
             child = undefined; ready = false; requested = false; proxy.setBackendReady(false);
             if (stopped) return;
@@ -132,12 +146,14 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
         });
     }
 
-    for (const directory of directories) {
+    for (const directory of watchSources ? directories : []) {
         if (!existsSync(directory)) continue;
         watchers.push(watch(directory, { recursive: true }, (_event, name) => {
             const relative = String(name || '');
             if (!/\.(?:ts|tsx|js|mjs|cjs|json)$/.test(relative) || /\.test\.[cm]?[jt]sx?$/.test(relative) || /\.d\.ts$/.test(relative)) return;
             dirty = true;
+            changedAt ??= performance.now();
+            lastChangedFile = path.relative(root, path.join(directory, relative));
             clearTimeout(debounce);
             debounce = setTimeout(() => { debounce = undefined; requestReload(); }, 500);
         }));
@@ -162,6 +178,6 @@ export function startBackendWatch({ cwd = backend, directories = [path.join(back
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-    const watcher = startBackendWatch();
+    const watcher = startBackendWatch({ watchSources: !process.argv.includes('--stable') });
     for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => watcher.stop(signal));
 }

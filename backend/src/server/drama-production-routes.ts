@@ -3,6 +3,7 @@ import type { Router } from "express";
 import { ZodError } from "zod";
 
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
+import { resolveProductionTarget } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
 import { productionWorkspaceSchemas, productionContractQuerySchema, validateProductionContractQuery } from "@basketikun/canvas-agent/drama/production-contract";
@@ -241,6 +242,11 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             const query = productionReadSchema.parse({ ...req.query, view: req.query.view || "full", targetIds: typeof req.query.targetIds === "string" ? req.query.targetIds.split(",") : req.query.targetIds,
                 sourceSections: typeof req.query.sourceSections === "string" && req.query.sourceSections ? req.query.sourceSections.split(",") : req.query.sourceSections });
             validateProductionSourceFields(query);
+            if (query.clipNumber !== undefined || query.shotNumber !== undefined || query.shotInClip !== undefined) {
+                if (query.targetIds?.length) throw new Error("TARGET_SELECTOR_CONFLICT: 稳定 ID 与展示编号只能选一种定位方式");
+                const current = service.getForRead(req.params.episodeId);
+                query.targetIds = [resolveProductionTarget(current[query.snapshot]?.director?.source || {}, query.view, query)];
+            }
             let production: any;
             // Canonical reads use the saved source directly; legacy runtime projections are opt-in for execution paths.
             if (query.view === "clip_workbench") {

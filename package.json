@@ -11,6 +11,7 @@
         "dev": "corepack pnpm run predev && concurrently -n backend,web \"corepack pnpm --filter @helishou/infinite-canvas-backend run dev\" \"corepack pnpm --filter infinite-canvas run dev\"",
         "predev:backend": "corepack pnpm --filter @basketikun/canvas-agent run build",
         "dev:backend": "corepack pnpm run predev:backend && corepack pnpm --filter @helishou/infinite-canvas-backend run dev",
+        "start:backend": "corepack pnpm --filter @basketikun/canvas-agent run build && corepack pnpm --filter @helishou/infinite-canvas-backend run build && node scripts/dev-backend-watch.mjs --stable",
         "dev:agent": "node scripts/dev-agent.mjs",
         "predev:web": "corepack pnpm run build:plugins && corepack pnpm --filter @basketikun/canvas-agent run build",
         "dev:web": "corepack pnpm run predev:web && corepack pnpm --filter infinite-canvas run dev",

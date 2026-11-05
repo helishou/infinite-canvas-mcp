@@ -29,12 +29,14 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, is
     const { t } = useTranslation();
     const colorTheme = useThemeStore((state) => state.theme);
     const theme = canvasThemes[colorTheme];
-    const dockStyle = { background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.item };
+    const dockStyle = { color: theme.toolbar.item };
     const activeStyle = { background: theme.toolbar.activeBg, color: theme.toolbar.activeText };
 
     return (
         <div data-canvas-zoom-controls className="canvas-zoom-dock" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="flex h-14 items-center gap-1 rounded-lg border px-2" style={dockStyle}>
+            {/* 高度与滑块宽度由 canvas-workspace-chrome.css 的 40px / 64px 统一定义；
+                毛玻璃底（半透明背景 + 1px 极淡描边）在 canvas-workspace-chrome.css 里。 */}
+            <div className="flex items-center gap-1 px-2" style={dockStyle}>
                 <Tooltip title={isMiniMapOpen ? t("canvas.miniMapClose") : t("canvas.miniMapOpen")}>
                     <Button
                         type="text"
@@ -56,7 +58,6 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, onFitAll, is
                         max="100"
                         step="1"
                         value={Math.round(scale * 100)}
-                        className="w-24"
                         style={{ accentColor: theme.node.activeStroke }}
                         onChange={(event) => onScaleChange(Number(event.target.value) / 100)}
                         aria-label={t("canvas.zoom")}

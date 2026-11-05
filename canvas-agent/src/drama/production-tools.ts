@@ -20,12 +20,16 @@ const artifactRead = z.object({ ...owner, ...readSnapshot, targetId: z.string().
 const versionSourceRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), sourceSection: sourceRead.shape.sourceSection, fields: sourceRead.shape.fields, targetIds: sourceRead.shape.targetIds, pageSize: sourceRead.shape.pageSize, chunkBytes: sourceRead.shape.chunkBytes, cursor: sourceRead.shape.cursor }).strict();
 const versionArtifactIndexRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), targetIds: artifactIndexRead.shape.targetIds, pageSize: artifactIndexRead.shape.pageSize, cursor: artifactIndexRead.shape.cursor }).strict();
 const versionArtifactRead = z.object({ kind: owner.kind, id: owner.id, version: z.number().int().min(1), snapshot: z.enum(["draft", "published"]).default("published"), targetId: artifactRead.shape.targetId, chunkBytes: artifactRead.shape.chunkBytes, cursor: artifactRead.shape.cursor }).strict();
-const workbenchRead = z.object({ ...owner, ...readSnapshot, targetId: z.string().min(1), view: z.enum(["subject_workbench", "shot_workbench", "clip_workbench"]), includeContext: z.boolean().default(false), includeRuntime: z.boolean().default(false), chunkBytes: z.number().int().min(1).max(65536).default(32768), cursor: z.string().optional() }).strict();
+const workbenchRead = z.object({ ...owner, ...readSnapshot, targetId: z.string().min(1).optional(),
+    clipNumber: z.number().int().positive().optional().describe("当前制作页 Clip 编号，从 1 开始，不能从 ID 后缀或 H3 节点下标推导"),
+    shotNumber: z.number().int().positive().optional().describe("全片镜头编号，从 1 开始"),
+    shotInClip: z.number().int().positive().optional().describe("配合 clipNumber 定位 Clip 内第几镜，从 1 开始"),
+    view: z.enum(["subject_workbench", "shot_workbench", "clip_workbench"]), includeContext: z.boolean().default(false), includeRuntime: z.boolean().default(false), chunkBytes: z.number().int().min(1).max(65536).default(32768), cursor: z.string().optional() }).strict();
 const write = { operationId: z.string().min(1), expectedRevision: z.number().int().nonnegative() };
 const edit = productionEditSchema.extend(owner).strict();
 export const productionToolSchemas = {
     production_preflight: productionPreflightSchema.extend(owner).extend({ view: z.enum(["summary", "diagnostics", "targets"]).default("summary"), pageSize: z.number().int().positive().max(50).default(20), cursor: z.string().optional(), chunkBytes: z.number().int().positive().max(65536).optional() }).strict(),
-    production_get: z.object({ ...owner, ...readSnapshot }).strict(),
+    production_get: z.object({ ...owner, ...readSnapshot, view: z.enum(["summary", "numbering"]).default("summary"), pageSize: z.number().int().min(1).max(50).optional(), cursor: z.string().optional() }).strict(),
     production_get_source: sourceRead,
     production_get_artifact_index: artifactIndexRead,
     production_get_artifact: artifactRead,
@@ -56,11 +60,11 @@ export const productionToolNames = Object.keys(productionToolSchemas) as Product
 export const isProductionTool = (name: string): name is ProductionToolName => Object.hasOwn(productionToolSchemas, name);
 export const productionToolDescriptions: Record<ProductionToolName, string> = {
     production_preflight: "按显式 kind/id 检查制作请求；只读，不提交媒体。默认仅返回摘要；view=diagnostics 或 targets 分页读取完整诊断/目标，默认每页 20 条、最多 50 条，使用 cursor 续页。单条超大诊断使用同工具 chunkBytes 分块。request 必须符合 action 对应的请求结构：compile 需 request.expectedRevision（范围编译还要 operationId/scope）；edit/publish 需 operationId 和 expectedRevision；generate 需 runId、idempotencyKey、expectedRevision 和 targets。",
-    production_get: "只读取 kind/id 制作摘要。源稿、产物目录、单个提示词或单目标工作台内容分别使用 production_get_source、production_get_artifact_index、production_get_artifact、production_get_workbench；本工具不接受全量视图。",
+    production_get: "默认读取 kind/id 制作摘要；view=numbering 分页返回当前制作页统一编号、稳定 Segment/Shot ID、标题与时长，按 nextCursor 续读。源稿、产物目录、单个提示词或单目标工作台内容分别使用 production_get_source、production_get_artifact_index、production_get_artifact、production_get_workbench；本工具不接受全量视图。",
     production_get_source: "读取指定 sourceSection，或用 sourceSections 一次读取多段（最多 8 段，如 shots、segments、script_scenes、settings）——同类分区优先合并成一次调用，不要同一秒内并发逐段读。只查局部字段时用 fields（顶层字段名），返回 partialSource/sourceFields、稳定 ID 与缺失字段，不附带画布输入或任务上下文；部分结果不能用于整稿替换。省略 fields 保持完整章节。script、production_shots、clip_groups、keyframes、keyframe_reviews、settings 是制作正文分区，其余章节来自导演源稿。单段默认每页 20 条、最多 50 条，用 cursor 续页；多段返回各段完整内容与 counts，不分页也不分块，体积超限时退回单段。读取单个对象可传唯一 targetIds 和 chunkBytes 分块。v2 的 sourceSection=shots 额外返回与当前页 Shot 对应的 targetClipMappings（shotId→segmentIds），用于核对当前分组；正式写入返修仍优先传稳定 Shot ID 给 production_edit 的 request_director_shot_refresh，由 Backend 在事务内重新解析映射。",
     production_get_artifact_index: "分页读取轻量产物目录，不含提示词和引用；默认每页 20 条，最多 50 条。",
     production_get_artifact: "按 targetId 分块读取正式编译提示词及引用绑定；Picture 编号对应本产物引用列表。Clip 应用时若画布参考顺序不同，Backend 按绑定身份同步重编号。使用 cursor 读完并核对 sha256。",
-    production_get_workbench: "只读取一个 targetId 的指定 Subject、Shot 或 Clip 工作台，默认返回 32 KiB 内容块及完整性摘要；用 cursor 续读到 nextCursor=null。核对单镜姿势时用 shot_workbench；Shot/Clip 默认只返回正文核心（Shot/Segment）。需要连续性和解析上下文时传 includeContext=true，需要画布 Prompt、导演基线、参考与运行状态时传 includeRuntime=true。两者都传 true 可读取完整工作台。audio_bindings 是导演源稿正式音频绑定，audioRuntime 是 H3 画布设置的只读映射；映射依来源节点和 storageKey 确认，H3 referenceBindingId 与 authoredBindingId 不可互换。Subject 草稿返回 entityNodeSource 时，用真实 projectId/nodeId 定位实体节点。检查状态优先用 production_get_artifact_index。",
+    production_get_workbench: "读取单个 Subject、Shot 或 Clip 工作台。优先按用户当前页面编号定位：clip_workbench + clipNumber；shot_workbench + clipNumber + shotInClip，或 shotNumber（全片镜号）。编号从 1 开始，严禁从稳定 ID 后缀或 H3 节点 index 猜编号。已解析目标后沿用返回的稳定 ID。targetId 与编号参数二选一。默认返回 32 KiB 内容块及完整性摘要；用 cursor 续读到 nextCursor=null。核对单镜姿势时用 shot_workbench；Shot/Clip 默认只返回正文核心（Shot/Segment）。需要连续性和解析上下文时传 includeContext=true，需要画布 Prompt、导演基线、参考与运行状态时传 includeRuntime=true。两者都传 true 可读取完整工作台。audio_bindings 是导演源稿正式音频绑定，audioRuntime 是 H3 画布设置的只读映射；映射依来源节点和 storageKey 确认，H3 referenceBindingId 与 authoredBindingId 不可互换。Subject 草稿返回 entityNodeSource 时，用真实 projectId/nodeId 定位实体节点。检查状态优先用 production_get_artifact_index。",
     production_get_readiness: "默认读取制作就绪摘要、目标总数和状态计数；view='targets' 分页读取目标级 blocker/warning，默认每页 20 条、最多 50 条，用 cursor 续读。",
     production_start_run: "按 kind/id 启动已有授权的制作运行；inputBasis 默认 canvas，冻结当前有效画布输入，显式 published 核验指定发布稿。Backend 在提交边界执行一次权威预检并返回 ready/blocked 目标，输入未变化时不要先重复调用 production_preflight。默认返回紧凑批次回执；完整冻结快照用 production_get_batch({ view: \"full\" }) 按需读取。保留 runId/idempotencyKey 与版本边界；保存、编译、审核和发布不授权生成。",
     production_get_batch: "按 kind/id/runId 读取固定生产范围、状态与任务 ID。默认返回紧凑摘要；传 view: \"full\" 读取完整执行快照、逐目标诊断与运行参数。",
@@ -89,11 +93,11 @@ export function productionToolRequest(name: ProductionToolName, raw: unknown) {
     const get = (path: string) => ({ method: "GET" as const, path });
     const post = (path: string, body: unknown) => ({ method: "POST" as const, path, body });
     switch (name) {
-        case "production_get": return get(base + productionReadQuery({ ...input, view: "summary" }));
+        case "production_get": return get(base + productionReadQuery({ ...input, ...(input.view === "numbering" ? { pageSize: input.pageSize || 20 } : {}) }));
         case "production_get_source": return get(base + productionReadQuery({ ...input, view: "source" }));
         case "production_get_artifact_index": return get(base + productionReadQuery({ ...input, view: "artifact_index" }));
         case "production_get_artifact": return get(base + productionReadQuery({ ...input, view: "artifacts", targetIds: [input.targetId] }));
-        case "production_get_workbench": return get(base + productionReadQuery({ ...input, targetIds: [input.targetId] }));
+        case "production_get_workbench": return get(base + productionReadQuery({ ...input, ...(input.targetId ? { targetIds: [input.targetId] } : {}) }));
         case "production_get_readiness": return get(base + `/readiness?${new URLSearchParams({ source: input.source, view: input.view, pageSize: String(input.pageSize), ...(input.cursor ? { cursor: input.cursor } : {}) })}`);
         case "production_preflight": return post(base + "/preflight", { action: input.action, request: input.request });
         case "production_start_run": return post(base + "/runs", input);

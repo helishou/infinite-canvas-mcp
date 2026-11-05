@@ -354,6 +354,8 @@ export type CanvasProductionStoryboardEditor = {
 export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
 export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }> };
 export type CanvasProductionEditing = {
+    /** Current authored Clip ordinals keyed by stable source Segment ID. */
+    clipNumbers?: Readonly<Record<string, number>>;
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean; segment?: Record<string, unknown> }>;

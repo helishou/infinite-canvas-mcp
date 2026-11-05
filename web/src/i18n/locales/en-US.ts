@@ -2,6 +2,12 @@ import { generationGroupsEnUS } from "../generation-groups";
 import { workspaceNavigationEnUS } from "../workspace-navigation";
 
 export default {
+    routeError: {
+        title: "This page failed to render",
+        hint: "This usually happens after a dev hot update left stale component state. Reload the page with the button below; local drafts and backend data are preserved.",
+        reload: "Reload page",
+        details: "Stack trace",
+    },
     canvasRecovery: {
         suggestions: "Rewrite suggestions", localDrafts: "Local drafts", loading: "Loading…",
         summary: "{{pending}} pending · {{count}} records", refresh: "Refresh", empty: "This canvas has no rewrite suggestions",

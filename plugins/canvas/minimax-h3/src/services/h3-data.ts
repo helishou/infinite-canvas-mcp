@@ -1,9 +1,16 @@
+import type { CanvasNodeContext } from "@infinite-canvas/plugin-sdk";
 import type { H3CharacterGroup, H3CharacterGroupEditPatch, H3CharacterOutfit, H3CharacterVoice, H3Ref, H3ReferenceBinding, H3ReferenceRole, H3Segment } from "../types";
 import { sameRef } from "./h3-compatibility";
 import { characterGroupBindings, resolveCharacterGroupBindings, syncH3CharacterGroupSource } from "../../../../../canvas-agent/src/canvas/reference-contract";
 import { applyReferenceOrder, orderReferencesForSubmission } from "../../../../../canvas-agent/src/canvas/storyboard-reference-order";
 
-export function h3OutputName(node: { id?: string }, clipNumber: number, version?: number) {
+/** Bound Clips always use the authored ordinal. Missing mappings must not become node indices. */
+export function h3ClipNumber(ctx: Pick<CanvasNodeContext, "production">, segment: H3Segment | undefined, index: number): number | string {
+    const targetId = String(segment?.productionClipProjection?.targetId || "");
+    return targetId ? ctx.production?.clipNumbers?.[targetId] ?? "?" : index + 1;
+}
+
+export function h3OutputName(node: { id?: string }, clipNumber: number | string, version?: number) {
     const source = String(node.id || "").trim().slice(-6);
     return `H3 Clip ${clipNumber}${source ? ` · ${source}` : ""}${version ? ` · v${version}` : ""}`;
 }

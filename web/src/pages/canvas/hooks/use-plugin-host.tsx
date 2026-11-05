@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import { previewH3Generation, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
+// @refresh reset
+// usePluginHost 是自定义 hook：内部 hook 数量变化（新增 useState/useRef/useEffect）时，
+// Fast Refresh 会沿用旧 fiber 的 hook 链，让 CanvasSurface 后续的 useState 拿到错位槽位并抛
+// "Should have a queue"。此指令让本模块更新时强制重挂载所有使用者，而不是就地刷新。
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { previewH3Generation, fetchProductionClipNumbers, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
@@ -36,6 +40,7 @@ type PluginHostParams = {
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (open: boolean) => void;
     theme: CanvasTheme;
+    nodes: CanvasNodeData[];
     nodesRef: MutableRefObject<CanvasNodeData[]>;
     connectionsRef: MutableRefObject<CanvasConnection[]>;
     selectGraphIndex: (nodes: CanvasNodeData[], connections: CanvasConnection[]) => CanvasGraphIndex;
@@ -69,7 +74,45 @@ async function persistH3Result<T extends { url: string; mimeType: string; storag
  */
 export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
-    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
+    const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodes, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
+    const [clipNumbers, setClipNumbers] = useState<Record<string, number>>({});
+    const productionOwners = [...new Set(nodes.filter(node => node.metadata?.productionOwnerId).map(node => String(node.metadata?.productionOwnerId)))].sort().join("|");
+    // 片段目标集合（新增、删除或重投影 Clip）变化时重新拉取编号；不参与清空判断，避免整排卡片先闪 "?"。
+    const productionTargets = [...new Set(nodes.flatMap(node => Array.isArray(node.metadata?.segments)
+        ? node.metadata.segments.map(segment => String((segment?.productionClipProjection as { targetId?: string } | undefined)?.targetId || "")).filter(Boolean)
+        : []))].sort().join("|");
+    const productionScopeRef = useRef(`${projectId}\n${productionOwners}`);
+    useEffect(() => {
+        let active = true;
+        let requestVersion = 0;
+        const scope = `${projectId}\n${productionOwners}`;
+        if (productionScopeRef.current !== scope) {
+            productionScopeRef.current = scope;
+            setClipNumbers({});
+        }
+        if (!productionOwners) return;
+        const refresh = async () => {
+            const version = ++requestVersion;
+            try {
+                const numbers = await fetchProductionClipNumbers({ projectId });
+                if (active && version === requestVersion) setClipNumbers(numbers);
+            } catch {
+                if (active && version === requestVersion) setClipNumbers({});
+            }
+        };
+        const onEvent = (event: Event) => {
+            const value = (event as CustomEvent).detail;
+            if (value?.type === "drama-production.updated" && !value.payload?.runId && [projectId, ...productionOwners.split("|")].includes(value.entityId)) void refresh();
+        };
+        void refresh();
+        window.addEventListener("backend-event", onEvent);
+        window.addEventListener("backend-connected", refresh);
+        return () => {
+            active = false;
+            window.removeEventListener("backend-event", onEvent);
+            window.removeEventListener("backend-connected", refresh);
+        };
+    }, [projectId, productionOwners, productionTargets]);
     const getProject = useCallback(() => useCanvasStore.getState().projects.find((item) => item.id === projectId), [projectId]);
     const graphAccess = useMemo(() => createPluginGraphAccess(getProject, () => ({ nodes: nodesRef.current, connections: connectionsRef.current }), params.selectGraphIndex), [getProject, nodesRef, connectionsRef, params.selectGraphIndex]);
     const generationLogs = useMemo<CanvasGenerationLogs>(() => {
@@ -284,9 +327,9 @@ export function usePluginHost(params: PluginHostParams) {
             openAssetPicker,
             openMediaPreview,
             generationLogs,
-            production: createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)),
+            production: { ...createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)), clipNumbers },
         }),
-        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes],
+        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes, clipNumbers],
     );
 
     const renderPluginPanel = useCallback(

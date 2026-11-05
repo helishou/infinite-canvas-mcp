@@ -45,6 +45,41 @@ test('returns structured 503 after the readiness wait expires', async t => {
     assert.equal((await response.json()).code, 'BACKEND_RELOADING');
 });
 
+test('preserves waiting requests across repeated not-ready notifications', async t => {
+    let requests = 0;
+    const backend = http.createServer((req, res) => { requests++; res.end('ready'); });
+    const targetPort = await listen(backend);
+    const proxy = createStableBackendProxy({ port: 0, targetPort, readyWaitMs: 500 });
+    await once(proxy.server, 'listening');
+    t.after(async () => { proxy.close(); await close(backend); });
+    const received = once(proxy.server, 'request');
+    const pending = fetch(`http://127.0.0.1:${proxy.server.address().port}/canvas/projects/P/collaboration`);
+    await received;
+    proxy.setBackendReady(false);
+    proxy.setBackendReady(false);
+    assert.equal(requests, 0);
+    proxy.setBackendReady(true);
+    const response = await pending;
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'ready');
+    assert.equal(requests, 1);
+});
+
+test('not-ready notifications preserve the original readiness deadline', async t => {
+    const proxy = createStableBackendProxy({ port: 0, targetPort: 1, readyWaitMs: 30 });
+    await once(proxy.server, 'listening');
+    t.after(() => proxy.close());
+    const received = once(proxy.server, 'request');
+    const pending = fetch(`http://127.0.0.1:${proxy.server.address().port}/health`);
+    await received;
+    proxy.setBackendReady(false);
+    const response = await pending;
+    assert.equal(response.status, 503);
+    const data = await response.json();
+    assert.equal(data.code, 'BACKEND_RELOADING');
+    assert.match(data.error, /30ms/);
+});
+
 test('waits for a competing watcher to release the public port before binding', async t => {
     const occupied = http.createServer();
     const port = await listen(occupied);

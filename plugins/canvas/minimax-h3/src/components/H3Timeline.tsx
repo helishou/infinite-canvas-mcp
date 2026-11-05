@@ -1,3 +1,4 @@
+import { h3ClipNumber } from "../services/h3-data";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
@@ -65,12 +66,12 @@ function reorderStoryboardShotsWithReferences(segment: H3Segment, refs: H3Ref[])
     return { ...segment, storyboardShots };
 }
 
-function TimelineReferenceMedia({ ctx, refItem, compactMedia }: { ctx: CanvasNodeContext; refItem: H3Ref; compactMedia: boolean }) {
+function TimelineReferenceMedia({ ctx, refItem }: { ctx: CanvasNodeContext; refItem: H3Ref }) {
     const mediaRef = useRef<HTMLDivElement | null>(null);
     const [visibleVideoUrl, setVisibleVideoUrl] = useState("");
     const mediaUrl = refItem.storageKey ? ctx.mediaUrl(refItem.storageKey) : refItem.url;
     useEffect(() => {
-        if (refItem.type !== "video" || compactMedia) return;
+        if (refItem.type !== "video") return;
         const media = mediaRef.current;
         const clip = media?.closest(".minimax-ref-clip");
         if (!clip || typeof IntersectionObserver === "undefined") {
@@ -84,9 +85,9 @@ function TimelineReferenceMedia({ ctx, refItem, compactMedia }: { ctx: CanvasNod
         }, { root: clip.closest(".minimax-tracks-scroll"), rootMargin: "120px" });
         observer.observe(clip);
         return () => observer.disconnect();
-    }, [compactMedia, refItem.type, mediaUrl]);
+    }, [refItem.type, mediaUrl]);
     return <div ref={mediaRef} className="minimax-ref-media">{refItem.type === "video"
-        ? compactMedia || !mediaUrl || visibleVideoUrl !== mediaUrl ? <H3Icon name="clapperboard" /> : <video src={mediaUrl} muted playsInline preload="metadata" draggable={false} />
+        ? !mediaUrl || visibleVideoUrl !== mediaUrl ? <H3Icon name="clapperboard" /> : <video src={mediaUrl} muted playsInline preload="metadata" draggable={false} />
         : refItem.type === "image" ? <img src={mediaUrl} alt={refItem.name} draggable={false} loading="lazy" />
             : <span>{refItem.name}</span>}</div>;
 }
@@ -141,7 +142,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         }
         return groups;
     }, [segments, defaults, metadata.h3ParameterPolicy, metadata.motionContextEnabled, comfyParams.motionContextEnabled]);
-    const compactMedia = ctx.scale < 0.2;
+    // 参考轨视频同样不按画布缩放卸载：见 H3ClipCard 的说明，懒加载由 IntersectionObserver 负责。
     const trackScrollRef = useRef<HTMLDivElement | null>(null);
     const rulerInnerRef = useRef<HTMLDivElement | null>(null);
     const pendingScrollIdRef = useRef<string | null>(null);
@@ -741,7 +742,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                 }}
                 className={`minimax-ref-clip ${ref ? "has-ref" : "is-empty"} ${isAddSlot ? "is-add-slot" : ""} ${pickingKey === `${segment.id}:${refIndex}` ? "is-picking" : ""} ${isGrouped ? "is-character-group" : ""} ${ref?.role === "character_voice" ? "is-character-voice" : ""} ${overLimit ? "is-over-limit" : ""} ${dropTargetKey === `${segment.id}:${refIndex}` ? "is-drop-target" : ""}`}
                 title={ref ? `双击编辑参考素材职责${overLimit ? `（已超出 H3 运行上限：图片最多 ${H3_RUNTIME_REF_LIMITS.image} 张、视频/音频最多 ${H3_RUNTIME_REF_LIMITS.video} 个，运行会报错）` : ""}` : pickingKey === `${segment.id}:${refIndex}` ? "在画布上点选节点作为参考（Esc 取消）" : "点击进入画布选节点模式，挑一个节点作为参考（也可直接拖素材进来）"}
-            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} compactMedia={compactMedia} /><span className="minimax-ref-role" title={picturePurpose ? `正式图片用途：${picturePurpose}` : "参考职责"}>{picturePurpose || REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
+            >{ref ? <><TimelineReferenceMedia ctx={ctx} refItem={ref} /><span className="minimax-ref-role" title={picturePurpose ? `正式图片用途：${picturePurpose}` : "参考职责"}>{picturePurpose || REFERENCE_ROLE_LABELS[ref.role || "other"] || "未分类"}</span><span className="minimax-ref-counts">{displayReferenceName(ref, entry?.ordinal || index + 1, label)}</span><button type="button" title="移除参考" onClick={(event) => { event.stopPropagation(); onRemoveRef(segment.id, ref); }} onDoubleClick={(event) => event.stopPropagation()}>×</button></> : <><H3Icon name={isAddSlot ? "plus" : "paperclip"} /><span>{pickingKey === `${segment.id}:${index}` ? "选择中…" : label}</span></>}</div>;
         })}</div>;
     };
     const renderStoryboardTrack = (segment: H3Segment) => {
@@ -881,7 +882,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
     const timelineMenuNode = timelineMenu && storyboardMenuSegment ? createPortal(
         <div ref={storyboardMenuRef} className="minimax-storyboard-menu" style={{ ...h3ThemeVars(ctx.theme), position: "fixed", zIndex: 9999, left: `${timelineMenu.x}px`, top: `${timelineMenu.y}px` }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
             {timelineMenu.kind === "clip" ? <>
-                <div className="minimax-storyboard-menu-title">{`Clip ${timelineMenuClipIndex + 1}`}</div>
+                <div className="minimax-storyboard-menu-title">{`Clip ${h3ClipNumber(ctx, segments[timelineMenuClipIndex], timelineMenuClipIndex)}`}</div>
                 <button
                     type="button"
                     className="minimax-storyboard-menu-item"
@@ -918,7 +919,7 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
                     onClick={(event) => { event.stopPropagation(); onEditRef(timelineMenu.segmentId, timelineMenu.ref); setTimelineMenu(null); }}
                 >编辑参考素材职责</button>
             </> : <>
-                <div className="minimax-storyboard-menu-title">{`Clip ${timelineMenuClipIndex + 1} · ${timelineMenu.kind === "storyboard" && timelineMenu.afterId ? `分镜 ${timelineMenu.index! + 1}` : "分镜轨"}`}</div>
+                <div className="minimax-storyboard-menu-title">{`Clip ${h3ClipNumber(ctx, segments[timelineMenuClipIndex], timelineMenuClipIndex)} · ${timelineMenu.kind === "storyboard" && timelineMenu.afterId ? `分镜 ${timelineMenu.index! + 1}` : "分镜轨"}`}</div>
                 {timelineMenu.kind === "storyboard" && storyboardMenuItem?.ref ? <button
                     type="button"
                     className="minimax-storyboard-menu-item"

@@ -187,12 +187,18 @@ def binding_ids(subject, usage, *, allow_missing=False):
     # Visible scene Subjects inherit a purpose-matched environment default only.
     if (subject.get("entityRef") or {}).get("kind") == "scene" and not scene_environment:
         return []
+    # Older scene assets use the entity-kind label "scene" for their purpose.
+    # Prefer authored environment bindings when present; do not rewrite source or
+    # let compatibility override explicit selection, state guards or ambiguity.
+    legacy_scene = scene_environment and not any("environment" in item.get("provides", []) for item in bindings)
+    def matches_purpose(values, purpose):
+        return purpose in values or (purpose == "environment" and legacy_scene and "scene" in values)
     selected = []
     for purpose in dict.fromkeys(map(str, purposes)):
         eligible = [item for item in bindings
-                    if purpose in [str(value) for value in item.get("provides", [])]
+                    if matches_purpose([str(value) for value in item.get("provides", [])], purpose)
                     and all(requirements.get(str(key)) == str(value) for key, value in (item.get("applicableState") or {}).items())]
-        candidates = [item for item in eligible if purpose in [str(value) for value in item.get("defaultFor", [])]]
+        candidates = [item for item in eligible if matches_purpose([str(value) for value in item.get("defaultFor", [])], purpose)]
         fixed_results = [item for item in eligible if (item.get("selection") or {}).get("mode") == "selected_result"]
         if len(candidates) == 1:
             selected.append(str(candidates[0]["id"]))
@@ -708,14 +714,26 @@ def adapt_production(production, *, draft=False):
                 # registered. Its archived source node (or stable asset ID) is
                 # still sufficient to identify and require this standalone image.
                 asset_id = str(snapshot.get("assetId") or frame.get("assetId") or frame.get("id") or "")
-                ref_subject = next((subject_by_id.get(str(sid)) for sid in frame.get("subjectIds", []) if str(sid) in subject_by_id), None)
-                entity_id = str((ref_subject or {}).get("entityRef", {}).get("id") or _canvas_node_entity_id(frame.get("sourceNode"), asset_id))
+                # A keyframe may compose several registered Subjects in one image.
+                # Keep all of their stable entity IDs on the approved asset; using
+                # only the first subject made the reference look like a different
+                # asset entity and left the other visible entities undeclared.
+                frame_subjects = [subject_by_id[str(sid)] for sid in frame.get("subjectIds", []) if str(sid) in subject_by_id]
+                entity_ids = list(dict.fromkeys(
+                    str((subject.get("entityRef") or {}).get("id") or "")
+                    for subject in frame_subjects
+                    if str((subject.get("entityRef") or {}).get("id") or "")
+                ))
+                if not entity_ids:
+                    fallback_entity = _canvas_node_entity_id(frame.get("sourceNode"), asset_id)
+                    if fallback_entity:
+                        entity_ids.append(fallback_entity)
+                entity_id = entity_ids[0] if entity_ids else ""
                 picture = next((candidate for candidate in selected_pictures
                                 if candidate["sha256"] == digest
                                 and candidate["is_keyframe"]
                                 and candidate["anchor"] == str(snapshot.get("anchor") or "")
-                                and asset_id in candidate["asset_ids"]
-                                and entity_id in candidate["entity_ids"]), None)
+                                and asset_id in candidate["asset_ids"]), None)
                 if not picture:
                     picture = {"number": len(selected_pictures) + 1, "label": "<Picture " + str(len(selected_pictures) + 1) + ">",
                                "sha256": digest, "file": str(snapshot["file"]), "asset_ids": [], "entity_ids": [],
@@ -734,11 +752,15 @@ def adapt_production(production, *, draft=False):
                 picture["roles"].append("keyframe")
                 picture["retain"].extend(str(value) for value in frame.get("retain", []))
                 picture["exclude"].extend(str(value) for value in frame.get("exclude", []))
-                if entity_id:
-                    picture["entity_ids"].append(entity_id)
-                    if ref_subject:
-                        picture["subject_ids"].append(str(ref_subject.get("id")))
-                    reference_requirements[shot_id].append({"asset_id": asset_id, "entity_id": entity_id,
+                for declared_entity in entity_ids:
+                    if declared_entity not in picture["entity_ids"]:
+                        picture["entity_ids"].append(declared_entity)
+                for subject in frame_subjects:
+                    subject_id = str(subject.get("id") or "")
+                    if subject_id and subject_id not in picture["subject_ids"]:
+                        picture["subject_ids"].append(subject_id)
+                for declared_entity in entity_ids:
+                    reference_requirements[shot_id].append({"asset_id": asset_id, "entity_id": declared_entity,
                                                             "asset_version": picture["asset_version"], "purpose": "keyframe"})
 
         # Keep prompt ordinals aligned with H3's actual submission slots:

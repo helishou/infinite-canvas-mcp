@@ -36,33 +36,23 @@ globalThis.fetch = (async (input: any, init: any) => {
 const { useCanvasStore, hydrateCanvasProjects, flushCanvasSyncNow, applyBackendCanvasDelta } = await import("./use-canvas-store");
 const { useBackendStore } = await import("../use-backend-store");
 
-test("后端哈希异常拒绝草稿不自动重试，明确恢复后保存编辑且不解除其他拒绝", async () => {
+test("确定性 400 明确失败：保留草稿但不锁画布，旧版本遗留的冲突锁自动拆掉", async () => {
     try {
         useBackendStore.setState({ connected: true });
         await hydrateCanvasProjects(); await flushCanvasSyncNow();
-        const conflict = useCanvasStore.getState().canvasConflicts[base.id];
-        assert.equal(conflict.reason, "rejected");
-        assert.equal(conflict.canRetryBackendFailure, true);
-        assert.equal(useCanvasStore.getState().canvasConflicts.unrelated.canRetryBackendFailure, false);
-        await useCanvasStore.getState().keepPendingOpsOnCanvasConflict("unrelated");
-        assert.deepEqual(buckets.get("infinite-canvas-command-outbox")!.get(unrelated.operationId), unrelated);
-        await flushCanvasSyncNow(); assert.equal(submissions.length, 0);
-        await useCanvasStore.getState().keepPendingOpsOnCanvasConflict(base.id);
+        const state = useCanvasStore.getState();
+        assert.equal(state.canvasConflicts[base.id], undefined, "400 不再把整张画布锁成冲突态");
+        assert.equal(state.canvasConflicts.unrelated, undefined);
         const outbox = buckets.get("infinite-canvas-command-outbox")!;
-        const replacement = [...outbox.values()].find(command => command.projectId === base.id);
-        assert.notEqual(replacement.operationId, original.operationId);
-        assert.deepEqual(replacement.operations, original.operations);
-        assert.deepEqual(replacement.supersedes, [original.operationId]);
-        assert.ok(writes.indexOf(`save:${replacement.operationId}`) < writes.indexOf(`remove:${original.operationId}`));
+        assert.ok(outbox.get(original.operationId)?.settled, "失败草稿保留且标记 settled");
+        assert.ok(outbox.get(unrelated.operationId)?.settled);
+        assert.equal(submissions.length, 0, "确定性拒绝不自动重放");
+        // 旧版本写进内存/持久化的全局冲突锁，加载新代码后下一轮同步即自愈。
+        useCanvasStore.setState({ canvasConflicts: { [base.id]: { message: "HTTP 400 update_h3_segment CAS 失败", reason: "rejected", revision: 5, pendingOperations: 1, conflictTargets: [], remoteProject: remote } } as any });
         await flushCanvasSyncNow();
-        assert.equal(submissions.length, 1); assert.equal(outbox.size, 1);
-        assert.equal(outbox.has(unrelated.operationId), true);
-        assert.equal(submissions[0].operationId, replacement.operationId);
-        const clip = remote.nodes[0].metadata.segments[0];
-        assert.equal(clip.prompt, "Manual prompt");
-        assert.deepEqual(clip.storyboardShots, original.operations[0].patch.storyboardShots);
-        assert.equal(clip.result, "historical.mp4");
-        assert.equal(clip.productionClipProjection.inputHash, "compiled");
+        assert.equal(useCanvasStore.getState().canvasConflicts[base.id], undefined, "遗留冲突锁已拆");
+        assert.equal(submissions.length, 0, "拆锁不复活被拒命令");
+        assert.equal(outbox.get(original.operationId)?.settled !== undefined, true, "失败草稿未被删除");
     } finally { useBackendStore.setState({ connected: false }); }
 });
 

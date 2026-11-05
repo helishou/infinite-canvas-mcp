@@ -24,6 +24,8 @@ http://localhost:3001
 
 `corepack pnpm run dev` 先构建官方插件清单和 `canvas-agent/dist`，成功后启动两个进程，不清理旧服务。根目录的 `dev:backend`、`dev:web` 和 `dev:services` 也会先构建共享产物；直接调用 workspace 的 `dev` 不经过这个准备步骤。Backend `dev` 与 `dev:watch` 在源码变化后等待任务、确认、Agent 回合及写请求空闲再重载；单次启动使用 `dev:once`。共享 Agent 源码仍需构建，更新 dist 后会触发重载。
 
+日常制作时，可在 Backend 空闲并停止原 Backend 后运行 `corepack pnpm run start:backend`。该命令构建共享 Agent 与 Backend，再通过常驻入口运行 Backend 构建产物；源码保存和后续构建均保留当前进程已加载的版本，更新时重新执行启动流程。前端可继续使用已有网页，或另开终端运行 `corepack pnpm run dev:web`。数据目录和连接配置沿用现有设置。
+
 | 地址 | 用途 |
 | --- | --- |
 | `http://localhost:3001` | 本地开发网页 |
