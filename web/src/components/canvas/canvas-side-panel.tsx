@@ -29,6 +29,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 import type { InsertAssetPayload } from "./asset-picker-modal";
+import { ONLINE_CATALOG_KINDS } from "@/lib/canvas/online-catalog";
 import { OnlineCostumes } from "./online-costumes";
 
 const subscribeCompactCanvas = (notify: () => void) => {
@@ -592,9 +593,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div style={{ display: assetSection === "online" ? undefined : "none" }}>
-                    <OnlineCostumes keyword={keyword} onInsert={onInsert} theme={theme} />
-                    <OnlineCostumes kind="portrait" keyword={keyword} onInsert={onInsert} theme={theme} />
-                    <OnlineCostumes kind="pose" keyword={keyword} onInsert={onInsert} theme={theme} />
+                    {ONLINE_CATALOG_KINDS.map(kind => <OnlineCostumes key={kind} kind={kind} keyword={keyword} onInsert={onInsert} theme={theme} />)}
                 </div>
                 <div style={{ display: assetSection === "mine" ? undefined : "none" }}>
                     <div className="flex items-center justify-end px-1.5 pb-2">

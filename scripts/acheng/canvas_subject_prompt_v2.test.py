@@ -75,6 +75,60 @@ class SubjectPromptV2ProjectionTest(unittest.TestCase):
         subject["pictureBindings"].append({"id": "NEW", "provides": ["environment"], "defaultFor": []})
         self.assertEqual(binding_ids(subject, usage), ["NEW"])
 
+    def test_legacy_prop_binding_serves_prop_purpose_and_prefers_new_prop_binding(self):
+        subject = {"id": "MAID", "kind": "other", "entityRef": {"kind": "asset", "id": "MAID_ASSET"}, "pictureBindings": [
+            {"id": "MAID_IMAGE", "provides": ["identity", "outfit"], "defaultFor": ["identity"], "applicableState": {}}]}
+        usage = {"subjectId": "MAID", "presentation": "visible", "pictureBindingIds": [],
+                 "pictureBindingMode": "default", "referencePurpose": ["prop"], "stateRequirements": []}
+        original = deepcopy(subject)
+        self.assertEqual(binding_ids(subject, usage), ["MAID_IMAGE"])
+        self.assertEqual(binding_ids(subject, {**usage, "pictureBindingMode": "explicit"}), [])
+        self.assertEqual(subject, original)
+        subject["pictureBindings"].append({"id": "MAID_PROP_IMAGE", "provides": ["prop"], "defaultFor": ["prop"], "applicableState": {}})
+        self.assertEqual(binding_ids(subject, usage), ["MAID_PROP_IMAGE"])
+
+    def test_legacy_prop_default_image_compiles_into_ref2va_without_source_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "maid.png"
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=")
+            image.write_bytes(image_bytes)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            source = {
+                "prompt_assembly": {"version": 2}, "fps_num": 24, "fps_den": 1,
+                "asset_plan": [{"id": "MAID_ASSET", "kind": "prop", "name": "Maid ensemble", "description": "Ceremonial maid clothing."}],
+                "asset_cards": [],
+                "subject_registry": [{
+                    "id": "MAID", "kind": "other", "entityRef": {"kind": "asset", "id": "MAID_ASSET", "ownerKind": "episode", "ownerId": "EP"},
+                    "pictureBindings": [{"id": "MAID_IMAGE", "assetId": "MAID_ASSET", "provides": ["identity", "outfit"],
+                                         "retain": ["ceremonial maid clothing"], "exclude": ["original composition"],
+                                         "defaultFor": ["identity"], "applicableState": {}}],
+                }],
+                "shots": [{
+                    "id": "SHOT_1", "timeline_id": "main", "story_order": 0, "duration_frames": 96,
+                    "visual": "The maid ensemble stands behind the table.",
+                    "subject_usages": [{"subjectId": "MAID", "presentation": "visible", "pictureBindingIds": [],
+                                        "pictureBindingMode": "default", "referencePurpose": ["prop"],
+                                        "continuityFactIds": [], "stateRequirements": []}],
+                    "keyframes": [], "utterance_refs": [],
+                }],
+                "segments": [{"id": "CLIP_1", "shot_ids": ["SHOT_1"], "mode": "Ref2VA", "mode_lock": "Ref2VA"}],
+                "ledger": {"contract_version": 2, "facts": [], "timelines": [{"id": "main", "start_frame": 0}],
+                           "initial": [], "events": [], "requirements": [], "coverage": []},
+                "_canvas_subject_picture_sources": {
+                    "MAID_IMAGE": {"assetId": "MAID_ASSET", "subjectId": "MAID", "kind": "subject", "role": "prop",
+                                   "file": str(image), "sha256": digest, "storageKey": "image:maid", "nodeId": "MAID_NODE",
+                                   "retain": ["ceremonial maid clothing"], "exclude": ["original composition"], "defaultFor": ["identity"]},
+                },
+            }
+            original = deepcopy(source)
+            self.assertEqual(_infer_segment_mode(source, source["segments"][0]), "Ref2VA")
+            projected = adapt_production(source)
+            self.assertEqual(source, original)
+            segment = projected["segments"][0]
+            self.assertEqual([reference["asset_id"] for reference in segment["references"]], ["MAID_ASSET"])
+            prompt = compile_prompt_v2(projected, segment)
+            self.assertIn("<Picture 1>", prompt)
+
     def test_legacy_scene_default_image_compiles_into_ref2va_without_source_mutation(self):
         self._assert_scene_default_image_compiles("scene")
 

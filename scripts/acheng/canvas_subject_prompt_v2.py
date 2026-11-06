@@ -187,12 +187,21 @@ def binding_ids(subject, usage, *, allow_missing=False):
     # Visible scene Subjects inherit a purpose-matched environment default only.
     if (subject.get("entityRef") or {}).get("kind") == "scene" and not scene_environment:
         return []
+    entity_ref = subject.get("entityRef") if isinstance(subject.get("entityRef"), dict) else {}
+    is_prop_subject = subject.get("kind") == "prop" or entity_ref.get("kind") == "asset"
+    # Older prop bindings used identity as the picture purpose. Keep them usable
+    # until the Subject has a purpose-specific prop binding, matching the shared
+    # production contract without rewriting the authored Subject.
+    legacy_prop = is_prop_subject and not any("prop" in string_rows(item.get("provides")) for item in bindings)
     # Older scene assets use the entity-kind label "scene" for their purpose.
     # Prefer authored environment bindings when present; do not rewrite source or
     # let compatibility override explicit selection, state guards or ambiguity.
     legacy_scene = scene_environment and not any("environment" in item.get("provides", []) for item in bindings)
     def matches_purpose(values, purpose):
-        return purpose in values or (purpose == "environment" and legacy_scene and "scene" in values)
+        values = string_rows(values)
+        return purpose in values \
+            or (purpose == "prop" and legacy_prop and "identity" in values) \
+            or (purpose == "environment" and legacy_scene and "scene" in values)
     selected = []
     for purpose in dict.fromkeys(map(str, purposes)):
         eligible = [item for item in bindings

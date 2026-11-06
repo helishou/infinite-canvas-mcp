@@ -353,9 +353,18 @@ export type CanvasProductionStoryboardEditor = {
 };
 export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
 export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }> };
+export type CanvasStoryboardTracks = {
+    revision: number;
+    tracks: Record<string, { storyboardShots: Array<Record<string, unknown>>; referenceBindings: Array<Record<string, unknown>>; duration: number }>;
+};
 export type CanvasProductionEditing = {
     /** Current authored Clip ordinals keyed by stable source Segment ID. */
     clipNumbers?: Readonly<Record<string, number>>;
+    /**
+     * 分镜格派生轨：owner 是制作稿 `shot.keyframes`，服务端读取时现算。
+     * H3 面板用它覆盖画布 segment 上的副本，避免「制作台改了、节点没跟」。
+     */
+    getStoryboardTrack?: (input: { nodeId?: string }) => Promise<CanvasStoryboardTracks>;
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean; segment?: Record<string, unknown> }>;

@@ -509,3 +509,21 @@ test("历史重放不执行 CAS：旧 Clip 的过期 expectedFields 不再拒绝
     const live = makeProject([makeH3Node({ segments: [{ id: "s1", referenceBindings: [{ id: "binding-c" }] }] })]);
     assert.throws(() => applyCanvasProjectOperations(live, [historical]), /CAS 失败/);
 });
+
+test("referenceBindings CAS 基线忽略 Backend 回填的媒体快照字段", () => {
+    // 真实事故形态：改 A 节点的文本被 B 节点的 referenceBindings 期望值以「storageKey 不符」整批回滚。
+    // 当前段已被 Backend 在结果归档后回填了新的 storageKey/url（同一绑定关系，媒体快照更新）。
+    const current = makeProject([makeH3Node({ segments: [{ id: "s1", prompt: "开场", status: "idle",
+        referenceBindings: [{ id: "r1", assetId: "a1", role: "character_identity", enabled: true, usage: "reference", tags: [], label: "角色", storageKey: "image:new", url: "new", mimeType: "image/png" }] }] })]);
+    // 期望值带旧媒体快照字段，但语义字段（id/assetId/role/label...）一致 → 不应抛 STALE_EXPECTED_FIELD。
+    assert.doesNotThrow(() => applyCanvasProjectOperations(current, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "新提示词" },
+        expectedFields: { referenceBindings: [{ id: "r1", assetId: "a1", role: "character_identity", enabled: true, usage: "reference", tags: [], label: "角色", storageKey: "image:old" }] } }]));
+});
+
+test("referenceBindings CAS 仍在语义字段被真正改写时失败", () => {
+    const current = makeProject([makeH3Node({ segments: [{ id: "s1", prompt: "开场", status: "idle",
+        referenceBindings: [{ id: "r1", assetId: "a1", role: "character_identity", enabled: true, usage: "reference", tags: [], label: "角色" }] }] })]);
+    // 期望值里的绑定 role 已被改成 scene，而当前值仍是 character_identity → 应抛 CAS 失败。
+    assert.throws(() => applyCanvasProjectOperations(current, [{ type: "update_h3_segment", nodeId: "h3-1", segmentId: "s1", patch: { prompt: "新" },
+        expectedFields: { referenceBindings: [{ id: "r1", assetId: "a1", role: "scene", enabled: true, usage: "reference", tags: [], label: "角色" }] } }]), /CAS 失败/);
+});

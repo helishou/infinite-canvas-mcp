@@ -1,5 +1,6 @@
 import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase, CanvasProject } from "../db.js";
+import { derivedStoryboardTracks, productionDraftForCanvas } from "../drama/storyboard-track.js";
 import { createHash } from 'node:crypto';
 import { h3PromptContent, h3ExpectedDialogues } from '@basketikun/canvas-agent/plugins/minimax-h3/runtime-params';
 import type { CanvasProjectFilter, CanvasProjectStore, H3NodeMaterial, H3ProductionRequirements } from "./types.js";
@@ -50,6 +51,17 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
         get: (id) => db.getCanvasProject(id),
         getH3ProductionRequirements: (projectId) => requirementsFrom(projectId, "published_json"),
         getH3DraftRequirements: (projectId) => requirementsFrom(projectId, "draft_json"),
+        // 分镜格 = 制作稿 shot.keyframes 的派生视图：每次读取时现算，画布上的副本不作为权威。
+        getStoryboardTracks: (projectId) => {
+            const snapshot = productionDraftForCanvas(db, projectId);
+            if (!snapshot) return undefined;
+            const project = db.getCanvasProject(projectId);
+            const segments = ((project?.nodes || []) as any[]).flatMap(node => (Array.isArray(node?.metadata?.segments) ? node.metadata.segments : []) as Array<Record<string, any>>);
+            if (!segments.length) return undefined;
+            let data: Record<string, any>;
+            try { data = JSON.parse(String(snapshot.snapshot)) as Record<string, any>; } catch { return undefined; }
+            return derivedStoryboardTracks(data as any, segments);
+        },
         create: (project) => db.createCanvasProject(project),
         delete: (id) => db.deleteCanvasProject(id),
         applyOperations: (id, expectedRevision, operations, context) => db.applyCanvasProjectOperations(id, expectedRevision, operations, context),

@@ -1964,11 +1964,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             if (detail.projectId !== projectId) return;
             const nodeId = String(detail.nodeId || "");
             const rect = containerRef.current?.getBoundingClientRect();
-            if (!nodeId || !rect || !nodesRef.current.some((node) => node.id === nodeId)) return;
+            if (!nodeId || !rect) return;
+            const currentNodes = nodesRef.current;
+            const index = selectGraphIndex(currentNodes, connectionsRef.current);
+            if (!index.nodeById.has(nodeId)) return;
             // 可点候选必须让用户看得见：H3 工作台动辄占满视口，参考节点常在屏幕外，
             // 只靠顶部提示条时用户会以为点击没生效。视口内没有候选就把最近的一个带到视口内；
             // 整张画布都没有候选时明确告知，不再静默停在选节点模式。
-            const candidates = nodesRef.current.filter((node) => node.id !== nodeId && isCanvasReferenceNode(node, nodesRef.current));
+            const candidates = currentNodes.filter((node) => node.id !== nodeId && isCanvasReferenceNode(node, currentNodes, index));
             if (!candidates.length) {
                 message.warning("画布上没有可用作参考的节点（图片 / 视频 / 音频 / 角色）");
                 window.dispatchEvent(new CustomEvent("canvas-reference-pick-end", { detail: { projectId, targetNodeId: nodeId } }));
@@ -1992,7 +1995,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         };
         window.addEventListener("canvas-reference-pick-request", onRequest);
         return () => window.removeEventListener("canvas-reference-pick-request", onRequest);
-    }, []);
+    }, [projectId, selectGraphIndex]);
 
     const selectNodeReference = useCallback(
         (fromNodeId: string) => {

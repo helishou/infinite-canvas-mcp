@@ -240,6 +240,12 @@ export function fetchBackendProject(id: string, summary = false) {
     return request<{ ok: boolean; project: Record<string, unknown> }>("GET", `/canvas/projects/${encodeURIComponent(id)}${summary ? "?summary=true" : ""}`);
 }
 
+/** 分镜格派生轨（owner = 制作稿 shot.keyframes，服务端现算）。 */
+export function fetchCanvasStoryboardTracks(id: string, nodeId?: string) {
+    return request<{ ok: boolean; projectId: string; revision: number; tracks: Record<string, { storyboardShots?: Array<Record<string, unknown>>; referenceBindings?: Array<Record<string, unknown>>; duration?: number }> }>(
+        "GET", `/canvas/projects/${encodeURIComponent(id)}/storyboard-track${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ""}`);
+}
+
 export function syncBackendCanvasCharacterAssets(id: string) {
     return request<{ ok: boolean; projectId: string; revision: number; updatedAt: string; operations: Array<Record<string, unknown>>; updated: number }>("POST", `/canvas/projects/${encodeURIComponent(id)}/sync-character-assets`);
 }

@@ -6,6 +6,7 @@ import { message } from "antd";
 import type { H3CharacterGroupEditPatch, H3Ref, H3Segment } from "../types";
 import { segmentsFor } from "../hooks/useH3Segments";
 import { useH3LocalView } from "../hooks/useH3LocalView";
+import { useDisplaySegments } from "../hooks/useDerivedStoryboardTracks";
 import { applyCharacterGroupEdits, h3OutputName, inferReferenceRole, promoteCharacterSourceReferences, refsForSegment, removeCharacterGroup, replaceSegmentReference, resultUrl, syncCharacterGroupFromSource, upsertCharacterGroup, withSegmentRefs } from "../services/h3-data";
 import { CharacterGroupParseError, isH3OutputVideoDrop, normalizeDroppedH3Ref, h3RefCandidates, orderedGroupStoryboardRefs, readCharacterGroupFromDrop, readCharacterGroupFromNode, readCharacterImagesFromDrop, readH3Refs, refreshSmartImageReference, storyboardSubjectIdsForNode } from "../services/h3-refs";
 import { sameRef } from "../services/h3-compatibility";
@@ -29,6 +30,8 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const metadata = ctx.node.metadata || {};
     const sharedMetadata = sharedContext.node.metadata || {};
     const segments = useMemo(() => segmentsFor(sharedMetadata), [sharedMetadata]);
+    // 分镜格显示用派生轨（owner = 制作稿 shot.keyframes）：画布上那份副本可能停在上一次成功编译。
+    const { display: displaySegments } = useDisplaySegments(ctx, segments, segments.length);
     const ctxRef = useRef(ctx);
     ctxRef.current = ctx;
     const storedSelectedId = String(metadata.selectedSegmentId || "");
@@ -110,7 +113,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         });
         return named.reverse();
     }, [ctx.node.id, ctx.node.title, segments]);
-    const total = Math.max(1, segments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
+    const total = Math.max(1, displaySegments.reduce((sum, item) => sum + Math.max(0.5, Number(item.duration || 1)), 0));
     const playhead = Math.max(0, Math.min(total, Number(metadata.playhead || 0)));
     const fmt = (value: number) => `${Number(value || 0).toFixed(Number(value || 0) % 1 ? 1 : 0)}s`;
     const selectedVideo = selectedRefs.find((item) => item.type === "video");
@@ -751,14 +754,14 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     return <div ref={workbenchRef} className={`minimax-canvas-workbench${canvasReferenceDragOver ? " is-canvas-ref-drag-over" : ""}`} data-canvas-no-zoom data-canvas-ref-drop-target={ctx.node.id} style={themeStyle} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()} onDragOver={(event) => { if (isH3OutputVideoDrop(event)) { event.stopPropagation(); return; } event.preventDefault(); event.stopPropagation(); }} onDrop={addDroppedReference}>
         <H3Runner key="runner" ctx={ctx} />
         <H3PaneHandles key="pane-handles" ctx={ctx} />
-        <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={segments} total={total} previewH={effPreviewH} />
+        <H3RulerScrubber key="ruler-scrubber" ctx={ctx} segments={displaySegments} total={total} previewH={effPreviewH} />
         <H3WorkbenchToolbar key="workbench-toolbar" ctx={ctx} metadata={metadata} segments={segments} selected={selected} selectedIndex={selectedIndex} playhead={playhead} total={total} fmt={fmt} onPlayAll={playAll} patchSelected={patchSelected} />
         <SmartStoryboardModal key="storyboard-modal" ctx={ctx} metadata={metadata} upstream={upstream} open={smartStoryboardOpen} uploads={smartStoryboardUploads} setUploads={setSmartStoryboardUploads} onClose={() => setSmartStoryboardOpen(false)} />
         {editingRef && currentEditingRef ? <H3ReferenceModal key={`reference-modal:${editingRef.segmentId}:${currentEditingRef.bindingId || currentEditingRef.assetId || currentEditingRef.url}`} ctx={ctx} refItem={currentEditingRef} characters={referencedCharacters} group={editingRefGroup} onApply={applyReferenceEdit} onReplaceFromCanvas={requestCanvasRefReplace} onRemoveRef={removeEditingReference} onRemoveStoryboardImage={removeEditingStoryboardImage} onDeleteGroup={editingRefGroup ? deleteReferenceGroup : undefined} onClose={() => setEditingRef(null)} /> : null}
         <div key="workbench-body" ref={bodyRef} className="minimax-wb-body">
             <div key="player-stage" className="minimax-player-stage"><H3PreviewPlayer key={`${showLivePreview ? "live" : "result"}-${previewKind}`} ctx={ctx} url={previewStorageKey ? ctx.mediaUrl(previewStorageKey) : preview} kind={previewKind} aspectRatio={String(selected?.aspectRatio || metadata.aspectRatio || "16:9 (Widescreen)")} storageKey={previewStorageKey} name={previewName} livePreview={showLivePreview} playhead={playhead} timelineOffset={resultUrl(selected?.result) ? Number(selected?.start || 0) : 0} clipDuration={resultUrl(selected?.result) ? Number(selected?.duration || 0) : undefined} playToken={playToken} playRequest={playRequest} nextUrl={nextUrl} preloadNext={preloadNext} onEnded={advancePlayback} onPlayheadTick={livePlayheadTick} /></div>
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} submitting={submittingSegments.has(String(selected?.id || ""))} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
-        <H3Timeline key="timeline" ctx={ctx} segments={segments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
+        <H3Timeline key="timeline" ctx={ctx} segments={displaySegments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
             <div key="input-source" className="minimax-wb-input-source" style={{ padding: "8px 0", fontSize: 14 }}>
                 使用当前已保存内容

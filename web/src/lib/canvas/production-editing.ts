@@ -1,8 +1,8 @@
 import type { CanvasNodeData } from "@/types/canvas";
-import type { CanvasProductionEditing, CanvasProductionStoryboardEditor } from "@/types/canvas-plugin";
+import type { CanvasProductionEditing, CanvasProductionStoryboardEditor, CanvasStoryboardTracks } from "@/types/canvas-plugin";
 import { productionSceneEntries, shotStoryboardKeyframe, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { nanoid } from "nanoid";
-import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
+import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchCanvasStoryboardTracks, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
@@ -403,6 +403,10 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             throw new Error(status.blockingDiagnostic?.message || `PROMPT_COMPILE_${status.status.toUpperCase()}: 编译未能生成可应用 Prompt`);
         }
         throw new Error("PROMPT_COMPILE_STILL_RUNNING: 编译仍在运行；再次点击会继续查询同一编译任务");
+    }, getStoryboardTrack: async (input: { nodeId?: string }): Promise<CanvasStoryboardTracks> => {
+        await flush();
+        const response = await fetchCanvasStoryboardTracks(projectId, input?.nodeId);
+        return { revision: Number(response.revision || 0), tracks: response.tracks as CanvasStoryboardTracks["tracks"] };
     }, replaceStoryboardTrack: async (input: CanvasProductionStoryboardEditor) => {
         await flush();
         let node = getNode(input.nodeId);
@@ -422,6 +426,8 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY");
         const result = await editor.handler({ ...input, segment: { ...input.segment, productionClipProjection: projection } }, clip);
         if (!result.sourceSaved) return result;
+        // 分镜轨写回改了 owner：已打开的 H3 面板需要按 owner 重算派生轨。
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("drama-production:refresh-storyboard-track", { detail: { canvasId: projectId } }));
         if (input.readBackSegment === false) return result;
         // The production edit reprojects its authoritative Shot data to the H3 canvas.
         // Return that committed Clip so the caller can merge local-only Quick Storyboard

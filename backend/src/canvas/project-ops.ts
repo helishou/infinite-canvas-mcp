@@ -815,10 +815,26 @@ function canonicalExpectedField(value: unknown): string {
     return JSON.stringify(value) ?? String(value);
 }
 
+/**
+ * referenceBindings 里的 url/storageKey/mimeType 是媒体快照字段，由 Backend/资产目录在
+ * 结果归档后回填，不是客户端 authored 的语义字段（见 ReferenceBinding 注释）。CAS 基线只
+ * 比较客户端可控的引用关系；否则 Backend 补的存储键会把一次正常写入永久判成冲突，表现为
+ * 「不同节点无法同时编辑」——改 A 节点的文本被 B 节点的 referenceBindings 期望值整批回滚。
+ */
+function stripBindingMediaFields(value: unknown): unknown {
+    if (!Array.isArray(value)) return value;
+    return value.map((item) => {
+        if (!item || typeof item !== "object") return item;
+        const { url, storageKey, mimeType, ...rest } = item as Record<string, unknown>;
+        return rest;
+    });
+}
+
 function sameExpectedFieldValue(field: string, current: unknown, expected: unknown) {
     // 写入时 patch.referenceBindings 会强制去重，期望值必须按同一规则归一化。
     // 否则客户端/派生流程读到带重复项的快照后，「读自己的写」也会永远判成冲突，形成确定性死锁。
-    const normalize = (value: unknown) => field === "referenceBindings" ? dedupeH3ReferenceBindings(value) : value;
+    // 媒体快照字段（url/storageKey/mimeType）由 Backend 回填，不参与 CAS 基线，避免无关节点写操作被整批回滚。
+    const normalize = (value: unknown) => field === "referenceBindings" ? stripBindingMediaFields(dedupeH3ReferenceBindings(value)) : value;
     const left = normalize(current), right = normalize(expected);
     if (sameValue(left, right)) return true;
     if (!["referenceBindings", "h3CharacterGroups"].includes(field)) return false;

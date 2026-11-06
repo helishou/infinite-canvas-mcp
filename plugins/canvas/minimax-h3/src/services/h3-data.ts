@@ -28,8 +28,12 @@ export function displayReferenceName(ref: H3Ref, ordinal: number, fallback: stri
 }
 
 function storedRefsForSegment(segment: H3Segment): H3Ref[] {
-    if (segment.referenceBindings?.length) {
-        return segment.referenceBindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({
+    // A production projection is authoritative even when it intentionally has
+    // no references. Falling through to legacy refs/refItems here can resurrect
+    // stale per-Clip images and exceed H3's reference limit in the UI.
+    if (segment.productionClipProjection || segment.referenceBindings?.length) {
+        const bindings = Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [];
+        return bindings.filter((binding) => (binding.url || binding.storageKey)).map((binding) => ({
             url: binding.url || "", type: inferH3ReferenceMediaType(binding), name: binding.label,
             storageKey: binding.storageKey, mimeType: binding.mimeType, nodeId: binding.sourceNodeId, role: binding.role,
             subjectId: binding.subjectId, storyboardSubjectIds: binding.storyboardSubjectIds, bindingId: binding.id, assetId: binding.assetId, tags: binding.tags, picturePurpose: binding.picturePurpose, description: binding.description, enabled: binding.enabled, usage: binding.usage, retentionLevel: binding.retentionLevel,

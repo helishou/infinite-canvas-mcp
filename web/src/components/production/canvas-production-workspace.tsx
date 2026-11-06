@@ -1,6 +1,6 @@
 import { useCanvasRoute, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { useEffect, useState } from "react";
-import { App, Button, Dropdown, Input, Modal, Select, Tag } from "antd";
+import { App, Button, Dropdown, Input, Modal, Select, Spin, Tag } from "antd";
 import { ArrowLeft, Check, ChevronDown, Clapperboard, Pencil, Search } from "lucide-react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -8,7 +8,7 @@ import { productionSceneEntries, type ProductionOperation } from "@basketikun/ca
 import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionSharedAssets,
     fetchBackendCanvasFolders, type ApprovedSharedAsset, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
-import { productionSegments, productionShots, productionSegmentRuntimeMatches, segmentShotIds, shotTitle } from "@/lib/production-source";
+import { productionSegments, productionShots, productionSegmentRuntimeMatches, segmentShotIds, shotTitle, subjectDisplayName } from "@/lib/production-source";
 import { MediaImage } from "@/components/media/media-image";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -18,6 +18,14 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { backendMediaUrl, fetchProductionSceneArchives, type ProductionSceneArchive } from "@/services/backend-api";
+
+const productionRows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value.filter(item => item && typeof item === "object") : [];
+function productionDirectoryText(value: unknown): string {
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (Array.isArray(value)) return value.map(productionDirectoryText).join(" ");
+    if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).map(productionDirectoryText).join(" ");
+    return "";
+}
 
 export function useCanvasProductionContext(projectId: string) {
     const { search: query } = useCanvasRoute();
@@ -110,12 +118,12 @@ export function CanvasProductionToolbar() {
         <Button type="text" size="small" icon={<Search className="size-3.5" />} aria-label={t("productionCanvas.find")} onClick={() => { useAgentStore.getState().closePanel(); useCanvasSidePanelStore.getState().closePanel(); setDirectoryOpen(true); }}><span className="hidden sm:inline">{t("productionCanvas.find")}</span></Button>
         <Modal title={t("productionCanvas.find")} open={directoryOpen} onCancel={() => setDirectoryOpen(false)} footer={null} width={520} styles={{ body: { maxHeight: "calc(100dvh - 220px)", overflow: "auto", color: theme.node.text } }}>
             <Input allowClear prefix={<Search className="size-4" />} value={filter} onChange={event => setFilter(event.target.value)} placeholder={t("productionCanvas.findPlaceholder")} aria-label={t("productionCanvas.findPlaceholder")} />
-            <ProductionDirectory filter={filter} onLocate={() => setDirectoryOpen(false)} />
+            <ProductionDirectory filter={filter} onLocate={() => setDirectoryOpen(false)} onOpenDirector={() => { setDirectoryOpen(false); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }} />
         </Modal>
     </div>;
 }
 
-export function ProductionDirectory({ filter = "", onLocate }: { filter?: string; onLocate?: () => void } = {}) {
+export function ProductionDirectory({ filter = "", onLocate, onOpenDirector }: { filter?: string; onLocate?: () => void; onOpenDirector?: () => void } = {}) {
     const { context, production, readiness } = useProductionWorkspaceStore();
     const { t } = useTranslation();
     const { navigate } = useCanvasRoute();
@@ -131,11 +139,51 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
         void fetchProductionSceneArchives(productionTarget(context.owner)).then(result => { if (active) setArchives(result.archives); }).catch(() => { if (active) setArchives([]); });
         return () => { active = false; };
     }, [context?.owner?.kind, context?.owner?.id, production?.revision]);
-    if (!context?.owner || !production?.draft.director) return <div className="p-3 text-xs">{t("productionCanvas.ready")}</div>;
+    if (!context?.owner) return null;
+    if (!production) return <div role="status" className="flex items-center gap-2 p-4 text-sm text-muted-foreground"><Spin size="small" />{t("productionCanvas.directoryLoading")}{onOpenDirector && <Button type="text" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
+    if (!production.draft.director) return <div className="flex flex-col items-center gap-2 p-5 text-center text-sm text-muted-foreground"><p>{t("productionCanvas.ready")}</p>{onOpenDirector && <Button type="link" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
     const director = production.draft.director;
-    const scenes = productionSceneEntries(director.source);
+    const source = director.source as Record<string, any>;
+    const scenes = productionSceneEntries(source);
     const sourceShots = productionShots(production);
     const sourceSegments = productionSegments(production);
+    const queryText = filter.trim().toLocaleLowerCase();
+    const matches = (...values: unknown[]) => !queryText || productionDirectoryText(values).toLocaleLowerCase().includes(queryText);
+    const entityNames = new Map<string, string>();
+    for (const entry of [...productionRows(source.character_registry), ...productionRows(source.scene_registry)]) {
+        const id = String(entry.id || "");
+        const name = String(entry.name || entry.scene_name || entry.display_name || entry.title || "");
+        if (id && name) entityNames.set(id, name);
+    }
+    for (const subject of productionRows(source.subject_registry)) {
+        const id = String(subject.id || "");
+        if (id) entityNames.set(id, subjectDisplayName(source, id));
+    }
+    const subjectNames = (shot: Record<string, any>) => productionRows(shot.subject_usages)
+        .map(usage => subjectDisplayName(source, String(usage.subjectId || usage.subject_id || "")))
+        .filter(Boolean);
+    const shotSearchValues = (shot: Record<string, any>) => [shot, subjectNames(shot)];
+    const shotsById = new Map(sourceShots.map(shot => [String(shot.id), shot]));
+    const sceneSearchValues = (scene: { environmentId?: string; [key: string]: unknown }) => [scene, entityNames.get(String(scene.environmentId || ""))];
+    const segmentRows = sourceSegments.map((segment, index) => ({
+        segment,
+        index,
+        shots: segmentShotIds(segment).map(id => shotsById.get(id)).filter((shot): shot is Record<string, any> => Boolean(shot)),
+    }));
+    const sceneRows = scenes.map((scene, index) => {
+        const sceneShots = scene.shotIds.map(id => shotsById.get(id)).filter((shot): shot is Record<string, any> => Boolean(shot));
+        const sceneSegments = segmentRows.filter(entry => entry.shots.some(shot => scene.shotIds.includes(String(shot.id))));
+        const sceneValues = sceneSearchValues(scene);
+        const matchedShots = sceneShots.filter(shot => matches(shotSearchValues(shot), sceneValues));
+        const matchedSegments = sceneSegments.filter(entry => matches(entry.segment, entry.shots.map(shotSearchValues), sceneValues));
+        return { scene, index, sceneValues, sceneShots: queryText ? matchedShots : sceneShots, sceneSegments: queryText ? matchedSegments : sceneSegments,
+            visible: !queryText || matches(sceneValues) || matchedShots.length > 0 || matchedSegments.length > 0 };
+    }).filter(entry => entry.visible);
+    const assignedShotIds = new Set(scenes.flatMap(scene => scene.shotIds));
+    const looseShots = sourceShots.filter(shot => !assignedShotIds.has(String(shot.id)));
+    const assignedSegmentIds = new Set(segmentRows.filter(entry => scenes.some(scene => entry.shots.some(shot => scene.shotIds.includes(String(shot.id)))))
+        .map(entry => String(entry.segment.id || "")));
+    const looseSegments = segmentRows.filter(entry => !assignedSegmentIds.has(String(entry.segment.id || "")));
     const select = (workspace: string, kind: string, id: string, edit = false) => {
         useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"));
         const next = new URLSearchParams(query);
@@ -163,40 +211,93 @@ export function ProductionDirectory({ filter = "", onLocate }: { filter?: string
     const confirmArchive = (sceneId: string, title: string) => modal.confirm({ title: t("productionCanvas.archiveSceneConfirm", { scene: title }), okText: t("productionCanvas.archiveScene"), okType: "danger", cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(canvasProject?.revision || 0), confirmed: true }) });
     const confirmRestore = (archive: ProductionSceneArchive) => modal.confirm({ title: t("productionCanvas.restoreSceneConfirm", { scene: archive.sceneTitle }), okText: t("productionCanvas.restoreScene"), cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "restore_director_scene", archiveId: archive.archiveId, expectedCanvasRevision: Number(canvasProject?.revision || 0) }) });
     const confirmClipDelete = (segmentId: string, title: string) => modal.confirm({ title: t("productionCanvas.deleteClipConfirm", { clip: title }), okText: t("productionCanvas.deleteClip"), okType: "danger", cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "delete_director_clip", segmentId, expectedCanvasRevision: Number(canvasProject?.revision || 0), confirmed: true }) });
-    const row = (kind: string, id: string, title: string, workspace: string, prepareId?: string) => {
-        if (filter.trim() && !`${id} ${title}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) return null;
+    let visibleRows = 0;
+    const row = (kind: string, id: string, title: string, workspace: string, prepareId?: string, searchValues: unknown[] = [], thumbnail?: string, subtitle?: string) => {
+        if (!matches(id, title, searchValues)) return null;
+        visibleRows++;
         const status = readiness?.targets.find(item => item.id === `${kind === "shot" ? "frame" : kind}:${id}`)?.status;
         return <div key={`${kind}:${id}`} className="flex min-w-0 items-center gap-1 py-1" data-production-directory-target={`${kind}:${id}`}>
-            <button type="button" className="min-w-0 flex-1 truncate rounded px-2 py-1 text-left text-xs hover:bg-black/5 dark:hover:bg-white/10" aria-current={query.get("target") === `${kind}:${id}` ? "true" : undefined} onClick={() => select(workspace, kind, id)}>{title}</button>
+            {thumbnail && <MediaImage className="h-11 w-16 shrink-0 rounded object-contain" src={backendMediaUrl(thumbnail)} alt={title} name={title} />}
+            <button type="button" className="min-w-0 flex-1 rounded px-2 py-1 text-left hover:bg-black/5 dark:hover:bg-white/10" aria-current={query.get("target") === `${kind}:${id}` ? "true" : undefined} onClick={() => select(workspace, kind, id)}>
+                <span className="block truncate text-xs">{title}</span>
+                {subtitle && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{subtitle}</span>}
+            </button>
             {status && <span className="text-[11px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
             {prepareId && <Button size="small" type="text" disabled={busy} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
             {kind === "segment" && <Button size="small" type="text" danger disabled={busy || !canvasProject} onClick={() => confirmClipDelete(id, title)}>{t("productionCanvas.deleteClip")}</Button>}
             {!prepareId && kind !== "scene" && <Button size="small" type="text" icon={<Pencil className="size-3" />} aria-label={t("productionCanvas.editNamed", { name: title })} onClick={() => select(workspace, kind, id, true)} />}
         </div>;
     };
-    const plan = Array.isArray(director.source.asset_plan) ? director.source.asset_plan as Record<string, any>[] : [];
+    const plan = productionRows(source.asset_plan);
+    const planAssetValues = (asset: Record<string, any>) => {
+        const entityId = String(asset.entity_id || asset.entityId || asset.character_id || asset.scene_id || asset.subject_id || "");
+        return [asset, entityNames.get(entityId), entityNames.get(String(asset.id || asset.asset_id || ""))];
+    };
+    const visiblePlan = plan.filter(asset => !Object.values(director.shotInputs).some(input => input.keyframeAssetId === String(asset.asset_id || asset.id)))
+        .filter(asset => matches(asset.id, asset.asset_id, asset.asset_name, asset.name, asset.title, planAssetValues(asset)));
+    const visibleLooseShots = queryText ? looseShots.filter(shot => matches(shotSearchValues(shot))) : looseShots;
+    const visibleLooseSegments = queryText ? looseSegments.filter(entry => matches(entry.segment, entry.shots.map(shotSearchValues))) : looseSegments;
+    const archiveMatches = archives.filter(archive => matches(archive.sceneId, archive.sceneTitle));
+    const hasTargets = plan.some(asset => !Object.values(director.shotInputs).some(input => input.keyframeAssetId === String(asset.asset_id || asset.id)))
+        || scenes.length > 0 || sourceShots.length > 0 || sourceSegments.length > 0 || archives.length > 0;
+    if (!hasTargets && !queryText) return <div className="flex flex-col items-center gap-2 p-5 text-center text-sm text-muted-foreground"><p>{t("productionCanvas.ready")}</p>{onOpenDirector && <Button type="link" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
     return <div className="h-full overflow-auto p-2" data-canvas-shortcuts-ignore>
-        {row("story", "brief", t("productionCanvas.story"), "story")}
-        <details open><summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.assets")}</summary>
-            {plan.filter(asset => !Object.values(director.shotInputs).some(input => input.keyframeAssetId === String(asset.asset_id || asset.id))).map(asset => { const id = String(asset.asset_id || asset.id); return row("asset", id, String(asset.asset_name || asset.name || asset.title || id), "assets", director.assets[id]?.nodeId ? undefined : `asset:${id}`); })}
-        </details>
-        {scenes.map((scene, index) => <details key={scene.id} open><summary className="px-2 py-2 text-xs font-medium">{index + 1}. {scene.title}
+        {row("story", "brief", t("productionCanvas.story"), "story", undefined, [source.brief])}
+        {(!queryText || visiblePlan.length > 0) && <details open><summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.assets")}</summary>
+            {visiblePlan.map(asset => {
+                const id = String(asset.asset_id || asset.id);
+                const title = String(asset.asset_name || asset.name || asset.title || entityNames.get(String(asset.entity_id || "")) || id);
+                const detail = String(asset.description || asset.purpose || "");
+                return row("asset", id, title, "assets", director.assets[id]?.nodeId ? undefined : `asset:${id}`, planAssetValues(asset), director.assets[id]?.storageKey, detail);
+            })}
+        </details>}
+        {sceneRows.map(({ scene, index, sceneValues, sceneShots, sceneSegments }) => <details key={scene.id} open><summary className="px-2 py-2 text-xs font-medium">{index + 1}. {scene.title}
             <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "arrange", sceneId: scene.id } } })); }}>{t("productionCanvas.arrange")}</Button>
             <Button type="text" size="small" danger disabled={busy || !canvasProject} onClick={event => { event.preventDefault(); event.stopPropagation(); confirmArchive(scene.id, scene.title); }}>{t("productionCanvas.archiveScene")}</Button></summary>
-            {row("scene", scene.id, t("productionCanvas.script"), "story")}
-            {scene.shotIds.map(id => row("shot", id, shotTitle(sourceShots.find(shot => String(shot.id) === id), id), "shots", director.shotInputs[id]?.keyframeAssetId && !director.assets[director.shotInputs[id].keyframeAssetId!]?.nodeId ? `frame:${id}` : undefined))}
-            {sourceSegments.filter(segment => segmentShotIds(segment).some(id => scene.shotIds.includes(id))).map(segment => row("segment", String(segment.id), t("productionCanvas.clip", { number: sourceSegments.indexOf(segment) + 1 }), "production", `segment:${segment.id}`))}
+            {row("scene", scene.id, `${scene.title || scene.id} · ${t("productionCanvas.script")}`, "story", undefined, [sceneValues, scene.text], undefined, scene.text)}
+            {sceneShots.map(shot => {
+                const id = String(shot.id || "");
+                const frameAssetId = String(director.shotInputs[id]?.keyframeAssetId || "");
+                const frameAsset = frameAssetId ? director.assets[frameAssetId] : undefined;
+                const subtitle = [shot.visual, shot.description, shot.camera].find(value => typeof value === "string" && value.trim()) as string | undefined;
+                return row("shot", id, shotTitle(shot, id), "shots", frameAssetId && !frameAsset?.nodeId ? `frame:${id}` : undefined,
+                    [shotSearchValues(shot), sceneValues], production.draft.keyframes[id]?.storageKey || frameAsset?.storageKey, subtitle);
+            })}
+            {sceneSegments.map(({ segment, index, shots }) => {
+                const id = String(segment.id || "");
+                const title = t("productionCanvas.clip", { number: index + 1 });
+                const relatedValues = shots.map(shotSearchValues);
+                const subtitle = String(segment.summary || segment.title || shots.map(shot => shotTitle(shot)).join(" · "));
+                return row("segment", id, title, "production", `segment:${id}`, [segment, relatedValues, sceneValues], undefined, subtitle);
+            })}
         </details>)}
-        {archives.some(archive => !filter.trim() || `${archive.sceneId} ${archive.sceneTitle}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())) && <details className="mt-2" data-production-archived-scenes>
+        {visibleLooseShots.length > 0 && <details open><summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.unassigned")}</summary>
+            {visibleLooseShots.map(shot => {
+                const id = String(shot.id || "");
+                const frameAssetId = String(director.shotInputs[id]?.keyframeAssetId || "");
+                const frameAsset = frameAssetId ? director.assets[frameAssetId] : undefined;
+                return row("shot", id, shotTitle(shot, id), "shots", frameAssetId && !frameAsset?.nodeId ? `frame:${id}` : undefined,
+                    [shotSearchValues(shot)], production.draft.keyframes[id]?.storageKey || frameAsset?.storageKey,
+                    [shot.visual, shot.description].find(value => typeof value === "string" && value.trim()) as string | undefined);
+            })}
+        </details>}
+        {visibleLooseSegments.length > 0 && <details open><summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.unassigned")}</summary>
+            {visibleLooseSegments.map(({ segment, index, shots }) => {
+                const id = String(segment.id || "");
+                return row("segment", id, t("productionCanvas.clip", { number: index + 1 }), "production", `segment:${id}`,
+                    [segment, shots.map(shotSearchValues)], undefined, String(segment.summary || segment.title || shots.map(shot => shotTitle(shot)).join(" · ")));
+            })}
+        </details>}
+        {archiveMatches.length > 0 && <details className="mt-2" data-production-archived-scenes>
             <summary className="px-2 py-2 text-xs font-medium">{t("productionCanvas.archivedScenes")}</summary>
-            {archives.filter(archive => !filter.trim() || `${archive.sceneId} ${archive.sceneTitle}`.toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase())).map(archive => <div key={archive.archiveId} className="flex min-w-0 items-center gap-1 py-1 text-xs">
+            {archiveMatches.map(archive => { visibleRows++; return <div key={archive.archiveId} className="flex min-w-0 items-center gap-1 py-1 text-xs">
                 <span className="min-w-0 flex-1 truncate px-2" title={archive.sceneId}>{archive.sceneTitle}</span>
                 <span className="text-[11px] opacity-60">{t("productionCanvas.archiveCounts", { shots: archive.shotCount, clips: archive.clipCount, expires: new Date(archive.expiresAt).toLocaleString() })}</span>
                 <Button size="small" type="text" disabled={busy || !canvasProject} onClick={() => confirmRestore(archive)}>{t("productionCanvas.restoreScene")}</Button>
-            </div>)}
+            </div>; })}
         </details>}
-        {!scenes.length && sourceSegments.map((segment, index) => row("segment", String(segment.id), t("productionCanvas.clip", { number: index + 1 }), "production", `segment:${segment.id}`))}
         {row("story", "advanced", t("productionCanvas.advanced"), "advanced")}
+        {queryText && visibleRows === 0 && <p role="status" className="px-3 py-5 text-center text-sm text-muted-foreground">{t("productionCanvas.directoryNoResults")}</p>}
     </div>;
 }
 

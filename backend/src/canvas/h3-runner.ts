@@ -1,4 +1,5 @@
 import { effectiveTargetInput, inputHash } from "../drama/canvas-inputs.js";
+import { applyStoryboardTracks, splitStoryboardTracks } from "../drama/storyboard-track.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
@@ -132,12 +133,17 @@ export class CanvasH3Runner {
     /** Pure preview: no canonical ops, seed generation, task creation or media writes. */
     preview(input: H3RunInput, inspectedReferenceDigests?: Map<string, string>) {
         const normalized = normalizeInput(input);
-        const project = this.stores.projects.get(normalized.projectId);
+        const { project, stale: staleStoryboard } = this.projectWithDerivedStoryboard(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         const requirements = this.stores.projects.getH3ProductionRequirements?.(normalized.projectId) || null;
         const diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }> = [];
         const plans = this.plansFor(normalized);
+        for (const plan of plans) {
+            if (!staleStoryboard.includes(plan.segmentId)) continue;
+            diagnostics.push({ code: 'STORYBOARD_TRACK_STALE', nodeId: plan.nodeId, segmentId: plan.segmentId,
+                message: '该 Clip 的分镜格图片集合已按制作稿变更，Picture 编号会重排；请先编译并应用该 Clip 再生成' });
+        }
         const firstPlan = plans[0];
         if (firstPlan?.continuation && firstPlan.continuation.index > 1) {
             try { this.resolveResumeSeed(normalized, firstPlan, project, defaults); }
@@ -504,7 +510,10 @@ export class CanvasH3Runner {
         if (!plans.length) throw new Error(blockedPlans.length
             ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
             : "没有符合条件的 H3 Clip");
-        const before = this.stores.projects.get(input.projectId)!;
+        const derivedProject = this.projectWithDerivedStoryboard(input.projectId);
+        const before = derivedProject.project!;
+        const stalePlan = plans.find(plan => derivedProject.stale.includes(plan.segmentId));
+        if (stalePlan) throw new Error(`Clip ${stalePlan.numbering?.clipNumber ?? stalePlan.segmentIndex + 1} 的分镜格图片集合已按制作稿变更，Picture 编号会重排；请先编译并应用该 Clip 再生成`);
         const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
         if (plans[0].continuation?.index && plans[0].continuation.index > 1 && new Set(plans.map((plan) => plan.nodeId)).size !== 1) {
             throw new Error("从组中间接入潜变量时只能选择一个 H3 节点");
@@ -554,7 +563,7 @@ export class CanvasH3Runner {
             return Object.keys(patch).length ? [{ type: "update_h3_segment", nodeId: plan.nodeId, segmentId: plan.segmentId, patch }] : [];
         });
         if (canonicalOps.length || sizeOps.length) this.stores.projects.applyOperations(input.projectId, Number(before.revision || 0), [...canonicalOps, ...sizeOps], { runtimeWrite: true, source: { clientId: "task:h3", kind: "task", label: "H3 参数规范化" } });
-        const project = this.stores.projects.get(input.projectId)!;
+        const project = this.projectWithDerivedStoryboard(input.projectId).project!;
         const nodes = project.nodes as Array<Record<string, unknown>>;
         const selectedNodeIds = new Set(plans.map((plan) => plan.nodeId));
         const sourceNodeIds = new Set<string>();
@@ -598,6 +607,24 @@ export class CanvasH3Runner {
 
     private projectFor(input: H3RunInput) {
         return input.runPlan?.version === 1 ? input.runPlan.project : this.stores.projects.get(input.projectId)!;
+    }
+
+    /**
+     * 分镜格是制作稿 `shot.keyframes` 的派生视图：生成准备（预检 / 计划 / 快照）按 owner 现算。
+     * 只吸收「同槽位换图」——槽位或绑定身份变了会重排 `<Picture N>`，必须重新编译后才行；
+     * 这类 Clip 进 `stale`，由调用方给诊断而不是拿旧提示词配新参考出片。
+     */
+    private projectWithDerivedStoryboard(projectId: string): { project: CanvasProject | undefined; stale: string[] } {
+        const project = this.stores.projects.get(projectId);
+        if (!project) return { project: undefined, stale: [] as string[] };
+        const tracks = this.stores.projects.getStoryboardTracks?.(projectId);
+        if (!tracks || !Object.keys(tracks).length) return { project, stale: [] as string[] };
+        const segments = (project.nodes as Array<Record<string, any>>).flatMap(node => Array.isArray(recordOf(node.metadata).segments) ? recordOf(node.metadata).segments as Array<Record<string, any>> : []);
+        const { applicable, stale } = splitStoryboardTracks(segments, tracks);
+        if (!Object.keys(applicable).length) return { project, stale };
+        const copy = structuredClone(project) as Record<string, any>;
+        applyStoryboardTracks(copy, applicable);
+        return { project: copy as typeof project, stale };
     }
 
     private restorePrevious(projectId: string, pending: PendingH3, discard: boolean) {

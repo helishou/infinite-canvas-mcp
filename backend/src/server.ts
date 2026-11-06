@@ -11,6 +11,7 @@ import path from "node:path";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 import { episodeCanvasRead } from "./drama/episode-read.js";
+import { withDerivedStoryboardTracks } from "./drama/storyboard-track.js";
 
 import {
   type ResolvedConfig,
@@ -616,7 +617,24 @@ export function startServer(
     if (req.query.savedOnly !== undefined && req.query.savedOnly !== "true" && req.query.savedOnly !== "false") return void res.status(400).json({ ok: false, error: "savedOnly 必须为 true/false" });
     const project = db.getCanvasProjectH3Context(req.params.id, nodeId, typeof req.query.segmentId === "string" ? req.query.segmentId : undefined, { sourceNodeIds, assetIds, segmentIds, savedOnly: req.query.savedOnly === "true" });
     if (!project || !Array.isArray(project.nodes) || !project.nodes.length) return void res.status(404).json({ ok: false, error: "H3 节点不存在" });
-    res.json({ ok: true, project });
+    // 分镜格是制作稿 shot.keyframes 的派生视图：读取时现算，画布上存的那份不作为权威。
+    const derived = withDerivedStoryboardTracks(db, req.params.id, project);
+    res.json({ ok: true, ...(derived.changed.length ? { derivedStoryboardSegments: derived.changed } : {}), project: derived.project });
+  });
+  app.get("/canvas/projects/:id/storyboard-track", (req, res) => {
+    const nodeId = typeof req.query.nodeId === "string" && req.query.nodeId ? req.query.nodeId : undefined;
+    const project = db.getCanvasProject(req.params.id);
+    if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
+    const scoped = { ...project, nodes: (project.nodes as Array<Record<string, any>> || []).filter(node => !nodeId || String(node.id) === nodeId) };
+    const derived = withDerivedStoryboardTracks(db, req.params.id, scoped);
+    const tracks: Record<string, unknown> = {};
+    for (const node of (derived.project?.nodes as Array<Record<string, any>> || [])) {
+      for (const segment of (node.metadata?.segments as Array<Record<string, any>> || [])) {
+        if (!derived.changed.includes(String(segment.id || ""))) continue;
+        tracks[String(segment.id)] = { storyboardShots: segment.storyboardShots, referenceBindings: segment.referenceBindings, duration: segment.duration };
+      }
+    }
+    res.json({ ok: true, projectId: req.params.id, revision: Number(project.revision || 0), tracks });
   });
   app.get("/canvas/projects/:id/h3-diagnose", (req, res) => {
     const nodeId = typeof req.query.nodeId === "string" && req.query.nodeId ? req.query.nodeId : undefined;

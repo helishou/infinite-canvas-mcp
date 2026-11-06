@@ -198,6 +198,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const surfaceHost = useCanvasHost();
   const params = useParams();
   const folders = useCanvasStore(state => state.folders);
+  const workspaceCanvasContext = useProductionWorkspaceStore(state => state.context);
   const episodeId = owner?.kind === "episode" ? owner.id : owner ? "" : params.episodeId || "";
   const projectId = owner?.kind === "canvas" ? owner.id : owner ? "" : params.projectId || "";
   const contextProjectId = projectId;
@@ -463,8 +464,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }, [seriesOnly, workspace, productionContext, canvasId, productionOwner.kind, productionOwner.id, continuityOwnerKey]);
 
   useEffect(() => {
-    if (embedded && production) useProductionWorkspaceStore.getState().setSnapshot(productionOwner.id, production, readiness);
-  }, [embedded, productionOwner.id, production, readiness]);
+    const canvasOwner = workspaceCanvasContext?.owner;
+    const ownerMatchesCanvas = Boolean(canvasOwner && canvasOwner.kind === productionOwner.kind && canvasOwner.id === productionOwner.id);
+    if ((embedded || ownerMatchesCanvas) && production) useProductionWorkspaceStore.getState().setSnapshot(productionOwner.id, production, readiness);
+  }, [embedded, productionOwner.id, productionOwner.kind, production, readiness, workspaceCanvasContext?.owner?.kind, workspaceCanvasContext?.owner?.id]);
   useEffect(() => {
     if (!production) return;
     const remote = String(production.draft.director?.source.brief || "");
@@ -1093,6 +1096,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (!result.production || !Number.isInteger(result.production.revision)) throw new Error(t("drama.production.receiptMalformed"));
       pendingCommandRef.current = null;
       pending(null); setProduction(previous => !previous || previous.episodeId !== result.production.episodeId || result.production.revision > previous.revision ? result.production : previous); setRemoteRevision(null);
+      // 分镜格 owner（shot.keyframes）可能已变：让已打开的 H3 节点面板重算派生轨。
+      if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("drama-production:refresh-storyboard-track"));
       return result.production;
     } catch (error) {
       const saved = commandFailureRecord(command, {
@@ -1374,13 +1379,13 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       "$acheng-director",
       scope.autoSend
         ? `请直接修复“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”的当前问题，并用中文报告结果。`
-        : `请用中文围绕“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”与用户讨论。`,
-      `先调用 ${readInstruction} 读取当前正式内容，只看与本次${scope.autoSend ? "修复" : "讨论"}有关的信息。`,
+        : `请用中文处理用户在“${scope.workspace}${targetId ? ` · ${targetObject?.kind || scope.targetKind || "目标"} ${targetId}` : ""}”范围内的请求，包括直接执行修改。`,
+      `先调用 ${readInstruction} 读取当前正式内容，只看与本次请求有关的信息。`,
       requestedBrief !== undefined ? `用户需求：${requestedBrief}` : "",
       scope.instruction ? `${scope.autoSend ? "修复任务" : "补充要求"}：${scope.instruction}` : "",
       scope.autoSend
         ? "这是用户明确发起的修复任务。直接按上述诊断修复当前问题的正式源字段，保存后复核；不要只给建议或再次询问确认。未能确认修复的项目保留为 partial；不生成媒体或发布。"
-        : "这是讨论草稿。发送后先围绕当前范围讨论；只有用户明确要求修改时，才读取对应生产合同并按合同局部编辑。不要生成媒体或发布。",
+        : "用户本轮提出修改（包括回答上一轮追问）时，直接读取对应生产合同并按合同局部编辑、保存，完成后简要报告改动；不要再次询问确认，也不要用“仍在讨论”“尚未修改”代替执行。只有缺少会改变创作方向的关键信息时才简短追问。不生成媒体或发布。",
       contractModule ? `需要修改时调用 mcp__infinite_canvas__production_get_contract({moduleId:"${contractModule}"})。` : "",
     ].filter(Boolean).join("\n");
     handledAgentResultRef.current = "";
@@ -1868,7 +1873,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       if (!await edit([{ type: "set_director_workflow", patch: { pendingDecisions: updated } }])) return false;
     }
     const workspace: DirectorWorkspace = decision.module === "story" ? "story" : decision.module === "assets" ? "assets" : ["shots", "performance", "effects"].includes(decision.module) ? "shots" : "production";
-    askDirectorWithFeedback({ workspace, targetId: decision.targetId, workId: decision.workId, instruction: `制作对象的待决定事项 ${decision.id} 已由用户明确答复：${answer.trim()}。请只在 ${decision.sourceHash} 所属的当前源稿版本上处理此决定，保留其他冻结事实与未编辑字段。` });
+    askDirectorWithFeedback({ workspace, targetId: decision.targetId, workId: decision.workId, autoSend: true, instruction: `制作对象的待决定事项 ${decision.id} 已由用户明确答复：${answer.trim()}。请只在 ${decision.sourceHash} 所属的当前源稿版本上处理此决定，保留其他冻结事实与未编辑字段。` });
     return true;
   };
   const replaceDirector = async (director: NonNullable<EpisodeProduction["draft"]["director"]>) => edit([{ type: "set_director_production", director }]);

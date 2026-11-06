@@ -43,6 +43,11 @@ export type CanvasProjectStore = {
     getH3ProductionRequirements?(projectId: string): H3ProductionRequirements | null;
     /** Current draft requirements; used as the diagnosis baseline before a version is published. */
     getH3DraftRequirements?(projectId: string): H3ProductionRequirements | null;
+    /**
+     * 制作稿 `shot.keyframes` → 画布分镜格的派生轨（segmentId → track）。
+     * 读取时现算，画布上存的那份不作为权威。
+     */
+    getStoryboardTracks?(projectId: string): Record<string, import("../drama/storyboard-track.js").StoryboardTrack> | undefined;
     list(): CanvasProject[];
     listSummaries(filter?: CanvasProjectFilter): CanvasProject[];
     get(id: string): CanvasProject | null;

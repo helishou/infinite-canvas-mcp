@@ -226,7 +226,8 @@ function pictureBindingIdsInDescription(description: string, imageRefs: H3Ref[])
 }
 
 function storyboardGenerationContext(ctx: CanvasNodeContext, segment: H3Segment, fields: { openingDescription: string; summary: string; soundscape: string; music: string }, shots: StoryboardShot[], referenceCatalog: CanvasReferenceAsset[], retentionLevels: Record<string, H3ReferenceRetention> = {}, options: { subjectOverrides?: H3SubjectDefinition[] | null; validateReferences?: boolean } = {}) {
-  const originalRefs = refsForSegment(segment).map((ref) => ref.bindingId && retentionLevels[ref.bindingId] ? { ...ref, retentionLevel: retentionLevels[ref.bindingId] } : ref);
+  // Prompt Picture ordinals must use the exact order H3 submits, including storyboard-first ordering.
+  const originalRefs = refsForSubmission(segment).map((ref) => ref.bindingId && retentionLevels[ref.bindingId] ? { ...ref, retentionLevel: retentionLevels[ref.bindingId] } : ref);
   const composite = storyboardCompositeLayout(segment.storyboardCompositeEnabled === true, shots, originalRefs);
   const compositeSourceIds = new Set(composite?.panels.map((panel) => panel.bindingId) || []);
   const representativeBindingId = composite?.panels[0]?.bindingId;
@@ -639,13 +640,16 @@ function characterEditorReference(ctx: CanvasNodeContext, segment: H3Segment | u
 export function H3PromptSection({
   ctx,
   selected,
-  imageRefs,
+  imageRefs: imageRefsInput,
   videoRefs,
   audioRefs,
   patchSelected,
   onOpenStoryboard,
 }: Props) {
   const locale = useH3Locale();
+  const imageRefs = useMemo(() => selected
+    ? refsForSubmission(selected).filter((ref) => ref.type === "image")
+    : imageRefsInput, [selected, imageRefsInput]);
   const editorRef = useRef<CanvasTextEditorHandle | null>(null);
   const textTarget = useMemo(() => ({ nodeId: ctx.node.id, segmentId: selected?.id, field: "prompt" as const }), [ctx.node.id, selected?.id]);
   // Bind synchronously: after switching Clips, even the first render must read that Clip's document.

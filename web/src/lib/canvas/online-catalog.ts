@@ -1,6 +1,7 @@
 // 在线资产目录解析：只读站点发布的数据，不执行页面脚本。
 
-export type OnlineAsset = { id: string; category: string; keywords: string; thumbnail: string; original: string; poseType?: string; angle?: string };
+export type OnlineCatalogKind = "costume" | "costume-anime" | "portrait" | "pose" | "depth" | "anime";
+export type OnlineAsset = { id: string; name?: string; category: string; keywords: string; thumbnail: string; original: string; subcategory?: string; poseType?: string; angle?: string };
 
 export const COSTUME_SOURCE = "https://ai-costume-gallery.pages.dev/";
 export const POSE_SOURCE = "https://ai-pose-gallery.pages.dev/";
@@ -87,4 +88,132 @@ export async function loadPortraitCatalog(): Promise<OnlineAsset[]> {
         } catch (error) { failure = error; }
     }
     throw failure;
+}
+
+// 读取中文索引站公开的静态 JSON；不在前端固化图库条目，因此站点发布新数据后可直接读取。
+const GALLERY_ROOT = "https://deeyu.github.io/ai-costume-gallery-zh/";
+
+export const ONLINE_CATALOG_KINDS: readonly OnlineCatalogKind[] = ["costume", "costume-anime", "portrait", "pose", "depth", "anime"];
+
+type OnlineCatalogDefinition = {
+    pageUrl: string;
+    dataUrl: string;
+    imageBase: string;
+    allowedImagePrefixes: readonly string[];
+};
+
+export const ONLINE_CATALOGS: Record<OnlineCatalogKind, OnlineCatalogDefinition> = {
+    costume: {
+        pageUrl: GALLERY_ROOT,
+        dataUrl: `${GALLERY_ROOT}data/costume-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: [GALLERY_ROOT, "https://raw.githubusercontent.com/Deeyu/ai-costume-gallery-zh/"],
+    },
+    "costume-anime": {
+        pageUrl: `${GALLERY_ROOT}costume-anime/`,
+        dataUrl: `${GALLERY_ROOT}costume-anime/data/costume-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: ["https://ai-costume-anime-gallery.pages.dev/"],
+    },
+    portrait: {
+        pageUrl: `${GALLERY_ROOT}portrait/`,
+        dataUrl: `${GALLERY_ROOT}portrait/data/portrait-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: ["https://ai-portrait-gallery.pages.dev/"],
+    },
+    pose: {
+        pageUrl: `${GALLERY_ROOT}pose/`,
+        dataUrl: `${GALLERY_ROOT}pose/data/pose-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: ["https://ai-pose-gallery.pages.dev/"],
+    },
+    depth: {
+        pageUrl: `${GALLERY_ROOT}depth/`,
+        dataUrl: `${GALLERY_ROOT}depth/data/depth-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: ["https://ai-pose-depth-gallery.pages.dev/"],
+    },
+    anime: {
+        pageUrl: `${GALLERY_ROOT}anime/`,
+        dataUrl: `${GALLERY_ROOT}anime/data/anime-zh.json`,
+        imageBase: GALLERY_ROOT,
+        allowedImagePrefixes: ["https://charadb-2fi.pages.dev/"],
+    },
+};
+
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${label} entry`);
+    return value as Record<string, unknown>;
+}
+
+function requiredString(item: Record<string, unknown>, field: string, label: string): string {
+    const value = item[field];
+    if (typeof value !== "string") throw new Error(`Invalid ${label} entry`);
+    return value;
+}
+
+function optionalString(item: Record<string, unknown>, field: string): string {
+    const value = item[field];
+    return typeof value === "string" ? value : "";
+}
+
+function textValues(...values: unknown[]): string[] {
+    return values.flatMap(value => {
+        if (typeof value === "string") return value ? [value] : [];
+        if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && Boolean(item));
+        return [];
+    });
+}
+
+function catalogImageUrl(value: string, definition: OnlineCatalogDefinition, label: string): string {
+    const result = new URL(value, definition.imageBase);
+    if (result.protocol !== "https:" || !definition.allowedImagePrefixes.some(prefix => result.href.startsWith(prefix))) {
+        throw new Error(`Invalid ${label} image URL`);
+    }
+    return result.href;
+}
+
+export function parseChineseOnlineCatalog(kind: OnlineCatalogKind, payload: unknown): OnlineAsset[] {
+    if (!Array.isArray(payload)) throw new Error(`Invalid ${kind} catalog`);
+    const definition = ONLINE_CATALOGS[kind];
+    return payload.map((record: unknown) => {
+        const item = asRecord(record, kind);
+        const id = requiredString(item, "id", kind);
+        const thumbnail = catalogImageUrl(requiredString(item, "缩略图", kind), definition, kind);
+        const original = catalogImageUrl(requiredString(item, "原图", kind), definition, kind);
+        const indexedSearch = optionalString(item, "检索");
+
+        if (kind === "costume" || kind === "costume-anime") {
+            const category = requiredString(item, "分类", kind);
+            const keywords = textValues(item["关键词"], item["英文关键词"], indexedSearch).join(" · ");
+            return { id, category, keywords, thumbnail, original };
+        }
+        if (kind === "portrait") {
+            const category = requiredString(item, "发长", kind);
+            const subcategory = requiredString(item, "类型", kind);
+            const name = optionalString(item, "发型") || subcategory;
+            const keywords = textValues(indexedSearch, item["发型"], item["原始发长"], item["原始发型"], subcategory).join(" · ");
+            return { id, name, category, subcategory, keywords, thumbnail, original };
+        }
+        if (kind === "pose" || kind === "depth") {
+            const category = requiredString(item, "体系", kind);
+            const subcategory = requiredString(item, "分类", kind);
+            const angle = requiredString(item, "角度", kind);
+            const name = requiredString(item, "姿势名称", kind);
+            const keywords = textValues(indexedSearch, item["原始姿势名称"], item["原始分类"], item["原始角度"], item["姿势编号"]).join(" · ");
+            return { id, name, category, subcategory, angle, keywords, thumbnail, original };
+        }
+
+        const category = requiredString(item, "类型", kind);
+        const subcategory = requiredString(item, "分类", kind);
+        const name = requiredString(item, "名称", kind);
+        const keywords = textValues(indexedSearch, item["原始名称"], item["原始分类"], item["标签"], item["子类型"], item["父级"], item["发色"]).join(" · ");
+        return { id, name, category, subcategory, keywords, thumbnail, original };
+    });
+}
+
+export async function loadOnlineCatalog(kind: OnlineCatalogKind): Promise<OnlineAsset[]> {
+    const response = await fetch(ONLINE_CATALOGS[kind].dataUrl, { cache: "no-cache" });
+    if (!response.ok) throw new Error(`Catalog HTTP ${response.status}`);
+    return parseChineseOnlineCatalog(kind, await response.json());
 }

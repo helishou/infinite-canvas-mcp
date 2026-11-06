@@ -2,6 +2,7 @@ import { Zip, ZipPassThrough } from "fflate";
 
 import { backendMediaUrl, fetchBackendGenerationLogs, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
 import { productionSegmentRuntimeMatches, productionSegments } from "@/lib/production-source";
+import { productionSourceFps, productionSubtitleTracks } from "@/lib/production-subtitles";
 import type { CanvasNodeData } from "@/types/canvas";
 
 type RecordValue = Record<string, unknown>;
@@ -109,6 +110,9 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
 
     try {
         const encoder = new TextEncoder();
+        // 字幕是制作稿里既有台词的投影：按 Shot 时间窗与 ref 片段生成，不改写任何台词文本。
+        const subtitleTracks = productionSubtitleTracks(director.source);
+        const subtitleIndex = subtitleTracks.map(track => ({ timelineId: track.timelineId, path: `subtitles/${safeName(track.timelineId)}.srt`, cueCount: track.cues.length, cues: track.cues }));
         const completePrompts = artifacts.length > 0 && artifacts.every(item => item.status === "ready" && item.sourceHash === director.sourceHash && item.receipt.sourceHash === director.sourceHash && item.receipt.promptHash === item.sha256);
         const readyTargets = options.readiness.targets.filter(item => item.status === "ready" || item.status === "complete").length;
         const dependenciesCleared = !options.readiness.unresolved.length && options.readiness.targets.every(item => item.status === "ready" || item.status === "complete");
@@ -130,6 +134,7 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
                 : { targetId: item.targetId, status: item.status }),
             media: mediaEntries,
             outputsIncluded: options.includeGeneratedMedia === true,
+            subtitles: { contract: "srt-1", fps: productionSourceFps(director.source), tracks: subtitleIndex },
             readinessSummary: { ready: readyTargets, total: options.readiness.targets.length, nextAction: options.readiness.nextAction },
         };
         addJson("production.json", { owner: options.owner, revision: sourceRevision, publishedVersion, stage: options.production.published ? "draft-with-published-baseline" : "draft", data: snapshot, publishedSnapshot: options.production.published });
@@ -138,6 +143,8 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
             addJson(item.uploadPath, { targetId: item.artifact.targetId, kind: item.artifact.kind, references: item.refs, receipt: item.artifact.receipt });
         }
         for (const item of generatedPromptFiles) addBytes(item.path, encoder.encode(item.prompt));
+        for (const track of subtitleTracks) addBytes(`subtitles/${safeName(track.timelineId)}.srt`, encoder.encode(track.srt));
+        if (subtitleTracks.length) addJson("subtitles/index.json", { fps: productionSourceFps(director.source), tracks: subtitleIndex });
         for (const binary of allBinaries) {
             const response = await fetch(backendMediaUrl(binary.key));
             if (!response.ok) {
@@ -160,7 +167,7 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
         manifest.media = mediaEntries;
         const missingRequestedMedia = mediaEntries.some(item => item.requested && !item.included);
         if (missingRequestedMedia) manifest.stage = "partial";
-        addBytes("README.txt", encoder.encode(`${options.title}\nAcheng revision ${sourceRevision} · published v${publishedVersion || "draft"}\nPackage status: ${String(manifest.stage)}\n${options.readiness.nextAction}\n${missingRequestedMedia ? "Some requested media files were unavailable; see manifest.json." : ""}\n`));
+        addBytes("README.txt", encoder.encode(`${options.title}\nAcheng revision ${sourceRevision} · published v${publishedVersion || "draft"}\nPackage status: ${String(manifest.stage)}\n${options.readiness.nextAction}\n${subtitleTracks.length ? `Subtitles: ${subtitleTracks.reduce((total, track) => total + track.cues.length, 0)} cues · ${subtitleTracks.map(track => `subtitles/${safeName(track.timelineId)}.srt`).join(", ")}` : "Subtitles: no recorded dialogue."}\n${missingRequestedMedia ? "Some requested media files were unavailable; see manifest.json." : ""}\n`));
         addJson("manifest.json", manifest);
         archive.end();
         return await archiveDone;

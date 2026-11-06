@@ -5412,9 +5412,9 @@ export class EpisodeProductionService {
             const storyboard = formalStoryboardTrack(draft, group, removedStoryboardBindingIds.size ? { ...existing, referenceBindings } : existing,
                 Array.isArray(project.referenceCatalog) ? project.referenceCatalog : []);
             if (!storyboard) throw new Error("CLIP_STORYBOARD_SOURCE_INVALID: 无法从正式 Shot 生成 H3 分镜轨");
-            const storyboardPatch = { ...storyboard,
-                ...(storyboard.referenceBindings ? { referenceBindings: storyboard.referenceBindings } : {}),
-                ...(referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0) ? { referenceBindings } : {}) };
+            const storyboardPatch = {
+                ...(referenceBindings.length !== (Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0) ? { referenceBindings } : {}),
+                ...storyboard };
             if (canonicalProduction(existing.storyboardShots || []) !== canonicalProduction(storyboard.storyboardShots)
                 || canonicalProduction(existing.referenceBindings || []) !== canonicalProduction(storyboardPatch.referenceBindings || existing.referenceBindings || [])
                 || Number(existing.duration || 0) !== storyboard.duration || existing.storyboardModeEnabled !== true

@@ -31,6 +31,19 @@ export function shotTitle(shot: ProductionSourceRow | undefined, fallback = "") 
     return String(shot?.title || shot?.display_name || shot?.id || fallback);
 }
 
+/** Subject display name resolved from its entity registry row (character / scene / asset), never a second stored name. */
+export function subjectDisplayName(source: Record<string, any>, subjectId: string) {
+    const rowsOf = (value: unknown): ProductionSourceRow[] => Array.isArray(value) ? value.filter(item => item && typeof item === "object") : [];
+    const subject = rowsOf(source?.subject_registry).find(item => String(item.id) === subjectId), entity = subject?.entityRef;
+    const registry = entity?.kind === "character" ? rowsOf(source?.character_registry) : entity?.kind === "scene" ? rowsOf(source?.scene_registry) : rowsOf(source?.asset_plan);
+    const item = registry.find(item => String(item.id || item.asset_id) === String(entity?.id));
+    const entityName = String(item?.name || item?.asset_name || item?.scene_name || item?.title || "");
+    if (entityName.trim()) return entityName;
+    // Fall back to stored display_name only when entity lookup fails (legacy/unregistered subjects).
+    if (typeof subject?.display_name === "string" && subject.display_name.trim()) return subject.display_name;
+    return subjectId;
+}
+
 export type ProductionSegmentRuntimeMatch = {
     node: CanvasNodeData;
     segment: Record<string, any>;

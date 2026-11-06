@@ -2615,11 +2615,25 @@ export class BackendDatabase {
             project.updatedAt = new Date().toISOString();
             this.db.prepare("UPDATE canvas_projects SET data_json = ?, updated_at = ? WHERE id = ?")
                 .run(JSON.stringify(stripProjectAssets(project)), String(project.updatedAt), id);
-            syncSharedCanvasAssetRecords(this, id, project as CanvasProject);
-            productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
+            // 嵌套调用（已有外层活动事务）时，派生同步需随外层一起提交，保留原路径；
+            // 非嵌套（普通提交）时改在 COMMIT 后的独立短事务执行，见下方派生同步块。
+            if (context?.withinTransaction) {
+                syncSharedCanvasAssetRecords(this, id, project as CanvasProject);
+                productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
+            }
             const source = context?.source || { clientId: "system:backend", kind: "system", label: "后台" };
+            // expectedFields 是提交时的一次性 CAS 校验条件，被 Backend 自身规范化/共享同步补字段后
+            // 常变成永久冲突基线；重放时 CAS 已不执行（committedReplay），存进历史只会拖慢整图历史重建
+            // 并留下脏状态。落库前从 committedOperations 剥离，前端对账也不依赖它。
+            const storedOperations = committedOperations.map((operation) => {
+                if (operation && typeof operation === "object" && "expectedFields" in operation) {
+                    const { expectedFields, ...rest } = operation as Record<string, unknown>;
+                    return rest;
+                }
+                return operation;
+            });
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-                .run(operationId, id, currentRevision, revision, JSON.stringify(source), encodeStoredJson(committedOperations), encodeStoredJson(operationResults), String(project.updatedAt));
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), encodeStoredJson(storedOperations), encodeStoredJson(operationResults), String(project.updatedAt));
             this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, project_id, request_hash, committed_revision) VALUES (?, ?, ?, ?)").run(operationId, id, fingerprint, revision);
             if (context?.mcpCommand) {
                 const requestHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
