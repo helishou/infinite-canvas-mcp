@@ -3,6 +3,7 @@ import type { Stores } from "../stores/types.js";
 import type { RunningHubBackend } from "../runtime/runninghub.js";
 import type { VideoConcatBackend } from "../runtime/video-concat.js";
 import type { BackendEventBus } from "../events.js";
+import { readWorkflowLivePreview } from "../workflows/live-preview.js";
 
 /** Agent 兼容运行时路由，实际任务由 Backend 服务和 TaskStore 承担。 */
 export function registerAgentRuntimeRoutes(app: Express, stores: Stores, runningHub: RunningHubBackend, videoConcat: VideoConcatBackend, events?: BackendEventBus) {
@@ -55,7 +56,7 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, running
 
 function taskResponse(id: string, prefix: string, stores: Stores, req: Request, res: Response) {
     const task = stores.tasks.get(id); if (!task || (prefix && !task.kind.startsWith(prefix))) return res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
-    return res.json({ ok: true, task, events: stores.tasks.events(id, Number(req.query.after || 0)) });
+    return res.json({ ok: true, task, preview: readWorkflowLivePreview(id) || null, events: stores.tasks.events(id, Number(req.query.after || 0)) });
 }
 function objectBody(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 /** 站点既可以从 query 传（GET/DELETE），也可以从 body 传（PUT/POST）。 */

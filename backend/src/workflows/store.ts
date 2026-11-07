@@ -354,6 +354,8 @@ export class WorkflowStore {
             runTarget: config.runTarget ?? "local",
             // 没带这个字段就沿用旧值；显式传 [] 要存成 '[]'，与「从未配置」的空串区分开。
             outputNodesJson: Array.isArray(config.outputNodes) ? JSON.stringify(config.outputNodes) : undefined,
+            // 预览桥节点：没带沿用旧值，显式传 '' 表示清空选择。
+            previewNodeId: config.previewNodeId === undefined ? undefined : config.previewNodeId,
         });
         return { config };
     }
@@ -390,6 +392,9 @@ export class WorkflowStore {
                 ...(row.runTarget && row.runTarget !== "local" ? { runTarget: row.runTarget as WorkflowConfig["runTarget"] } : {}),
                 // 空串 = 从未配置过（前端据此默认勾选链路末端的输出节点）；'[]' = 用户显式清空，要如实返回空数组。
                 ...(row.outputNodesJson ? { outputNodes: parseOutputNodes(row.outputNodesJson) } : {}),
+                // 空串 = 用户显式关闭预览；字段缺失 = 从未配置（前端据此推荐唯一的预览桥）。
+                // 两者行为不同，不能合并成一个默认值。
+                previewNodeId: row.previewNodeId,
             };
             if (name === "custom/视频修复FlashVSR1.1.json") {
                 config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);

@@ -144,6 +144,13 @@ export class BackendClient {
     );
   }
 
+  /** 读请求 15s；写请求按耗时预算放宽，避免把仍在进行的写误报为超时。 */
+  private timeoutFor(method: string, path: string): number {
+    if (method === "GET") return 15_000;
+    if (/\/production\/ops|\/compile|apply-compilation|scene-work/.test(path)) return 90_000;
+    return 30_000;
+  }
+
   private async request<T = unknown>(
     method: string,
     path: string,
@@ -160,7 +167,11 @@ export class BackendClient {
           ...(body ? { "content-type": "application/json" } : {}),
         },
         body: body ? JSON.stringify(body) : undefined,
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
+        // 写操作（制作稿 ops / 编译触发）在 3.7MB 源上要跑克隆、投影与哈希，实测 6–20s；
+        // 15s 的读请求超时会把「后端仍在写」误报成失败。按读写分档，写档给足预算。
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(this.timeoutFor(method, path))])
+          : AbortSignal.timeout(this.timeoutFor(method, path)),
       });
     } catch (error) {
       const kind = isTimeoutError(error) ? "timeout" : "network";

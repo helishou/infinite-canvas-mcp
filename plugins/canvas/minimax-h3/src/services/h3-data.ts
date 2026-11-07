@@ -71,7 +71,7 @@ export function refsForSegment(segment: H3Segment): H3Ref[] {
 
 /** Prompt Picture ordinals follow the same storyboard-first order used by H3 submission. */
 export function refsForSubmission(segment: H3Segment): H3Ref[] {
-    return orderReferencesForSubmission(
+    const ordered = orderReferencesForSubmission(
         refsForSegment(segment),
         (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
         (ref) => ref.bindingId,
@@ -79,6 +79,7 @@ export function refsForSubmission(segment: H3Segment): H3Ref[] {
         (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) !== "storyboard" && Boolean(ref.subjectId || ref.groupId),
         segment.referenceOrder,
     );
+    return ordered;
 }
 
 export function segmentRefsPatch(refs: H3Ref[], previous?: H3Segment): Pick<H3Segment, "referenceBindings" | "refItems" | "refs"> {

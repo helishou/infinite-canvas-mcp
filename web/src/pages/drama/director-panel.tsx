@@ -30,8 +30,6 @@ import { SubjectStoryboardWorkbench, type StoryboardViewMemory } from "./subject
 import { productionWorkbenchValue, subjectDisplayName, subjectDescriptionField } from "./subject-shot-draft";
 import { AudioDesignEditor, SevenStepsReferencesEditor, SegmentAudioBindingEditor, type AudioSourceEntry } from "./audio-design-editor";
 import { ReferenceNodeLink } from "./reference-node-link";
-import { SourceJsonEditor } from "./source-json-editor";
-import { PerformanceDesignEditor } from "./performance-design-editor";
 import { matchesProductionEntityTarget, subjectPictureNavigation } from "./subject-picture-navigation";
 import { PictureBindingEditor } from "./picture-binding-editor";
 import { SmartImageNodePicker } from "./smart-image-node-picker";
@@ -62,17 +60,6 @@ const objectWorkspaces: Array<{ key: Exclude<DirectorWorkspace, "overview" | "ad
   { key: "continuity", modules: ["continuity"], targetKinds: ["segment"] },
   { key: "production", modules: ["model"], targetKinds: ["segment"] },
 ];
-const COMBAT_JSON_FIELD_ORDER = ["force_source", "trajectory", "contact", "resistance", "impact_hold", "transfer", "recoil", "chain", "timing"];
-const COMBAT_JSON_NESTED_FIELD_ORDER: Record<string, string[]> = {
-  chain: ["attack", "response", "result", "continuation"],
-  timing: ["axis_lock", "spatial_direction", "speed_curve", "camera_sync", "direction_facts", "speed_profile", "phases", "slow_motion"],
-  direction_facts: ["origin", "target", "screen_direction", "body_orientation", "weapon_direction", "support_point", "result_direction"],
-  speed_profile: ["support", "acceleration", "contact_read", "recovery"],
-  phases: ["name", "start", "end", "playback", "purpose", "motion", "positions", "orientation", "action", "combat_logic", "camera", "dof", "composition", "dynamics", "tail_frame"],
-  combat_logic: ["attacker", "target", "target_point", "intent", "defender_state", "response", "result", "next_authority"],
-  camera: ["framing", "movement", "motion_vector", "action_anchor"],
-  slow_motion: ["enabled", "start", "end", "rate", "trigger", "reason", "exit"],
-};
 function Image({ src, alt, className }: { src: string; alt: string; className?: string }) {
   if (alt.startsWith("<Video")) return <video className="max-h-24 max-w-48 rounded object-contain" controls preload="metadata" src={src} aria-label={alt} />;
   if (alt.startsWith("<Audio")) return <audio className="max-w-64" controls preload="metadata" src={src} aria-label={alt} />;
@@ -397,13 +384,12 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
   const [keyframeNodeDraft, setKeyframeNodeDraft] = useState<string>();
   const [keyframeUnbound, setKeyframeUnbound] = useState(false);
   const [secondsDraft, setSecondsDraft] = useState("");
-  const [performanceDraft, setPerformanceDraft] = useState<Record<string, any>>({});
   const [saving, setSaving] = useState(false);
   const originalCharacters = Array.isArray(shot.characters) ? shot.characters : [];
   const visibleCharacterIds = originalCharacters.map(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean);
   const characterOptions = characters.map(character => ({ value: String(character.id), label: String(character.name || character.display_name || character.id) }));
   const characterValues = editing || saving ? characterDraft : visibleCharacterIds;
-  useEffect(() => { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); }, [id]);
+  useEffect(() => { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); }, [id]);
   const save = async () => {
     const patch: Record<string, unknown> = {};
     SHOT_SOURCE_FIELDS.forEach(field => { if ((draft[field] ?? "") !== values[field]) patch[field] = patchProse(shot[field], draft[field] ?? ""); });
@@ -415,7 +401,6 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     }
     if (JSON.stringify(characterDraft) !== JSON.stringify(visibleCharacterIds)) patch.characters = characterDraft.map(characterId => originalCharacters.find(character => String(typeof character === "string" ? character : character?.id || character?.character_id || "") === characterId)
       ?? { id: characterId, name: characters.find(character => String(character.id) === characterId)?.name || characterId });
-    if (JSON.stringify(performanceDraft) !== JSON.stringify(shot.performance ?? {})) patch.performance = Object.keys(performanceDraft).length ? performanceDraft : null;
     const keyframeChange = keyframeUnbound
       ? { type: "unbind" as const, shotId: id }
       : keyframeNodeDraft && keyframeAssetId ? { type: "bind" as const, assetId: keyframeAssetId, nodeId: keyframeNodeDraft } : undefined;
@@ -423,15 +408,15 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     setSaving(true);
     const saved = await onSave(patch, keyframeChange);
     setSaving(false);
-    if (saved !== false) { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); }
+    if (saved !== false) { setEditing(false); setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); }
   };
   return <section className="space-y-4" data-shot-source-fields={id}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="text-sm font-medium">{t("director.studio.shotSource")}</h3>
       {editing ? <div className="flex items-center gap-2" data-shot-source-actions>
         <Button size="small" type="primary" icon={<Check className="size-3.5" />} loading={saving} disabled={busy || saving} onClick={() => void save()}>{t("common.save")}</Button>
-        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setPerformanceDraft({}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(false); }}>{t("common.cancel")}</Button>
-      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setCharacterDraft((Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean)); setSecondsDraft(String(Number(seconds.toFixed(3)))); setPerformanceDraft(shot.performance && typeof shot.performance === "object" && !Array.isArray(shot.performance) ? structuredClone(shot.performance) : {}); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
+        <Button size="small" disabled={saving} onClick={() => { setDraft({}); setCharacterDraft([]); setSecondsDraft(""); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(false); }}>{t("common.cancel")}</Button>
+      </div> : <Button size="small" type="text" data-shot-source-edit icon={<Pencil className="size-3.5" />} disabled={busy} onClick={() => { setDraft({ ...values }); setCharacterDraft((Array.isArray(shot.characters) ? shot.characters : []).map((character: any) => String(typeof character === "string" ? character : character?.id || character?.character_id || "")).filter(Boolean)); setSecondsDraft(String(Number(seconds.toFixed(3)))); setKeyframeNodeDraft(undefined); setKeyframeUnbound(false); setEditing(true); }}>{t("director.studio.editShotFields")}</Button>}
     </div>
     <div className="space-y-4">
       {keyframeEditor?.({ editing, nodeId: keyframeNodeDraft, onNodeChange: nodeId => { setKeyframeNodeDraft(nodeId); setKeyframeUnbound(false); }, onUnbind: () => { setKeyframeNodeDraft(undefined); setKeyframeUnbound(true); } })}
@@ -453,9 +438,8 @@ function ShotSourceFields({ shot, busy, names, characters, fps, onSave, keyframe
     {/* A 类补齐：源稿结构化声音（foley / low_frequency_hz）原先完全不可见，这里就地编辑，走 shot patch 链路。 */}
     <details className="rounded-lg border border-border" data-shot-audio-design open={Boolean((shot.audio as Record<string, any> | undefined)?.foley?.length || (shot.audio as Record<string, any> | undefined)?.ambience || (shot.audio as Record<string, any> | undefined)?.low_frequency_hz != null)}><summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-muted-foreground"><span className="flex items-center gap-1.5"><Volume2 className="size-3.5" />{t("director.atomic.soundDesign")}</span></summary>{shot.audio && typeof shot.audio === "object" && !Array.isArray(shot.audio) ? <div className="p-3 pt-2"><AudioDesignEditor value={shot.audio} disabled={busy || saving} onPersist={async nextAudio => { if (saving) return false; setSaving(true); const saved = await onSave({ audio: nextAudio }); setSaving(false); return saved !== false; }} /></div> : <p className="px-3 pb-3 text-xs text-muted-foreground">{t("director.atomic.noStructuredAudio")}</p>}</details>
  {/* B 类补齐：镜头特性即时保存，兼容尚未初始化 features 的旧源稿。 */}
- {(() => { const current = shot.features && typeof shot.features === "object" && !Array.isArray(shot.features) ? shot.features as Record<string, unknown> : {}; const features = { core_emotion: false, combat: false, supernatural_vfx: false, colossal: false, ...current }; return <><div className="flex flex-wrap gap-x-4 gap-y-2 rounded-lg border border-border px-3 py-2" data-shot-features aria-label={t("director.studio.shotFeatures")}>{Object.entries(features).map(([key, value]) => <label key={key} className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><Switch size="small" checked={Boolean(value)} disabled={busy || saving} onChange={next => { const updated = { ...features, [key]: next }; void onSave({ features: updated, ...(key === "combat" ? next ? (!shot.combat ? { combat: {} } : {}) : { combat: null } : {}) }); }} />{t(`director.studio.shotFeature.${key}`, key)}</label>)}</div>
- <PerformanceDesignEditor value={editing ? performanceDraft : shot.performance} disabled={!editing || busy || saving} durationFrames={frameCount} fps={fps} onChange={setPerformanceDraft} />
- {Boolean(features.combat || shot.combat) && <details className="rounded-lg border border-border p-3" data-shot-combat-editor><summary className="cursor-pointer text-xs font-medium">{t("director.studio.combatPayload")}</summary><div className="mt-2"><SourceJsonEditor title={t("director.studio.combatPayload")} hint={t("director.studio.combatPayloadHint")} value={shot.combat} fieldOrder={COMBAT_JSON_FIELD_ORDER} nestedFieldOrder={COMBAT_JSON_NESTED_FIELD_ORDER} disabled={busy || saving} onSave={next => onSave({ combat: next })} /></div></details>}</>; })()}
+ {(() => { const current = shot.features && typeof shot.features === "object" && !Array.isArray(shot.features) ? shot.features as Record<string, unknown> : {}; const features = { core_emotion: false, combat: false, supernatural_vfx: false, colossal: false, ...current }; return <><div className="flex flex-wrap gap-x-4 gap-y-2 rounded-lg border border-border px-3 py-2" data-shot-features aria-label={t("director.studio.shotFeatures")}>{Object.entries(features).map(([key, value]) => <label key={key} className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground"><Switch size="small" checked={Boolean(value)} disabled={busy || saving} onChange={next => { const updated = { ...features, [key]: next }; void onSave({ features: updated }); }} />{t(`director.studio.shotFeature.${key}`, key)}</label>)}</div>
+</>; })()}
     {includeCompleteSource && <details className="text-xs text-muted-foreground" data-shot-complete-source-details><summary className="cursor-pointer">{t("director.studio.shotCompleteSource")}</summary><div className="mt-3" data-shot-complete-source><SourceData value={shot} names={names} /></div></details>}
   </section>;
 }
@@ -2002,6 +1986,8 @@ export function DirectorPanel({
   // 由 renderShotDetails 统一渲染，workbench 不再单独注入一份，避免同一批字段在页面上出现两遍。
   const renderShotFields = (shot: Record<string, any>, includeCompleteSource = false, keyframeEditor?: KeyframeEditor) => {
     const id = String(shot.id || "");
+    const shotList = records(source.shots);
+    const shotIndex = shotList.findIndex(item => String(item.id) === id);
     return <ShotSourceFields key={id} shot={shot} busy={busy} names={nameMap} characters={characters} fps={fps}
       keyframeAssetId={d?.shotInputs[id]?.keyframeAssetId} keyframeEditor={keyframeEditor}
       includeCompleteSource={includeCompleteSource}

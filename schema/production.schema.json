@@ -1,0 +1,171 @@
+{
+  "$id": "acheng/production",
+  "version": 3,
+  "status": "authoritative",
+  "note": "唯一机器源。只定义编译链路真正需要校验的事实；创作方法（五拍、七层受力）属于写作指导，见 references/40-action-choreography.md 与 31-performance-handoff.md。",
+  "limits": {
+    "max_chars_per_text_item": 7000
+  },
+  "shot": {
+    "facts": {
+      "zh": "镜级事实",
+      "note": "全镜写一次；留空则从上一条镜头继承",
+      "fields": [
+        {
+          "key": "orientation",
+          "zh": "人物朝向",
+          "en": "Orientation",
+          "max": 90,
+          "hint": "他面向画面右，她面向画面左"
+        },
+        {
+          "key": "ground",
+          "zh": "地面与道具状态",
+          "en": "Ground and props",
+          "max": 90,
+          "hint": "干爽青石，红绸平铺，只有击打线有水"
+        },
+        {
+          "key": "axis",
+          "zh": "轴线与机位关系",
+          "en": "Axis",
+          "max": 120,
+          "hint": "他在画面左、她在画面右，机位不越轴"
+        },
+        {
+          "key": "framing",
+          "zh": "景别与焦段",
+          "en": "Framing",
+          "max": 80,
+          "hint": "中景，胸高，35mm"
+        },
+        {
+          "key": "movement",
+          "zh": "运镜",
+          "en": "Camera movement",
+          "max": 80,
+          "hint": "横移跟拍，镜内不切"
+        },
+        {
+          "key": "dof",
+          "zh": "景深",
+          "en": "Depth of field",
+          "max": 70,
+          "hint": "两人清楚，背景桌面虚"
+        }
+      ]
+    },
+    "combat_contract": {
+      "zh": "武戏连续性契约",
+      "trigger": "features.combat === true",
+      "note": "只放跨镜必须机器校验的事实；动作分解写在镜头正文，不在这里。",
+      "fields": [
+        {
+          "key": "axis",
+          "zh": "轴线保持",
+          "en": "Axis held",
+          "max": 80,
+          "hint": "他在画面左、她在画面右，机位不越轴"
+        },
+        {
+          "key": "distance",
+          "zh": "起止间距（米）",
+          "en": "Distance start to end",
+          "max": 40,
+          "hint": "3.0 米 → 2.2 米"
+        },
+        {
+          "key": "contact",
+          "zh": "接触点",
+          "en": "Contact point",
+          "max": 60,
+          "hint": "剑刃压在她右肩外的鞭梢上"
+        },
+        {
+          "key": "damage",
+          "zh": "伤害与损耗",
+          "en": "Damage",
+          "max": 60,
+          "hint": "绸缎炸成水雾，双方无伤"
+        },
+        {
+          "key": "tail",
+          "zh": "尾帧状态",
+          "en": "Tail state",
+          "max": 60,
+          "hint": "水雾未落，他的剑还在下劈"
+        }
+      ]
+    },
+    "performance_contract": {
+      "zh": "文戏连续性契约",
+      "trigger": "features.core_emotion === true",
+      "note": "只放跨镜必须机器校验的事实；表演方法写在正文与写作指导里。",
+      "fields": [
+        {
+          "key": "axis",
+          "zh": "轴线保持",
+          "en": "Axis held",
+          "max": 80,
+          "hint": "他在画面左、她在画面右，机位不越轴"
+        },
+        {
+          "key": "eyeline",
+          "zh": "视线关系",
+          "en": "Eyeline",
+          "max": 60,
+          "hint": "她的视线钉在他脸上，他抬眼迎住"
+        },
+        {
+          "key": "distance",
+          "zh": "人物间距",
+          "en": "Distance",
+          "max": 40,
+          "hint": "3.0 米 → 2.2 米"
+        },
+        {
+          "key": "state_change",
+          "zh": "状态变化",
+          "en": "State change",
+          "max": 80,
+          "hint": "他把钥匙递出去，拇指松了劲"
+        }
+      ]
+    }
+  },
+  "templates": {
+    "facts": "Stage: {orientation} {ground} Axis: {axis} Camera: {framing}, {movement}, {dof}",
+    "combat_contract": "Continuity: axis {axis} | distance {distance} | contact {contact} | damage {damage} | ends on {tail}",
+    "performance_contract": "Continuity: axis {axis} | eyeline {eyeline} | distance {distance} | changed to {state_change}"
+  },
+  "guidance_only": {
+    "note": "写作方法，供 agent 写正文时遵循；不参与校验、不参与编译、不进 schema 字段。",
+    "combat_beats": [
+      "approach",
+      "commit",
+      "contact",
+      "recovery",
+      "reset"
+    ],
+    "combat_layers": [
+      "force_source",
+      "trajectory",
+      "contact",
+      "resistance",
+      "impact_hold",
+      "transfer",
+      "recoil"
+    ],
+    "performance_beats": [
+      "open",
+      "press",
+      "turn",
+      "land",
+      "after"
+    ],
+    "see": [
+      "references/40-action-choreography.md",
+      "references/31-performance-handoff.md"
+    ]
+  }
+}

@@ -6,6 +6,7 @@ import { type ResolvedConfig } from "../config.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import type { Stores } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
+import { readWorkflowLivePreview } from "../workflows/live-preview.js";
 
 /** ComfyUI Bridge 路由（总后台权威，Agent 变纯代理）。 */
 export function registerComfyRoutes(ctx: { app: import("express").Express; stores: Stores; config: ResolvedConfig; events?: BackendEventBus; basePath?: string }, bridge: ComfyUiBackend) {
@@ -111,7 +112,8 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
                 ...(task.error ? { errorPreview: task.error.slice(0, 300) } : {}),
             } });
         }
-        res.json({ ok: true, task, preview: bridge.getLivePreview(taskId) || null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
+        // H3 展开流的帧在 bridge 内存里；自定义工作流的预览桥帧在工作流注册表里。
+        res.json({ ok: true, task, preview: bridge.getLivePreview(taskId) || readWorkflowLivePreview(taskId) || null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
     });
 
     app.post(routePath("/comfy/tasks/:id/cancel"), (req, res) => {

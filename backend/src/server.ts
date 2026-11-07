@@ -44,6 +44,7 @@ import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
+import { readWorkflowLivePreview } from "./workflows/live-preview.js";
 import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
@@ -70,6 +71,7 @@ import { redactInlineMedia } from "./runtime/redact-inline-media.js";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
 import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
 import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
+import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 
 const logger = createLogger("backend");
 
@@ -189,6 +191,7 @@ export function startServer(
       (req.method === "GET" || req.method === "HEAD") &&
       (url === "/media" ||
         url.startsWith("/media/") ||
+        url.startsWith("/camera-library/media/") ||
         url.startsWith("/runtime/media-file"))
     )
       return next();
@@ -267,6 +270,7 @@ export function startServer(
   });
   registerConnectionRoutes(app, config, stores.settings);
   registerLocalModelProxyRoutes(app);
+  registerCameraLibraryRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =
@@ -2072,6 +2076,8 @@ export function startServer(
     res.json({
       ok: true,
       task,
+      // 自定义工作流的预览桥帧：画布节点生成态按 runtimeTaskId 轮询这里。
+      preview: readWorkflowLivePreview(req.params.id) || null,
       events: stores.tasks.events(req.params.id, Number(req.query.after || 0)),
     });
   });

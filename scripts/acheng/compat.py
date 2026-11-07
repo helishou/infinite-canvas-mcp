@@ -7,12 +7,24 @@ PATCH_VERSION = "canvas-14"
 
 def replace(path, before, after):
     text = path.read_text(encoding="utf-8")
-    if after and after in text or not after and before not in text:
+    if after and after in text or not after and _floor_variants(text, before) is None:
         return
-    if text.count(before) != 1:
+    if _floor_variants(text, before) is None:
         raise RuntimeError(f"Unsupported upstream contract in {path.name}: {before[:70]}")
-    path.write_text(text.replace(before, after), encoding="utf-8")
+    path.write_text(text.replace(_floor_variants(text, before), after), encoding="utf-8")
 
+
+
+def _floor_variants(text, before):
+    """Accept both the historical 2000-word floor and the 1200-word floor."""
+    if before and text.count(before) == 1:
+        return before
+    for old, new in (("2000", "1200"), ("1200", "2000")):
+        if old in before:
+            alt = before.replace(old, new)
+            if text.count(alt) == 1:
+                return alt
+    return None
 
 def apply(root):
     root = Path(root)

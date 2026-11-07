@@ -1,6 +1,8 @@
+import { graphlib, layout } from "@dagrejs/dagre";
 import { nanoid } from "nanoid";
 
 import { GROUP_FRAME_PADDING, groupFrameOfMembers } from "@/lib/canvas/canvas-node-geometry";
+import { findFreeNodePosition, placementObstacles, type PlacementRect } from "@/lib/canvas/canvas-node-placement";
 import { applyBackendCanvasDelta } from "@/lib/canvas/canvas-delta";
 import i18n from "@/i18n";
 import { getNodeSpec, isRegisteredNodeType } from "@/lib/canvas/node-registry";
@@ -40,8 +42,6 @@ export function summarizeCanvasAgentOps(ops?: CanvasAgentOp[]) {
 
 // 自动排布参数：未显式指定位置的节点按连接关系分层落到画布最右侧（输入在左、输出在右）。
 const AUTO_LAYOUT_GAP = 48;
-// 判定重叠的容差（像素）：同一轮里多个节点落在极近坐标时视为碰撞并依次右移铺开。
-const OVERLAP_PAD = 8;
 // 尺寸归一化只作用于承载画面的节点；文本/配置/分组/音频等小节点不参与，避免被拉伸成巨块。
 const LAYOUT_MEDIA_TYPES = new Set<string>([CanvasNodeType.Image, CanvasNodeType.Video]);
 // 归一化目标带：以选中画面节点高度的【中位数】为锚，收进 [中位数 × 0.7, 中位数 × 1.4]。
@@ -159,27 +159,22 @@ function normalizeMediaSizes(byId: Map<string, CanvasNodeData>, ids: string[]) {
     return changed;
 }
 
-/** 判断 (x,y,w,h) 是否与已有节点矩形重叠。 */
-function isRectFree(nodes: CanvasNodeData[], x: number, y: number, w: number, h: number) {
-    return !nodes.some(
-        (node) =>
-            x < node.position.x + node.width + OVERLAP_PAD &&
-            x + w + OVERLAP_PAD > node.position.x &&
-            y < node.position.y + node.height + OVERLAP_PAD &&
-            y + h + OVERLAP_PAD > node.position.y,
-    );
-}
-
-/** 从期望坐标出发，向右侧逐个步进取到第一个不重叠的位置（碰撞时铺成一行）。 */
-function resolveFreePosition(nodes: CanvasNodeData[], desired: { x: number; y: number }, w: number, h: number) {
-    let x = desired.x;
-    let y = desired.y;
-    let guard = 0;
-    while (!isRectFree(nodes, x, y, w, h) && guard < 256) {
-        x += w + AUTO_LAYOUT_GAP;
-        guard++;
-    }
-    return { x, y };
+/** 从期望坐标出发就近找空位；显式坐标撞上已有节点时不再一路向右铺。 */
+function resolveFreePosition(
+    nodes: CanvasNodeData[],
+    desired: { x: number; y: number },
+    w: number,
+    h: number,
+    options: { excludeIds?: Iterable<string>; bounds?: PlacementRect } = {},
+) {
+    return findFreeNodePosition({
+        desired,
+        size: { width: w, height: h },
+        obstacles: placementObstacles(nodes),
+        excludeIds: options.excludeIds,
+        bounds: options.bounds,
+        gap: AUTO_LAYOUT_GAP,
+    });
 }
 
 // 连通分量：把 ids 按无向连线聚成若干块；块内节点彼此相连、块间不相连。
@@ -220,225 +215,106 @@ function componentTopKey(ids: string[], byId: Map<string, CanvasNodeData>): numb
 }
 
 /**
- * 对单个连通块做「分层正交」紧凑排布，返回【局部坐标】（原点 0,0）下各节点位置与块包围盒尺寸。
+ * 自适应间距（与 Toonflow 一致）：
+ * - 同一层内节点间距按节点高度中位数的 1/4 取，夹在 [96, 160]；
+ * - 层间距按节点宽度中位数的 1/2 取，夹在 [160, 320]。
+ * 图元越大间距越大，避免大图挤在一起；小图也不会被拉开成大片空白。
+ */
+function flowSpacing(ids: string[], sizeOf: (id: string) => { width: number; height: number }) {
+    const median = (values: number[]) => {
+        if (!values.length) return 0;
+        const sorted = [...values].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    };
+    const nodeGap = Math.round(Math.min(160, Math.max(96, median(ids.map((id) => sizeOf(id).height)) / 4)));
+    const rankGap = Math.round(Math.min(320, Math.max(160, median(ids.map((id) => sizeOf(id).width)) / 2)));
+    return { nodeGap, rankGap };
+}
+
+/**
+ * 对单个连通块用 dagre 做有向图分层排布，返回【局部坐标】（原点 0,0）下各节点位置与块包围盒尺寸。
  *
- * 设计目标（用户诉求：整理后别拉得满天飞、**有关系的节点要挨在一起**）：
- * 1. 位置由结构直接算出，不再靠力导向迭代收敛 —— 曾实测 45 节点的块被全局斥力撑到
- *    11000 × 16800（节点面积只占 2.8%），相连节点中心距中位数 1344（约 4 倍节点高），
- *    本该水平的链在画布上斜穿几屏。
- * 2. 相连节点两轴都近：层号只决定先后的方向（源在左、汇在右），实际 x 贴着前驱右边界算
- *    （见下第 4 步），层内顺序决定 y。
- * 3. 链严格水平、输出与上游同行：用「行网格」—— 同一行是一条横带，行高取该行最高节点、
- *    行内垂直居中，所以 1:1 的输入输出中心严格对齐（dy = 0）。
- * 4. 绝不重叠：同一行内按层序推进必然右移（行游标），不同行由行高 + gap 天然分隔，构造性成立。
+ * 采用 Toonflow 的方案（dagre，rankdir=LR）：dagre 负责分层、层内排序与交叉最小化，
+ * 输入在左、输出在右。相比自研的分层 + 重心排序 + 行网格，交叉更少、结构更稳定，
+ * 环、长边（跨层引用）和重复边都由 dagre 统一处理。
+ * 间距规则参考 Toonflow arrangeCanvas（MIT）：
+ * https://github.com/HBAI-Ltd/Toonflow-app/blob/master/apps/web/src/pages/workspace/panels/canvas/arrangeCanvas.ts
+ *
+ * 取舍：dagre 的每一层是统一列，同层出现一个很宽的节点会把下一层整体右推，
+ * 自研版「宽节点只推自己那一行」的紧凑性在宽窄混排图里会略差；
+ * 换来的是跨层交叉显著更少、节点顺序与结构更符合通用有向图的直觉。
  */
 function layoutComponentLocal(ctx: {
     sizeOf: (id: string) => { width: number; height: number };
     resized: Map<string, { width: number; height: number }>;
-    gap: number;
-    /** 节点原坐标 y：层内顺序的初始依据，尽量保留用户原本的上下布局意图。 */
-    yOf: (id: string) => number;
+    spacing: { nodeGap: number; rankGap: number };
 }, comp: string[], compEdges: CanvasConnection[]): { positions: Map<string, FlowLayoutEntry>; width: number; height: number } {
-    const { sizeOf, resized, gap, yOf } = ctx;
+    const { sizeOf, resized, spacing } = ctx;
     const positions = new Map<string, FlowLayoutEntry>();
     const put = (id: string, x: number, y: number) => {
         const size = resized.get(id);
         positions.set(id, size ? { x, y, width: size.width, height: size.height } : { x, y });
     };
-    const n = comp.length;
-    const heightOf = (id: string) => sizeOf(id).height;
-    const widthOf = (id: string) => sizeOf(id).width;
 
-    // 单点：直接落位。
-    if (n <= 1) {
-        if (n === 1) put(comp[0], 0, 0);
-        return { positions, width: n === 1 ? widthOf(comp[0]) : 0, height: n === 1 ? heightOf(comp[0]) : 0 };
+    if (!comp.length) return { positions, width: 0, height: 0 };
+    // 单点：直接落位，省一次建图。
+    if (comp.length === 1) {
+        const size = sizeOf(comp[0]);
+        put(comp[0], 0, 0);
+        return { positions, width: size.width, height: size.height };
     }
 
-    // 1) 分层：最长路径分层，源在左、汇在右；有环时靠松弛迭代推进，保证收敛。
-    const indeg = new Map<string, number>();
-    const outAdj = new Map<string, string[]>();
-    comp.forEach((id) => { indeg.set(id, 0); outAdj.set(id, []); });
-    compEdges.forEach((conn) => {
-        outAdj.get(conn.fromNodeId)?.push(conn.toNodeId);
-        indeg.set(conn.toNodeId, (indeg.get(conn.toNodeId) ?? 0) + 1);
+    const graph = new graphlib.Graph();
+    graph.setGraph({
+        rankdir: "LR",
+        nodesep: spacing.nodeGap,
+        ranksep: spacing.rankGap,
+        // 多条边共用的中段间距，与 Toonflow 保持一致。
+        edgesep: 32,
     });
-    const level = new Map<string, number>();
-    const queue: string[] = [];
-    comp.forEach((id) => { if ((indeg.get(id) ?? 0) === 0) { level.set(id, 0); queue.push(id); } });
-    while (queue.length) {
-        const u = queue.shift()!;
-        for (const v of outAdj.get(u) ?? []) {
-            level.set(v, Math.max(level.get(v) ?? 0, (level.get(u) ?? 0) + 1));
-            const d = (indeg.get(v) ?? 0) - 1;
-            indeg.set(v, d);
-            if (d === 0) queue.push(v);
-        }
-    }
-    for (let pass = 0; pass < n; pass++) {
-        let changed = false;
-        for (const conn of compEdges) {
-            const lv = Math.max(level.get(conn.toNodeId) ?? 0, (level.get(conn.fromNodeId) ?? 0) + 1);
-            if (lv !== level.get(conn.toNodeId)) { level.set(conn.toNodeId, lv); changed = true; }
-        }
-        if (!changed) break;
-    }
-    comp.forEach((id) => { if (!level.has(id)) level.set(id, 0); });
-
-    // 列（层）：只保留有节点的层；环等场景会松弛出空层，空层必须丢掉，否则列宽算成空值污染整块坐标。
-    const byLevel = new Map<number, string[]>();
+    graph.setDefaultEdgeLabel(() => ({}));
     comp.forEach((id) => {
-        const lv = level.get(id) ?? 0;
-        const bucket = byLevel.get(lv);
-        if (bucket) bucket.push(id);
-        else byLevel.set(lv, [id]);
+        const size = sizeOf(id);
+        graph.setNode(id, { width: size.width, height: size.height });
     });
-    const layers = [...byLevel.keys()].sort((a, b) => a - b).map((lv) => byLevel.get(lv)!);
-
-    // 邻居表：同一条边只记一次，避免重复计权把重心带偏。
-    const preds = new Map<string, string[]>();
-    const succs = new Map<string, string[]>();
-    comp.forEach((id) => { preds.set(id, []); succs.set(id, []); });
+    // 自环 / 重复边会让 dagre 的层数异常膨胀，先去重；方向由 from → to 决定（输入在左、输出在右）。
     const seenEdge = new Set<string>();
     compEdges.forEach((conn) => {
-        const key = `${conn.fromNodeId}->${conn.toNodeId}`;
+        if (conn.fromNodeId === conn.toNodeId) return;
+        const key = `${conn.fromNodeId}\u0000${conn.toNodeId}`;
         if (seenEdge.has(key)) return;
         seenEdge.add(key);
-        preds.get(conn.toNodeId)?.push(conn.fromNodeId);
-        succs.get(conn.fromNodeId)?.push(conn.toNodeId);
+        graph.setEdge(conn.fromNodeId, conn.toNodeId);
     });
+    layout(graph);
 
-    // 2) 层内顺序：先按原坐标上→下稳定排，再交替做「前向看前驱重心 / 后向看后继重心」排序。
-    //    只做前向时扇出节点的顺序被上游牵死，分叉汇聚处的交叉压不下去；补上后向遍历才收敛。
-    layers.forEach((ids) => ids.sort((a, b) => yOf(a) - yOf(b)));
-    const orderIndex = new Map<string, number>();
-    const reindex = (ids: string[]) => ids.forEach((id, i) => orderIndex.set(id, i));
-    layers.forEach((ids) => reindex(ids));
-    for (let pass = 0; pass < 4; pass++) {
-        const forward = pass % 2 === 0;
-        const targets = layers.map((_, i) => i);
-        const scan = forward ? targets.slice(1) : targets.slice(0, -1).reverse();
-        scan.forEach((lv) => {
-            const refsOf = forward ? preds : succs;
-            const home = new Map(layers[lv].map((id, i) => [id, i]));
-            const bary = (id: string) => {
-                const refs = refsOf.get(id)!.map((ref) => orderIndex.get(ref)).filter((v): v is number => v !== undefined);
-                return refs.length ? refs.reduce((sum, v) => sum + v, 0) / refs.length : home.get(id)!;
-            };
-            layers[lv].sort((a, b) => bary(a) - bary(b));
-            reindex(layers[lv]);
-        });
-    }
-
-    // 3) 行 y：每行是一条横跨各层的水平带，相连节点尽量分到同一行 → 链自然水平、输出与上游同行。
-    //    行高取该行最高节点，行内垂直居中，所以 1:1 的输入输出中心严格对齐（dy = 0）。
-    const rowOf = new Map<string, number>();
-    const rowHeight = new Map<number, number>();
-    layers.forEach((ids) => {
-        // 目标行 = 前驱行的重心；整层块再以该重心为中心摆放，避免父节点永远贴住第一个子节点。
-        const wanted = ids.map((id, index) => {
-            const refs = (preds.get(id) ?? []).map((parent) => rowOf.get(parent)).filter((row): row is number => row !== undefined);
-            return refs.length ? refs.reduce((sum, row) => sum + row, 0) / refs.length : index;
-        });
-        const mean = wanted.reduce((sum, value) => sum + value, 0) / wanted.length;
-        const start = mean - (ids.length - 1) / 2;
-        ids.forEach((id, index) => {
-            const row = Math.round(start + index);
-            rowOf.set(id, row);
-            rowHeight.set(row, Math.max(rowHeight.get(row) ?? 0, heightOf(id)));
-        });
-    });
-    const rowTop = new Map<number, number>();
-    let cursorY = 0;
-    [...rowHeight.keys()].sort((a, b) => a - b).forEach((row) => {
-        rowTop.set(row, cursorY);
-        cursorY += rowHeight.get(row)! + gap;
-    });
-
-    // 4) 列 x：**不用统一列坐标**。曾按「层宽 = 层内最大宽」给整层一个 x，结果同层只要出现
-    //    一个宽节点，整层其它窄链后面都留出同宽的死空白，有关系的两个节点被顶到 1400+ 之外
-    //    （实测「宽窄链混排」相邻节点净空隙 1448，正常应为一个 gap）。
-    //    改为「贴前驱」：x = max(所有前驱右边界 + gap, 本行游标)。于是
-    //    - 有边相连的两个节点恰好相隔一个 gap，宽节点只推自己那一行，不牵连别的链；
-    //    - 跨层引用（A 直接连 E）会自动跳空列贴上去，不再横跨整屏。
-    //    不重叠由「本行游标 + 前驱约束」保证：同一行按层序推进必然右移，不同行 y 天然分隔。
-    const nodeX = new Map<string, number>();
-    const rowCursor = new Map<number, number>();
-    layers.forEach((ids) => {
-        ids.forEach((id) => {
-            const row = rowOf.get(id)!;
-            const afterPreds = (preds.get(id) ?? []).reduce((max, parent) => {
-                const parentX = nodeX.get(parent);
-                return parentX === undefined ? max : Math.max(max, parentX + widthOf(parent) + gap);
-            }, -Infinity);
-            const x = Math.max(Number.isFinite(afterPreds) ? afterPreds : 0, rowCursor.get(row) ?? 0);
-            nodeX.set(id, x);
-            rowCursor.set(row, x + widthOf(id) + gap);
-        });
-    });
-
-    // 5) 反向收紧：正向只保证「不早于前驱」，于是「短链汇入长链」时短链末端被留在很左边，
-    //    与汇合点拉开上千像素（实测 5 步链 + 2 步链汇合时，短链末端到汇合点净空隙 1452）。
-    //    再从右往左松弛一次：能贴住后继左边（留一个 gap）就贴过去。
-    //    只放行「从源点出发、沿途每个节点都只有一个后继」的链整体右移 —— 这类链的上游没有分支，
-    //    右移不会拉长别的边。一旦链上挂过分支（源点扇出 / 中途分叉），整条不动：否则为了贴汇合点，
-    //    反而会把「共享输入 → 各下游」的边推远，得不偿失（实测宽窄链混排场景会从 1 处长边变 2 处）。
-    const onSingleChain = new Map<string, boolean>();
-    layers.forEach((ids) => ids.forEach((id) => {
-        const parents = preds.get(id) ?? [];
-        onSingleChain.set(id, parents.length === 0
-            || parents.every((parent) => (succs.get(parent) ?? []).length === 1 && onSingleChain.get(parent) === true));
-    }));
-    // rowRight：本行「已定位的最左节点」左边界再减 gap，即更左节点允许达到的最右位置。
-    const rowRight = new Map<number, number>();
-    for (let i = layers.length - 1; i >= 0; i--) {
-        const ids = layers[i];
-        for (let j = ids.length - 1; j >= 0; j--) {
-            const id = ids[j];
-            const row = rowOf.get(id)!;
-            const current = nodeX.get(id)!;
-            const caps: number[] = [];
-            if (onSingleChain.get(id)) {
-                (succs.get(id) ?? []).forEach((succ) => {
-                    const succX = nodeX.get(succ);
-                    if (succX !== undefined) caps.push(succX - widthOf(id) - gap);
-                });
-                const rowCap = rowRight.get(row);
-                if (rowCap !== undefined) caps.push(rowCap - widthOf(id));
-            }
-            const next = caps.length ? Math.max(current, Math.min(...caps)) : current;
-            nodeX.set(id, next);
-            rowRight.set(row, next - gap);
-        }
-    }
-    comp.forEach((id) => {
-        const row = rowOf.get(id)!;
-        const h = heightOf(id);
-        put(id, nodeX.get(id)!, rowTop.get(row)! + (rowHeight.get(row)! - h) / 2);
-    });
-
-    // 归一到局部原点 (0,0)，并回传块包围盒尺寸（块间打包要用）。
+    // dagre 给的是节点中心坐标，转成左上角后归一到局部原点 (0,0)。
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     comp.forEach((id) => {
-        const p = positions.get(id)!;
+        const node = graph.node(id);
         const size = sizeOf(id);
-        minX = Math.min(minX, p.x);
-        minY = Math.min(minY, p.y);
-        maxX = Math.max(maxX, p.x + size.width);
-        maxY = Math.max(maxY, p.y + size.height);
+        const x = node.x - size.width / 2;
+        const y = node.y - size.height / 2;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + size.width);
+        maxY = Math.max(maxY, y + size.height);
+        put(id, x, y);
     });
-    comp.forEach((id) => {
-        const p = positions.get(id)!;
+    positions.forEach((pos, id) => {
         const size = resized.get(id);
-        positions.set(id, size ? { x: p.x - minX, y: p.y - minY, width: size.width, height: size.height } : { x: p.x - minX, y: p.y - minY });
+        positions.set(id, size
+            ? { x: pos.x - minX, y: pos.y - minY, width: size.width, height: size.height }
+            : { x: pos.x - minX, y: pos.y - minY });
     });
     return { positions, width: maxX - minX, height: maxY - minY };
 }
 
 /**
- * 按连接关系（fromNodeId → toNodeId 表示数据流方向）做拓扑分层排布：
+ * 按连接关系（fromNodeId → toNodeId 表示数据流方向）做分层排布：
  * 源点（只有出边，输入）在左，汇点（只有入边，输出）在右。
- * 连通块内部走「分层正交」：层号决定列 x，格行决定 y，相连节点尽量同行 → 链水平、块紧凑。
+ * 每个连通块内部交给 dagre（rankdir=LR）分层与交叉最小化，块间再按货架式打包。
  * - ids：需要布局的节点 id 集合。
  * - scopeEdges=true 时只取两端都在 ids 内的边（用于「整理选中」子图）；
  *   否则取所有「目标在 ids 内且源已存在」的边（用于新建批次，使下游节点被推到右侧）。
@@ -529,7 +405,7 @@ export function computeFlowLayout(opts: {
         let stackedY = anchorY;
         ids.filter((id) => parkSet.has(id)).forEach((id) => {
             const size = sizeOf(id);
-            const pos = resolveFreePosition(nodes, { x: anchorX, y: stackedY }, size.width, size.height);
+            const pos = resolveFreePosition(nodes, { x: anchorX, y: stackedY }, size.width, size.height, { excludeIds: [id] });
             put(id, pos.x, pos.y);
             stackedY = pos.y + size.height + gap;
         });
@@ -539,29 +415,25 @@ export function computeFlowLayout(opts: {
     const idSet = new Set(flowIds);
     const scopedEdges = connections.filter((conn) => idSet.has(conn.toNodeId) && (scopeEdges ? idSet.has(conn.fromNodeId) : byId.has(conn.fromNodeId)));
 
-    // 连通分量聚类：把节点按连线拆成若干「连通块」。块内做分层正交排布（相连节点两个方向都靠近、链保持水平），
+    // 连通分量聚类：把节点按连线拆成若干「连通块」。块内交给 dagre 做分层与交叉最小化，
     // 块与块之间按原上下顺序做「货架式」打包 —— 小块填进大块旁边的空位、装不下才换行，
     // 避免无条件纵向堆叠在右侧留出整片空白；跨块连线随之被隔离，边交叉大幅下降。
     const components = computeConnectedComponents(flowIds, scopedEdges);
     // 块顺序：按块内最靠上的节点原坐标排，尽量保留用户原本的上下布局意图。
     components.sort((a, b) => componentTopKey(a, byId) - componentTopKey(b, byId));
 
-    // 块间间距：明显大于块内行距，使无关节点一眼可辨（也不至于把画布拉得过空）。
-    const CLUSTER_GAP = Math.round(gap * 2.5);
+    // 块内间距随图元尺寸自适应（见 flowSpacing）；块间留出更大的空隙，使无关节点一眼可辨。
+    const spacing = flowSpacing(flowIds, sizeOf);
+    const CLUSTER_GAP = Math.round(Math.max(spacing.nodeGap, spacing.rankGap) * 1.5);
     // 先把每个块在局部坐标（原点 0,0）排好，拿到各自的包围盒。
     const blocks = components.map((comp) => {
         const compSet = new Set(comp);
         const compEdges = scopedEdges.filter((conn) => compSet.has(conn.fromNodeId) && compSet.has(conn.toNodeId));
-        return layoutComponentLocal(
-            { sizeOf, resized, gap, yOf: (id: string) => byId.get(id)?.position.y ?? 0 },
-            comp,
-            compEdges,
-        );
+        return layoutComponentLocal({ sizeOf, resized, spacing }, comp, compEdges);
     });
     // 块间「货架式」打包：按原上下顺序往右铺，一行铺不下再换行。
     // 小块能填进大块旁边的空位，避免无条件纵向堆叠在右侧留出整片空白
     // （实测「大块 + 若干孤立点」场景包围盒面积占比 37% → 67%）。
-    // 货架宽度上限取「最宽块」与「总面积开方」的较大者：单块绝不被挤断行，整行也不会无限拉长。
     // 货架宽度上限取「最宽块」与「总面积开方」的较大者：
     // 单块绝不被挤断行（宽度 ≥ 最宽块），整行也不会无限拉长（≥ 面积开方）。
     // 试过按包围盒面积搜索更优宽度，但会选出「两块并排」这类极端扁长的形状
@@ -592,7 +464,7 @@ export function computeFlowLayout(opts: {
     let parkY = anchorY;
     ids.filter((id) => parkSet.has(id)).forEach((id) => {
         const size = sizeOf(id);
-        const pos = resolveFreePosition(nodes, { x: rightEdge, y: parkY }, size.width, size.height);
+        const pos = resolveFreePosition(nodes, { x: rightEdge, y: parkY }, size.width, size.height, { excludeIds: [id] });
         put(id, pos.x, pos.y);
         parkY = pos.y + size.height + gap;
     });
@@ -783,8 +655,10 @@ export function planCanvasAgentOperations(snapshot: CanvasAgentSnapshot, ops?: C
     const operations: CanvasBackendOperation[] = [];
     const autoLayout: Array<{ index: number; id: string }> = [];
 
-    // 自动排布的网格起点：画布现有节点的右边界之外，避免压住既有内容。
+    // 自动排布的锚点：画布现有节点的右侧之外、与既有内容顶部对齐，避免压住既有内容，
+    // 也避免新批次落到 y=0 的远处（用户看到的就是“新建的节点跑到上面去了”）。
     const anchorX = state.nodes.length ? Math.max(...state.nodes.map((node) => node.position.x + node.width)) + AUTO_LAYOUT_GAP : 0;
+    const anchorY = state.nodes.length ? Math.min(...state.nodes.map((node) => node.position.y)) : 0;
     // 记录 op 并按同一份 delta 投影，后续 op 才能看到前序 op 的结果（与 Backend 顺序执行一致）。
     const emit = (operation: CanvasBackendOperation) => {
         operations.push(operation);
@@ -800,11 +674,11 @@ export function planCanvasAgentOperations(snapshot: CanvasAgentSnapshot, ops?: C
             const width = op.width || spec.width;
             const height = op.height || spec.height;
             const nodeId = op.id || `${nodeType}-${Date.now()}-${index}`;
-            // 优先尊重显式坐标（含碰撞时向右铺开）；未给坐标先占位，循环后统一分层。
+            // 优先尊重显式坐标（撞车时就近找空位）；未给坐标先占位，循环后统一分层。
             const hasExplicitPosition = Boolean(op.position) || op.x !== undefined || op.y !== undefined;
             const position = hasExplicitPosition
-                ? resolveFreePosition(state.nodes, { x: op.position?.x ?? op.x ?? 0, y: op.position?.y ?? op.y ?? 0 }, width, height)
-                : { x: anchorX, y: 0 };
+                ? resolveFreePosition(state.nodes, { x: op.position?.x ?? op.x ?? 0, y: op.position?.y ?? op.y ?? 0 }, width, height, { excludeIds: [nodeId] })
+                : { x: anchorX, y: anchorY };
             const operationIndex = emit({
                 type: "add_node",
                 id: nodeId,
@@ -898,7 +772,7 @@ export function planCanvasAgentOperations(snapshot: CanvasAgentSnapshot, ops?: C
 
     // 统一分层排布未指定坐标的节点：按连接关系把输入放左、输出放右。
     if (autoLayout.length) {
-        const positions = computeFlowLayout({ nodes: state.nodes, connections: state.connections, ids: autoLayout.map((item) => item.id), anchorX, anchorY: 0 });
+        const positions = computeFlowLayout({ nodes: state.nodes, connections: state.connections, ids: autoLayout.map((item) => item.id), anchorX, anchorY });
         for (const item of autoLayout) {
             const pos = positions.get(item.id);
             if (!pos) continue;

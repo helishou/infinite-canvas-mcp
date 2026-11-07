@@ -27,6 +27,7 @@ import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-i
 import { SmartImageHistoryActions } from "./smart-image-history-actions";
 import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
 import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
+import { useCanvasNodeLivePreview, type CanvasNodeLivePreview } from "@/services/canvas-node-live-preview";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 // 选中态取画布主题：浅色 #2f80ff / 深色 #60a5fa。写死亮蓝会让暗色主题下的
@@ -142,6 +143,34 @@ function isNodeGenerating(node: CanvasNodeData) {
 function nodeRunProgress(node: CanvasNodeData) {
     const progress = node.metadata?.runProgress;
     return typeof progress === "number" && progress > 0.01 && progress < 1 ? Math.round(progress * 100) : undefined;
+}
+
+/**
+ * 生成态的实时预览帧覆盖层。帧来自工作流里用户选中的预览桥节点，
+ * 只在任务运行期间出现；不写节点 metadata，正式产物仍由原有回写链路落库。
+ * 画布节点处在父级 scale 变换层内，角标字号要按 scale 反向补偿。
+ */
+function NodeLivePreviewLayer({ frame, theme, scale }: { frame: CanvasNodeLivePreview; theme: CanvasTheme; scale: number }) {
+    const stepLabel = Number.isFinite(frame.step) && Number.isFinite(frame.total) ? ` ${frame.step}/${frame.total}` : "";
+    const label = frame.source === "step" ? `实时预览${stepLabel}` : "节点完成帧";
+    const fontSize = Math.max(9, Math.min(11 / Math.max(scale, 0.01), 18));
+    return (
+        <div
+            className="pointer-events-none absolute inset-0 z-40 overflow-hidden rounded-[inherit]"
+            style={{ background: "rgba(0,0,0,0.72)" }}
+            data-canvas-live-preview={frame.nodeId || "unknown"}
+        >
+            <img src={frame.dataUrl} alt="" draggable={false} className="h-full w-full select-none object-contain" />
+            <div
+                className="absolute left-1 top-1 flex items-center gap-1 rounded-full px-1.5 py-0.5 font-medium text-white"
+                style={{ background: "rgba(0,0,0,0.62)", fontSize, lineHeight: 1.2 }}
+            >
+                <span className="inline-block shrink-0 rounded-full" style={{ width: fontSize * 0.55, height: fontSize * 0.55, background: theme.node.generating }} />
+                <span className="whitespace-nowrap">{label}</span>
+                {frame.nodeId ? <span className="whitespace-nowrap opacity-70">#{frame.nodeId}</span> : null}
+            </div>
+        </div>
+    );
 }
 
 type OverviewImage = Pick<CanvasNodeImage, "content" | "storageKey" | "naturalWidth" | "naturalHeight">;
@@ -322,6 +351,8 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const characterBadgePaddingY = Math.min(4 / Math.max(scale, 0.01), height * 0.04);
     const hasMediaPreview = Boolean(image || videoSource || isH3);
     const generating = isNodeGenerating(data);
+    // H3 节点走插件自己的 /comfy/tasks/:id 预览通道，别让这里多起一个轮询。
+    const livePreview = useCanvasNodeLivePreview(String(data.metadata?.runtimeTaskId || ""), generating && !isH3);
     const generatingPercent = generating ? nodeRunProgress(data) : undefined;
     // 概览壳处在父级 scale 变换层内，边框会细到看不见，标记只能靠「够大的色块 + 屏幕恒定尺寸的角标」表达。
     const generatingAccent = theme.node.generating;
@@ -371,6 +402,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
+            {livePreview ? <NodeLivePreviewLayer frame={livePreview} theme={theme} scale={scale} /> : null}
             {image ? (
                 <OverviewImagePreview image={image} label={data.title || data.type} theme={theme} />
             ) : isH3 ? (
@@ -605,6 +637,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasPropContent = isProp && Boolean(data.metadata?.propImage?.url || data.metadata?.propImage?.storageKey);
     const isGroup = data.type === CanvasNodeType.Group;
     const generating = isNodeGenerating(data);
+    // H3 节点走插件自己的 /comfy/tasks/:id 预览通道，别让这里多起一个轮询。
+    const livePreview = useCanvasNodeLivePreview(String(data.metadata?.runtimeTaskId || ""), generating && !isH3NodeType(data.type));
     const batchCount =
         data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")
             ? data.metadata?.images?.length || 0
@@ -922,6 +956,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 else onContextMenu(event, data.id);
             }}
         >
+            {livePreview ? <NodeLivePreviewLayer frame={livePreview} theme={theme} scale={scale} /> : null}
             {!referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
                 <div
                     data-canvas-node-drag-handle={!isEditingTitle ? "true" : undefined}

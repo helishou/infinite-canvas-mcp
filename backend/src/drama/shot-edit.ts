@@ -4,6 +4,7 @@ import { ProductionValidationError, requireShotFraming } from "@basketikun/canva
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { defaultDirectorBoundary } from "./continuity-defaults.js";
+import { generatedDirectorClipId, repartitionDirectorClips } from "./clip-storyboard.js";
 
 type Row = Record<string, any>;
 type Edit = Extract<ProductionOperation, { type: "edit_director_shot" }>;
@@ -200,7 +201,8 @@ export function reconcileShotClipBoundaries(director: DirectorProduction, previo
 /** Source edits only: no Prompt, media or published snapshot is modified. */
 export function editDirectorShot(director: DirectorProduction, operation: Edit) {
     if (!isSubjectPromptAssembly(director.source)) reject("SHOT_EDIT_VERSION", "prompt_assembly", "原子镜头操作只用于 Prompt v2 制作稿");
-    const next = structuredClone(director), source = next.source as Row;
+    const next = structuredClone(director);
+    let source = next.source as Row;
     let shots = rows(source.shots);
     const selected = shots.find(shot => shot.id === operation.shotId), index = shots.indexOf(selected!);
     const originalSound = sound(source);
@@ -221,23 +223,66 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
             shots.splice(index + 1, 0, authored);
             group!.shot_ids.splice(group!.shot_ids.indexOf(selected.id) + 1, 0, authored.id);
         } else {
-            const segment = structuredClone(operation.segment || {});
-            if (!segment.id || rows(source.segments).some(row => row.id === segment.id)) reject("SHOT_NEW_CLIP", "segment.id", "首镜需要新的 Clip 身份及执行模式");
-            segment.shot_ids = [authored.id];
+            const segments = rows(source.segments);
             const anchor = operation.anchorShotId ? shots.find(row => row.id === operation.anchorShotId) : undefined;
             if (operation.anchorShotId) {
                 if (!anchor) reject("SHOT_NOT_FOUND", `shots.${operation.anchorShotId}`, "新增 Clip 的锚点镜头不存在");
-                const anchorGroup = clip(source, anchor.id);
-                if (!anchorGroup) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
+            }
+            const anchorGroup = anchor ? clip(source, anchor.id) : undefined;
+            if (anchor && !anchorGroup) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
+            const authoredSegment = structuredClone(operation.segment || {});
+            if (authoredSegment.id !== undefined && (typeof authoredSegment.id !== "string" || !authoredSegment.id.trim())) {
+                reject("SHOT_NEW_CLIP", "segment.id", "segment.id 必须是非空 Clip ID；也可以省略，由 Backend 自动生成");
+            }
+            if (authoredSegment.id && segments.some(row => row.id === authoredSegment.id)) {
+                reject("SHOT_NEW_CLIP", "segment.id", "segment.id 已被使用；请省略该字段，由 Backend 生成新的 Clip 身份");
+            }
+            const profileSource = anchorGroup || segments.at(-1);
+            const inheritedProfile = Object.fromEntries(["mode", "mode_lock", "mode_selection_reason", "styleTemplateId"].flatMap(key =>
+                !Object.hasOwn(authoredSegment, key) && profileSource && Object.hasOwn(profileSource, key) ? [[key, profileSource[key]]] : []));
+            const segment: Row = { ...inheritedProfile, ...authoredSegment };
+            if (!segment.id) {
+                const baseId = generatedDirectorClipId([String(authored.id)]);
+                const occupied = new Set(segments.map(row => String(row.id)));
+                segment.id = baseId;
+                let suffix = 1;
+                while (occupied.has(String(segment.id))) segment.id = `${baseId}_${suffix++}`;
+            }
+            segment.shot_ids = [authored.id];
+            if (anchor && anchorGroup) {
+                const existingShotIds = (anchorGroup.shot_ids || []).map(String);
+                const anchorOffset = existingShotIds.indexOf(String(anchor.id));
+                if (anchorOffset < 0) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
                 for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== anchor[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增 Clip 须沿用锚点镜头所在的场次和时间线");
                 Object.assign(authored, { scene_id: anchor.scene_id, timeline_id: anchor.timeline_id, ...(anchor.source_scene_id ? { source_scene_id: anchor.source_scene_id } : {}) });
                 shots.splice(shots.indexOf(anchor) + 1, 0, authored);
-                const segments = rows(source.segments);
-                source.segments = [...segments.slice(0, segments.indexOf(anchorGroup) + 1), segment, ...segments.slice(segments.indexOf(anchorGroup) + 1)];
+                if (anchorOffset < existingShotIds.length - 1) {
+                    const affectedIds = new Set([...existingShotIds, String(authored.id)]);
+                    const shotIds = shots.filter(row => affectedIds.has(String(row.id))).map(row => String(row.id));
+                    const groupAudio = (ids: string[]) => {
+                        if (!Array.isArray(anchorGroup.audio_bindings)) return { shot_ids: ids };
+                        const members = new Set(ids);
+                        const audio_bindings = rows(anchorGroup.audio_bindings).flatMap(binding => {
+                            const shotIds = rows(binding.shotIds).map(String).filter(id => members.has(id));
+                            return shotIds.length ? [{ ...binding, shotIds }] : [];
+                        });
+                        return { shot_ids: ids, audio_bindings };
+                    };
+                    const groups = [
+                        groupAudio(existingShotIds.slice(0, anchorOffset + 1)),
+                        { ...segment, executionProfileSourceId: String(anchorGroup.id) },
+                        groupAudio(existingShotIds.slice(anchorOffset + 1)),
+                    ];
+                    repartitionDirectorClips(next, { shotIds, segments: groups });
+                    source = next.source as Row;
+                } else {
+                    const segmentIndex = segments.indexOf(anchorGroup);
+                    source.segments = [...segments.slice(0, segmentIndex + 1), segment, ...segments.slice(segmentIndex + 1)];
+                }
             } else { source.segments = [...rows(source.segments), segment]; shots.push(authored); }
         }
         if (!Number.isInteger(authored.duration_frames) || authored.duration_frames <= 0) reject("SHOT_DURATION", `shots.${authored.id}.duration_frames`, "镜头时长必须为正整数帧");
-        if (operation.anchorShotId) {
+        if (operation.action === "insert" && !selected) {
             const seconds = Number(authored.duration_frames) / (Number(source.fps_num || 24) / Number(source.fps_den || 1));
             if (!Number.isFinite(seconds) || seconds < 4 || seconds > 15) reject("CLIP_DURATION_OUT_OF_RANGE", `shots.${authored.id}.duration_frames`, `新 Clip 时长 ${seconds.toFixed(2)} 秒，必须在 4–15 秒范围内`);
         }

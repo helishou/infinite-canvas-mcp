@@ -32,17 +32,27 @@ test("array names and chained Get/Set/Reroute resolve recursively", () => {
   assert.deepEqual((convertComfyWorkflowToApi(graph) as any)[4].inputs.images, ["1", 2]);
 });
 
-for (const scenario of ["missing", "duplicate", "cycle", "unconnected", "empty"] as const) {
+for (const scenario of ["missing", "duplicate", "cycle", "empty"] as const) {
   test(`named routing rejects ${scenario} explicitly`, () => {
     const graph = fixture();
     if (scenario === "missing") graph.nodes[1].widgets_values = ["other"];
     if (scenario === "duplicate") graph.nodes.push({ ...graph.nodes[1], id: 5 });
     if (scenario === "cycle") graph.links[0][1] = 3;
-    if (scenario === "unconnected") { graph.nodes[1].inputs = []; graph.links.shift(); }
     if (scenario === "empty") graph.nodes[2].widgets_values_named.Constant = "";
     assert.throws(() => convertComfyWorkflowToApi(graph), /GetNode|SetNode|循环/);
   });
 }
+
+test("unconnected named Set still imports; unresolved GetNode link is skipped", () => {
+  const graph = fixture();
+  // SetNode（id 2）的 value 输入既不在节点 inputs 也不在 links 表里：命名路由缺上游连线。
+  graph.nodes[1].inputs = [];
+  graph.links.shift();
+  const api = convertComfyWorkflowToApi(graph) as any;
+  // 不再因单一孤点阻断整张图：Loader 与 SaveImage 正常转换，缺连线的 GetNode 下游连线静默落空。
+  assert.deepEqual(Object.keys(api).sort(), ["1", "4"]);
+  assert.deepEqual(api[4].inputs, {});
+});
 
 test("disabled and bypass targets remain omitted; bypass slot zero still forwards", () => {
   const graph = fixture();

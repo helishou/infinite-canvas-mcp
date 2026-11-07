@@ -101,3 +101,31 @@ test("machine Subject editing uses its original prompt_description without makin
     assert.equal(subjectDescriptionField("environment", { prompt_description: "湿钢轨与闸门" }), "prompt_description");
     assert.deepEqual(row, before);
 });
+
+test("分镜编辑承载 features/combat：文戏武戏切换只改同一份真相源", async () => {
+    const { shotFormValue, shotFormChanges, shotFormIsCombat } = await import("./subject-shot-draft");
+
+    const dramaValue = shotFormValue({ ...shot, features: { core_emotion: true } });
+    assert.equal(shotFormIsCombat(dramaValue), false);
+
+    const payload = { force_source: "punch", chain: { attack: "a" }, timing: { axis_lock: "x" } };
+    const combatValue = { ...dramaValue, features: { ...dramaValue.features!, combat: true }, combat: payload };
+    assert.equal(shotFormIsCombat(combatValue), true);
+
+    const intoCombat = shotFormChanges({ version: 2, shotId: "S1", base: dramaValue, value: combatValue });
+    assert.deepEqual(intoCombat.patch.features, { core_emotion: true, combat: true });
+    assert.deepEqual(intoCombat.patch.combat, payload);
+
+    const backToDrama = shotFormChanges({ version: 2, shotId: "S1", base: combatValue, value: { ...combatValue, features: { core_emotion: true, combat: false }, combat: null } });
+    assert.deepEqual(backToDrama.patch, { features: { core_emotion: true, combat: false }, combat: null });
+
+    const textOnly = shotFormChanges({ version: 2, shotId: "S1", base: dramaValue, value: { ...dramaValue, visual: "新画面" } });
+    assert.deepEqual(Object.keys(textOnly.patch), ["visual"]);
+});
+
+test("已存的武戏镜头从源稿读回时保留 features/combat", async () => {
+    const { shotFormValue } = await import("./subject-shot-draft");
+    const saved = shotFormValue({ ...shot, features: { combat: true }, combat: { force_source: "kick" } });
+    assert.deepEqual(saved.features, { combat: true });
+    assert.deepEqual(saved.combat, { force_source: "kick" });
+});

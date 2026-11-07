@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Cascader, Input, InputNumber, Select, Switch } from "antd";
-import { Camera, History, Image as ImageIcon, Users, Volume2 } from "lucide-react";
+import { Camera, Film, History, Image as ImageIcon, Users, Volume2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { isClothingPictureBinding, resolveSubjectPictureBindingIds, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { keyframeSubjectSelectionFromPaths, setShotPictureBindingIds, setShotPictureBindingMode, shotPictureBindingMode, syncKeyframeSubjectsToShotUsages } from "./subject-picture-selection";
@@ -13,7 +13,8 @@ import { SmartImageNodePicker } from "./smart-image-node-picker";
 import type { ImageNodeChoice } from "./smart-image-node-options";
 import { normalizeUtteranceVoiceovers, readShotFormDraft, rebaseShotFormDraft, shotDraftChanged, shotDraftSourceChanged, shotFormChangedFields, shotFormChanges, shotFormValue, speakerOnCamera, subjectDisplayName, type ShotFormValue, type ShotUtteranceValue } from "./subject-shot-draft";
 import { AudioDesignEditor } from "./audio-design-editor";
-import { PerformanceDesignEditor } from "./performance-design-editor";
+import { CameraLibraryModal, type CameraLibrarySelection } from "./camera-library-modal";
+import { cameraMovementValue, findCameraLibraryMove, useCameraLibrary } from "./camera-library-options";
 
 type Keyframes = Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"];
 type Utterances = Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"];
@@ -42,6 +43,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     const [keyframeNode, setKeyframeNode] = useState<ImageNodeChoice>();
     const [compositionNode, setCompositionNode] = useState<ImageNodeChoice>();
     const [saving, setSaving] = useState(false);
+    const [libraryOpen, setLibraryOpen] = useState(false);
     const latestDraft = useRef(draftValue); latestDraft.current = draftValue;
     const disabled = busy || saving || invalid;
     const subjects = records(source.subject_registry);
@@ -57,6 +59,27 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         }
         return [];
     };
+    // 「运镜方式」与镜头库预览弹窗共用同一份只读清单：下拉的选项就是镜头库里的 132 段镜头。
+    const library = useCameraLibrary();
+    const currentMovement = String(value.camera.movement || "").trim();
+    // 旧稿里手填的运镜方式不在清单中：单独成组保留显示，不静默丢弃，直到用户重新从镜头库选择。
+    const legacyMovement = currentMovement && !findCameraLibraryMove(library.index, currentMovement) ? currentMovement : undefined;
+    const movementUnavailable = Boolean(library.error) || Boolean(library.index && !library.index.available);
+    const movementOptions = useMemo(() => {
+        const moves = library.index?.available ? library.index.moves : [];
+        const optionFor = (move: (typeof moves)[number]) => ({ value: cameraMovementValue(move), label: `#${move.id} ${cameraMovementValue(move)}` });
+        const groups = (library.index?.categories || []).map(category => ({
+            label: t(`director.atomic.cameraLibraryCategory.${category.key}`, { defaultValue: category.key }),
+            options: moves.filter(move => move.category === category.key).map(optionFor),
+        })).filter(group => group.options.length > 0);
+        const grouped = new Set(groups.flatMap(group => group.options.map(option => option.value)));
+        const others = moves.filter(move => !grouped.has(cameraMovementValue(move)));
+        if (others.length) groups.push({ label: t("director.atomic.cameraLibraryOther"), options: others.map(optionFor) });
+        return [
+            ...(legacyMovement ? [{ label: t("director.atomic.cameraMovementLegacy"), options: [{ value: legacyMovement, label: legacyMovement }] }] : []),
+            ...groups,
+        ];
+    }, [library.index, legacyMovement, t]);
     const framingValues = ["EWS", "WS", "FS", "MS", "MCU", "CU", "ECU"];
     const framingMissing = !framingValues.includes(String(value.camera.framing || ""));
 
@@ -88,6 +111,12 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         onDraftChange(!shotDraftChanged(next) && !shotDraftSourceChanged(next, shot) ? undefined : JSON.stringify(next));
     };
     const camera = (patch: Record<string, unknown>) => update({ camera: { ...value.camera, ...patch } });
+    /** 下拉单选与镜头库弹窗写同一对字段：镜头名进 movement，检索号进 previs_id。 */
+    const selectMovement = (selection?: string) => {
+        const move = selection ? library.index?.moves.find(item => cameraMovementValue(item) === selection) : undefined;
+        // shot patch 对 camera 是合并语义：清空必须写显式空值，删键会留下旧绑定。
+        camera({ movement: move ? cameraMovementValue(move) : selection || "", previs_id: move?.id || "" });
+    };
     const usagePatch = (index: number, patch: Record<string, unknown>) => update({ subject_usages: value.subject_usages.map((item, n) => n === index ? { ...item, ...patch } : item) });
     const removeSubjectUsage = (index: number) => {
         const subjectId = String(value.subject_usages[index]?.subjectId || "");
@@ -221,7 +250,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         <div className="shot-editor-heading">
         <div className="flex gap-5 border-b border-border" role="tablist" aria-label={t("director.atomic.shotSections")}>{([["direction", Camera], ["sound", Volume2], ["subjects", Users], ["anchors", ImageIcon]] as const).map(([key, Icon]) => <button type="button" key={key} role="tab" aria-selected={section === key && !contextControl?.active} onClick={() => { if (contextControl?.active) contextControl.exit(); setSection(key); sectionControl?.select(key); }} className={`flex items-center gap-2 border-b-2 py-2 text-sm ${section === key && !contextControl?.active ? "border-primary font-medium" : "border-transparent text-muted-foreground"}`}><Icon className="size-3.5" />{t("director.atomic.section." + key)}</button>)}{contextControl && <button type="button" role="tab" aria-selected={contextControl.active} onClick={contextControl.enter} className={`flex items-center gap-2 border-b-2 py-2 text-sm ${contextControl.active ? "border-primary font-medium" : "border-transparent text-muted-foreground"}`}><History className="size-3.5" />{t("director.atomic.contextTab")}</button>}</div>
         </div><div className="shot-editor-scroll" data-shot-editor-scroll hidden={Boolean(contextControl?.active)}>
-        {section === "direction" && <div className="shot-editor-form-grid">
+        {section === "direction" && <div className="shot-editor-form-grid shot-editor-direction-grid">
             <div className="shot-editor-fields shot-editor-span-all grid gap-3 sm:grid-cols-[minmax(0,1fr)_120px]">
                 <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.shotTitle")}</span><Input value={value.title} disabled={disabled} onChange={event => update({ title: event.target.value })} /></label>
                 <div className="grid gap-1.5 text-xs text-muted-foreground"><label className="grid gap-1.5"><span>{t("director.atomic.seconds")}</span><InputNumber className="w-full" min={0} step={1 / fps} precision={3} value={value.duration_frames / fps} disabled={disabled} onChange={seconds => update({ duration_frames: Math.round(Number(seconds || 0) * fps) })} /></label>{continuousVoice && value.duration_frames > Number(shot.duration_frames) && <span>{t("director.atomic.continuousVoiceDuration")}</span>}</div>
@@ -232,6 +261,11 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                 <Select value={value.camera.framing || undefined} disabled={disabled} aria-required="true" aria-invalid={framingMissing} aria-describedby={framingMissing ? framingErrorId : undefined} placeholder={t("director.atomic.chooseFraming")} options={framingValues.map(key => ({ value: key, label: t("director.atomic.framingName." + key) }))} onChange={framing => camera({ framing })} />
                 {framingMissing && <span id={framingErrorId} role="alert" className="text-destructive">{t("director.atomic.framingRequired")}</span>}
             </label>
+            <div className="grid content-start gap-1.5 text-xs text-muted-foreground" data-camera-library-trigger>
+                <span>{t("director.atomic.cameraLibrary")}</span>
+                <Button icon={<Film className="size-3.5" />} disabled={disabled} onClick={() => setLibraryOpen(true)}>{t("director.atomic.cameraLibraryOpen")}</Button>
+                {value.camera.previs_id && <span className="text-[11px] text-muted-foreground">{t("director.atomic.cameraLibraryCurrent", { id: String(value.camera.previs_id) })}</span>}
+            </div>
             <label className="shot-editor-span-all grid gap-1.5 text-xs text-muted-foreground">
                 <span>{t("director.atomic.attention")}</span>
                 <Select className="w-full" aria-label={t("director.atomic.attention")} mode="multiple" value={Array.isArray(attentionSubjectIds) ? attentionSubjectIds : []} disabled={disabled} options={value.subject_usages.map(usage => String(usage.subjectId)).filter((subjectId, index, ids) => subjectId && ids.indexOf(subjectId) === index).map(subjectId => ({ value: subjectId, label: subjectDisplayName(source, subjectId) }))} onChange={attention_subject_ids => camera({ attention_subject_ids })} />
@@ -246,7 +280,24 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                 <Input.TextArea value={String(value.camera.editorial_reason || "")} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} required aria-required="true" aria-invalid={editorialReasonMissing} aria-describedby={editorialReasonMissing ? editorialReasonErrorId : undefined} onChange={event => camera({ editorial_reason: event.target.value })} />
                 {editorialReasonMissing && <span id={editorialReasonErrorId} role="alert" className="text-destructive">{t("director.atomic.editorialReasonRequired")}</span>}
             </label>
-            <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraMovement")}</span><Input value={String(value.camera.movement || "")} disabled={disabled} onChange={event => camera({ movement: event.target.value })} /></label>
+            <label className="grid gap-1.5 text-xs text-muted-foreground" data-camera-movement>
+                <span>{t("director.atomic.cameraMovement")}</span>
+                <Select
+                    className="w-full"
+                    aria-label={t("director.atomic.cameraMovement")}
+                    showSearch
+                    allowClear
+                    optionFilterProp="label"
+                    placeholder={t("director.atomic.cameraMovementPlaceholder")}
+                    value={currentMovement || undefined}
+                    disabled={disabled || (movementUnavailable && !currentMovement)}
+                    loading={library.loading}
+                    options={movementOptions}
+                    notFoundContent={movementUnavailable ? t("director.atomic.cameraMovementUnavailable") : undefined}
+                    onChange={selection => selectMovement(selection)}
+                />
+                {legacyMovement && <span className="text-[11px] text-amber-600">{t("director.atomic.cameraMovementLegacyHint")}</span>}
+            </label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraPath")}</span><Input.TextArea value={String(value.camera.path || "")} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => camera({ path: event.target.value })} /></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.angle")}</span><Input value={String(value.camera.angle || "")} disabled={disabled} onChange={event => camera({ angle: event.target.value })} /></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.lensMm")}</span><InputNumber className="w-full" min={1} step={1} value={Number.isFinite(Number(lensValue)) && lensValue !== null && lensValue !== "" ? Number(lensValue) : null} disabled={disabled} onChange={lens => camera({ [lensField]: lens })} /></label>
@@ -256,7 +307,6 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                 <span>{t("director.atomic.cameraDescription")}</span>
                 <Input.TextArea value={cameraDescription} placeholder={t("director.atomic.cameraDescriptionPlaceholder")} autoSize={{ minRows: 3, maxRows: 8 }} disabled={disabled} onChange={event => camera({ description: event.target.value })} />
             </label>
-            <PerformanceDesignEditor value={value.performance} disabled={disabled} durationFrames={value.duration_frames} fps={fps} onChange={performance => update({ performance })} />
         </div>}
         {section === "sound" && <div className="shot-editor-form-grid">
             {utteranceRows.map((item, index) => <article key={item.utteranceId || `new:${index}`} className="space-y-2 rounded-lg border border-border p-3">
@@ -417,5 +467,14 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
         </div>}
         </div>
         <footer className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card py-3" hidden={Boolean(contextControl?.active)}><span className="text-xs text-muted-foreground">{t(dirty ? "director.atomic.draftKept" : "director.atomic.saved")}</span><Button type="primary" loading={saving} disabled={disabled || !dirty || changedSource || cameraFieldsMissing} onClick={() => void save()}>{t("director.atomic.saveShot")}</Button></footer>
+        <CameraLibraryModal
+            open={libraryOpen}
+            disabled={disabled}
+            library={library}
+            movement={currentMovement}
+            previsId={value.camera.previs_id ? String(value.camera.previs_id) : undefined}
+            onApply={({ movement }: CameraLibrarySelection) => selectMovement(movement)}
+            onClose={() => setLibraryOpen(false)}
+        />
     </section>;
 }

@@ -452,7 +452,7 @@ function reconcileSubjectImageReferences(segment: Record<string, any>, director:
             : normalized;
     }
 }
-export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>) {
+export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>, h3Defaults?: Record<string, unknown>) {
     const nodes: Record<string, any>[] = Array.isArray(project.nodes) ? project.nodes : [];
     const shots = group.shotIds.map(id => published.shots.find(shot => shot.id === id)).filter((shot): shot is NonNullable<typeof shot> => !!shot);
     const settings = runSettings || published.settings as unknown as Record<string, unknown>;
@@ -579,7 +579,12 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
         ...(storyboardShots ? { storyboardShots } : {}),
         aspectRatio: settings.videoAspectRatio || object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
-        modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName || BASE_H3_NODE_METADATA.modelName };
+        modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName
+            // A Clip materialised together with its scene node has no node to read from
+            // yet. Falling straight to the hard-coded BASE default would stamp a model
+            // path that may not exist on this machine; the saved H3 defaults win.
+            || object(h3Defaults).modelName
+            || BASE_H3_NODE_METADATA.modelName };
     const preflight = compileReferenceSubmission(project, segment);
     assertReferenceCompilation(preflight);
     // The reference compiler also normalizes labels and may add authored outfit
@@ -619,7 +624,7 @@ export function buildPublishedProductionClip(project: Record<string, any>, publi
     const metadata = object(node?.metadata);
     const saved = (metadata.segments || []).find((clip: any) => clip.id === segmentId);
     if (!saved) throw new Error("已发布 Clip 节点不存在");
-    const authored = buildProductionClip(project, published, group, segmentId, runSettings);
+    const authored = buildProductionClip(project, published, group, segmentId, runSettings, defaults);
     const runtime = resolveH3Runtime(saved, {}, metadata, defaults).params;
     const contentKeys = new Set(CLIP_PROJECTION_FIELDS.filter(key => key !== "modelName"));
     const settings = Object.fromEntries(H3_PARAM_KEYS.filter(key => !contentKeys.has(key) && runtime[key] !== undefined).map(key => [key, runtime[key]]));
@@ -728,10 +733,10 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
     };
 }
 
-export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>, overwriteCompiledPrompt = false) {
+export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>, overwriteCompiledPrompt = false, h3Defaults?: Record<string, unknown>) {
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
-        let segment = buildProductionClip(project, data, group, segmentId);
+        let segment = buildProductionClip(project, data, group, segmentId, undefined, h3Defaults);
         if (Array.isArray(segment.referenceBindings)) {
             // 去重必须发生在合并/对齐之前：后面的 prompt 图片编号对齐、referenceCount
             // 都按这个数组的槽位计算，重复行会让编号整体错开一位。
@@ -1027,6 +1032,53 @@ function layoutSceneForClip(data: EpisodeProductionData, group: EpisodeProductio
 }
 
 /**
+ * A Clip row is identified by its own projection target, never by the owner tag of
+ * the node that happens to carry it. Nodes copied across episodes (承接迁移) keep the
+ * previous episode's owner metadata, and a scene node a user deleted and re-imported
+ * loses it entirely; in both cases the production projects nothing while every
+ * compiler artifact still reports ready. A node is claimable only when every Clip row
+ * it carries belongs to this production, so a shared canvas cannot be hijacked by a
+ * neighbour production's targets.
+ */
+export function claimableProductionClipNodes(project: Record<string, any>, data: EpisodeProductionData, owner: { kind: string; id: string }, preferredNodeIds: ReadonlySet<string> = new Set()) {
+    const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
+    const targets = new Set(data.clipGroups.map(group => group.id));
+    const carriers = new Map<string, string[]>();
+    const foreignOwners = new Set<string>();
+    for (const node of nodes) {
+        const metadata = object(node.metadata);
+        // Archived migration nodes and script/entity nodes never hold live Clip rows.
+        if (metadata.productionArchiveLabel) continue;
+        const segments = Array.isArray(metadata.segments) ? metadata.segments.map(object) : [];
+        const rowTargets = [...new Set(segments.map(segment => String(object(segment.productionClipProjection).targetId || "")).filter(Boolean))];
+        if (!rowTargets.length) continue;
+        // A node that also holds targets of another production is never adopted: the
+        // canvas is genuinely shared and guessing here would move rows across owners.
+        if (!rowTargets.every(targetId => targets.has(targetId))) continue;
+        const nodeId = String(node.id || "");
+        for (const targetId of rowTargets) carriers.set(targetId, [...(carriers.get(targetId) || []), nodeId]);
+        if (String(metadata.productionOwnerId || "") !== owner.id || String(metadata.productionOwnerKind || "") !== owner.kind) foreignOwners.add(nodeId);
+    }
+    const nodeByTarget = new Map<string, string>();
+    for (const [targetId, nodeIds] of carriers) {
+        if (nodeIds.length === 1) { nodeByTarget.set(targetId, nodeIds[0]!); continue; }
+        // A migration copy and the real scene node can both carry the same Clip. The
+        // node the layout actually assigns to it is the live one; without that tie-break
+        // the Clip reports "ambiguous" and stops syncing entirely.
+        const assigned = nodeIds.filter(nodeId => preferredNodeIds.has(nodeId));
+        if (assigned.length === 1) nodeByTarget.set(targetId, assigned[0]!);
+    }
+    const ownershipOperations: CanvasOperation[] = [];
+    for (const nodeId of foreignOwners) {
+        // Only claim a node that uniquely carries rows this production owns; a
+        // contested row keeps reporting unresolved instead of being reassigned.
+        if (![...nodeByTarget.values()].includes(nodeId)) continue;
+        ownershipOperations.push({ type: "update_node", id: nodeId, metadata: { productionOwnerKind: owner.kind, productionOwnerId: owner.id } });
+    }
+    return { nodeByTarget, ownershipOperations };
+}
+
+/**
  * Project formal Clips onto their scene H3 nodes. A full projection mirrors the
  * whole Clip list, so missing rows are restored; `materializeTargets` additionally
  * gates node creation and every addition inside a Shot-local projection.
@@ -1038,7 +1090,12 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
     const pendingNodes = new Map<string, CanvasOperation>();
     const retainedProjectedSegments = new Map<string, Set<string>>();
     const unitForGroup = (group: EpisodeProductionData["clipGroups"][number]) => layout.units.find(unit => unit.targets.includes(`segment:${group.id}`) && unit.members.some(member => member.role === "video"));
-    const nodeForGroup = (group: EpisodeProductionData["clipGroups"][number]) => group.nodeId || unitForGroup(group)?.members.find(member => member.role === "video")?.nodeId;
+    // Ownership metadata is a claim, not the identity of a Clip row: fall back to the
+    // node that already carries this Clip's projection target before giving up on it.
+    const layoutVideoNodeIds = new Set(layout.units.flatMap(unit => unit.members.filter(member => member.role === "video").map(member => String(member.nodeId || ""))).filter(Boolean));
+    const claim = claimableProductionClipNodes(project, data, layout.owner, layoutVideoNodeIds);
+    const nodeForGroup = (group: EpisodeProductionData["clipGroups"][number]) =>
+        group.nodeId || unitForGroup(group)?.members.find(member => member.role === "video")?.nodeId || claim.nodeByTarget.get(group.id);
     // A source repartition can reach compilation after the new Clip IDs were
     // saved but before their H3 projection was updated. Rebind same-node orphan
     // rows by Shot overlap before additions are planned, so a two-Clip boundary
@@ -1092,7 +1149,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         const pendingCompilation = pendingCompilationTargets?.has(group.id) === true;
         const projected: ReturnType<typeof productionClipProjection> = pendingCompilation
             ? { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] } }
-            : productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true);
+            : productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true, defaults);
         if (existing && forceBoundaryTargets?.has(group.id)) {
             const boundary = data.director?.boundaries.find(item => item.from === group.id);
             const boundaryPatch = {
@@ -1231,5 +1288,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             }
         }
     }
-    return { operations, referenceSync };
+    // Self-heal ownership drift first: an adopted node must be bound by its owner tag
+    // on the next read, so projection stops depending on the carrier fallback alone.
+    return { operations: [...claim.ownershipOperations, ...operations], referenceSync };
 }

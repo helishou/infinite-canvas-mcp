@@ -7,6 +7,10 @@ import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
 import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
 import { convertComfyWorkflowToApi, removeUiNotes } from "./comfyui-workflow-conversion.js";
+import {
+    clearWorkflowLivePreview, decodeKjPreviewMessage, previewImageRefFromOutput,
+    publishWorkflowLivePreview,
+} from "./live-preview.js";
 
 type RunParams = Record<string, unknown>;
 type FieldValues = Record<string, unknown>;
@@ -357,8 +361,21 @@ export function removeEmptyMediaNodes(workflow: Record<string, unknown>, fields:
             if (cls === "ComfySwitchNode") {
                 const sel = selectedSwitchBranch(result, item!);
                 if (sel === null) {
-                    // 开关来源缺失，无法判定选中分支 -> 视为无效，移除并级联
-                    shouldRemove = true;
+                    // 开关接的是表达式/运行时节点（例如“是否续段”的 ComfyMathExpression），
+                    // 静态无法判定走哪一支：只要开关来源还在、且两支里至少一支仍可用，就保留。
+                    // 之前一律视为无效会把整条链级联删掉（H3 无限接流这类动态开关工作流会整图消失）。
+                    const swLink = inputs.switch;
+                    const dynamicSwitch = Array.isArray(swLink) && typeof swLink[0] === "string" && isNodePresent(result, String(swLink[0]));
+                    if (!dynamicSwitch) {
+                        // 开关来源真的缺失 -> 视为无效，移除并级联
+                        shouldRemove = true;
+                    } else {
+                        const branchAlive = (name: "on_true" | "on_false") => {
+                            const link = inputs[name];
+                            return Array.isArray(link) && typeof link[0] === "string" && isNodePresent(result, String(link[0]));
+                        };
+                        shouldRemove = !branchAlive("on_true") && !branchAlive("on_false");
+                    }
                 } else {
                     const selLink = inputs[sel] as unknown[];
                     if (Array.isArray(selLink) && removed.has(String(selLink[0]))) shouldRemove = true;
@@ -687,6 +704,8 @@ export class WorkflowExecutor {
         configTitle: string;
         /** 用户指定的输出节点；空数组表示不过滤。 */
         outputNodes: string[];
+        /** 预览桥节点；空串表示该节点已被裁剪或从未选择，本次运行不采集预览。 */
+        previewNodeId: string;
         parentTaskId: string | undefined;
     }> {
         // Compile the current authoritative source on every run, including UI graphs
@@ -794,9 +813,16 @@ export class WorkflowExecutor {
         const task = clientTaskId
             ? this.tasks.create(clientTaskId, "workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) })
             : this.tasks.create("workflow", { workflow: "custom", fields: persistedFieldValues, prompt: promptText }, { ...params, ...(parentTaskId ? { parentTaskId } : {}) });
+        // 预览桥节点只做展示，节点被裁剪/改号时降级为「无预览」，绝不阻断生成。
+        // 本地链 convertComfyWorkflowToApi 与 removeEmptyMediaNodes 都保持节点原 id。
+        const requestedPreviewNodeId = typeof config.previewNodeId === "string" ? config.previewNodeId : "";
+        const previewNodeId = requestedPreviewNodeId && Object.hasOwn(prepared, requestedPreviewNodeId) ? requestedPreviewNodeId : "";
+        if (requestedPreviewNodeId && !previewNodeId) {
+            this.tasks.addEvent(task.id, "preview_node_missing", { requestedNodeId: requestedPreviewNodeId });
+        }
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, outputNodes: Array.isArray(config.outputNodes) ? config.outputNodes : [], parentTaskId };
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, outputNodes: Array.isArray(config.outputNodes) ? config.outputNodes : [], previewNodeId, parentTaskId };
     }
 
     /**
@@ -818,10 +844,12 @@ export class WorkflowExecutor {
         configTitle: string;
         /** 用户指定的输出节点；空数组表示不过滤。 */
         outputNodes: string[];
+        /** 预览桥节点；空串表示本次运行不采集预览。 */
+        previewNodeId: string;
         /** 画布父任务已自行写过生成日志时，内层不再重复写。 */
         parentTaskId: string | undefined;
     }): Promise<RunResult> {
-        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, outputNodes, parentTaskId } = ctx;
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, outputNodes, previewNodeId, parentTaskId } = ctx;
         // 画布任务（image/video/audio）已经写过一条更完整的生成日志时，这里不再重复写。
         // 否则同一次生图会在日志面板出现「生图」+「工作流」两条几乎一致的记录：
         // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
@@ -829,7 +857,8 @@ export class WorkflowExecutor {
         const skipLog = Boolean(parentTaskId);
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
-            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name);
+            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name,
+                previewNodeId ? { nodeId: previewNodeId, taskIds: [task.id, parentTaskId] } : undefined);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
             if (!skipLog) this.db?.createGenerationLog({
@@ -877,6 +906,8 @@ export class WorkflowExecutor {
         } finally {
             this.controllers.delete(task.id);
             this.comfyExecutions.delete(task.id);
+            // 预览帧只在生成态有意义；终态立即释放，避免任务 id 复用或长期占内存。
+            clearWorkflowLivePreview([task.id, parentTaskId]);
         }
     }
 
@@ -972,7 +1003,13 @@ export class WorkflowExecutor {
         /** 用户指定的输出节点；空数组表示不过滤。 */
         outputNodes: string[] = [],
         workflowName = "custom",
+        /** 预览桥节点 + 任务别名（子任务 id 与画布父任务 id 双写）。 */
+        preview?: { nodeId: string; taskIds: Array<string | undefined> },
     ) {
+        const previewNodeId = preview?.nodeId || "";
+        const previewTaskIds = preview?.taskIds || [];
+        let previewSeq = 0;
+        let publishedPreviewSeq = 0;
         const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
         this.comfyExecutions.set(task.id, activeExecution);
         const Ctor = (globalThis as any).WebSocket;
@@ -983,6 +1020,34 @@ export class WorkflowExecutor {
         let wsClosed = false;
         let wsError: Error | null = null;
         let wsExecutionSuccessOutputs: Record<string, unknown> | null = null;
+
+        /** PreviewImage/SaveImage 的 `executed` 只给 temp 文件名，取回 bytes 再转成可直接显示的 dataUrl。 */
+        const captureNodePreview = (output: unknown) => {
+            if (!previewNodeId) return;
+            const ref = previewImageRefFromOutput(output);
+            if (!ref) return;
+            const seq = ++previewSeq;
+            void (async () => {
+                try {
+                    const view = `${comfyUrl}/view?filename=${encodeURIComponent(ref.filename)}&subfolder=${encodeURIComponent(ref.subfolder)}&type=${encodeURIComponent(ref.type)}`;
+                    const response = await fetch(view, { signal: AbortSignal.timeout(8000) });
+                    if (!response.ok) return;
+                    const mime = (response.headers.get("content-type") || "image/png").split(";")[0];
+                    const bytes = Buffer.from(await response.arrayBuffer());
+                    // 预览帧走 1.5s 轮询，超大图直接放弃；正式产物仍由 collectOutputMedia 归档。
+                    if (!bytes.length || bytes.length > 4 * 1024 * 1024) return;
+                    if (seq <= publishedPreviewSeq) return;
+                    publishedPreviewSeq = seq;
+                    publishWorkflowLivePreview(previewTaskIds, {
+                        dataUrl: `data:${mime};base64,${bytes.toString("base64")}`,
+                        mime,
+                        nodeId: previewNodeId,
+                        source: "node",
+                        promptId: capturedPromptId || undefined,
+                    });
+                } catch { /* 预览是尽力而为，取不到不影响生成 */ }
+            })();
+        };
 
         try {
             if (controller.signal.aborted) throw new Error("任务已取消");
@@ -995,6 +1060,19 @@ export class WorkflowExecutor {
                             const raw = typeof event.data === "string" ? event.data : String(event.data ?? "");
                             if (!raw) return;
                             const msg = JSON.parse(raw);
+                            // KJ 预览桥的逐帧事件不带 prompt_id，必须在下面的归属过滤之前处理。
+                            // 只在 /prompt 已返回（capturedPromptId）且用户声明了唯一桥节点时接收，
+                            // 避免同一 ComfyUI 实例上别的任务的帧串进本任务。
+                            if (msg?.type === "kj_preview_override") {
+                                if (!previewNodeId || !capturedPromptId) return;
+                                const frame = decodeKjPreviewMessage(msg, previewNodeId, capturedPromptId);
+                                if (!frame) return;
+                                const seq = ++previewSeq;
+                                if (seq <= publishedPreviewSeq) return;
+                                publishedPreviewSeq = seq;
+                                publishWorkflowLivePreview(previewTaskIds, frame);
+                                return;
+                            }
                             if (!msg?.type || !capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) return;
                             if (msg.type === "executed" || msg.type === "execution_success") {
                                 if (msg.type === "execution_success") wsExecutedAt ??= Date.now();
@@ -1004,6 +1082,9 @@ export class WorkflowExecutor {
                                     const node = msg.data.node;
                                     if (msg.type === "executed" && node != null) {
                                         wsOutputs = { ...(wsOutputs || {}), [String(node)]: msg.data.output };
+                                        // 选中的预览桥节点完成时补一帧「节点级」画面；逐帧桥没有 output，
+                                        // 这里自然跳过，画面仍由 kj_preview_override 提供。
+                                        if (previewNodeId && String(node) === previewNodeId) captureNodePreview(msg.data.output);
                                     } else if (msg.type === "execution_success") {
                                         wsExecutionSuccessOutputs = msg.data.output;
                                         wsOutputs = { ...(wsOutputs || {}), ...msg.data.output };

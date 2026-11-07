@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clipInputOperations, formalStoryboardTrack, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
+import { claimableProductionClipNodes, clipInputOperations, formalStoryboardTrack, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
 import { refsForSegment } from "../../../plugins/canvas/minimax-h3/src/services/h3-data.js";
 
 const OWNER = { kind: "episode" as const, id: "EP" };
@@ -296,4 +296,32 @@ test("regenerated character-group identity does not freeze an obsolete Clip as m
     assert.deepEqual(deletes(clipInputOperations(clip(), onlyClipA, layout, {}, new Set()).operations), ["clip-stale"]);
     assert.deepEqual(deletes(clipInputOperations(clip({ title: "人工改过的标题" }), onlyClipA, layout, {}, new Set()).operations), [], "a real edit must keep the Clip");
     assert.deepEqual(deletes(clipInputOperations(clip({ h3CharacterGroups: { "character-group-asset-1": { ...characterGroup("outfit-binding-regenerated")["character-group-asset-1"], outfitEnabled: false } } }), onlyClipA, layout, {}, new Set()).operations), [], "disabling outfits is an authored edit");
+});
+
+test("a Clip row carried by a node copied from another episode still binds and re-claims its owner", () => {
+    const foreign = { id: "H3-OLD", type: "minimax-h3:video", metadata: {
+        productionOwnerKind: "episode", productionOwnerId: "EP-OTHER", productionSceneId: "SC-A",
+        segments: [projectedClip("clip-a", "CLIP_A")],
+    } };
+    const result = clipInputOperations(project(foreign), onlyClipA, layout);
+    assert.deepEqual(kinds(result.operations, "update_node").map(operation => [operation.id, operation.metadata.productionOwnerId]), [["H3-OLD", OWNER.id]],
+        "a node carrying only this production's Clips is re-claimed for its real owner");
+    assert.equal(result.referenceSync.length, 1, "the Clip must be evaluated instead of being silently skipped");
+    assert.equal(result.referenceSync[0].targetId, "CLIP_A");
+});
+
+test("claimable Clip nodes resolve a migration copy through the layout assignment", () => {
+    const row = (id: string, targetId: string) => ({ id, productionClipProjection: { targetId } });
+    const stale = { id: "H3-OLD", type: "minimax-h3:video", metadata: {
+        productionOwnerKind: "episode", productionOwnerId: OWNER.id, productionSceneId: "SC-STALE", segments: [row("clip-old", "CLIP_A")],
+    } };
+    const live = { id: "H3-A", type: "minimax-h3:video", metadata: {
+        productionOwnerKind: "episode", productionOwnerId: OWNER.id, productionSceneId: "SC-A", segments: [row("clip-a", "CLIP_A")],
+    } };
+    const data = { ...onlyClipA, clipGroups: [{ id: "CLIP_A", shotIds: ["SH-A"] }] };
+    const claim = claimableProductionClipNodes({ nodes: [stale, live] } as any, data as any, OWNER, new Set(["H3-A"]));
+    assert.equal(claim.nodeByTarget.get("CLIP_A"), "H3-A", "the node the layout assigns wins over the migration copy");
+    assert.deepEqual(claim.ownershipOperations, [], "an already-owned node must not be rewritten");
+    const unassigned = claimableProductionClipNodes({ nodes: [stale, live] } as any, data as any, OWNER);
+    assert.equal(unassigned.nodeByTarget.has("CLIP_A"), false, "without a layout assignment the duplicate stays unresolved instead of guessing");
 });

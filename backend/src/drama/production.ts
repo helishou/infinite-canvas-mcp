@@ -77,10 +77,12 @@ import { compileProductionLayout, existingProductionSceneH3NodeId, productionAss
 import { productionLayoutStableId, productionNodePosition } from "./production-layout-geometry.js";
 import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
 import { compiledImageInput, assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
-import { buildPublishedProductionClip, clipInputHash, clipInputOperations, formalStoryboardTrack, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
+import { buildPublishedProductionClip, claimableProductionClipNodes, clipInputHash, clipInputOperations, formalStoryboardTrack, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
+import { isAgentWrite } from "./agent-write-scope.js";
+import { shotStructureIssues } from "./shot-agent-structure.js";
 import { isArchivedStoryboardKeyframeBinding } from "./storyboard-media.js";
 import { productionModeFromH3TaskMode, synchronizeDirectorModesFromH3 } from "./h3-mode-sync.js";
 import { dedupReceipt, resolveReceiptDedup, assertPublicReceipt } from "./receipt-dedup.js";
@@ -3575,11 +3577,18 @@ export class EpisodeProductionService {
             .get(this.ownerKind, episodeId) as { revision: number } | undefined;
         const base = this.lifecycleEvent(episodeId, entity, id, baseRevision);
         const latest = this.lifecycleEvent(episodeId, entity, id);
-        if (!floor || baseRevision < floor.revision || base?.state !== "alive" || latest?.state !== "deleted" || !latest.snapshot_json) {
+        // 只要这个 id 在生命周期表里存在过就可恢复：请求基线可能已被后台提交推高
+        // （投影/刷新会写入更晚的 revision），此时 base 行早已不在 <=baseRevision 窗口里，
+        // 但实体本身仍然有快照。按最新快照复活，不再把可恢复的情况判成历史缺失。
+        const restorable = latest?.snapshot_json
+            ? latest
+            : (base?.snapshot_json ? base : undefined);
+        const baseAlive = base ? base.state === "alive" : Boolean(restorable);
+        if (!floor || baseRevision < floor.revision || !baseAlive || !restorable) {
             throw Object.assign(new Error(`BASE_HISTORY_UNAVAILABLE: ${entity} ${id} 已删除，且请求基线无法恢复；本地草稿已保留`),
                 { code: "BASE_HISTORY_UNAVAILABLE", conflictTargets: [`${entity}:${id}`], currentRevision });
         }
-        items.push(JSON.parse(latest.snapshot_json) as Record<string, unknown>);
+        items.push(JSON.parse(restorable.snapshot_json as string) as Record<string, unknown>);
         source[collection] = items;
     }
 
@@ -3756,9 +3765,26 @@ export class EpisodeProductionService {
                 }
                 if (explicitTargets.some(segmentId => shotResolvedTargets.has(segmentId))) throw new ProductionValidationError([{ code: "CLIP_REFRESH_SCOPE", path: "request.ops", message: "Segment 目标与 Shot 目标解析后重叠，不能重复登记同一 Clip", severity: "error" }]);
                 const requestedTargets = new Set([...explicitTargets, ...shotResolvedTargets]);
+                // 结构编辑（split/merge/delete/move/repartition）没有 shotProjectionIds，旧逻辑会
+                // 把全部 Segment 当成候选，逐个做两次 compilationScopeInput（3.7MB 源 ≈ 每个 200ms+），
+                // 十几个 Clip 叠起来就把同步请求推过客户端超时。这里改为只取真正变了的 Segment：
+                // shot_ids 变化，或包含内容有变化的 Shot。整体仍是一次 O(源大小) 扫描。
                 const automaticTargets = overwriteCompiledPromptTargets?.size || sceneRuntime ? []
-                    : clipRows(after.source.segments).filter(segment => !shotProjectionIds?.size
-                        || (segment.shot_ids || []).some((id: string) => shotProjectionIds.has(id))).map(segment => String(segment.id));
+                    : shotProjectionIds?.size
+                        ? clipRows(after.source.segments).filter(segment => (segment.shot_ids || []).some((id: string) => shotProjectionIds.has(id))).map(segment => String(segment.id))
+                        : measure("clip_refresh_changed_segments", () => {
+                            const beforeShots = new Map(clipRows(before.source.shots).map(shot => [String(shot.id), JSON.stringify(shot)]));
+                            const changedShots = new Set<string>();
+                            for (const shot of clipRows(after.source.shots)) {
+                                if (beforeShots.get(String(shot.id)) !== JSON.stringify(shot)) changedShots.add(String(shot.id));
+                            }
+                            const beforeLists = new Map(clipRows(before.source.segments).map(segment => [String(segment.id), (segment.shot_ids || []).map(String).join(",")]));
+                            return clipRows(after.source.segments).filter(segment => {
+                                const ids = (segment.shot_ids || []).map(String);
+                                if (beforeLists.get(String(segment.id)) !== ids.join(",")) return true;
+                                return ids.some((id: string) => changedShots.has(id));
+                            }).map(segment => String(segment.id));
+                        });
                 const targetIds = [...new Set([...requestedTargets, ...automaticTargets])];
                 const changedTargets = measure("clip_refresh_input_hash_comparison", () => targetIds.filter(segmentId => {
                     // Locked Clips retain their compiled inputs; ordinary saves
@@ -3766,7 +3792,14 @@ export class EpisodeProductionService {
                     if (clipRows(after.source.segments).some(segment => String(segment.id) === segmentId && segment.locked === true)) return false;
                     try {
                         const nextHash = compilationScopeInput(after, clipRefreshScope(segmentId)).inputHash;
-                        const priorHash = compilationScopeInput(before, clipRefreshScope(segmentId)).inputHash;
+                        // 上一次编译产物里已经存了这一段的 compilationScope.inputHash；
+                        // 有就直接用，省掉一次对 before 源稿的全量 scope 计算（3.7MB 源上
+                        // 这是每个 Segment 最贵的一步，16 个 Clip 叠起来就是超时来源）。
+                        const stored = clipRows(after.artifacts).find(artifact => artifact.kind === "h3"
+                            && String(artifact.targetId || "") === segmentId
+                            && artifact.receipt?.compilationScope?.inputHash);
+                        const priorHash = stored?.receipt?.compilationScope?.inputHash
+                            || compilationScopeInput(before, clipRefreshScope(segmentId)).inputHash;
                         return nextHash !== priorHash || requestedTargets.has(segmentId)
                             && !after.artifacts.some(artifact => artifact.kind === "h3" && artifact.targetId === segmentId
                                 && artifact.status === "ready" && currentCompilationArtifact(after, artifact));
@@ -4052,7 +4085,17 @@ export class EpisodeProductionService {
         });
     }
 
+
     private patchDirectorSource(director: NonNullable<EpisodeProductionData["director"]>, entity: keyof typeof directorPatchFields, id: string | undefined, patch: Record<string, unknown>, allowMissingSourceEntityCreate = true) {
+        // Agent 侧结构契约：写文戏必须齐五轨，写武戏必须齐七层。人工编辑不受此约束。
+        if (entity === "shot" && id && isAgentWrite()) {
+            const shot = (Array.isArray(director.source.shots) ? director.source.shots : [])
+                .map(record).find(item => String(item.id || "") === String(id)) || {};
+            const issues = shotStructureIssues(shot, patch);
+            if (issues.length) {
+                throw new Error(`SHOT_STRUCTURE_CONTRACT ${String(id)}: ` + issues.map(issue => `${issue.code}: ${issue.message}`).join("；"));
+            }
+        }
         applyDirectorSourcePatch(director, entity, id, patch, { allowCreate: allowMissingSourceEntityCreate });
     }
 
@@ -4375,11 +4418,29 @@ export class EpisodeProductionService {
                 matches.set(targetId, items);
             }
         }
+        // Ownership metadata is a claim that can drift: a scene node copied from the
+        // previous episode, or a row restored by hand, keeps or loses the owner tag
+        // while its Clip rows still identify themselves by targetId. Bind through the
+        // carrier node instead of reporting the production as unbound, which used to
+        // fail silently (no prompt ever reached the node while every artifact read ready).
+        const currentSceneIds = new Set(productionSceneEntries(director.source).map(scene => scene.id));
+        const claimable = project ? claimableProductionClipNodes(project, data, owner, new Set(
+            ((project.nodes as Array<Record<string, any>> | undefined) || [])
+                .filter(node => currentSceneIds.has(String(record(node.metadata).productionSceneId || "")))
+                .map(node => String(node.id || "")))) : { nodeByTarget: new Map<string, string>() };
+        const unbound: string[] = [];
         for (const group of data.clipGroups) {
-            const candidates = matches.get(group.id) || [];
+            let candidates = matches.get(group.id) || [];
+            if (candidates.length !== 1) {
+                const carrierId = claimable.nodeByTarget.get(group.id);
+                const carrier = carrierId ? ((project?.nodes as Array<Record<string, any>> | undefined) || []).find(node => String(node.id) === carrierId) : undefined;
+                const row = carrier ? clipRows(record(carrier.metadata).segments).find(segment => String(record(segment.productionClipProjection).targetId || "") === group.id) : undefined;
+                candidates = carrier && row ? [{ node: carrier, segment: row }] : [];
+            }
             if (candidates.length !== 1) {
                 group.nodeId = null;
                 group.segmentId = null;
+                unbound.push(group.id);
                 continue;
             }
             const [{ node, segment }] = candidates;
@@ -4394,6 +4455,9 @@ export class EpisodeProductionService {
                 ...(origin.sourceNodeId ? { sourceNodeId: String(origin.sourceNodeId) } : {}),
             };
         }
+        // Never let an unbound Clip look like a healthy production: the compiler still
+        // produces ready artifacts while nothing can reach the canvas.
+        if (unbound.length) console.warn("PRODUCTION_CLIP_UNBOUND", JSON.stringify({ owner, canvasId, targets: unbound.slice(0, 20), total: unbound.length }));
     }
 
     private episode(episodeId: string) {
@@ -6132,4 +6196,18 @@ function reorder<T extends { id: string }>(items: T[], ids: string[]) {
 }
 function orderShotsByScene(draft: EpisodeProductionData) {
     return draft.scenes.flatMap((scene) => draft.shots.filter((shot) => shot.sceneId === scene.id));
+}
+
+function shotCharacterNames(source: Record<string, any>, shot: Record<string, any>): string[] {
+    const registry = clipRows(source.character_registry || []);
+    const ids = new Set<string>();
+    for (const value of (Array.isArray(shot.characters) ? shot.characters : [])) {
+        const id = typeof value === "string" ? value : value?.id;
+        if (id) ids.add(String(id));
+    }
+    for (const usage of (Array.isArray(shot.subject_usages) ? shot.subject_usages : [])) {
+        const id = usage?.subjectId ?? usage?.subject_id;
+        if (id) ids.add(String(id));
+    }
+    return registry.filter((item: any) => ids.has(String(item.id))).map((item: any) => String(item.name || item.id));
 }

@@ -15,6 +15,10 @@ export function clipShots(d: DirectorProduction, id: string) {
     if (!shots.length || shots.some((s: unknown) => !s)) reject("CLIP_SHOTS_MISSING", `segments.${id}.shot_ids`, "Clip 镜头不完整");
     return { segment, shots: shots as Record<string, any>[] };
 }
+
+export function generatedDirectorClipId(shotIds: string[]) {
+    return `SEG_${crypto.createHash("sha256").update(shotIds.join("\0")).digest("hex").slice(0, 20)}`;
+}
 /**
  * 局部修补 Clip 分镜：只传被改的镜头，其余镜头与输入沿用当前值。
  *
@@ -175,7 +179,7 @@ export function repartitionDirectorClips(d: DirectorProduction, op: { shotIds: s
         if (!ids.length || ids.some((id, offset) => id !== op.shotIds[cursor + offset])) reject("CLIP_PARTITION_ORDER", `segments.${index}.shot_ids`, "新分组必须按源 Shot 顺序连续排列");
         cursor += ids.length;
         const matchingOld = oldGroups.find(segment => canonicalProduction(segment.shot_ids || []) === canonicalProduction(ids));
-        const generatedId = `SEG_${crypto.createHash("sha256").update(ids.join("\0")).digest("hex").slice(0, 20)}`;
+        const generatedId = generatedDirectorClipId(ids);
         let id = String(raw.id || matchingOld?.id || generatedId);
         // Callers may carry forward the old Clip ID when a group changes. Keep
         // the operation usable by minting a deterministic identity for the new

@@ -11,11 +11,14 @@ async function withStubbedComfy<T>(fn: () => Promise<T>): Promise<T> {
     const originalWs = (globalThis as any).WebSocket;
     (globalThis as any).WebSocket = undefined;
     globalThis.fetch = (async (url: string) => {
+        // 第二个用例与前一个工作流不同，切流时 ComfyWorkflowSwitch 会先请求 /free。
+        if (String(url).endsWith("/free")) return new Response(null, { status: 200 });
         if (String(url).endsWith("/prompt")) {
             return new Response(JSON.stringify({ prompt_id: "prompt-1" }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (String(url).includes("/history")) {
-            return new Response(JSON.stringify({ "prompt-1": { outputs: { "1": { images: [{ filename: "out.png", subfolder: "", type: "output" }] } } } }), { status: 200, headers: { "content-type": "application/json" } });
+            // 执行器只在 history 带 success/completed 时才认定结束，光有 outputs 会一直轮询到 30 分钟超时。
+            return new Response(JSON.stringify({ "prompt-1": { outputs: { "1": { images: [{ filename: "out.png", subfolder: "", type: "output" }] } }, status: { status_str: "success", completed: true } } }), { status: 200, headers: { "content-type": "application/json" } });
         }
         if (String(url).includes("/view")) {
             return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200, headers: { "content-type": "image/png" } });

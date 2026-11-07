@@ -9,7 +9,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode, _subject_retention_attributes, _h3_picture_submission_order, neutralize_spoken_repetition, repeated_spoken_dialogue
+from canvas_subject_prompt_v2 import adapt_production, binding_ids, build_source_map, compile_prompt_v2, entity_text, project_continuity_source, write_prompt_text, _state_start_descriptions, _render_state_end, _plain_text, _infer_segment_mode, _subject_retention_attributes, _h3_picture_submission_order, neutralize_spoken_repetition, repeated_spoken_dialogue, _camera_movement_prompt_value, _camera_prompt_lines, _shot_camera_facts, _shot_prompt_v2
 
 source_contract_spec = importlib.util.spec_from_file_location("canvas_source_contract", Path(__file__).with_name("source-contract.py"))
 source_contract = importlib.util.module_from_spec(source_contract_spec)
@@ -681,6 +681,42 @@ class SpokenDialogueRepetitionTest(unittest.TestCase):
             with self.assertRaises(ValueError) as error:
                 self._compile("白貉临终泣言：“" + self.line + "”")
         self.assertIn("台词重复", str(error.exception))
+
+
+class CameraMovementPromptTest(unittest.TestCase):
+    def test_library_move_writes_only_the_english_name(self):
+        self.assertEqual(_camera_movement_prompt_value("竖摇 / Tilt"), "Tilt")
+        self.assertEqual(_camera_movement_prompt_value("推进上摇 / Dolly In + Tilt"), "Dolly In + Tilt")
+        self.assertEqual(_camera_movement_prompt_value("竖摇"), "Tilt")
+        self.assertEqual(_camera_movement_prompt_value("Tilt"), "Tilt")
+
+    def test_shot_prompt_and_camera_facts_use_the_english_move(self):
+        camera = {"angle": "正面平视", "movement": "竖摇 / Tilt", "lens": 65, "previs_id": "004"}
+        lines = _camera_prompt_lines(camera)
+        self.assertIn("Movement: Tilt.", lines)
+        self.assertFalse(any("竖摇" in line for line in lines))
+        facts = _shot_camera_facts({}, {}, {"camera": camera})
+        self.assertEqual(facts["movement"], ("Movement", "Tilt", "Movement: Tilt."))
+
+    def test_shot_header_writes_only_the_english_move(self):
+        shot = {"id": "S1", "start_frame": 0, "end_frame": 96, "visual": "他起身穿过人群。",
+                "camera": {"framing": "MS", "movement": "竖摇 / Tilt", "lens": 65,
+                           "angle": "正面平视", "editorial_reason": "保留升镜跟步的连续运动"}}
+        prompt = _shot_prompt_v2({"fps_num": 24, "fps_den": 1, "subject_registry": []},
+                                 {"start_frame": 0, "subjects": []}, shot, 1, [])
+        self.assertIn("Movement: Tilt.", prompt)
+        self.assertNotIn("竖摇", prompt)
+
+    def test_handwritten_movement_without_english_name_is_preserved(self):
+        text = "一镜到底：单摄影机连续跟拍，低机位快速推移"
+        self.assertEqual(_camera_movement_prompt_value(text), text)
+        self.assertIn("Movement: " + text + ".", _camera_prompt_lines({"movement": text}))
+
+    def test_catalog_outage_falls_back_to_stripping_the_chinese_name(self):
+        from unittest.mock import patch
+        with patch("canvas_subject_prompt_v2._camera_move_catalog", return_value={"by_value": {}, "by_zh": {}}):
+            self.assertEqual(_camera_movement_prompt_value("新镜头 / New Move"), "New Move")
+            self.assertEqual(_camera_movement_prompt_value("一镜到底：连续跟拍"), "一镜到底：连续跟拍")
 
 
 if __name__ == "__main__":

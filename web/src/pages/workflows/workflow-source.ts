@@ -34,6 +34,13 @@ export function workflowDisplayGraph(source: unknown): DisplayGraph {
     return result;
 }
 
+/** 工作流节点数：UI 格式数 nodes 数组，API 格式数顶层键（不能拿 UI 格式的顶层键当节点数：恒为 11）。 */
+export function workflowNodeCount(source: unknown): number {
+    const graph = source as Record<string, unknown> | null;
+    if (Array.isArray(graph?.nodes)) return (graph!.nodes as unknown[]).length;
+    return source ? Object.keys(graph as Record<string, unknown>).length : 0;
+}
+
 export function workflowSourcePositions(source: unknown): Map<string, { x: number; y: number }> {
     const nodes = (source as Row | null)?.nodes;
     const positions = new Map<string, { x: number; y: number }>();

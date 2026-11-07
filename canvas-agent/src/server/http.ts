@@ -1092,11 +1092,19 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     route(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
       const threadId = routeParam(req.params.threadId);
+      const result = llm && isLlmThread(threadId)
+        ? llm.read(threadId, workspace.workspacePath)
+        : await readCodexThread(emit, threadId, workspace.workspacePath);
+      const selectedModel = !isLlmThread(threadId) ? llm?.codexThreadModel(threadId) : undefined;
+      const thread = result.thread && typeof result.thread === "object"
+        ? { ...result.thread, ...(selectedModel ? { model: selectedModel } : {}) }
+        : result.thread;
       res.json({
         ok: true,
         workspace,
         conversation: session.conversationStateSnapshot,
-        ...(llm && isLlmThread(threadId) ? llm.read(threadId, workspace.workspacePath) : await readCodexThread(emit, threadId, workspace.workspacePath)),
+        ...result,
+        ...(thread ? { thread } : {}),
       });
     }),
   );

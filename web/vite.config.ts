@@ -32,6 +32,8 @@ export default defineConfig({
         proxy: {
             "/api": { target: backendTarget, changeOrigin: true },
             "/media": { target: backendTarget, changeOrigin: true },
+            // acheng-director 镜头库的只读 mp4 流；与 /media 同源代理，避免 <video> 跨域。
+            "/camera-library": { target: backendTarget, changeOrigin: true },
             "/events": { target: backendTarget, changeOrigin: true },
             "/agent": { target: backendTarget, changeOrigin: true },
             "/canvas/realtime": { target: backendTarget.replace(/^http/, "ws"), ws: true, changeOrigin: true },

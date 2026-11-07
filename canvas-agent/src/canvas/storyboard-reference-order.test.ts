@@ -20,3 +20,4 @@ test("explicit Ref drag order takes precedence over subject-first fallback witho
     assert.deepEqual(ordered(["prop", "board-2", "scene", "hero", "board-1"]), ["board-1", "board-2", "prop", "scene", "hero"]);
     assert.deepEqual(ordered(["scene", "missing"]), ["board-1", "board-2", "scene", "hero", "prop"]);
 });
+

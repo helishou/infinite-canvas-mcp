@@ -152,6 +152,14 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     }, [ctx.storage, segment?.id]);
     useEffect(() => {
         let active = true;
+        // 后端无响应时不能永远卡在"正在加载 LoRA 组合"：加超时兜底。
+        // request() 的 fetch 没有超时，若后端地址不可达/不返回会永久 pending。
+        const loadTimeout = setTimeout(() => {
+            if (!active) return;
+            setLoraPresetsLoading(false);
+            setLoraPresetsLoaded(true);
+            setLoraPresetError("读取 LoRA 组合超时：后端未响应。请确认画布后端已启动、backend 地址正确，然后点下方\"重新读取 LoRA 组合\"重试。");
+        }, 10000);
         setLoraPresetsLoaded(false);
         setLoraPresetsLoading(true);
         setLoraPresetError("");
@@ -165,8 +173,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             .catch((error) => {
                 if (active) setLoraPresetError(error instanceof Error ? error.message : String(error));
             })
-            .finally(() => { if (active) setLoraPresetsLoading(false); });
-        return () => { active = false; };
+            .finally(() => { if (active) { setLoraPresetsLoading(false); clearTimeout(loadTimeout); } });
+        return () => { active = false; clearTimeout(loadTimeout); };
     }, [ctx.storage, segment?.id, loraPresetLoadRequest]);
     if (!segment) return null;
     const mode = (segment.taskMode || segment.mode || "ref2va") as keyof typeof modeLabels;
@@ -452,7 +460,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         {section("runtime", "显存与卸载", segment.keepModelCache === true ? enabledSummary("连续生成") : segment.uniBlockSwapEnabled ? enabledSummary("UniBlockSwap") : "默认", <div className="nfh3-control-grid">
             {control("运行时预留显存", <Switch checked={segment.runtimeReserveEnabled === true} onChange={(checked) => patch({ runtimeReserveEnabled: checked })} />)}
             {control("预留显存 GB", <InputNumber style={field} min={0} max={24} step={0.1} value={segment.reservedVramGb != null ? Number(segment.reservedVramGb) : undefined} placeholder="0.6" onChange={(value) => patch({ reservedVramGb: value ?? undefined })} />)}
-            {control("连续生成模式（保留模型缓存）", <Switch checked={segment.keepModelCache === true} onChange={(checked) => patch({ keepModelCache: checked })} />)}
+            {control("连续生成模式（复用条件缓存）", <Switch checked={segment.keepModelCache === true} onChange={(checked) => patch({ keepModelCache: checked })} />, false, "默认关闭。开启后，同一段在提示词、尺寸、首帧都没变时直接复用上次的文本条件，不再重新加载文本编码器（约 15GB）重编码；显存里不用同时塞下文本编码器和采样模型。代价是条件编码前不再强制先卸载显存，改由 ComfyUI 自行换出模型；只在展开流生效，合并流/人脸精修仍会回退单节点。")}
             {control("启用 UniBlockSwap", <Switch checked={segment.uniBlockSwapEnabled === true} onChange={(checked) => patch({ uniBlockSwapEnabled: checked })} />)}
             {control("常驻块数", <InputNumber style={field} min={1} max={49} value={segment.uniBlockSwapBlocks != null ? Number(segment.uniBlockSwapBlocks) : undefined} placeholder="1" onChange={(value) => patch({ uniBlockSwapBlocks: value ?? undefined })} />)}
         </div>)}

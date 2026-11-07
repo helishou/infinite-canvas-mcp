@@ -12,6 +12,9 @@ const emptySupplementalHistory: CodexSupplementalHistory = { items: [], turns: [
 /** 将 Codex 线程转换为列表展示所需的摘要。 */
 export function summarizeCodexThread(thread: unknown) {
     const status = field(thread, "status");
+    const turns = field(thread, "turns");
+    const latestTurn = Array.isArray(turns) ? turns.at(-1) : undefined;
+    const model = stringOrNull(field(latestTurn, "model")) || stringOrNull(field(thread, "model"));
     return {
         id: String(field(thread, "id") || ""),
         sessionId: String(field(thread, "sessionId") || ""),
@@ -23,6 +26,7 @@ export function summarizeCodexThread(thread: unknown) {
         threadSource: field(thread, "threadSource"),
         createdAt: Number(field(thread, "createdAt") || 0),
         updatedAt: Number(field(thread, "updatedAt") || 0),
+        ...(model ? { model } : {}),
     };
 }
 

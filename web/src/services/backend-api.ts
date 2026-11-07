@@ -149,6 +149,18 @@ export type BackendRuntimeTask = {
     updatedAt?: string;
 };
 
+/** 任务详情里附带的生成态预览帧（H3 展开流与自定义工作流预览桥共用形状）。 */
+export type BackendTaskLivePreview = {
+    dataUrl: string;
+    mime?: string;
+    step?: number;
+    total?: number;
+    nodeId?: string;
+    source?: "step" | "node";
+    promptId?: string;
+    updatedAt?: number;
+};
+
 /** 所有画布生成来源共用的任务提交客户端。 */
 export async function startCanvasGeneration(input: CanvasGenerationCommand, signal?: AbortSignal) {
     const result = await request<{ ok: boolean } & CanvasGenerationStartResult>("POST", CANVAS_GENERATION_PATH, input, { signal });
@@ -655,6 +667,32 @@ export function backendMediaUrl(storageKey: string): string {
     return `${base}/media/${key}?token=${token}`;
 }
 
+/** acheng-director skill 的 132 段运镜白模镜头库（只读，视频由 Backend 直接流式提供）。 */
+export type CameraLibraryMove = {
+    id: string; key: string; nameZh: string; nameEn: string; category: string;
+    file: string; url: string; duration: number; fps: number; width: number;
+    height: number; size: number; available: boolean;
+};
+export type CameraLibraryCategory = { key: string; from: string; to: string; count: number };
+export type CameraLibraryIndex = {
+    ok: boolean; available: boolean; source: string; mediaBase: string; count: number;
+    categories: CameraLibraryCategory[]; moves: CameraLibraryMove[]; reason?: string;
+};
+
+export function fetchCameraLibrary(signal?: AbortSignal) {
+    return request<CameraLibraryIndex>("GET", "/camera-library/moves", undefined, { signal });
+}
+
+/** 镜头库视频端点免 token；开发态走 Vite 同源代理，生产态跟随已配置的 Backend 前缀。 */
+export function cameraLibraryMediaUrl(file: string): string {
+    const key = encodeURIComponent(file);
+    const isDev = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+    const base = getBackendUrl().replace(/\/$/, "");
+    const isLocal = base === DEFAULT_URL || base === "http://localhost:17370" || base === "";
+    if (isDev && isLocal) return `/camera-library/media/${key}`;
+    return `${base}/camera-library/media/${key}`;
+}
+
 /**
  * 把历史 ComfyUI /view 地址改成总后台代理地址。
  * 画布数据可能来自旧版本，节点里只保存了 127.0.0.1:8188 的临时地址；
@@ -748,7 +786,7 @@ export async function saveDataDir(dataDir: string): Promise<{ dataDir: string; c
 // ── Tasks ────────────────────────────────────────────────────────────────
 
 export function fetchBackendTask(id: string, signal?: AbortSignal) {
-    return request<{ ok: boolean; task?: BackendRuntimeTask; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
+    return request<{ ok: boolean; task?: BackendRuntimeTask; preview?: BackendTaskLivePreview | null; events?: unknown[] }>("GET", canvasTaskPath(id), undefined, { signal });
 }
 
 export function resolveBackendH3Confirmation(id: string, input: { action: "confirm" | "keep_first_pass" | "discard"; segmentId: string; expectedRevision: number; postpassParams?: Record<string, unknown> }) {

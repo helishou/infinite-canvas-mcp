@@ -1107,6 +1107,66 @@ def _performance_text(value):
     return _plain_text(value)
 
 
+_CAMERA_MOVE_CATALOG = None
+
+
+def _camera_move_catalog():
+    """镜头库清单：源稿用「中文名 / English Name」定位镜头，编译产物只写英文名。"""
+    global _CAMERA_MOVE_CATALOG
+    if _CAMERA_MOVE_CATALOG is not None:
+        return _CAMERA_MOVE_CATALOG
+    catalog = {"by_value": {}, "by_zh": {}}
+    script = Path(__file__).resolve()
+    # 开发态用 scripts/acheng 的 overlay，发布态用运行包 scripts/ 里的同一份编译器；
+    # 两者的 skill 清单分别在仓库 .agents/skills 与运行包 data/ 下。
+    roots = [script.parent, Path.cwd(), *list(script.parents)[1:6]]
+    for root in roots:
+        for candidate in (root / "data" / "camera-moves.json",
+                          root / ".agents" / "skills" / "acheng-director" / "data" / "camera-moves.json"):
+            try:
+                if not candidate.is_file():
+                    continue
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            moves = payload if isinstance(payload, list) else payload.get("moves") if isinstance(payload, dict) else []
+            for move in moves if isinstance(moves, list) else []:
+                if not isinstance(move, dict):
+                    continue
+                zh = str(move.get("name_zh") or "").strip()
+                en = str(move.get("name_en") or "").strip()
+                if not en:
+                    continue
+                if zh:
+                    catalog["by_zh"].setdefault(zh, en)
+                    catalog["by_value"].setdefault((zh + " / " + en).casefold(), en)
+                catalog["by_value"].setdefault(en.casefold(), en)
+            if catalog["by_value"]:
+                _CAMERA_MOVE_CATALOG = catalog
+                return catalog
+    _CAMERA_MOVE_CATALOG = catalog
+    return catalog
+
+
+def _camera_movement_prompt_value(value):
+    """镜头库镜头只把英文名写进提示词；没有英文名的手写运镜描述原样保留。"""
+    text = _plain_text(value)
+    if not text:
+        return text
+    catalog = _camera_move_catalog()
+    english = catalog["by_value"].get(text.casefold()) or catalog["by_zh"].get(text)
+    if english:
+        return english
+    # 清单不可用或新增镜头时，按「中文名 / English Name」形态剥掉中文名，
+    # 不改写像「一镜到底：单摄影机连续跟拍」这类没有英文名的自定义描述。
+    match = re.match(r"^[^/]*[\u4e00-\u9fff][^/]*\s*/\s*([^/]+)$", text)
+    if match:
+        candidate = match.group(1).strip()
+        if re.search(r"[A-Za-z]", candidate) and not re.search(r"[\u3400-\u9fff]", candidate):
+            return candidate
+    return text
+
+
 def _camera_prompt_lines(camera, suppressed_keys=None):
     fields = (("description", "Camera description"), ("angle", "Angle"), ("movement", "Movement"),
               ("path", "Path"), ("target", "Target"), ("focus", "Focus"))
@@ -1114,7 +1174,8 @@ def _camera_prompt_lines(camera, suppressed_keys=None):
     for key, label in fields:
         if key in (suppressed_keys or set()):
             continue
-        text = _plain_text(camera.get(key))
+        raw = _plain_text(camera.get(key))
+        text = _camera_movement_prompt_value(raw) if key == "movement" else raw
         if text and text.casefold() != "per shot description":
             rendered.append(label + ": " + text + ".")
     if "lens" not in (suppressed_keys or set()):
@@ -1131,33 +1192,8 @@ def _camera_prompt_lines(camera, suppressed_keys=None):
 
 
 def _combat_prompt_lines(shot, production):
-    """Render the authored combat contract into the model-facing Shot body."""
-    combat = shot.get("combat")
-    if not isinstance(combat, dict) or not combat:
-        return []
-    labels = (
-        ("force_source", "Force source"), ("trajectory", "Trajectory"),
-        ("contact", "Contact"), ("resistance", "Resistance"),
-        ("impact_hold", "Impact read"), ("transfer", "Force transfer"),
-        ("recoil", "Recoil"),
-    )
-    lines = []
-    for key, label in labels:
-        text = _plain_text(combat.get(key))
-        if text:
-            lines.append(label + ": " + text)
-    chain = combat.get("chain") if isinstance(combat.get("chain"), dict) else {}
-    for key, label in (("attack", "Attack"), ("response", "Defender response"),
-                       ("result", "Exchange result"), ("continuation", "Continuation")):
-        text = _plain_text(chain.get(key))
-        if text:
-            lines.append(label + ": " + text)
-    timing = combat.get("timing")
-    if isinstance(timing, dict) and timing:
-        timing_renderer = _load_runtime_helper("combat_timing").render_combat_timing
-        factor = Fraction(int(production.get("fps_den", 1)), int(production.get("fps_num", 24)))
-        lines.extend(timing_renderer(timing, factor))
-    return ["Combat choreography:\n" + "\n".join(lines)] if lines else []
+    """跨镜事实归连续性台账，镜头载荷不再复制一份进提示词。"""
+    return []
 
 
 def _audio_prompt_text(value):
@@ -1470,7 +1506,8 @@ def _shot_camera_facts(production, segment, shot):
         facts["framing"] = ("Framing", framing, "Framing: " + framing + ".")
     for key, label in (("description", "Camera description"), ("angle", "Angle"), ("movement", "Movement"),
                        ("path", "Path"), ("target", "Target"), ("focus", "Focus")):
-        value = _plain_text(camera.get(key))
+        raw = _plain_text(camera.get(key))
+        value = _camera_movement_prompt_value(raw) if key == "movement" else raw
         if value and value.casefold() != "per shot description":
             facts[key] = (label, value, label + ": " + value + ".")
     lens = camera.get("lens_mm") if "lens_mm" in camera else camera.get("lens")

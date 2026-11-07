@@ -42,6 +42,8 @@ const NODE_W = 140;
 const NODE_H = 56;
 const X_GAP = 40;
 const Y_GAP = 16;
+/** 大工作流（几百节点、原始画布坐标跨几千像素）需要比 20% 更小的最小缩放，否则「适应」后整图装不进视口。 */
+const MIN_ZOOM = 0.02;
 
 /** 连线型输入在 API 格式里是 ["节点ID", 端口序号]，不能当可填写字段。 */
 export function isGraphLinkValue(value: unknown): value is [string, number] {
@@ -100,7 +102,6 @@ export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFie
     const nodes: GraphNode[] = [];
     const positions = new Map<string, { x: number; y: number }>();
     const sortedLevels = [...buckets.keys()].sort((a, b) => a - b);
-    let maxRows = 0;
 
     const minX = sourcePositions.size ? Math.min(...[...sourcePositions.values()].map((pos) => pos.x)) : 0;
     const minY = sourcePositions.size ? Math.min(...[...sourcePositions.values()].map((pos) => pos.y)) : 0;
@@ -115,7 +116,6 @@ export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFie
             const label = title.length > 24 ? title.slice(0, 24) + "…" : title;
             nodes.push({ id, classType, label, layer: lv, x: positions.get(id)!.x, y: positions.get(id)!.y, hasExposed: (exposedCounts.get(id) || 0) > 0, exposedCount: exposedCounts.get(id) || 0 });
         });
-        maxRows = Math.max(maxRows, ids.length);
     }
 
     const edges: GraphEdge[] = [];
@@ -132,7 +132,11 @@ export function computeGraphLayout(workflow: WorkflowGraphJson, fields: GraphFie
         }
     }
 
-    return { nodes, edges, width: Math.max(sortedLevels.length * (NODE_W + X_GAP) + 40, ...nodes.map((node) => node.x + NODE_W + 20)), height: Math.max(maxRows * (NODE_H + Y_GAP) + 40, ...nodes.map((node) => node.y + NODE_H + 20)) };
+    // 画布尺寸只取节点的真实包围盒：分层网格项（maxRows）在节点已有原始坐标时只虚增高度，
+    // 既让「适应」把倍率压得过低，也让内容被居中推到视口外（大工作流会看起来「空白」）。
+    const maxX = nodes.reduce((acc, node) => Math.max(acc, node.x + NODE_W), 0);
+    const maxY = nodes.reduce((acc, node) => Math.max(acc, node.y + NODE_H), 0);
+    return { nodes, edges, width: maxX + 40, height: maxY + 40 };
 }
 
 type Props = {
@@ -166,7 +170,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
         if (!currentLayout || !wrapRef.current) return;
         const w = wrapRef.current;
         const pad = 20;
-        const k = Math.max(0.2, Math.min(2, Math.min((w.clientWidth - pad * 2) / currentLayout.width, (w.clientHeight - pad * 2) / currentLayout.height)));
+        const k = Math.max(MIN_ZOOM, Math.min(2, Math.min((w.clientWidth - pad * 2) / currentLayout.width, (w.clientHeight - pad * 2) / currentLayout.height)));
         setView({ k, x: (w.clientWidth - currentLayout.width * k) / 2, y: (w.clientHeight - currentLayout.height * k) / 2 });
     }, []);
 
@@ -195,7 +199,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
         if (!layout) return;
         e.preventDefault();
         const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const nk = Math.max(0.2, Math.min(3, view.k * f));
+        const nk = Math.max(MIN_ZOOM, Math.min(3, view.k * f));
         const r = wrapRef.current!.getBoundingClientRect();
         const mx = e.clientX - r.left, my = e.clientY - r.top;
         setView({ k: nk, x: mx - (mx - view.x) * (nk / view.k), y: my - (my - view.y) * (nk / view.k) });
@@ -226,7 +230,7 @@ export function WorkflowGraphView({ workflow, fields, renderNodePopup }: Props) 
         <div className="relative h-full">
             <div className="absolute right-2 top-2 z-10 flex gap-1">
                 <button onClick={() => setView(v => ({ ...v, k: Math.min(3, v.k * 1.2) }))} className="rounded bg-white/80 px-2 py-1 text-xs shadow hover:bg-white">+</button>
-                <button onClick={() => setView(v => ({ ...v, k: Math.max(0.2, v.k / 1.2) }))} className="rounded bg-white/80 px-2 py-1 text-xs shadow hover:bg-white">−</button>
+                <button onClick={() => setView(v => ({ ...v, k: Math.max(MIN_ZOOM, v.k / 1.2) }))} className="rounded bg-white/80 px-2 py-1 text-xs shadow hover:bg-white">−</button>
                 <button onClick={fitToView} className="rounded bg-white/80 px-2 py-1 text-xs shadow hover:bg-white">适应</button>
                 <span className="rounded bg-white/80 px-2 py-1 text-xs shadow">{Math.round(view.k * 100)}%</span>
             </div>

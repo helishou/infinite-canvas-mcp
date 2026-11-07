@@ -40,6 +40,11 @@ export type WorkflowConfig = {
      * 留空表示不过滤，沿用工作流全部输出。节点 ID 用工作流自身编号。
      */
     outputNodes?: string[];
+    /**
+     * 预览桥节点（单选）。该节点发出的预览帧只用于画布节点的生成态画面，
+     * 不参与产物筛选、归档与生成日志；留空表示不采集。仅本地 ComfyUI 链生效。
+     */
+    previewNodeId?: string;
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
     /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）；留空表示没绑定。 */

@@ -167,6 +167,11 @@ export type WorkflowConfig = {
     fields: WorkflowField[];
     /** 指定输出节点：只保留这些节点的产物；留空表示不过滤。 */
     outputNodes?: string[];
+    /**
+     * 预览桥节点（单值）：该节点发出的预览帧会推送到画布节点的生成态画面。
+     * 只影响展示，不参与产物筛选、归档与生成日志。留空表示不采集预览。
+     */
+    previewNodeId?: string;
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
     /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）。留空表示没绑定。 */
@@ -183,6 +188,8 @@ export type WorkflowConfigRow = {
     runningHubProfileId: string; runTarget: string;
     /** 输出节点选择的原始 JSON；空串表示从未配置过（此时前端会默认勾选链路末端的输出节点）。 */
     outputNodesJson: string;
+    /** 预览桥节点 id；空串表示未选择。 */
+    previewNodeId: string;
 };
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -425,6 +432,7 @@ export class BackendDatabase {
                 runninghub_profile_id TEXT NOT NULL DEFAULT '',
                 run_target TEXT NOT NULL DEFAULT 'local',
                 output_nodes_json TEXT NOT NULL DEFAULT '',
+                preview_node_id TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
         `);
@@ -439,6 +447,10 @@ export class BackendDatabase {
         }
         if (!workflowColumns.some((column) => column.name === "run_target")) {
             this.db.exec("ALTER TABLE workflow_configs ADD COLUMN run_target TEXT NOT NULL DEFAULT 'local'");
+        }
+        // 预览桥节点：老库补列，空串 = 未选择，绝不阻断生成。
+        if (!workflowColumns.some((column) => column.name === "preview_node_id")) {
+            this.db.exec("ALTER TABLE workflow_configs ADD COLUMN preview_node_id TEXT NOT NULL DEFAULT ''");
         }
         // 文本身份属于对象的一次生命周期，不得由可复用的 nodeId / segmentId 推导。
         const textColumns = this.db.prepare("PRAGMA table_info(canvas_text_documents)").all() as Array<{ name: string }>;
@@ -2632,8 +2644,9 @@ export class BackendDatabase {
                 }
                 return operation;
             });
+            // 批次历史先以明文落库（跳过 gzip，缩短写锁持有时长）；压缩在 COMMIT 后的派生事务里做。
             this.db.prepare("INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-                .run(operationId, id, currentRevision, revision, JSON.stringify(source), encodeStoredJson(storedOperations), encodeStoredJson(operationResults), String(project.updatedAt));
+                .run(operationId, id, currentRevision, revision, JSON.stringify(source), JSON.stringify(storedOperations), JSON.stringify(operationResults), String(project.updatedAt));
             this.db.prepare("INSERT INTO canvas_command_receipts (operation_id, project_id, request_hash, committed_revision) VALUES (?, ?, ?, ?)").run(operationId, id, fingerprint, revision);
             if (context?.mcpCommand) {
                 const requestHash = commandFingerprint({ tool: context.mcpCommand.tool, targetId: context.mcpCommand.targetId, request: context.mcpCommand.request });
@@ -2642,6 +2655,23 @@ export class BackendDatabase {
                 this.completeMcpCommand(operationId, revision, committedOperations);
             }
             this.db.exec(commitSql);
+            // 主画布写已提交。资产目录登记与共享资产消费者投影是最终一致的派生索引，
+            // 放到 COMMIT 后的独立短事务里执行，不再占用主画布的写锁（SQLite 单写者串行），
+            // 从而缩短同一项目内不同节点并发提交的相互等待。失败仅影响派生索引，下次改动会重触发。
+            // gzip 压缩也在写锁外完成（decodeStoredJson 兼容明文与 gzip）。
+            if (!context?.withinTransaction) {
+                try {
+                    this.db.exec("BEGIN IMMEDIATE");
+                    syncSharedCanvasAssetRecords(this, id, project as CanvasProject);
+                    productionUpdates.push(...propagateAssetChanges(this, id, assetBefore, project, dependentCommits, context?.originatingProjectId));
+                    this.db.prepare("UPDATE canvas_operation_batches SET operations_json = ?, results_json = ? WHERE operation_id = ?")
+                        .run(encodeStoredJson(storedOperations), encodeStoredJson(operationResults), operationId);
+                    this.db.exec("COMMIT");
+                } catch (error) {
+                    this.db.exec("ROLLBACK");
+                    console.error("画布主写已提交，但派生同步/历史压缩失败", error);
+                }
+            }
             commit = { projectId: id, operationId, baseRevision: currentRevision, revision, operations: committedOperations, operationResults, source, updatedAt: String(project.updatedAt), ...(productionUpdates.length ? { productionUpdates } : {}), deletedAssetIds: sourceAssetsBefore.filter(asset => !this.getAssetRecord(asset.id)).map(asset => asset.id) };
         } catch (error) {
             this.db.exec(rollbackSql);
@@ -3300,6 +3330,7 @@ export class BackendDatabase {
                 runningHubProfileId: String(row.runninghub_profile_id || ''),
                 runTarget: String(row.run_target || 'local'),
                 outputNodesJson: String(row.output_nodes_json ?? ''),
+                previewNodeId: String(row.preview_node_id ?? ''),
                 updatedAt: String(row.updated_at),
             };
         } catch { return null; }
@@ -3338,13 +3369,13 @@ export class BackendDatabase {
     upsertWorkflowConfig(name: string, config: {
         title?: string; backend?: string; description?: string; operation?: string;
         fieldsJson?: string; mediaInputsJson?: string; miniCardsJson?: string;
-        runningHubProfileId?: string; runTarget?: string; outputNodesJson?: string;
+        runningHubProfileId?: string; runTarget?: string; outputNodesJson?: string; previewNodeId?: string;
     }): void {
         const now = new Date().toISOString();
         const existing = this.getWorkflowConfig(name);
         this.db.prepare(`
-            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, output_nodes_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, output_nodes_json, preview_node_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 title = excluded.title, backend = excluded.backend, description = excluded.description,
                 operation = excluded.operation, fields_json = excluded.fields_json,
@@ -3352,6 +3383,7 @@ export class BackendDatabase {
                 runninghub_profile_id = excluded.runninghub_profile_id,
                 run_target = excluded.run_target,
                 output_nodes_json = excluded.output_nodes_json,
+                preview_node_id = excluded.preview_node_id,
                 updated_at = excluded.updated_at
         `).run(
             name,
@@ -3365,6 +3397,7 @@ export class BackendDatabase {
             config.runningHubProfileId ?? existing?.runningHubProfileId ?? '',
             config.runTarget ?? existing?.runTarget ?? 'local',
             config.outputNodesJson ?? existing?.outputNodesJson ?? '',
+            config.previewNodeId ?? existing?.previewNodeId ?? '',
             now,
         );
     }

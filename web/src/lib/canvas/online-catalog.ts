@@ -1,7 +1,7 @@
 // 在线资产目录解析：只读站点发布的数据，不执行页面脚本。
 
 export type OnlineCatalogKind = "costume" | "costume-anime" | "portrait" | "pose" | "depth" | "anime";
-export type OnlineAsset = { id: string; name?: string; category: string; keywords: string; thumbnail: string; original: string; subcategory?: string; poseType?: string; angle?: string };
+export type OnlineAsset = { id: string; name?: string; category: string; summary?: string; displayKeywords?: string; keywords: string; thumbnail: string; original: string; subcategory?: string; poseType?: string; angle?: string };
 
 export const COSTUME_SOURCE = "https://ai-costume-gallery.pages.dev/";
 export const POSE_SOURCE = "https://ai-pose-gallery.pages.dev/";
@@ -185,30 +185,38 @@ export function parseChineseOnlineCatalog(kind: OnlineCatalogKind, payload: unkn
 
         if (kind === "costume" || kind === "costume-anime") {
             const category = requiredString(item, "分类", kind);
+            const tags = textValues(item["关键词"]);
+            const name = tags.slice(0, 2).join(" · ") || id;
+            const displayKeywords = tags.slice(2, 6).join(" · ");
             const keywords = textValues(item["关键词"], item["英文关键词"], indexedSearch).join(" · ");
-            return { id, category, keywords, thumbnail, original };
+            return { id, name, category, summary: category, displayKeywords, keywords, thumbnail, original };
         }
         if (kind === "portrait") {
             const category = requiredString(item, "发长", kind);
             const subcategory = requiredString(item, "类型", kind);
-            const name = optionalString(item, "发型") || subcategory;
+            const hairstyle = optionalString(item, "发型");
+            const name = hairstyle || category;
+            const summary = hairstyle ? `${category} · ${subcategory}` : subcategory;
             const keywords = textValues(indexedSearch, item["发型"], item["原始发长"], item["原始发型"], subcategory).join(" · ");
-            return { id, name, category, subcategory, keywords, thumbnail, original };
+            return { id, name, category, subcategory, summary, keywords, thumbnail, original };
         }
         if (kind === "pose" || kind === "depth") {
             const category = requiredString(item, "体系", kind);
             const subcategory = requiredString(item, "分类", kind);
             const angle = requiredString(item, "角度", kind);
             const name = requiredString(item, "姿势名称", kind);
+            const summary = [category, subcategory, angle].join(" · ");
             const keywords = textValues(indexedSearch, item["原始姿势名称"], item["原始分类"], item["原始角度"], item["姿势编号"]).join(" · ");
-            return { id, name, category, subcategory, angle, keywords, thumbnail, original };
+            return { id, name, category, subcategory, angle, summary, keywords, thumbnail, original };
         }
 
         const category = requiredString(item, "类型", kind);
         const subcategory = requiredString(item, "分类", kind);
         const name = requiredString(item, "名称", kind);
+        const summary = `${category} · ${subcategory}`;
+        const displayKeywords = textValues(item["标签"], item["发色"]).join(" · ");
         const keywords = textValues(indexedSearch, item["原始名称"], item["原始分类"], item["标签"], item["子类型"], item["父级"], item["发色"]).join(" · ");
-        return { id, name, category, subcategory, keywords, thumbnail, original };
+        return { id, name, category, subcategory, summary, displayKeywords, keywords, thumbnail, original };
     });
 }
 

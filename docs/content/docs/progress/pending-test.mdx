@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Shot editing now uses a single-select Camera movement: the 132 Previs moves from the camera library are grouped by category and searchable by ID, Chinese name or English name. Picking from the dropdown or selecting after a video preview in Browse camera library must write the same move name and Previs ID; reopening the library preselects the current move, and clearing the dropdown also unbinds the Previs ID. Free-text values from older drafts stay visible with a hint to pick a library move, produce no draft change and are not rewritten automatically. After recompiling, check that `Movement:` in the Shot prompt carries only the library's English name (for example `Tilt`) with no Chinese name, while older hand-written movement descriptions without an English name compile unchanged.
+
 - Formal storyboard tracks and the production workbench use the same Shot keyframe. Replace and clear an image from either editor, then refresh: verify the same opening keyframe and track slot update, no duplicate opening is added, and unrelated composition or timed keyframes remain intact. Check failed saves are reported as failed.
 
 - Clip status: editing only an earlier Shot's camera or visual description must not recompile later Clips; continuity validation still retains the authored context. Target Shot content, replay timing and continuity input changes must still invalidate affected outputs. Saving locked Clips must not create doomed refresh jobs, and current valid compilation must take precedence over historical failures or unloaded workbench data. Older receipts retain their original dependency checks and acquire the narrower fingerprint on their next compile.

@@ -49,6 +49,18 @@ GUIDANCE = """# H3 精简生产正文
 """
 
 
+def _floor_variants(text, before):
+    """Accept both the historical 2000-word floor and the 1200-word floor."""
+    if before and text.count(before) == 1:
+        return before
+    for old, new in (("2000", "1200"), ("1200", "2000")):
+        if old in before:
+            alt = before.replace(old, new)
+            if text.count(alt) == 1:
+                return alt
+    return None
+
+
 def apply_prompt_policy(root):
     """Apply only to a new runtime candidate, never an existing verified runtime."""
     root = Path(root)
@@ -58,9 +70,10 @@ def apply_prompt_policy(root):
     def replace(relative, before, after):
         path = root / relative
         text = path.read_text(encoding="utf-8")
-        if text.count(before) != 1:
+        actual = _floor_variants(text, before)
+        if actual is None:
             raise RuntimeError(f"Unsupported H3 concise overlay in {relative}: {before[:80]}")
-        path.write_text(text.replace(before, after), encoding="utf-8")
+        path.write_text(text.replace(actual, after), encoding="utf-8")
 
     path = root / "scripts/h3_contract.py"
     text = path.read_text(encoding="utf-8")

@@ -164,6 +164,11 @@
 .shot-editor-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); align-content: start; gap: 12px; }
 .shot-editor-form-grid > * { min-width: 0; }
 .shot-editor-span-all { grid-column: 1 / -1; min-width: 0; }
+/* Direction fields keep their natural height. Grid's default `stretch` inflated a short
+   control and pushed it off the shared baseline whenever the cell beside it wrapped
+   (e.g. a bound Previs hint, or a multi-line editorial reason). */
+.shot-editor-direction-grid > * { align-self: start; }
+.shot-editor-direction-grid > .grid { align-content: start; }
 @media(max-width:767px) {
   .storyboard-mobile-actions { display: flex; width: 100%; justify-content: space-between; }
 }

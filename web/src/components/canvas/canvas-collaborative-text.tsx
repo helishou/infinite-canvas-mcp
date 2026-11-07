@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent } from "react";
 import { CanvasPortal, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { Decoration, EditorView, keymap, placeholder as placeholderExtension, ViewPlugin, WidgetType, type DecorationSet } from "@codemirror/view";
@@ -547,6 +547,20 @@ export function CanvasCollaborativeText(props: CanvasTextEditorProps) {
     return props.standalone ? <CanvasStandaloneText {...props} /> : <CanvasYjsText {...props} />;
 }
 
+/**
+ * 外框看起来就是输入区，但只有内部的 .cm-content 能拿焦点：点在边框/内边距上原本毫无反应，
+ * 表现为「点下去光标不出现」。这里把这类点击转给编辑器，并按点击位置落光标。
+ */
+function focusEditorFromShell(event: ReactMouseEvent<HTMLDivElement>, view: EditorView | null) {
+    const target = event.target;
+    if (target instanceof Element && target.closest("button,a,input,textarea,select,[role='button']")) return;
+    if (!view || (target instanceof Node && view.dom.contains(target))) return;
+    event.preventDefault();
+    const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+    view.focus();
+    if (typeof pos === "number" && pos >= 0) view.dispatch({ selection: { anchor: pos } });
+}
+
 function CanvasStandaloneText(props: CanvasTextEditorProps) {
     const { placeholder = "请输入文本", references = [], chips = false, clipReferenceTags = false, dialogue = false, lineMap = false, editorRef, className, style, autoFocus = false, autoHeight = false } = props;
     const parent = useRef<HTMLDivElement>(null);
@@ -653,7 +667,7 @@ function CanvasStandaloneText(props: CanvasTextEditorProps) {
         // 否则焦点落在编辑器里按 Ctrl+C 毫无反应。其余按键照旧拦截，避免触发画布快捷键。
         const copyIntent = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "c" && !window.getSelection()?.toString();
         if (!copyIntent) event.stopPropagation();
-    }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+    }} onMouseDown={(event) => { event.stopPropagation(); focusEditorFromShell(event, editor.current); }} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: autoHeight ? "auto" : "100%", minHeight: 80 }} />
         {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}
     </div>;
@@ -765,7 +779,7 @@ function CanvasYjsText(props: CanvasTextEditorProps) {
         // 同 CanvasStandaloneText：Ctrl/Cmd+C 未选中文字时放行冒泡，回落为「复制节点」
         const copyIntent = (event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "c" && !window.getSelection()?.toString();
         if (!copyIntent) event.stopPropagation();
-    }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+    }} onMouseDown={(event) => { event.stopPropagation(); focusEditorFromShell(event, editor.current); }} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
         <div ref={parent} style={{ height: "100%", minHeight: 80 }} />
         {!status.ready && !status.error ? <small style={{ color: theme.node.muted }}>正在读取协作文档…</small> : null}
         {dialogueMenu ? <DialogueContextMenu menu={dialogueMenu} onClose={() => setDialogueMenu(null)} theme={theme} /> : null}

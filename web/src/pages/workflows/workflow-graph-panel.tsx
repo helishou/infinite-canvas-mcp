@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Button } from "antd";
 import { useTranslation } from "react-i18next";
 import type { WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
@@ -6,6 +7,7 @@ import { graphFieldTargetsNode, WorkflowGraphView, type WorkflowGraphJson } from
 import { NodeFieldPopupShell } from "./node-field-popup";
 import { workflowDisplayGraph } from "./workflow-source";
 import { FieldEditor } from "./field-editor";
+import { suggestMediaFields } from "./field-suggest";
 
 type WorkflowJson = WorkflowGraphJson;
 
@@ -109,12 +111,26 @@ export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onF
         onFieldsChange(fields.filter(f => f.id !== fieldId));
     };
 
+    // 一键扫描媒体加载节点，补齐参考图/视频/音频字段（不与已暴露字段重复）。
+    const autoDetectMediaFields = () => {
+        const suggested = suggestMediaFields(sourceWorkflow);
+        const seen = new Set(fields.map(f => `${f.node}::${f.input}`));
+        const added = suggested.filter(f => !seen.has(`${f.node}::${f.input}`));
+        if (added.length === 0) return;
+        onFieldsChange([...fields, ...added]);
+    };
+
     if (!workflow || Object.keys(workflow).length === 0) {
         return <div className="flex h-64 items-center justify-center text-sm text-muted-foreground">无可视化节点</div>;
     }
 
     return (
-        <div className="relative h-full">
+        <div className="flex h-full flex-col">
+            <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground">点击节点可暴露输入为字段；或直接扫描媒体加载节点</span>
+                <Button size="small" onClick={autoDetectMediaFields}>自动识别媒体字段</Button>
+            </div>
+            <div className="relative min-h-0 flex-1">
             <WorkflowGraphView
                 workflow={sourceWorkflow}
                 fields={fields}
@@ -156,6 +172,7 @@ export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onF
                     </div>
                 </div>
             )}
+            </div>
         </div>
     );
 }

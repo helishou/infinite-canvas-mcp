@@ -1,12 +1,11 @@
 /**
  * 整理布局（computeFlowLayout）回归测试。
  *
- * 运行（web 目录下，借 backend 的 tsx）：
- *   ../backend/node_modules/.bin/tsx --test src/lib/canvas/canvas-agent-ops.test.ts
+ * 运行（web 目录下；web 自身没装 tsx，借 backend 的 loader，PowerShell 直接执行 .bin 会被执行策略拦截）：
+ *   node --import ../backend/node_modules/tsx/dist/loader.mjs --test src/lib/canvas/canvas-agent-ops.test.ts
  *
- * 覆盖两条曾经踩过的坑：
- * 1) 输出被拉到顶部：纵向按「层内序号顺排」时，输入在下方的链路，输出会堆在 anchorY 附近。
- * 2) 尺寸悬殊：同批节点高度差过大，整理后画布视觉杂乱。
+ * 覆盖 dagre 排布的核心不变量：链尽量水平、相连节点两轴都靠近、任意形状不重叠、
+ * 重复整理幂等、尺寸归一化，以及组框始终包住成员。
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -258,10 +257,13 @@ test("大图不散架：并联链 + 汇聚点整理后紧凑、链严格水平�
         }
     }
 
-    // 4) 任何相连节点都不允许被拉到几屏之外（水平跨度不超过一个节点宽量级）。
+    // 4) 任何相连节点都不允许被拉到几屏之外：相邻层之间只隔一个层间距（dagre 的 ranksep 上限 320）。
     conns.forEach((c) => {
+        const from = rect(c.fromNodeId);
+        const to = rect(c.toNodeId);
         const dx = Math.abs(center(c.fromNodeId).x - center(c.toNodeId).x);
-        assert.ok(dx <= 700, `${c.fromNodeId}->${c.toNodeId} 水平跨度=${Math.round(dx)} 应在 700 以内`);
+        const allowance = (from.w + to.w) / 2 + 320 + 1;
+        assert.ok(dx <= allowance, `${c.fromNodeId}->${c.toNodeId} 水平跨度=${Math.round(dx)} 应不超过 ${Math.round(allowance)}（半宽和 + 层间距）`);
     });
 });
 
@@ -300,9 +302,10 @@ const clearOf = (
     return Math.round(layout.get(to)!.x - (layout.get(from)!.x + fromWidth));
 };
 
-test("宽节点不撑列：同层有超宽节点时，另一条窄链的相邻节点仍只隔一个 gap", () => {
-    // 曾经的实现给「整层」一个统一 x，层宽取层内最大宽 —— 于是层里只要有一个宽节点，
-    // 同层其它窄链后面都被留出同宽的死空白，有关系的两个节点被顶到 1400+ 之外。
+test("宽节点只撑自己的列：窄链与宽链共用同一组层，不被额外推进", () => {
+    // dagre 的每一层是统一列，列宽取层内最大节点；窄节点在本列内居中。
+    // 因此窄链的横向净空隙会包含宽节点的宽度（Toonflow 方案的已知取舍），
+    // 但两条链仍按相同的层号推进，不会为了宽节点多出一层、也不会把窄链甩到更右边。
     const nodes = [
         node("root", "image", 0, 0, 340, 240),
         node("wideA", "image", 400, 0, 1600, 240), node("wideB", "image", 2100, 0, 1600, 240),
@@ -314,14 +317,23 @@ test("宽节点不撑列：同层有超宽节点时，另一条窄链的相邻�
         edge("root", "thinA"), edge("thinA", "thinB"), edge("thinB", "sink"),
     ];
     const layout = layoutOf(nodes, conns, false);
-    assert.equal(clearOf(layout, nodes, "thinA", "thinB"), 48, "窄链相邻节点应恰好相隔一个 gap");
-    assert.equal(clearOf(layout, nodes, "wideA", "wideB"), 48, "宽链自身也不应被撑开");
+    const centerX = (id: string) => {
+        const p = layout.get(id)!;
+        const width = p.width ?? nodes.find((item) => item.id === id)!.width;
+        return p.x + width / 2;
+    };
+    assert.ok(Math.abs(centerX("thinA") - centerX("wideA")) <= 1, "窄链第一层应与宽链第一层居中于同一列");
+    assert.ok(Math.abs(centerX("thinB") - centerX("wideB")) <= 1, "窄链第二层应与宽链第二层居中于同一列");
+    const thinGap = clearOf(layout, nodes, "thinA", "thinB");
+    assert.ok(thinGap <= 1600 + 320, `窄链相邻层净空隙=${thinGap} 应不超过「最宽节点 + 层间距上限」`);
+    const wideGap = clearOf(layout, nodes, "wideA", "wideB");
+    assert.ok(wideGap >= 160 && wideGap <= 320, `层间距=${wideGap} 应落在自适应区间 [160, 320]`);
     assert.deepEqual(overlaps(nodes, layout), []);
 });
 
-test("短链汇入长链：短链整体右移贴住汇合点，链内间距不变", () => {
-    // 汇聚点只能待在最长链末端右侧，短链末端本来会被落在很左边（实测净空隙 1452）。
-    // 修正后从源点出发的纯链会整体右移去贴合汇合点，链内间距仍是 48。
+test("短链汇入长链：分支与长链共用同组层，汇合点只隔一个层间距", () => {
+    // dagre 用统一层间距：短链内部、长链内部、以及两条链末端到汇合点的净空隙都相同。
+    // 旧实现里短链末端会被留在很左边（实测净空隙 1452），这里确认分支确实紧邻汇合点。
     const nodes = [
         node("s1", "image", 0, 0, 340, 240), node("a1", "image", 400, 0, 420, 236),
         node("b1", "image", 900, 0, 420, 236), node("c1", "image", 1400, 0, 420, 236),
@@ -334,15 +346,18 @@ test("短链汇入长链：短链整体右移贴住汇合点，链内间距不�
         edge("s2", "a2"), edge("a2", "sink"),
     ];
     const layout = layoutOf(nodes, conns, false);
-    assert.equal(clearOf(layout, nodes, "a2", "sink"), 48, "短链末端应贴住汇合点（原先被留在 1452 之外）");
-    assert.equal(clearOf(layout, nodes, "s2", "a2"), 48, "右移不应破坏短链内部间距");
-    assert.equal(clearOf(layout, nodes, "d1", "sink"), 48, "长链末端与汇合点仍应贴住");
+    const gap = clearOf(layout, nodes, "d1", "sink");
+    assert.ok(gap >= 160 && gap <= 320, `层间距=${gap} 应落在自适应区间 [160, 320]`);
+    assert.equal(clearOf(layout, nodes, "a2", "sink"), gap, "短链末端应紧邻汇合点，与长链末端到汇合点同距");
+    // s2 比同列的长链节点窄，dagre 会把窄节点在本列内居中，净空隙因此多出半个宽度差。
+    const shortGap = clearOf(layout, nodes, "s2", "a2");
+    assert.ok(shortGap >= gap && shortGap <= gap + 64, `短链内部间距=${shortGap} 应接近层间距 ${gap}（差额仅来自窄节点居中的半个宽度差）`);
     assert.deepEqual(overlaps(nodes, layout), []);
 });
 
-test("共享输入不被推远：源点扇出后两条链都仍贴着源点", () => {
-    // 反向收紧只放行「从源点出发、沿途无分支」的链。源点一旦扇出，整条链就不许动，
-    // 否则为了贴汇合点会把「共享输入 → 各下游」的边推远（实测会从 1 处长边变成 2 处）。
+test("共享输入：两条分支占同一组层，不会因分叉再被横向拉开", () => {
+    // dagre 会让两条等长分支对齐到同一组列（vidA 与 vidB 同列、upA 与 upB 同列），
+    // 共享输入到第一层最多跨过一个列位，不会像旧实现那样为了贴汇合点把分支推远。
     const nodes = [
         node("base", "image", 0, 0, 340, 240),
         node("vidA", "image", 400, 0, 420, 236), node("upA", "image", 900, 0, 420, 236),
@@ -355,8 +370,16 @@ test("共享输入不被推远：源点扇出后两条链都仍贴着源点", ()
         edge("base", "h3"), edge("h3", "vidB"), edge("vidB", "upB"), edge("upB", "sink"),
     ];
     const layout = layoutOf(nodes, conns, false);
-    assert.equal(clearOf(layout, nodes, "base", "vidA"), 48, "共享输入到第一路下游应贴住");
-    assert.equal(clearOf(layout, nodes, "base", "h3"), 48, "共享输入到第二路下游应贴住");
+    const centerX = (id: string) => {
+        const p = layout.get(id)!;
+        const width = p.width ?? nodes.find((item) => item.id === id)!.width;
+        return p.x + width / 2;
+    };
+    assert.ok(Math.abs(centerX("vidA") - centerX("vidB")) <= 1, "两路分支第一层应对齐到同一列");
+    assert.ok(Math.abs(centerX("upA") - centerX("upB")) <= 1, "两路分支第二层应对齐到同一列");
+    const branchGap = clearOf(layout, nodes, "vidA", "upA");
+    assert.ok(branchGap >= 160 && branchGap <= 320, `层间距=${branchGap} 应落在自适应区间 [160, 320]`);
+    assert.equal(clearOf(layout, nodes, "base", "h3"), branchGap, "共享输入到第二路分支只应隔一个层间距");
     assert.deepEqual(overlaps(nodes, layout), []);
 });
 
@@ -468,9 +491,11 @@ test("孤立节点不排成细长一列：一堆无连接节点的形状贴近�
     // 货架换行判定曾把「上一块后的 tail gap」也算进行宽，于是每行的可用宽度凭空少一个 CLUSTER_GAP：
     // 实测选中 6 个 300×200 的孤立节点会被拉成 300×1800 的一列（原选区是 1060×680），看着就像搬了家。
     const nodes = Array.from({ length: 6 }, (_, i) => node(`g${i}`, "image", 1200 + (i % 3) * 260, 900 + Math.floor(i / 3) * 240, 300, 200));
-    const { out, box } = arrangeSelected(nodes, [], true);
+    const { out } = arrangeSelected(nodes, [], true);
     assert.ok(out.maxX - out.minX >= 600, `整理后宽度=${Math.round(out.maxX - out.minX)} 应至少排得下两列（修复前只有 300）`);
-    assert.ok(out.maxY - out.minY <= (box.maxY - box.minY) * 2, `整理后高度=${Math.round(out.maxY - out.minY)} 不应远超原选区高度 ${box.maxY - box.minY}`);
+    // 单列时会是 6 行、高约 6×200 + 5×块间距；现在按多列排开即可，不应再接近单列高度。
+    const singleColumnHeight = 6 * 200 + 5 * 240;
+    assert.ok(out.maxY - out.minY <= singleColumnHeight * 0.55, `整理后高度=${Math.round(out.maxY - out.minY)} 不应接近单列高度 ${singleColumnHeight}`);
 });
 
 test("就近让开：上方有空位时不往下推整屏", () => {

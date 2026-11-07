@@ -692,11 +692,12 @@ export function H3Timeline({ ctx, segments, selected, total, onRemoveRef, onEdit
         const mode = String(segment.taskMode || segment.mode || "ref2va");
         const storyboardMode = supportsStoryboardTrack(segment) && isStoryboardModeEnabled(segment);
         const storyboardLaneVisible = supportsStoryboardTrack(segment) && (storyboardMode || !storyboardTrackItems(segment).length);
-        const orderedEntries = orderReferencesForSubmission(allRefs.map((ref, index) => ({ ref, index })),
+        const orderedRefs = orderReferencesForSubmission(allRefs,
             (segment.storyboardShots || []).map((shot) => String(shot.referenceBindingId || "")).filter(Boolean),
-            (entry) => entry.ref.bindingId,
-            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) === "storyboard",
-            (entry) => entry.ref.enabled !== false && entry.ref.type === "image" && inferReferenceRole(entry.ref) !== "storyboard" && Boolean(entry.ref.subjectId || entry.ref.groupId), segment.referenceOrder);
+            (ref) => ref.bindingId,
+            (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) === "storyboard",
+            (ref) => ref.enabled !== false && ref.type === "image" && inferReferenceRole(ref) !== "storyboard" && Boolean(ref.subjectId || ref.groupId),         segment.referenceOrder);
+        const orderedEntries = orderedRefs.map((ref, index) => ({ ref, index }));
         const typeCounts: Record<H3Ref["type"], number> = { image: 0, video: 0, audio: 0 };
         const indexedRefs = orderedEntries.map((entry) => ({ ...entry, ordinal: ++typeCounts[entry.ref.type] }));
         const refs = indexedRefs.filter(({ ref }) => !storyboardMode || ref.type !== "image" || inferReferenceRole(ref) !== "storyboard");

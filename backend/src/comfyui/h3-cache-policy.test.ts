@@ -4,9 +4,9 @@ import { ComfyUiBackend, buildNativeNanFengV15Workflow, type ComfyUiDeps } from 
 import type { RuntimeTask } from "../db.js";
 
 for (const scenario of [
-    { name: "未开启连续生成时默认完整释放执行缓存", params: {}, fail: false, frees: 1 },
+    { name: "未开启连续生成时默认彻底释放执行缓存", params: {}, fail: false, frees: 1 },
     { name: "明确保留模型缓存时成功不发 /free", params: { keepModelCache: true }, fail: false, frees: 0 },
-    { name: "明确关闭缓存时成功完整释放一次", params: { keepModelCache: false }, fail: false, frees: 1 },
+    { name: "明确关闭缓存时成功彻底释放一次", params: { keepModelCache: false }, fail: false, frees: 1 },
     { name: "采样失败时即使保留缓存也执行清理", params: { keepModelCache: true }, fail: true, frees: 1 },
 ]) {
     test(scenario.name, async (t) => {

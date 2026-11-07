@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { App, Select, Spin } from "antd";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Layers, PersonStanding, ScanFace, Shirt, Sparkles, type LucideIcon } from "lucide-react";
+import { ChevronRight, Layers, PersonStanding, Plus, ScanFace, Shirt, Sparkles, type LucideIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 import type { CanvasTheme } from "@/lib/canvas-theme";
@@ -81,8 +81,8 @@ export function OnlineCostumes({ keyword, onInsert, theme, kind = "costume" }: {
             <Icon className="size-3.5" />
             <span>{t(`canvas.sidePanel.${ui.title}`)}</span>{catalog.data && <span className="opacity-50">{filtered.length}</span>}
         </button>
-        {open && <div className="space-y-2 px-1 pb-3">
-            <a href={ONLINE_CATALOGS[kind].pageUrl} target="_blank" rel="noreferrer" className="text-xs opacity-70 underline">{t(label("Source"))}</a>
+        {open && <div className="space-y-1.5 px-1 pb-2">
+            <a href={ONLINE_CATALOGS[kind].pageUrl} target="_blank" rel="noreferrer" className="inline-block text-[11px] leading-4 opacity-55 transition-opacity hover:opacity-90 hover:underline">{t(label("Source"))}</a>
             {catalog.isLoading ? <div className="py-4 text-center text-xs"><Spin size="small" /> {t(label("Loading"))}</div> : catalog.isError ? <div className="text-xs">{t(label("Error"))} <button type="button" className="underline" onClick={() => void catalog.refetch()}>{t(label("Retry"))}</button></div> : <>
                 <Select size="small" className="w-full" value={category} onChange={value => { setCategory(value); setSubcategory(""); setAngle(""); setLimit(40); }} options={[{ value: "", label: t(label("Category")) }, ...categories.map(value => ({ value, label: value }))]} />
                 {(ui.subcategoryFilter || ui.angleFilter) && <div className="flex gap-1">
@@ -90,12 +90,21 @@ export function OnlineCostumes({ keyword, onInsert, theme, kind = "costume" }: {
                     {ui.angleFilter && <Select size="small" className="min-w-0 flex-1" value={angle} onChange={value => { setAngle(value); setLimit(40); }} options={[{ value: "", label: t(label(ui.angleFilter)) }, ...angles.map(value => ({ value, label: value }))]} />}
                 </div>}
                 {!filtered.length ? <div className="py-4 text-center text-xs opacity-60">{t(label("Empty"))}</div> : <div className="grid grid-cols-2 gap-2">
-                    {filtered.slice(0, limit).map(item => <button key={item.id} type="button" disabled={Boolean(importing)} onClick={() => void insert(item)} title={`${item.name || item.id} · ${item.category}\n${item.keywords}`} className="overflow-hidden rounded-lg border text-left disabled:opacity-50" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
-                        <img src={item.thumbnail} alt={item.name || item.id} loading="lazy" className={cn("w-full object-contain", kind === "portrait" ? "aspect-[4/5]" : "aspect-[2/3]")} />
-                        <span className="block truncate px-2 pt-1 text-xs font-semibold">{item.name || item.id}{importing === item.id && " …"}</span>
-                        <span className="block truncate px-2 text-[11px] opacity-65">{item.category}{item.subcategory ? ` · ${item.subcategory}` : ""}{item.angle ? ` · ${item.angle}` : ""}</span>
-                        <span className="block line-clamp-2 px-2 pb-2 text-[11px] opacity-65">{item.keywords}</span>
-                    </button>)}
+                    {filtered.slice(0, limit).map(item => {
+                        const title = item.name || item.id;
+                        return <button key={item.id} type="button" disabled={Boolean(importing)} onClick={() => void insert(item)} title={`${item.id} · ${item.category}\n${item.keywords}`} aria-label={`${t("canvas.sidePanel.add")}: ${title}`} aria-busy={importing === item.id} className="group overflow-hidden rounded-lg border text-left transition-opacity hover:opacity-90 active:opacity-75 disabled:opacity-50" style={{ borderColor: theme.node.stroke, background: theme.node.panel }}>
+                            <img src={item.thumbnail} alt={title} loading="lazy" className={cn("w-full object-contain", kind === "portrait" ? "aspect-[4/5]" : "aspect-[2/3]")} />
+                            <div className="flex min-h-8 items-start gap-1 px-2 pt-1.5">
+                                <span className="min-w-0 flex-1 line-clamp-2 text-xs font-semibold leading-4">{title}</span>
+                                <span className="grid size-5 shrink-0 place-items-center" style={{ color: theme.toolbar.activeText }}>
+                                    {importing === item.id ? <Spin size="small" /> : <Plus aria-hidden="true" className="size-3.5 opacity-55 transition-opacity group-hover:opacity-100" />}
+                                </span>
+                            </div>
+                            {item.summary && <span className="block truncate px-2 text-[11px] leading-4 opacity-60">{item.summary}</span>}
+                            {item.displayKeywords && <span className="block line-clamp-1 px-2 pb-2 text-[10px] leading-4 opacity-55">{item.displayKeywords}</span>}
+                            {!item.displayKeywords && <span className="block pb-2" />}
+                        </button>;
+                    })}
                 </div>}
                 {filtered.length > limit && <button type="button" className="w-full py-2 text-xs underline" onClick={() => setLimit(value => value + 40)}>{t(label("More"))}</button>}
             </>}

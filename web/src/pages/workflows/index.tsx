@@ -9,11 +9,16 @@ import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { exportWorkflowPackage, importWorkflowPackage, renameWorkflowTitle, runWorkflow, syncWorkflowFromComfyUI, type WorkflowConfig, type WorkflowField, type WorkflowPackage, type WorkflowRunResult } from "@/services/api/workflows";
 import { WorkflowGraphPanel } from "./workflow-graph-panel";
+import { workflowNodeCount } from "./workflow-source";
+import { suggestMediaFields } from "./field-suggest";
 import { WorkflowLibraryList, type WorkflowLibraryItem } from "./workflow-library-list";
 import { RunTab } from "./run-panel";
+import { reorderMediaFields } from "./field-groups";
 import { WorkflowWorkbench, type WorkbenchTab } from "./workflow-workbench";
 import { RunHistoryList } from "./run-history-list";
 import { lastOutputNodeId, normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
+import { PreviewNodePicker } from "./preview-node-picker";
+import { preferredPreviewNodeId } from "./preview-node-candidates";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
 import { ComfyUIWorkflowImport } from "./comfyui-workflow-import";
 import { useRunningHubUpload } from "./runninghub-workflow-upload";
@@ -490,7 +495,19 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
             const outputNodes = detail.config.outputNodes === undefined
                 ? (lastOutput ? [lastOutput] : [])
                 : normalizeOutputNodeSelection(detail.config.outputNodes, detail.workflow);
-            setSelected({ ...detail, config: { ...detail.config, outputNodes } });
+            // 从未配置过时，流里恰好有一个逐帧预览桥就自动采用。必须落盘：画布视频生成
+            // 读的是后端持久化的 config，只在前端会话态选中不会生效。
+            // 显式关闭存的是空串，与「从未配置」的 undefined 区分，不会被再次自动打开。
+            const configuredPreviewNodeId = detail.config.previewNodeId;
+            const previewNodeId = configuredPreviewNodeId === undefined
+                ? preferredPreviewNodeId(detail.workflow as never)
+                : configuredPreviewNodeId;
+            const autoPersistPreview = configuredPreviewNodeId === undefined && Boolean(previewNodeId);
+            setSelected({ ...detail, config: { ...detail.config, outputNodes, previewNodeId } });
+            if (autoPersistPreview) {
+                void request("PUT", `/api/workflows/${encodeURIComponent(name)}/config`, { ...detail.config, previewNodeId })
+                    .catch(() => undefined);
+            }
             setHistoryLogs([]);
             setActiveTab("graph");
         } catch (err) {
@@ -584,6 +601,11 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
 
     const handleOutputNodesChange = (next: string[]) => {
         if (selected) void handleSaveConfig(selected, { ...selected.config, outputNodes: next });
+    };
+
+    const handlePreviewNodeChange = (next: string) => {
+        // 空串是「显式关闭」，不能写成 undefined（后端会沿用旧值）。
+        if (selected) void handleSaveConfig(selected, { ...selected.config, previewNodeId: next });
     };
 
     const loadHistory = useCallback(async () => {
@@ -695,6 +717,20 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         const existingTimer = fieldsSaveTimerRef.current[selected.name];
         if (existingTimer) clearTimeout(existingTimer);
         fieldsSaveTimerRef.current[selected.name] = setTimeout(() => { fieldsSaveTimerRef.current[selected.name] = null; flushFieldsSave(selected.name); }, 600);
+    };
+
+    // 一键扫描节点图的媒体加载节点，补齐参考图/视频/音频字段（不与已暴露字段重复）。
+    const handleAutoDetectFields = () => {
+        if (!selected) return;
+        const suggested = suggestMediaFields(selected.workflow);
+        const seen = new Set(selected.config.fields.map((f) => `${f.node}::${f.input}`));
+        const added = suggested.filter((f) => !seen.has(`${f.node}::${f.input}`));
+        if (added.length === 0) {
+            message.info("没有发现新的媒体输入节点");
+            return;
+        }
+        handleFieldsChange([...selected.config.fields, ...added]);
+        message.success(`已识别 ${added.length} 个媒体输入字段`);
     };
 
     /**
@@ -961,7 +997,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                         result={cloudRun?.result || null}
                                         runLabel="提交到 RunningHub"
                                         emptyText={t("microTools.workflow.noCloudMappings")}
-                                        hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入"
+                                        hint="表单里的参数只影响本次运行，不会写回档案；媒体按档案里 image/video/audio 字段的顺序注入，可拖动左侧手柄调整"
                                         statusText={t(cloudRun?.submitting ? "workflowRecovery.submitting" : cloudRun?.cancellation === "pending" ? "workflowRecovery.cancelWaiting" : cloudRun?.unknown ? "workflowRecovery.submissionUnknown" : cloudRun?.error ? "workflowRecovery.queryFailed" : "workflowRecovery.running")}
                                         onCancel={cloudRun?.taskId && !cloudRun.unknown && !cloudRun.submitting && !cloudRun.cancellation ? () => void cloudRuns.cancel(cloudOwner, cancelRunningHubTask, readCloudTask) : undefined}
                                         extra={runNotice(cloudOwner, cloudRun, cloudRuns, readCloudTask)}
@@ -973,6 +1009,27 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                                 excludeSaveImageToLocal
                                             />
                                         }
+                                        onReorderMediaFieldIds={(orderedMediaIds) => {
+                                            if (!selectedProfile) return;
+                                            const nextFields = reorderMediaFields(
+                                                selectedProfile.fields || [],
+                                                (field) => ["image", "video", "audio"].includes(field.source || ""),
+                                                (field) => field.id || `${field.nodeId}::${field.fieldName}`,
+                                                orderedMediaIds,
+                                            );
+                                            // RunningHub 注入顺序按 source + index；拖动后把媒体 index 重编成连续序号，
+                                            // 让新顺序既反映到界面提示（runningHubMediaSlots），也真正落到平台素材槽位。
+                                            const cursors = { image: 0, video: 0, audio: 0 };
+                                            const reindexed = nextFields.map((field) => {
+                                                if (["image", "video", "audio"].includes(field.source || "")) {
+                                                    const kind = field.source as "image" | "video" | "audio";
+                                                    cursors[kind] += 1;
+                                                    return { ...field, index: cursors[kind] };
+                                                }
+                                                return field;
+                                            });
+                                            void handleProfileFieldsChange(reindexed);
+                                        }}
                                     />
                                 }
                                 history={
@@ -1028,7 +1085,7 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                     </h2>
                                 )
                             }
-                            subtitle={`${selected.name.replace(/^custom\//, "")} · ${Object.keys(selected.workflow).length} 个节点 · ${selected.config.fields.length} 字段`}
+                            subtitle={`${selected.name.replace(/^custom\//, "")} · ${workflowNodeCount(selected.workflow)} 个节点 · ${selected.config.fields.length} 字段`}
                             alerts={selected.source?.syncState === "changed"
                                 ? <Alert type="warning" showIcon message={t("workflowLibraryActions.syncComfyUIChanged")} description={`${selected.source.relativePath} · ${selected.source.instance}`} />
                                 : selected.source?.syncState === "missing"
@@ -1105,6 +1162,17 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                     key={`local:${selected.name}`}
                                     config={selected.config}
                                     onRun={handleRun}
+                                    onAutoDetectFields={handleAutoDetectFields}
+                                    onReorderMediaFieldIds={(orderedMediaIds) => {
+                                        if (!selected) return;
+                                        const nextFields = reorderMediaFields(
+                                            selected.config.fields,
+                                            (field) => ["image", "video", "audio"].includes(field.type),
+                                            (field) => field.id,
+                                            orderedMediaIds,
+                                        );
+                                        handleFieldsChange(nextFields);
+                                    }}
                                     running={Boolean(activeRun?.running)}
                                     disabled={savingOwners.has(selected?.name || "") || Boolean(activeRun?.unknown)}
                                     cancelPending={activeRunIsCloud ? activeRun?.cancelling : undefined}
@@ -1114,7 +1182,12 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                         ? () => void cloudRuns.cancel(boundCloudOwner, cancelRunningHubTask, readCloudTask)
                                         : undefined}
                                     extra={runNotice(localOwner, localRun, localRuns, fetchBackendTask)}
-                                    outputPicker={<OutputNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />}
+                                    outputPicker={
+                                        <div className="space-y-3">
+                                            <OutputNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />
+                                            <PreviewNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={selected.config.previewNodeId} onChange={handlePreviewNodeChange} />
+                                        </div>
+                                    }
                                     advanced={
                                         <div className="space-y-2">
                                             <div className="flex flex-wrap items-center gap-3">

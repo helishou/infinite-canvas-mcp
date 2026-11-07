@@ -1,3 +1,4 @@
+import { runAsAgentWrite } from "./drama/agent-write-scope.js";
 import { executeDirectorSubagentTool } from "@basketikun/canvas-agent/agent/delegation";
 import { productionToolNames, executeProductionTool } from "@basketikun/canvas-agent/drama/production-tools";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -354,7 +355,7 @@ export function registerBackendMcpHttpRoutes(
       if (!checkProfile(req, res, existing.instance)) return;
       existing.lastSeenAt = Date.now();
       try {
-        await existing.transport.handleRequest(req, res, req.body);
+        await runAsAgentWrite(() => existing.transport.handleRequest(req, res, req.body));
       } catch (error) {
         fail(res, error);
       }
@@ -420,7 +421,7 @@ export function registerBackendMcpHttpRoutes(
       transport.onerror = (error) =>
         logger.warn("MCP HTTP 传输异常", { error: error.message });
       await instance.server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await runAsAgentWrite(() => transport.handleRequest(req, res, req.body));
     } catch (error) {
       if (instance) await instance.server.close().catch(() => undefined);
       fail(res, error);
@@ -438,7 +439,7 @@ export function registerBackendMcpHttpRoutes(
     if (!checkProfile(req, res, session.instance)) return;
     try {
       if (req.method === "DELETE") session.closeReason = "client_delete";
-      await session.transport.handleRequest(req, res);
+      await runAsAgentWrite(() => session.transport.handleRequest(req, res));
       if (req.method === "DELETE" && sessions.get(sessionId) === session)
         session.closeReason = "transport_closed";
     } catch (error) {

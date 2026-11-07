@@ -34,7 +34,7 @@ export type AgentModel = {
 export type AgentApprovalDecision = "accept" | "acceptForSession" | "decline";
 export type AgentPendingApproval = { requestId: string; method: string; threadId?: string; turnId?: string; itemId?: string; reason?: string; command?: unknown; cwd?: string; grantRoot?: string; networkApprovalContext?: unknown; permissions?: unknown; deciding?: AgentApprovalDecision };
 export type AgentCanvasContext = { snapshot: CanvasAgentSnapshot; applyOps: (ops?: CanvasAgentOp[]) => CanvasAgentSnapshot; undoOps: () => CanvasAgentSnapshot | null; canUndo: boolean };
-export type AgentThreadSummary = { id: string; preview: string; name?: string | null; cwd?: string; status?: string; source?: unknown; createdAt?: number; updatedAt?: number };
+export type AgentThreadSummary = { id: string; preview: string; model?: string; name?: string | null; cwd?: string; status?: string; source?: unknown; createdAt?: number; updatedAt?: number };
 export type AgentTokenUsage = { input: number; cached: number; output: number };
 export type AgentBootstrapStatus = { key: string; text: string; detail: string; status: "running" | "ready" | "error" };
 export type AgentConversationState = {
@@ -133,17 +133,23 @@ type AgentStore = {
 export const CANVAS_AGENT_PANEL_MOTION_MS = 500;
 
 let saveSettingsTimer: ReturnType<typeof setTimeout> | null = null;
+let agentModelSelectionRevision = 0;
+let pendingAgentSettings: Partial<FrontendSettings> = {};
 
 function debouncedSaveAgentSettings(patch: Partial<AgentStore>) {
+    const settingsPatch: Partial<FrontendSettings> = {};
+    if (patch.width !== undefined) settingsPatch.agentPanelWidth = patch.width;
+    if (patch.permissionMode !== undefined) settingsPatch.agentPermissionMode = patch.permissionMode;
+    if (patch.model !== undefined) settingsPatch.agentModel = patch.model;
+    if (patch.reasoningEffort !== undefined) settingsPatch.agentReasoningEffort = patch.reasoningEffort;
+    if (Object.keys(settingsPatch).length === 0) return;
     if (saveSettingsTimer) clearTimeout(saveSettingsTimer);
+    pendingAgentSettings = { ...pendingAgentSettings, ...settingsPatch };
     saveSettingsTimer = setTimeout(() => {
         saveSettingsTimer = null;
-        const s: Partial<FrontendSettings> = {};
-        if (patch.width !== undefined) s.agentPanelWidth = patch.width;
-        if ((patch as Partial<AgentStore>).permissionMode !== undefined) s.agentPermissionMode = (patch as Partial<AgentStore>).permissionMode;
-        if (patch.model !== undefined) s.agentModel = patch.model;
-        if (patch.reasoningEffort !== undefined) s.agentReasoningEffort = patch.reasoningEffort;
-        if (Object.keys(s).length > 0) void saveSettings(s);
+        const pending = pendingAgentSettings;
+        pendingAgentSettings = {};
+        if (Object.keys(pending).length > 0) void saveSettings(pending);
     }, 500);
 }
 
@@ -195,6 +201,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     pendingTool: null,
     pendingApprovals: [],
     setAgentState: (patch) => {
+        if (patch.model !== undefined) agentModelSelectionRevision++;
         const before = get(), after = { ...before, ...patch };
         const draft = after.prompt.trim() || after.attachments.length || after.canvasReferences.length;
         const hadDraft = before.prompt.trim() || before.attachments.length || before.canvasReferences.length;
@@ -325,12 +332,13 @@ export async function flushAgentPromptQueue() {
 
 /** 从 backend settings 同步 agent 相关配置 */
 async function hydrateAgentSettings() {
+    const modelSelectionRevision = agentModelSelectionRevision;
     const settings = await fetchSettings();
     const patch: Partial<AgentStore> = {};
     if (settings.agentPanelWidth) patch.width = settings.agentPanelWidth;
     if (settings.agentPermissionMode) patch.permissionMode = settings.agentPermissionMode as AgentPermissionMode;
-    if (settings.agentModel) patch.model = settings.agentModel;
-    if (settings.agentReasoningEffort) patch.reasoningEffort = settings.agentReasoningEffort as AgentReasoningEffort;
+    if (settings.agentModel && modelSelectionRevision === agentModelSelectionRevision) patch.model = settings.agentModel;
+    if (settings.agentReasoningEffort && modelSelectionRevision === agentModelSelectionRevision) patch.reasoningEffort = settings.agentReasoningEffort as AgentReasoningEffort;
     if (Object.keys(patch).length > 0) useAgentStore.setState(patch);
 }
 

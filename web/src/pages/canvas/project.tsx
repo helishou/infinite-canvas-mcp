@@ -100,6 +100,7 @@ import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourc
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { findFreeNodePosition, placementObstacles, NODE_PLACEMENT_GAP } from "@/lib/canvas/canvas-node-placement";
 import { findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection } from "@/lib/canvas/canvas-node-geometry";
 import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupResizeLayout, orderedGroupSlots, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
 import { buildOrderedGroupDragCommit } from "@/lib/canvas/canvas-ordered-group-drag";
@@ -1013,6 +1014,16 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         return screenToCanvas((rect?.left || 0) + (rect?.width || size.width) / 2, (rect?.top || 0) + (rect?.height || size.height) / 2);
     }, [screenToCanvas, size.height, size.width]);
 
+    // 当前可见区域的世界坐标矩形：新建节点优先落在这里，保证用户马上能看到它。
+    const getViewportBounds = useCallback(() => {
+        const rect = canvasRectRef.current;
+        const currentViewport = viewportRef.current;
+        const width = rect?.width || size.width;
+        const height = rect?.height || size.height;
+        const k = currentViewport.k || 1;
+        return { x: -currentViewport.x / k, y: -currentViewport.y / k, width: width / k, height: height / k };
+    }, [size.height, size.width]);
+
     const setConnecting = useCallback(
         (next: ConnectionHandle | null) => {
             connectingParamsRef.current = next;
@@ -1070,25 +1081,31 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const createConnectedNode = useCallback(
         (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Loop | CanvasNodeType.Scene | CanvasNodeType.Prop, pending: PendingConnectionCreate) => {
             const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.count || effectiveConfig.canvasImageCount) } : undefined;
-            const newNode = createCanvasNode(type, pending.position, metadata);
+            const sourceNode = pending.connection ? nodesRef.current.find((node) => node.id === pending.connection?.nodeId) : undefined;
+            const spec = getNodeSpec(type);
+            // 连线创建时沿用源节点尺寸（视觉上与源节点同规格），再按实际尺寸就近寻位。
+            const size = sourceNode ? { width: sourceNode.width, height: sourceNode.height } : { width: spec.width, height: spec.height };
+            const placement = findFreeNodePosition({
+                desired: { x: pending.position.x - size.width / 2, y: pending.position.y - size.height / 2 },
+                size,
+                obstacles: placementObstacles(nodesRef.current),
+                bounds: getViewportBounds(),
+                gap: NODE_PLACEMENT_GAP,
+            });
+            const newNode = createCanvasNode(type, { x: placement.x + size.width / 2, y: placement.y + size.height / 2 }, metadata);
+            newNode.width = size.width;
+            newNode.height = size.height;
             if (pending.connection) {
-                const sourceNode = nodesRef.current.find((node) => node.id === pending.connection?.nodeId);
-                if (sourceNode) {
-                    newNode.width = sourceNode.width;
-                    newNode.height = sourceNode.height;
-                    newNode.position = {
-                        x: pending.position.x - sourceNode.width / 2,
-                        y: pending.position.y - sourceNode.height / 2,
-                    };
-                }
                 const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
                 if (!connection) {
                     message.warning(t("canvas.projectPage.configConnection"));
                     return;
                 }
+                nodesRef.current = [...nodesRef.current, newNode];
                 setNodes((prev) => [...prev, newNode]);
                 setConnections((prev) => [...prev, { id: nanoid(), ...connection }]);
             } else {
+                nodesRef.current = [...nodesRef.current, newNode];
                 setNodes((prev) => [...prev, newNode]);
             }
             setSelectedNodeIds(new Set([newNode.id]));
@@ -1097,7 +1114,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, message, setConnecting, t],
+        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getViewportBounds, message, setConnecting, t],
     );
 
     const cancelPendingConnectionCreate = useCallback(() => {
@@ -1610,7 +1627,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [selectedNodeIds, productionContext, productionRecord, projectId]);
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
-            const targetPosition = position || getCanvasCenter();
+            const spec = getNodeSpec(type);
+            const center = position || getCanvasCenter();
+            // 期望位置被占用时就近找空位：连续新建 / 在已有节点上右键新建都不会叠在一起。
+            const placement = findFreeNodePosition({
+                desired: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
+                size: { width: spec.width, height: spec.height },
+                obstacles: placementObstacles(nodesRef.current),
+                bounds: getViewportBounds(),
+                gap: NODE_PLACEMENT_GAP,
+            });
+            const targetPosition = { x: placement.x + spec.width / 2, y: placement.y + spec.height / 2 };
             const configMetadata =
                 type === CanvasNodeType.Config
                     ? {
@@ -1621,6 +1648,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     : undefined;
             const newNode = createCanvasNode(type, targetPosition, configMetadata);
 
+            // 同步写 ref：同一 tick 里连点新建时，下一次寻位才能看到刚加的节点（否则会算到同一个空位）。
+            nodesRef.current = [...nodesRef.current, newNode];
             setNodes((prev) => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
@@ -1637,7 +1666,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Character && type !== CanvasNodeType.Scene && type !== CanvasNodeType.Prop && type !== CanvasNodeType.Loop;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
+        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter, getViewportBounds],
     );
 
     const deleteNodes = useCallback(
@@ -3288,10 +3317,6 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     useEffect(() => {
         const handlePaste = (event: ClipboardEvent) => {
-            if (!activeRef.current) return;
-            const target = event.target instanceof Element ? event.target : null;
-            if (target?.closest(".canvas-blocking-overlay")) return;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")) return;
             const data = event.clipboardData;
             if (!data) return;
 
@@ -3304,6 +3329,36 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 }
             }
             const text = data.getData("text/plain");
+
+            // 粘贴被丢弃时必须说明原因，否则用户只能看到「按了没反应」。
+            // 但只有本次剪贴板真的带图片/视频/音频时才提示：普通文字粘贴与空剪贴板保持静默。
+            const mediaPasted = files.some((file) => /^(image|video|audio)\//.test(file.type));
+            const explainSkipped = (reason: "hidden" | "overlay" | "editor") => {
+                if (!mediaPasted) return;
+                message.warning({
+                    content: reason === "hidden"
+                        ? t("canvas.projectPage.pasteSkipCanvasHidden")
+                        : reason === "overlay"
+                            ? t("canvas.projectPage.pasteSkipPanelOpen")
+                            : t("canvas.projectPage.pasteSkipEditorFocus"),
+                    key: "canvas-paste-skipped",
+                    duration: 4,
+                });
+            };
+
+            if (!activeRef.current) {
+                explainSkipped("hidden");
+                return;
+            }
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest(".canvas-blocking-overlay")) {
+                explainSkipped("overlay");
+                return;
+            }
+            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")) {
+                explainSkipped("editor");
+                return;
+            }
             const canvasText = data.getData(CANVAS_CLIPBOARD_FORMAT) || data.getData(`web ${CANVAS_CLIPBOARD_FORMAT}`);
             const canvasClipboard = parseCanvasClipboard(canvasText || text);
             event.preventDefault();
@@ -3322,7 +3377,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             void pasteSystemClipboard().then(async (handled) => {
                 if (handled) return;
                 if (await pasteEventClipboard(files, text)) return;
-                if (localMultiClipboardFallbackRef.current) pasteCopiedNodes();
+                if (localMultiClipboardFallbackRef.current) { pasteCopiedNodes(); return; }
+                // 剪贴板里有东西，但浏览器没给出任何媒体文件和文本（典型是从资源管理器复制的图片文件）：
+                // 这类「按了没反应」必须解释，否则用户无从自查。
+                if (!mediaPasted && !text.trim() && data.types.length) message.warning({ content: t("canvas.projectPage.pasteSkipNoMedia"), key: "canvas-paste-skipped", duration: 4 });
             });
         };
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -3432,7 +3490,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             window.removeEventListener("keydown", handleKeyDown);
             window.removeEventListener("blur", handleWindowBlur);
         };
-    }, [copySelectedNodes, deleteConnection, deleteNodes, pasteCopiedNodes, pasteEventClipboard, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, undoCanvas, fitAllNodes, focusSelection]);
+    }, [copySelectedNodes, deleteConnection, deleteNodes, message, pasteCopiedNodes, pasteEventClipboard, pasteSystemClipboard, redoCanvas, selectedConnectionId, setConnecting, undoCanvas, fitAllNodes, focusSelection, t]);
 
     const handleConnectStart = useCallback(
         (event: ReactMouseEvent, nodeId: string, handleType: "source" | "target") => {

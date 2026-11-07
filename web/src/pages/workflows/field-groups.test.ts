@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupWorkflowFields } from "./field-groups";
+import { groupWorkflowFields, reorderMediaFields } from "./field-groups";
 import type { WorkflowField } from "@/services/api/workflows";
 
 test("workflow groups preserve every mapped field, identity and defaults", () => {
@@ -14,3 +14,30 @@ test("workflow groups preserve every mapped field, identity and defaults", () =>
     assert.deepEqual(groups[2].fields.map(field => field.type), ["dropdown", "boolean", "number", "custom"]);
 });
 test("empty workflow groups create no empty input sections", () => assert.deepEqual(groupWorkflowFields([]), []));
+
+test("reorderMediaFields reorders only media and keeps non-media positions", () => {
+    const fields = [
+        { id: "t1", type: "text" },
+        { id: "img1", type: "image" },
+        { id: "v1", type: "video" },
+        { id: "img2", type: "image" },
+        { id: "p1", type: "number" },
+        { id: "img3", type: "image" },
+    ] as WorkflowField[];
+    const isMedia = (field: WorkflowField) => ["image", "video", "audio"].includes(field.type);
+    const next = reorderMediaFields(fields, isMedia, (field) => field.id, ["img3", "img1", "v1", "img2"]);
+    assert.deepEqual(next.map((field) => field.id), ["t1", "img3", "img1", "v1", "p1", "img2"]);
+});
+
+test("reorderMediaFields ignores ids absent from media and leaves order for empty list", () => {
+    const fields = [
+        { id: "img1", type: "image" },
+        { id: "v1", type: "video" },
+        { id: "img2", type: "image" },
+    ] as WorkflowField[];
+    const isMedia = (field: WorkflowField) => ["image", "video", "audio"].includes(field.type);
+    const withGhost = reorderMediaFields(fields, isMedia, (field) => field.id, ["ghost", "img2", "img1", "v1"]);
+    assert.deepEqual(withGhost.map((field) => field.id), ["img2", "img1", "v1"]);
+    const empty = reorderMediaFields(fields, isMedia, (field) => field.id, []);
+    assert.deepEqual(empty.map((field) => field.id), ["img1", "v1", "img2"]);
+});

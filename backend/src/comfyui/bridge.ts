@@ -406,7 +406,7 @@ export class ComfyUiBackend {
         if (this.deps.tasks.get(task.id)?.status === "cancelled") return;
         const controller = new AbortController(); this.controllers.set(task.id, controller);
         this.comfyExecutions.set(task.id, { url: comfyUrl });
-        let executionCacheCleared = false;
+        let modelsReleased = false;
         let executionCompleted = false;
         const keepModelCache = task.params.keepModelCache === true;
         try {
@@ -418,8 +418,8 @@ export class ComfyUiBackend {
                 ? await this.executeH3Segments(task, preset.id, task.input, task.params, comfyUrl, controller)
                 : await this.executeWorkflow(task, preset.id, task.input, task.params, comfyUrl, controller);
             if (preset.id === "minimax-h3" && !keepModelCache) {
-                await this.clearComfyExecutionCache(comfyUrl);
-                executionCacheCleared = true;
+                await this.releaseComfyModels(comfyUrl);
+                modelsReleased = true;
             }
             const checked = await inspectH3Result(result, task.params, this.deps.media);
             const current = this.deps.tasks.get(task.id);
@@ -428,8 +428,8 @@ export class ComfyUiBackend {
             this.deps.tasks.addEvent(task.id, "result", checked);
             executionCompleted = true;
         } finally {
-            if (preset.id === "minimax-h3" && !executionCacheCleared && (!keepModelCache || !executionCompleted)) {
-                try { await this.clearComfyExecutionCache(comfyUrl); } catch (error) { console.warn("[comfyui] H3 执行缓存清理失败:", error instanceof Error ? error.message : String(error)); }
+            if (preset.id === "minimax-h3" && !modelsReleased && (!keepModelCache || !executionCompleted)) {
+                try { await this.releaseComfyModels(comfyUrl); } catch (error) { console.warn("[comfyui] H3 模型释放失败:", error instanceof Error ? error.message : String(error)); }
             }
             await this.cancellations.get(task.id);
             this.cancellations.delete(task.id);
@@ -437,8 +437,14 @@ export class ComfyUiBackend {
         }
     }
 
-    /** 完整释放执行缓存和模型；成功连续生成且保留缓存时不得调用 /free。 */
-    private async clearComfyExecutionCache(comfyUrl: string) {
+    /**
+     * 彻底释放执行缓存和模型。
+     * free_memory 必须为 true：它触发 ComfyUI 的 e.reset()，把上一段的中间张量从系统内存里放掉。
+     * 只 unload_models 会留下 RAM pressure cache，H3 的大家伙（20GB DiT + 15GB TE）会挤掉系统文件缓存，
+     * 下一段每步都从磁盘重读权重——实测同一段从 41s/it 退化到 617s/it（3'41" → 10'33"）。
+     * 连续生成模式（keepModelCache）根本不会走到这里，条件缓存自然保留。
+     */
+    private async releaseComfyModels(comfyUrl: string) {
         const response = await fetch(`${comfyUrl}/free`, {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -1481,10 +1487,14 @@ export async function buildExpandedNanFengV10Workflow(
     validateNanFengMode(mode, uploadedRefs.length, uploadedVideos.length, uploadedAudios.length, params);
 
     // ── 起始释放：同时是四个 Loader 名称的依赖屏障（先行卸载旧模型 / 预留显存）──
+    // 连续生成模式（keepModelCache）只让「条件链」脱钩，起始释放必须每任务执行：
+    // 它负责卸载上一任务的模型、设 EXTRA_RESERVED_VRAM；跳过它会让显存带着上一段的状态进入采样，
+    // 实测同一段第二次跑会从 3'41" 退化到 10'33"（显存打满、持续换入换出）。
+    const reuseConditioning = params.keepModelCache === true;
     const reserved = params.runtimeReserveEnabled === true ? Number(value("reservedVramGb", 0.6)) : 0;
     const start = node("nf_start", "NanFengH3ReleaseAtStartV15", {
         unet_name: modelName, clip_name: textEncoder, video_vae_name: videoVaeName, audio_vae_name: audioVaeName,
-        reserved_vram_gb: reserved, keep_loader_cache: keepLoaderCache,
+        reserved_vram_gb: reserved, keep_loader_cache: reuseConditioning ? false : keepLoaderCache,
     });
 
     // ── DiT + LoRA + 注意力/加速补丁链（顺序与原生 generate() 一致）──
@@ -1522,7 +1532,12 @@ export async function buildExpandedNanFengV10Workflow(
     const conditionLoaders = node("nf_condition_loaders", "NanFengH3ReleaseBeforeConditionLoadersV15", {
         clip_name: start(1), video_vae_name: start(2), audio_vae_name: start(3), keep_loader_cache: keepLoaderCache,
     });
-    const clip = node("nf_clip", "CLIPLoader", { clip_name: nameGate("nf_gate_clip", conditionLoaders(0)), type: String(value("textEncoderType", "minimax")), device: String(value("textEncoderDevice", "default")) });
+    // 连续生成模式下，Loader 名称改回字面量：屏障节点的 IS_CHANGED 返回 NaN，
+    // 而 ComfyUI 的签名递归包含祖先（comfy_execution/caching.py），挂在它下面会让 CLIPLoader /
+    // VAELoader / 条件编码节点每次都是新 key——prompt 没变也要重载 TE 重新编码。
+    // 这里放弃「条件编码前先释放」的顺序保证，换取条件缓存可复用；起始释放（nf_start）仍然每任务执行。
+    const clipName = reuseConditioning ? textEncoder : nameGate("nf_gate_clip", conditionLoaders(0));
+    const clip = node("nf_clip", "CLIPLoader", { clip_name: clipName, type: String(value("textEncoderType", "minimax")), device: String(value("textEncoderDevice", "default")) });
     // TRT 视频 VAE：原生 V15 开启时改用 MiniMaxH3TRTVAELoader 取代普通 VAELoader。
     let videoVae: (output?: number) => [string, number];
     if (params.trtVideoVaeEnabled === true) {
@@ -1531,9 +1546,11 @@ export async function buildExpandedNanFengV10Workflow(
         if (decoder === "None" || encoder === "None") throw new Error("已启用 TRT 视频 VAE，但未选择本机编译的 TRT decoder/encoder 引擎。请先选择引擎，或关闭该开关。");
         videoVae = node("nf_video_vae", "MiniMaxH3TRTVAELoader", { decoder, encoder });
     } else {
-        videoVae = node("nf_video_vae", "VAELoader", { vae_name: nameGate("nf_gate_video_vae", conditionLoaders(1)) });
+        const vaeName = reuseConditioning ? videoVaeName : nameGate("nf_gate_video_vae", conditionLoaders(1));
+        videoVae = node("nf_video_vae", "VAELoader", { vae_name: vaeName });
     }
-    const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: nameGate("nf_gate_audio_vae", conditionLoaders(2)) });
+    const audioVaeNameInput = reuseConditioning ? audioVaeName : nameGate("nf_gate_audio_vae", conditionLoaders(2));
+    const audioVae = node("nf_audio_vae", "VAELoader", { vae_name: audioVaeNameInput });
 
     const promptBody = withNoTextConstraint(String(input.prompt || "").trim(), params.noCaption !== false);
     const trigger = String(value("constantTriggerWord", "")).trim();
@@ -1547,8 +1564,12 @@ export async function buildExpandedNanFengV10Workflow(
     let conditioning: [string, number];
     let latent: [string, number];
     if (mode === "t2v" || mode === "i2v" || mode === "fl2v") {
-        const release = node("nf_condition_release", "NanFengH3ReleaseBeforeConditioningV15", { clip: clip(0), vae: videoVae(0), keep_loader_cache: keepLoaderCache });
-        const imageInputs: Record<string, any> = { clip: release(0), vae: release(1), prompt, width, height, length: frames };
+        // 连续生成模式下不插条件释放节点：它每次执行都会把 NaN 写进下游签名，
+        // 让 MiniMaxH3ImageToVideo（prompt 编码就在它内部）永远无法命中缓存。
+        const release = reuseConditioning
+            ? null
+            : node("nf_condition_release", "NanFengH3ReleaseBeforeConditioningV15", { clip: clip(0), vae: videoVae(0), keep_loader_cache: keepLoaderCache });
+        const imageInputs: Record<string, any> = { clip: release ? release(0) : clip(0), vae: release ? release(1) : videoVae(0), prompt, width, height, length: frames };
         if (mode === "i2v" || mode === "fl2v") {
             const first = node("nf_first", "LoadImage", { image: uploadedRefs[0] });
             imageInputs.first_frame = node("nf_first_limit", "NanFengH3LimitImageLongEdgeV15", { image: first(0), max_long_edge: referenceLongEdge })(0);

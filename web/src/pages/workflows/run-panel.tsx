@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Input, Progress, Select, Switch, Tag, message } from "antd";
 import { useTranslation } from "react-i18next";
 import { groupWorkflowFields } from "./field-groups";
-import { Play, Trash2, Upload } from "lucide-react";
+import { Play, Trash2, Upload, GripVertical } from "lucide-react";
 import { uploadBackendMedia, backendMediaUrl } from "@/services/backend-api";
 import type { WorkflowConfig, WorkflowField, WorkflowRunResult } from "@/services/api/workflows";
 
@@ -119,6 +119,10 @@ export type RunPanelProps = {
     outputPicker?: ReactNode;
     /** 高级设置区（运行位置等）；没有就不渲染。 */
     advanced?: ReactNode;
+    /** 参考媒体字段拖拽重排后回调，参数为媒体字段 id 的新顺序（左→右）。 */
+    onReorderMediaFieldIds?: (orderedMediaIds: string[]) => void;
+    /** 运行页签空白时的一键识别入口（扫描节点图媒体输入），由调用方实现。 */
+    onAutoDetectFields?: () => void;
 };
 
 /**
@@ -127,7 +131,7 @@ export type RunPanelProps = {
  * 各自的特有内容（默认值运行、取消、批量映射表）通过插槽传入。
  */
 export function RunTab({
-    config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker, advanced,
+    config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, hint, toolbar, footer, extra, progress, statusText, onCancel, outputPicker, advanced, onReorderMediaFieldIds, onAutoDetectFields,
 }: RunPanelProps & {
     hint?: ReactNode;
     toolbar?: ReactNode;
@@ -158,6 +162,8 @@ export function RunTab({
                 statusText={statusText}
                 onCancel={onCancel}
                 advanced={advanced}
+                onReorderMediaFieldIds={onReorderMediaFieldIds}
+                onAutoDetectFields={onAutoDetectFields}
             />
             {footer}
             {extra}
@@ -169,10 +175,13 @@ export function RunTab({
  * 运行面板：按 config.fields 渲染可填写输入并提交。本地 ComfyUI 与 RunningHub
  * 都把字段归一化成 WorkflowConfig 后复用它，所以两边运行体验一致。
  */
-export function RunPanel({ config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, progress, statusText, onCancel, advanced }: RunPanelProps) {
+export function RunPanel({ config, onRun, running, disabled, cancelPending, result, emptyText, runLabel, progress, statusText, onCancel, advanced, onReorderMediaFieldIds, onAutoDetectFields }: RunPanelProps) {
     const { t } = useTranslation();
     const uploadingFields = useRef(new Set<string>());
     const [uploadCount, setUploadCount] = useState(0);
+    // 拖拽重排参考媒体的瞬时状态：用 ref 承载被拖字段 id，避免 onDrop 闭包读到旧值。
+    const dragIdRef = useRef<string | null>(null);
+    const [dragOverId, setDragOverId] = useState<string | null>(null);
     // An owner is isolated by RunTab's key. Within that owner, names/defaults and fresh
     // config objects must not overwrite input; only a different field binding starts anew.
     const fieldKey = (field: WorkflowField) => JSON.stringify([field.id, field.node, field.input, field.type]);
@@ -197,38 +206,91 @@ export function RunPanel({ config, onRun, running, disabled, cancelPending, resu
         setUploadCount(uploadingFields.current.size);
     };
 
+    const renderFieldControl = (field: WorkflowField) => (
+        field.type === "text" ? (
+            <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setField(field.id, e.target.value)} rows={2} placeholder={field.name} />
+        ) : field.type === "image" ? (
+            <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
+        ) : field.type === "audio" ? (
+            <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
+        ) : field.type === "video" ? (
+            <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
+        ) : field.type === "dropdown" ? (
+            <Select value={fields[field.id] || undefined} onChange={(v) => setField(field.id, v)} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
+        ) : field.type === "boolean" ? (
+            <Switch checked={fields[field.id] === "true"} onChange={(v) => setField(field.id, String(v))} />
+        ) : (
+            <Input value={fields[field.id] || ""} onChange={(e) => setField(field.id, e.target.value)} placeholder={String(field.default || "")} />
+        )
+    );
+
+    const renderFieldLabel = (field: WorkflowField) => (
+        <label className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
+            {field.name || field.id}
+            <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
+        </label>
+    );
+
+    const handleMediaDrop = (targetId: string) => {
+        const fromId = dragIdRef.current;
+        dragIdRef.current = null;
+        setDragOverId(null);
+        if (!fromId || fromId === targetId || !onReorderMediaFieldIds) return;
+        const ids = config.fields.filter((field) => ["image", "video", "audio"].includes(field.type)).map((field) => field.id);
+        const from = ids.indexOf(fromId);
+        const to = ids.indexOf(targetId);
+        if (from < 0 || to < 0 || from === to) return;
+        ids.splice(to, 0, ids.splice(from, 1)[0]);
+        onReorderMediaFieldIds(ids);
+    };
+
     return (
         <div className="space-y-4">
             <p className="text-xs text-muted-foreground">{t("microTools.workflow.scope")}</p>
             {config.fields.length === 0 ? (
-                <div className="text-center text-sm text-muted-foreground">{emptyText ?? "请先点击节点配置字段后再运行"}</div>
+                <div className="space-y-3 text-center">
+                    <div className="text-sm text-muted-foreground">{emptyText ?? "请先点击节点配置字段后再运行"}</div>
+                    {onAutoDetectFields ? (
+                        <Button type="dashed" onClick={onAutoDetectFields}>自动识别媒体字段（扫描节点图）</Button>
+                    ) : null}
+                </div>
             ) : (
                 <div className="space-y-3">
                     {groupWorkflowFields(config.fields).map(group => <section key={group.key} aria-label={t(`microTools.workflow.${group.key}`)} className="space-y-3">
                         <h3 className="text-sm font-medium text-foreground">{t(`microTools.workflow.${group.key}`)}</h3>
-                    {group.fields.map((field) => (
-                        <div key={fieldKey(field)}>
-                            <label className="mb-1 flex items-center gap-2 text-xs text-muted-foreground">
-                                {field.name || field.id}
-                                <Tag color="default" className="text-xs">{field.node.includes(",") ? `多节点 · ${field.input}` : `${field.node}.${field.input}`}</Tag>
-                            </label>
-                            {field.type === "text" ? (
-                                <Input.TextArea value={fields[field.id] || ""} onChange={(e) => setField(field.id, e.target.value)} rows={2} placeholder={field.name} />
-                            ) : field.type === "image" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="image" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
-                            ) : field.type === "audio" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="audio" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
-                            ) : field.type === "video" ? (
-                                <MediaFieldUpload fieldId={field.id} kind="video" value={fields[field.id] || ""} onChange={(v) => setField(field.id, v)} onUploadingChange={(pending) => setUploading(fieldKey(field), pending)} />
-                            ) : field.type === "dropdown" ? (
-                                <Select value={fields[field.id] || undefined} onChange={(v) => setField(field.id, v)} options={(field.options ?? []).map((o) => ({ label: o, value: o }))} placeholder={field.name} className="w-full" />
-                            ) : field.type === "boolean" ? (
-                                <Switch checked={fields[field.id] === "true"} onChange={(v) => setField(field.id, String(v))} />
-                            ) : (
-                                <Input value={fields[field.id] || ""} onChange={(e) => setField(field.id, e.target.value)} placeholder={String(field.default || "")} />
-                            )}
+                    {group.key === "media" ? (
+                        <div className="space-y-2">
+                            <p className="text-xs text-muted-foreground">{t("microTools.workflow.mediaReorderHint")}</p>
+                            {group.fields.map((field) => (
+                                <div
+                                    key={fieldKey(field)}
+                                    draggable
+                                    title={t("microTools.workflow.dragToReorder")}
+                                    onDragStart={(event) => { dragIdRef.current = field.id; event.dataTransfer.effectAllowed = "move"; }}
+                                    onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; if (dragIdRef.current && dragIdRef.current !== field.id) setDragOverId(field.id); }}
+                                    onDragLeave={() => { if (dragOverId === field.id) setDragOverId(null); }}
+                                    onDrop={(event) => { event.preventDefault(); handleMediaDrop(field.id); }}
+                                    onDragEnd={() => { dragIdRef.current = null; setDragOverId(null); }}
+                                    className={`flex items-start gap-2 rounded-md border border-transparent p-2 ${dragOverId === field.id ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20" : "hover:border-border"}`}
+                                >
+                                    <GripVertical className="mt-1 size-4 shrink-0 cursor-grab text-muted-foreground active:cursor-grabbing" />
+                                    <div className="min-w-0 flex-1">
+                                        {renderFieldLabel(field)}
+                                        {renderFieldControl(field)}
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    ))}
+                    ) : (
+                        <div className="space-y-3">
+                            {group.fields.map((field) => (
+                                <div key={fieldKey(field)}>
+                                    {renderFieldLabel(field)}
+                                    {renderFieldControl(field)}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                     </section>)}
                 </div>
             )}

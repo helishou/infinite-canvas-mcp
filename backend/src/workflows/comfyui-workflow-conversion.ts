@@ -1,6 +1,22 @@
 type Row = Record<string, any>;
 
-const UI_NOTE_TYPES = new Set(["Note", "MarkdownNote", "孤海注释", "Fast Groups Muter (rgthree)", "Fast Groups Bypasser (rgthree)", "Mute / Bypass (rgthree)"]);
+const UI_NOTE_TYPES = new Set(["Note", "MarkdownNote", "孤海注释"]);
+/** rgthree 的前端控制节点只切换所连节点的 mute/bypass，后端没有对应 class_type，不能进入 API prompt。 */
+const UI_CONTROL_TYPES = new Set([
+    "Fast Groups Muter (rgthree)",
+    "Fast Groups Bypasser (rgthree)",
+    "Fast Muter (rgthree)",
+    "Fast Bypasser (rgthree)",
+    "Fast Actions Button (rgthree)",
+    "Node Collector (rgthree)",
+    "Mute / Bypass (rgthree)",
+    "Mute / Bypass Repeater (rgthree)",
+    "Mute / Bypass Relay (rgthree)",
+    "Random Unmuter (rgthree)",
+    "Label (rgthree)",
+    "Bookmark (rgthree)",
+]);
+const UI_ONLY_TYPES = new Set([...UI_NOTE_TYPES, ...UI_CONTROL_TYPES]);
 const UI_ROUTING_TYPES = new Set(["Reroute", "SetNode", "GetNode"]);
 
 /** 节点是否被 bypass（mode 4）：不执行，第一个输入透传到第一个输出。 */
@@ -20,9 +36,9 @@ function isRoutingNode(node: Row | null): boolean {
   return isBypassed(node);
 }
 
-/** Remove frontend-only annotations from an execution graph without changing the saved workflow. */
+/** Remove frontend-only annotations and control nodes from an execution graph without changing the saved workflow. */
 export function removeUiNotes(graph: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(graph).filter(([, node]) => !UI_NOTE_TYPES.has(String(row(node)?.class_type))));
+  return Object.fromEntries(Object.entries(graph).filter(([, node]) => !UI_ONLY_TYPES.has(String(row(node)?.class_type))));
 }
 
 function row(value: unknown): Row | null {
@@ -100,21 +116,25 @@ export function convertComfyWorkflowToApi(value: unknown): Record<string, unknow
       return resolveSource(String(matches[0].id), 0, visited, true);
     }
     namedRoute ||= source.type === "SetNode";
-    // bypass 节点只透传第一个输入到第一个输出，其他槽位不透传
-    if (isBypassed(source) && originSlot !== 0) return [originId, originSlot];
+    // bypass 节点只透传第一个输入到第一个输出，其他槽位没有可透传的来源。
+    // 不能把 [bypassedId, slot] 原样交给下游：被 bypass 的节点不会进入 API prompt，
+    // 那样会生成指向不存在节点的悬空连线，提交前校验必然失败。
+    if (isBypassed(source) && originSlot !== 0) return null;
     const rerouteInput = (Array.isArray(source.inputs) ? source.inputs : []).find((input: Row, index: number) => Number(input?.slot_index ?? input?.slotIndex ?? index) === (isBypassed(source) ? 0 : originSlot));
     const upstream = rerouteInput?.link !== null && rerouteInput?.link !== undefined
       ? links.get(String(rerouteInput.link))
       : incoming.get(`${originId}:${originSlot}`);
     if (!upstream) {
-      if (namedRoute) throw new Error(`SetNode/GetNode 路由 ${originId} 缺少上游连线`);
+      // 命名路由（SetNode/GetNode）缺上游连线时，不再阻断整张工作流的导入/校验：
+      // 与下方「无法解析的连线跳过，不阻断导入」及非命名路由的落空处理保持一致，
+      // 让该连线静默落空，导入仍成功；缺连线的孤点由运行期或 ComfyUI 反馈。
       return null;
     }
     return resolveSource(upstream.originId, upstream.originSlot, visited, namedRoute);
   };
   for (const node of nodes) {
     if (!node || node.id === undefined || typeof node.type !== "string" || !node.type) continue;
-    if (UI_NOTE_TYPES.has(node.type)) continue;
+    if (UI_ONLY_TYPES.has(node.type)) continue;
     if (UI_ROUTING_TYPES.has(node.type)) continue;
     if (isDisabled(node)) continue;
     if (isBypassed(node)) continue;
@@ -154,6 +174,8 @@ export function convertComfyWorkflowToApi(value: unknown): Record<string, unknow
   for (const link of links.values()) {
     const targetNode = nodeById.get(link.targetId);
     if (UI_ROUTING_TYPES.has(String(targetNode?.type || ""))) continue;
+    // 前端控制节点不是执行节点，指向它的连线是控制连线而非数据连线
+    if (UI_CONTROL_TYPES.has(String(targetNode?.type || ""))) continue;
     if (isDisabled(targetNode)) continue;
     if (isBypassed(targetNode)) continue;
     if (!api[link.targetId]) throw new Error(`工作流连线引用了不存在的节点：${link.originId} → ${link.targetId}`);

@@ -230,6 +230,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const [reconnectEpoch, setReconnectEpoch] = useState(0);
     const loadThreadsSequenceRef = useRef(0);
     const threadMessagesRef = useRef(new Map<string, AgentChatItem[]>());
+    const pendingHistoryModelRef = useRef<{ threadId: string; model: string } | null>(null);
     const authoritativeHistoryTurnsRef = useRef(new Set<string>());
     const liveTurnKeysRef = useRef(new Set<string>());
     const runtimeCursorRef = useRef<{ instanceId: string; revision: number } | null>(null);
@@ -273,6 +274,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             const history = normalizeHistoryMessages(thread.messages || []);
             const latest = useAgentStore.getState();
             if (sequence !== loadThreadsSequenceRef.current || latest.activeThreadId !== threadId) return false;
+            const historyModel = String(thread.thread?.model || "").trim();
+            if (historyModel) {
+                const selected = selectAvailableAgentModel(latest.models, historyModel, latest.reasoningEffort);
+                if (selected.model === historyModel) {
+                    pendingHistoryModelRef.current = null;
+                    setAgentState({ model: selected.model, reasoningEffort: selected.reasoningEffort });
+                } else {
+                    pendingHistoryModelRef.current = { threadId, model: historyModel };
+                }
+            }
             const historyTurns = authoritativeHistoryTurnKeys(threadId, thread.settledTurnIds || []);
             const hasExpectedTurn = !expectedTurnId || historyTurns.has(`${threadId}\0${expectedTurnId}`);
             const activeTurnSettled = Boolean(latest.activeTurnId && historyTurns.has(`${threadId}\0${latest.activeTurnId}`));
@@ -311,6 +322,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             loadThreadsSequenceRef.current += 1;
             authoritativeHistoryTurnsRef.current.clear();
             liveTurnKeysRef.current.clear();
+            pendingHistoryModelRef.current = null;
         }
         const messages = keepPendingMessage
             ? [scopeChatItem(pendingMessage!, nextThreadId, "")]
@@ -747,11 +759,19 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             .then((response) => {
                 if (disposed) return;
                 const state = useAgentStore.getState();
-                setAgentState(selectAvailableAgentModel(response.data || [], state.model, state.reasoningEffort));
+                const pendingHistoryModel = pendingHistoryModelRef.current;
+                const restoreHistoryModel = pendingHistoryModel?.threadId === state.activeThreadId ? pendingHistoryModel.model : "";
+                const selected = selectAvailableAgentModel(response.data || [], restoreHistoryModel || state.model, state.reasoningEffort);
+                if (restoreHistoryModel && selected.model === restoreHistoryModel) {
+                    pendingHistoryModelRef.current = null;
+                    setAgentState(selected);
+                } else {
+                    useAgentStore.setState(selected);
+                }
             })
             .catch((error) => {
                 if (disposed) return;
-                setAgentState({ models: [], model: "", reasoningEffort: "" });
+                useAgentStore.setState({ models: [] });
                 addEventLog(rt("modelListFailed"), error);
             });
         return () => { disposed = true; };
@@ -1403,6 +1423,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     function clearAgentSession(patch: Parameters<typeof setAgentState>[0] = {}) {
         loadThreadsSequenceRef.current += 1;
         threadMessagesRef.current.clear();
+        pendingHistoryModelRef.current = null;
         authoritativeHistoryTurnsRef.current.clear();
         liveTurnKeysRef.current.clear();
         threadOperationRef.current = 0;
@@ -1491,6 +1512,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             message.info(rt("modelSwitchWhenIdle"));
             return;
         }
+        pendingHistoryModelRef.current = null;
         const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
         setAgentState({ model, reasoningEffort: effort || "" });
         if (needsConversation && await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));

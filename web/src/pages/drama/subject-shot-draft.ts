@@ -9,6 +9,10 @@ export type ShotUtteranceValue = {
 export type ShotFormValue = {
     title: string; visual: string; camera: Record<string, any>; duration_frames: number;
     subject_usages: Array<Record<string, any>>; keyframes: Array<Record<string, any>>; reference_requirements: Array<Record<string, any>>; audio: unknown;
+    /** 只承载本表单可编辑的镜头特性（core_emotion / combat）。其余特性不属于分镜编辑。 */
+    features?: Record<string, boolean>;
+    /** 打戏载荷：仅 features.combat 为真时有意义；切回文戏时置 null。 */
+    combat?: Record<string, any> | null;
     performance?: Record<string, any> | null;
     utterances?: Array<ShotUtteranceValue>;
 };
@@ -27,6 +31,8 @@ function validFormValue(value: unknown): value is ShotFormValue {
     if (!object(value) || typeof value.title !== "string" || typeof value.visual !== "string"
         || !Number.isFinite(value.duration_frames) || !object(value.camera)
         || (value.performance !== undefined && value.performance !== null && !object(value.performance))
+        || (value.combat !== undefined && value.combat !== null && !object(value.combat))
+        || (value.features !== undefined && (!object(value.features) || Object.values(value.features).some(flag => typeof flag !== "boolean")))
         || !optionalStrings(value.camera.attention_subject_ids) || !validUtterances(value.utterances)) return false;
     return Array.isArray(value.subject_usages) && value.subject_usages.every(usage => object(usage)
         && typeof usage.subjectId === "string" && (usage.pictureBindingMode === undefined || ["default", "explicit"].includes(usage.pictureBindingMode))
@@ -85,6 +91,8 @@ export function shotFormValue(shot: Record<string, any>, source?: Record<string,
         duration_frames: Number(shot.duration_frames || 1), subject_usages: rows(shot.subject_usages),
         keyframes: rows(shot.keyframes).filter(frame => frame.anchor !== "composition"),
         reference_requirements: [...referenceById.values()], audio: shot.audio ?? "",
+        ...(shot.features !== undefined ? { features: shot.features } : {}),
+        ...(shot.combat !== undefined ? { combat: shot.combat } : {}),
         ...(shot.performance !== undefined ? { performance: shot.performance } : {}) });
     if (source) formal.utterances = shotUtteranceRows(shot, source, textMode);
     return formal;
@@ -146,9 +154,20 @@ export function readShotFormDraft(raw: string | undefined, shot: Record<string, 
 export const shotDraftChanged = (draft: ShotFormDraft) => canonicalProduction(draft.base) !== canonicalProduction(draft.value);
 export const shotDraftSourceChanged = (draft: ShotFormDraft, shot: Record<string, any>, source?: Record<string, any>) => draftFieldConflicts(draft.base, draft.value, shotFormValue(shot, source, draft.version === 1 ? "whole" : "segment")).length > 0;
 
+/**
+ * 分镜编辑的「文戏 / 武戏」模式由 `features.combat` 单一决定。
+ *
+ * 武戏模式写入 `combat` 载荷，编译器据此展开逐阶段时序；文戏模式保留 `performance`
+ * 五轨并置 `combat: null`。两者共用同一份 source，不额外存模式字段。
+ */
+export function shotFormIsCombat(value: Pick<ShotFormValue, "features" | "combat"> | undefined | null): boolean {
+    return Boolean(value?.features?.combat || value?.combat);
+}
+
+
 export function shotFormChanges(draft: ShotFormDraft) {
     const patch: Record<string, unknown> = {};
-    for (const key of ["title", "visual", "camera", "duration_frames", "subject_usages", "reference_requirements", "audio", "performance"] as const) {
+    for (const key of ["title", "visual", "camera", "duration_frames", "subject_usages", "reference_requirements", "audio", "features", "combat", "performance"] as const) {
         if (canonicalProduction(draft.base[key]) !== canonicalProduction(draft.value[key])) patch[key] = draft.value[key];
     }
     const baseUtterances = draft.base.utterances || [];

@@ -29,10 +29,23 @@ test("failed config save leaves displayed/saved config unchanged and can retry",
 });
 test("out-of-order detail responses preserve the latest selection intent", async () => {
  const a=deferred<any>(), b=deferred<any>(); let selected:any; const loaded:any[]=[];
- const load=callback("handleLoadDetail", {detailRequest:{current:0},setDetailLoading:(v:boolean)=>loaded.push(v),setDetailError:()=>{},request:(_m:string,path:string)=>path.endsWith("A")?a.promise:b.promise,normalizeOutputNodeSelection:(v:any)=>v,lastOutputNodeId:()=>"" ,setSelected:(v:any)=>{selected=v},setHistoryLogs:()=>{},setActiveTab:()=>{}});
+ const load=callback("handleLoadDetail", {detailRequest:{current:0},setDetailLoading:(v:boolean)=>loaded.push(v),setDetailError:()=>{},request:(_m:string,path:string)=>path.endsWith("A")?a.promise:b.promise,normalizeOutputNodeSelection:(v:any)=>v,lastOutputNodeId:()=>"" ,preferredPreviewNodeId:()=>"",setSelected:(v:any)=>{selected=v},setHistoryLogs:()=>{},setActiveTab:()=>{}});
  const first=load("A"),second=load("B"); b.resolve({name:"B",config:{fields:[]},workflow:{}});await second;a.resolve({name:"A",config:{fields:[]},workflow:{}});await first;assert.equal(selected.name,"B");assert.equal(loaded.at(-1),false);
 });
 
+test("唯一预览桥自动采用并落盘，显式关闭不会被重新打开", async () => {
+ let current:any = { name:"A", config:{fields:[]}, workflow:{} }; const writes:any[] = [];
+ const scope = { detailRequest:{current:0}, setDetailLoading:()=>{}, setDetailError:()=>{}, setHistoryLogs:()=>{}, setActiveTab:()=>{},
+  normalizeOutputNodeSelection:(v:any)=>v, lastOutputNodeId:()=>"", preferredPreviewNodeId:()=>"141",
+  setSelected:(v:any)=>{current=v},
+  request:(method:string,_path:string,body?:any)=>{ if(method==="PUT"){writes.push(body); return Promise.resolve({});} return Promise.resolve({name:"A",config:current.config,workflow:{}}); } };
+ await callback("handleLoadDetail", scope)("A");
+ assert.equal(current.config.previewNodeId,"141"); assert.equal(writes.length,1); assert.equal(writes[0].previewNodeId,"141");
+ // 显式关闭存的是空串，重新打开详情不应再自动选中或写库。
+ current = { name:"A", config:{fields:[],previewNodeId:""}, workflow:{} };
+ await callback("handleLoadDetail", scope)("A");
+ assert.equal(current.config.previewNodeId,""); assert.equal(writes.length,1);
+});
 test("POST receipt is returned before reads; missing legacy client IDs never prove rejection", async () => {
  class ApiError extends Error { constructor(message:string,readonly status:number){super(message);} }
  class Rejected extends Error {}

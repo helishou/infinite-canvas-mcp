@@ -16,6 +16,8 @@ export class ComfyWorkflowSwitch {
                 const response = await fetch(`${endpoint}/free`, {
                     method: "POST",
                     headers: { "content-type": "application/json" },
+                    // 切流时必须连执行缓存一起放掉（free_memory:true → e.reset()）：
+                    // 只卸权重会留下 RAM pressure cache，把系统文件缓存挤走，下一段每步从磁盘读权重。
                     body: JSON.stringify({ unload_models: true, free_memory: true }),
                     signal,
                 });

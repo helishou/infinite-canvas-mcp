@@ -100,6 +100,13 @@ export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metad
         ...nodePanes,
         ...storedParams,
         ...metadata,
+        // `minimaxBaseModel` is the legacy fallback the runner reads when a Clip has no
+        // model of its own. BASE ships one hard-coded checkpoint, so a saved default that
+        // changes only `modelName` used to leave the node pointing at a model that may not
+        // exist on this machine. Keep the pair consistent unless both were given.
+        ...(("minimaxBaseModel" in metadata || "minimaxBaseModel" in storedParams) ? {} : {
+            minimaxBaseModel: (metadata.modelName ?? storedParams.modelName ?? BASE_H3_NODE_METADATA.modelName),
+        }),
         segments: [initialSegment],
     };
 }

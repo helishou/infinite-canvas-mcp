@@ -1697,15 +1697,19 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   };
   const saveV2Shot = async (shotId: string, patch: Record<string, unknown>, keyframes?: Extract<ProductionOperation, { type: "set_director_shot_keyframes" }>["keyframes"], utterances?: Extract<ProductionOperation, { type: "set_director_shot_utterances" }>["utterances"]) => {
     const ops: ProductionOperation[] = [];
-    if (Object.hasOwn(patch, "performance") && patch.performance !== null) {
-      // The structured JSON editor submits the complete performance object. The shared
-      // source patch contract merges nested objects, so first clear the old object in
-      // the same transaction; the following patch then stores this exact authored value.
-      const { performance, ...otherFields } = patch;
-      if (Object.keys(otherFields).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: otherFields });
-      ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { performance: null } });
-      ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { performance } });
-    } else if (Object.keys(patch).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch });
+    const { performance, combat, ...rest } = patch;
+    if (Object.keys(rest).length) ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: rest });
+    // The structured editors submit complete objects. The shared source patch contract merges
+    // nested objects, so clearing in the same transaction keeps the authored value exact —
+    // otherwise removed phases / cleared fields would survive the merge.
+    for (const [key, value] of [["performance", performance], ["combat", combat]] as const) {
+      if (value && typeof value === "object") {
+        ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { [key]: null } });
+        ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { [key]: value } });
+      } else if (Object.hasOwn(patch, key)) {
+        ops.push({ type: "patch_director_source", entity: "shot", id: shotId, patch: { [key]: value } });
+      }
+    }
     if (keyframes !== undefined) ops.push({ type: "set_director_shot_keyframes", shotId, keyframes });
     if (utterances !== undefined) ops.push({ type: "set_director_shot_utterances", shotId, utterances });
     if (!ops.length) return true;

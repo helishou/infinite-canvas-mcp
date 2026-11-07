@@ -427,9 +427,16 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const compiledArtifactMatchesCanvas = (clipId: string, artifact: DirectorProduction["artifacts"][number] | undefined) => {
         if (!artifact || artifact.kind !== "h3" || artifact.status !== "ready"
             || !isCurrentCompilationArtifact(director, artifact)) return false;
+        // A row that merely carries the Clip identity proves nothing: the projection
+        // stamps the compiled promptHash onto the row it actually wrote. Without that
+        // stamp the compiled prompt never reached the canvas (unbound node, deleted
+        // scene node, node copied from another episode), so "ready" would be a lie.
         const matches = productionSegmentRuntimeMatches(canvasNodes as any, clipId);
-        return matches.length === 1 && /^minimax|^smart-minimax/i.test(String(matches[0].node.type || ""));
+        return matches.some(match => /^minimax|^smart-minimax/i.test(String(match.node.type || ""))
+            && String((match.segment as Record<string, any> | undefined)?.productionClipProjection?.promptHash || "") === String(artifact.sha256 || ""));
     };
+    const clipCanvasBinding = (clipId: string) => productionSegmentRuntimeMatches(canvasNodes as any, clipId)
+        .some(match => /^minimax|^smart-minimax/i.test(String(match.node.type || "")));
     const compileStaleReason = (artifact: DirectorProduction["artifacts"][number] | undefined, projection?: Record<string, unknown>) => {
         if (!artifact) return t("compileStaleReason.generic");
         const freshness = compilationArtifactFreshness(director, artifact);
@@ -458,7 +465,8 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const hasPersistedBlockers = Array.isArray(artifactDiagnostics?.blockers) && artifactDiagnostics.blockers.length > 0;
         // Current authoritative success wins over historical refresh failures
         // and an unloaded workbench projection (which reports "recorded").
-        if (readyByLatestReceipt || status === "ready" || readyByPromptMatch) return {
+        // "Ready" now requires the compiled promptHash to be stamped on the canvas row.
+        if (readyByPromptMatch) return {
             label: t("director.atomic.stateReady"), color: "green", tone: "ready" as const,
         };
         if (job && (isCompileActive(job.status) || ["blocked", "failed"].includes(job.status))) {
@@ -466,12 +474,18 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             return { label: t(active ? "director.atomic.stateCompiling" : "director.atomic.clipRefreshPhase." + job.status), color: active ? "processing" : "red",
                 tone: active ? "live" as const : "blocked" as const, reason: t("director.atomic.clipRefreshPhase." + job.status) };
         }
+        // The compiler succeeded but the canvas never received the prompt. Reporting
+        // "ready" here is what let an unbound Clip sit green while its node stayed empty.
+        if (readyByLatestReceipt || status === "ready") {
+            const bound = clipCanvasBinding(clipId);
+            return bound
+                ? { label: t("director.atomic.clipPromptNotSynced"), color: "red", tone: "blocked" as const, reason: t("director.atomic.clipPromptNotSyncedReason") }
+                : { label: t("director.atomic.clipNodeUnbound"), color: "red", tone: "blocked" as const, reason: t("director.atomic.clipNodeUnboundReason") };
+        }
         if ((notReadyByLatestReceipt || hasPersistedBlockers) && !readyByPromptMatch) return { label: t("director.atomic.stateBlocked"), color: "red", tone: "blocked" as const, reason: compileStaleReason(artifact, projection) };
         if (status === "pending") return { label: t("director.atomic.statePending"), color: undefined, tone: "pending" as const };
         if (status === "recorded" && !readyByPromptMatch) return { label: t("director.atomic.compileStale"), color: undefined, tone: "recorded" as const, reason: compileStaleReason(artifact, projection) };
-        return status === "ready" || readyByLatestReceipt || readyByPromptMatch
-            ? { label: t("director.atomic.stateReady"), color: "green", tone: "ready" as const }
-            : { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
+        return { label: t("director.atomic.compileStale"), color: "orange", tone: "stale" as const, reason: compileStaleReason(artifact, projection) };
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const lockedClipIds = new Set(clips.filter(item => clipLockOverrides[String(item.id)] ?? item.locked === true).map(item => String(item.id)));
