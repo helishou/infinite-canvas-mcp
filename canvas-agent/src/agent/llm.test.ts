@@ -18,10 +18,10 @@ function settings(config: Json) {
     const store: LlmSettings = { get: key => structuredClone(data.get(key)), set: (key, value) => { data.set(key, structuredClone(value)); } };
     return { data, store };
 }
-async function modelServer(t: import("node:test").TestContext, handler: (body: Json, response: http.ServerResponse) => void) {
+async function modelServer(t: import("node:test").TestContext, handler: (body: Json, response: http.ServerResponse, request: http.IncomingMessage) => void) {
     const server = http.createServer(async (request, response) => {
         let body = ""; for await (const chunk of request) body += chunk;
-        handler(JSON.parse(body), response);
+        handler(JSON.parse(body), response, request);
     }).listen(0, "127.0.0.1");
     await once(server, "listening");
     t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }));
@@ -60,6 +60,20 @@ test("canvas channel identity distinguishes equal model names and excludes brows
         { ...config("http://c").channels[0], id: "local", kind: "comfyui" },
     ] });
     assert.deepEqual(value.map(item => item.id), ["a::same", "b::same"]);
+});
+
+test("channel-defined headers reach the model request without overriding credentials", async t => {
+    let seen: http.IncomingHttpHeaders = {};
+    const url = await modelServer(t, (_body, response, request) => {
+        seen = request.headers;
+        sse(response, [{ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }]);
+    });
+    const value = config(url).channels[0];
+    const providers = configuredLlmProviders({ textModel: value.id + "::model", channels: [{ ...value, headers: { "x-opencode-session": "canvas-session", authorization: "custom" } }] });
+    assert.deepEqual(providers[0].headers, { "x-opencode-session": "canvas-session", authorization: "custom" });
+    await requestLlm(providers[0], "", [{ role: "user", parts: [{ text: "hi" }] }], [], new AbortController().signal);
+    assert.equal(seen["x-opencode-session"], "canvas-session");
+    assert.equal(seen.authorization, "Bearer secret-test-key");
 });
 
 test("Codex channel uses native model identity and effort catalog without HTTP credentials", () => {

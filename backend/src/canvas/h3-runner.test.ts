@@ -30,6 +30,21 @@ test("A's tail-frame switch is consumed by B and does not change A's own input",
     assert.equal(resolveClipContinuation({ id: "C" }, b, false, {}).useTailFrame, false);
 });
 
+test("A 的视频续写开关由 B 消费（边界语义与尾帧一致），A 自身运行不受影响", () => {
+    const a = { id: "A", result: "a.mp4", videoContinuation: true };
+    // A 自己运行：开关挂在 A 上只对下一段生效，A 是第一段时不应该去找上一段成片。
+    const own = resolveClipContinuation(a, undefined, false, {});
+    assert.equal(own.useVideoContinuation, false);
+    assert.equal(own.needsPreviousVideo, false);
+    // B 运行时消费 A 的开关，前提是 A 有成品视频。
+    assert.equal(resolveClipContinuation({ id: "B", result: "b.mp4" }, a, false, {}).useVideoContinuation, true);
+    assert.equal(resolveClipContinuation({ id: "B", result: "b.mp4" }, a, false, {}).needsPreviousVideo, true);
+    // A 没有成品时 B 不能续写。
+    assert.equal(resolveClipContinuation({ id: "B" }, { id: "A", videoContinuation: true }, false, {}).needsPreviousVideo, false);
+    // B 自己挂开关不影响 B 的输入。
+    assert.equal(resolveClipContinuation({ id: "B", videoContinuation: true }, { id: "A", result: "a.mp4" }, false, {}).useVideoContinuation, false);
+});
+
 test("默认不把上一段成品带进下一段：既不当参考视频也不抓尾帧", () => {
     const decision = resolveClipContinuation({ id: "s2" }, previousReady, true, {});
     assert.equal(decision.usePreviousAsReference, false);

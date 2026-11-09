@@ -378,7 +378,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
         }
         patchSelectedSegment(ctx, { ...metadata, selectedSegmentId: selected.id }, patch);
     }, [commitSegmentChange, ctx, metadata, selected]);
-    const patchAllSettings = useCallback((patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>) => {
+    const patchAllSettings = useCallback((patch: Partial<H3Segment>, formalBoundaryValues?: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean; videoContinuation?: boolean }>) => {
         const liveMetadata = ctx.getNode(ctx.node.id)?.metadata || ctx.node.metadata || metadata;
         const current = Array.isArray(liveMetadata.segments) && liveMetadata.segments.length ? liveMetadata.segments as H3Segment[] : segmentsFor(liveMetadata);
         const rememberedModel = String(liveMetadata.h3LastSelectedVideoModel || "").trim();
@@ -401,7 +401,7 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             const bySegmentId = new Map(formalBoundaryValues.map(value => [value.segmentId, value]));
             update.segments = update.segments.map(segment => {
                 const boundary = bySegmentId.get(segment.id);
-                return boundary ? { ...segment, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled } : segment;
+                return boundary ? { ...segment, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled, videoContinuation: boundary.videoContinuation === true } : segment;
             });
         }
         ctx.updateMetadata(update);
@@ -763,15 +763,6 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
             <div key="prompt-side" className="minimax-prompt-side"><H3ClipSettingsPanel ctx={ctx} metadata={metadata} selected={selected} submitting={submittingSegments.has(String(selected?.id || ""))} patchSelected={patchSelected} patchAllSettings={patchAllSettings} /></div>
         <H3Timeline key="timeline" ctx={ctx} segments={displaySegments} selected={selected} total={total} onRemoveRef={removeTimelineRef} onEditRef={(segmentId, ref) => setEditingRef({ segmentId, ref })} onRequestReplaceRef={beginCanvasRefReplace} onRequestPickRef={requestCanvasRefPick} onRequestPickStoryboardShot={requestStoryboardShotPick} pickingShotKey={pickingRef?.shotId ? `${pickingRef.segmentId}:${pickingRef.shotId}` : undefined} onSegmentChange={commitSegmentChange} pickingKey={pickingRef ? `${pickingRef.segmentId}:${pickingRef.slotIndex}` : undefined} onPlayAll={playAll} fmt={fmt} />
             <H3MaterialLibrary key="material-library" ctx={ctx} outputs={outputs} segments={segments} selected={selected} patchSelected={patchSelected} />
-            <div key="input-source" className="minimax-wb-input-source" style={{ padding: "8px 0", fontSize: 14 }}>
-                使用当前已保存内容
-                {selected?.productionClipProjection && <span> · 已关联导演基线</span>}
-                {selected?.inputOutdated === true && <span> · 输入已修改</span>}
-                {typeof (selected?.productionClipProjection?.nextValues as any)?.prompt === "string" && selected?.prompt !== (selected.productionClipProjection?.nextValues as any).prompt && <details>
-                    <summary>已手动修改 · 查看导演提示词差异</summary>
-                    <pre style={{ maxHeight: 240, overflow: "auto", whiteSpace: "pre-wrap" }}>{String((selected.productionClipProjection?.nextValues as any).prompt)}</pre>
-                </details>}
-            </div>
             <H3CurrentClipPanel key="current-clip-panel" ctx={ctx} selected={selected} selectedIndex={selectedIndex} imageRefs={imageRefs} videoRefs={videoRefs} audioRefs={audioRefs} patchSelected={patchSelected} fmt={fmt} onOpenStoryboard={() => setSmartStoryboardOpen(true)} />
         </div>
         <div key="status" className="minimax-wb-status"><H3StatusBadge status={submittingSegments.has(String(selected?.id || "")) && !["queued", "loading", "awaiting_confirmation"].includes(currentRuntime.status) ? "preparing" : currentRuntime.status} error={String(selected?.errorDetails || metadata.errorDetails || metadata.error || "")} onRetry={() => requestH3Run(ctx, false, true)} />{String(metadata.smartStoryboardStatus || "") === "loading" ? <span style={{ marginLeft: 8, color: "#f59e0b", fontSize: 24 }}>智能分镜正在分析参考图并生成提示词，请稍候…</span> : null}{String(metadata.smartStoryboardStatus || "") === "success" ? <span style={{ marginLeft: 8, color: "#22c55e", fontSize: 24 }}>智能分镜已完成</span> : null}{String(metadata.smartStoryboardStatus || "") === "error" ? <span style={{ marginLeft: 8, color: "#ef4444", fontSize: 24 }}>智能分镜生成失败</span> : null}</div>

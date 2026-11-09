@@ -1067,6 +1067,9 @@ export class ProductionCompilationService {
             return receipt;
         }
         this.assertUnlockedTargets(current.draft.director || packet.director, packet.scope);
+        // 果实无关的产物抖动不该作废一次已完成的编译：artifacts 是派生物，
+        // 而 compile→apply 之间后台刷新几乎必然改写它。比较一律先剥掉 artifacts。
+        const derivedStable = (director: any) => hash({ ...director, artifacts: [] });
         if (packet.inputManifestHash && current.draft.director) {
             const validationStarted = performance.now();
             const workerKey = this.jobKey(owner, packet.operationId);
@@ -1075,32 +1078,51 @@ export class ProductionCompilationService {
                 this.compilationDirector(current.draft.director), packet.scope?.targetIds, true, undefined, diagnostics));
             activeApplyValidations++;
             try {
-                if (await this.inputManifestFingerprint(id, owner, currentInput, packet.scope, workerKey) !== packet.inputManifestHash) throw new ProductionConflictError(current);
+                const manifestMatches = await this.inputManifestFingerprint(id, owner, currentInput, packet.scope, workerKey) === packet.inputManifestHash;
+                if (!manifestMatches
+                    && derivedStable(this.compilationDirector(current.draft.director)) !== derivedStable(this.compilationDirector(packet.director))) throw new ProductionConflictError(current);
             } finally {
                 activeApplyValidations--;
                 console.info("PRODUCTION_COMPILATION_TIMINGS", JSON.stringify({ operationId: packet.operationId, timingsMs: { applyValidationMs: performance.now() - validationStarted } }));
             }
         }
+        // apply 与 commit 之间只要有一次后台派生写入（刷新/发布），revision 就会前进；
+        // 这不是源稿冲突，重读最新 revision 再提交即可。真冲突（scope 输入变了）仍抛错。
+        const applyWithRebase = async (buildMerged: (fresh: any) => any) => {
+            let lastError: unknown;
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const fresh = this.service.get(id);
+                if (!fresh.draft.director) throw new ProductionConflictError(fresh);
+                const merged = buildMerged(fresh);
+                this.service.verifyCompilationBindings(id, merged, { allowUnreferencedAssetNodes: true });
+                try {
+                    return await this.service.edit(id, { operationId: packet.operationId, expectedRevision: fresh.revision, ops: [{ type: "set_director_production", director: merged }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
+                } catch (error) {
+                    if (!(error instanceof ProductionConflictError) || attempt === 2) throw error;
+                    lastError = error;
+                }
+            }
+            throw lastError;
+        };
         if (packet.scope) {
-            const director = current.draft.director;
-            if (!director) throw new ProductionConflictError(current);
-            const applyDiagnostics: ProductionDiagnostic[] = [];
-            const latest = this.service.resolveSubjectPictureInputs(id, { ...director, engine: packet.director.engine }, packet.scope?.targetIds, true, undefined, applyDiagnostics);
-            const input = compilationScopeInput(latest, packet.scope);
-            if (input.inputHash !== packet.scopeHash && input.legacyInputHash !== packet.scopeHash) throw new ProductionConflictError(current);
             const targets = new Set<string>(packet.targetIds);
-            const preserved = structuredClone(latest); preserveCompilationProvenance(preserved);
-            for (const assetId of packet.assetIds || []) if (packet.director.assets[assetId]) preserved.assets[assetId] = structuredClone(packet.director.assets[assetId]);
-            const merged = { ...preserved, engine: packet.director.engine, artifacts: [...preserved.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
-            this.service.verifyCompilationBindings(id, merged, { allowUnreferencedAssetNodes: true });
-            const result = await this.service.edit(id, { operationId: packet.operationId, expectedRevision: current.revision, ops: [{ type: "set_director_production", director: merged }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);
+            const result = await applyWithRebase(fresh => {
+                const applyDiagnostics: ProductionDiagnostic[] = [];
+                const latest = this.service.resolveSubjectPictureInputs(id, { ...fresh.draft.director, engine: packet.director.engine }, packet.scope?.targetIds, true, undefined, applyDiagnostics);
+                const input = compilationScopeInput(latest, packet.scope);
+                if (input.inputHash !== packet.scopeHash && input.legacyInputHash !== packet.scopeHash) throw new ProductionConflictError(fresh);
+                const preserved = structuredClone(latest); preserveCompilationProvenance(preserved);
+                for (const assetId of packet.assetIds || []) if (packet.director.assets[assetId]) preserved.assets[assetId] = structuredClone(packet.director.assets[assetId]);
+                return { ...preserved, engine: packet.director.engine, artifacts: [...preserved.artifacts.filter(item => !targets.has(item.targetId)), ...packet.director.artifacts.filter((item: any) => targets.has(item.targetId))] };
+            });
             const receipt = { referenceSync: result.referenceSync, revision: result.revision, sourceHash: result.draft.director?.sourceHash, replayed: result.replayed === true, operationId: packet.operationId, mediaSubmitted: false };
             this.markApplied(this.packetJob(preparedId), receipt);
             return receipt;
         }
 
         const currentDirector = current.draft.director;
-        if (!currentDirector || !packet.scope && hash(currentDirector) !== packet.baselineHash
+        if (!currentDirector
+            || !packet.scope && derivedStable(currentDirector) !== derivedStable(packet.director)
             || packet.scope && compilationScopeInput(currentDirector, packet.scope).inputHash !== packet.scopeHash) throw new ProductionConflictError(current);
         this.service.verifyCompilationBindings(id, packet.director, { allowUnreferencedAssetNodes: true });
         const result = await this.service.edit(id, { operationId: packet.operationId, expectedRevision: packet.expectedRevision, ops: [{ type: "set_director_production", director: packet.director }] }, undefined, false, undefined, undefined, overwriteCompiledPromptTargets);

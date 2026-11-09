@@ -38,6 +38,24 @@ test("provider and Backend URLs keep their configured origin and API prefix", ()
     assert.equal(buildApiUrl("http://127.0.0.1:17370", "/models"), "http://127.0.0.1:17370/v1/models");
 });
 
+test("channel request headers survive config normalization", () => {
+    const channel = createModelChannel({
+        id: "opencode-go",
+        name: "OpenCode Go",
+        baseUrl: "https://opencode.ai/inference/go/openai/v1",
+        apiKey: "k",
+        apiFormat: "openai-chat",
+        headers: { "x-opencode-session": "canvas-session" },
+        models: [{ name: "kimi-k3", capability: "text" }],
+    });
+    assert.deepEqual(channel.headers, { "x-opencode-session": "canvas-session" });
+    const original = useConfigStore.getState().config;
+    try {
+        useConfigStore.getState().replaceConfig({ ...defaultConfig, channels: [channel], textModel: "opencode-go::kimi-k3" });
+        assert.deepEqual(useConfigStore.getState().config.channels[0].headers, { "x-opencode-session": "canvas-session" });
+    } finally { useConfigStore.setState({ config: original }); }
+});
+
 test("Codex CLI channel round trips without injecting an API URL or requiring credentials", () => {
     const channel = createModelChannel({ id: "cli", name: "Codex", kind: "codex-cli", models: [{ name: "native", capability: "text" }] });
     assert.equal(channel.baseUrl, ""); assert.equal(channel.apiKey, "");

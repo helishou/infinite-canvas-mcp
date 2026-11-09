@@ -32,11 +32,17 @@ function clone<T>(value: T): T {
  *  - add_node / update_node / delete_node → op.id
  *  - add/update/delete_h3_segment → op.nodeId
  *  - delete_connections → op.ids 对应的连接整条
- *  - update_project → op.patch 的键在项目顶层（保留旧值供比对） */
+ *  - update_project → op.patch 的键在项目顶层（保留旧值供比对）
+ *
+ *  cloneValues 默认 true：outbox 要落盘，必须切断与 store 的引用。
+ *  内存里的撤销栈传 false：store 用不可变更新，旧节点对象不会被后续编辑改写，
+ *  直接共享引用即可，避免把大 H3 节点的 metadata 深拷贝两份。 */
 export function buildCanvasConflictBaseline(
     project: CanvasProject,
     operations: Array<Record<string, unknown>>,
+    options?: { cloneValues?: boolean },
 ): CanvasConflictBaseline {
+    const copy = <T,>(value: T): T => options?.cloneValues === false ? value : clone(value);
     const nodeIds = new Set<string>();
     const connectionIds = new Set<string>();
     const projectKeys = new Set<string>();
@@ -56,10 +62,10 @@ export function buildCanvasConflictBaseline(
         id: project.id,
         title: project.title,
         revision: Number(project.revision || 0),
-        nodes: nodes.filter((node) => nodeIds.has(String(node.id))).map((node) => clone(node) as Record<string, unknown>),
-        connections: connections.filter((connection) => connectionIds.has(String(connection.id))).map((connection) => clone(connection) as Record<string, unknown>),
+        nodes: nodes.filter((node) => nodeIds.has(String(node.id))).map((node) => copy(node) as Record<string, unknown>),
+        connections: connections.filter((connection) => connectionIds.has(String(connection.id))).map((connection) => copy(connection) as Record<string, unknown>),
     };
-    for (const key of projectKeys) baseline[key] = clone(projectRecord[key]);
+    for (const key of projectKeys) baseline[key] = copy(projectRecord[key]);
     return baseline;
 }
 

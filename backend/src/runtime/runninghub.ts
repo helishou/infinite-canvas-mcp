@@ -637,7 +637,8 @@ export class RunningHubBackend {
             if (data.status !== lastStatus) { this.tasks.addEvent(task.id, "remote_status", { taskId: config.remoteId, status: data.status }); lastStatus = data.status; }
             if (["SUCCESS", "SUCCEEDED", "SUCCEED", "COMPLETED", "FINISHED"].includes(data.status)) {
                 // 用户可指定输出节点：只保留选中节点产出的媒体与文本，未指定时保持原样。
-                const results = selectRunningHubResults(data.results, outputNodesOf(task.params));
+                const selectedNodes = outputNodesOf(task.params);
+                const results = selectRunningHubResults(data.results, selectedNodes);
                 const materializeErrors: Array<{ nodeId: string; url: string; reason: string }> = [];
                 let media = await this.materialize(results, signal, (nodeId, reason, url) => materializeErrors.push({ nodeId, url, reason }), config);
                 const texts = results.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []);
@@ -645,31 +646,59 @@ export class RunningHubBackend {
                 const intermediates = this.wsIntermediates(task.id);
                 let outputEndpointResultCount = 0;
                 let outputEndpointError = "";
-                if (task.kind === "runninghub:workflow" && !media.length && !intermediates.length && !texts.length) {
+                const nothingYet = () => !media.length && !intermediates.length && !texts.length;
+                if (task.kind === "runninghub:workflow" && nothingYet()) {
                     // Some sites return no file URLs from /openapi/v2/query even after SUCCESS.
                     try {
                         const fallbackResponse = await this.request(config, "/task/openapi/outputs", { apiKey: keyFor(config), taskId: config.remoteId }, signal);
-                        const fallbackResults = selectRunningHubResults(normalizeRunningHubOutputs(fallbackResponse), outputNodesOf(task.params));
+                        const fallbackResults = selectRunningHubResults(normalizeRunningHubOutputs(fallbackResponse), selectedNodes);
                         outputEndpointResultCount = fallbackResults.length;
-                        media = await this.materialize(fallbackResults, signal, (nodeId, reason, url) => materializeErrors.push({ nodeId, url, reason }), config);
-                        texts.push(...fallbackResults.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []));
+                        if (fallbackResults.length) {
+                            media = await this.materialize(fallbackResults, signal, (nodeId, reason, url) => materializeErrors.push({ nodeId, url, reason }), config);
+                            texts.push(...fallbackResults.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []));
+                        }
                     } catch (error) {
                         outputEndpointError = redact(error instanceof Error ? error.message : String(error), config).slice(0, 500);
                     }
                 }
+                // 指定输出节点没有对应产物，但工作流整体成功且平台确实返回了结果时，
+                // 退而取全部输出节点的产物，避免把一次成功的生成当成失败丢掉。
+                // 常见于 SaveVideo / VHS 这类节点：平台把视频挂在更上游的产出节点上，
+                // 而不是用户选中的那个输出节点。
+                let outputNodeFallback = false;
+                if (task.kind === "runninghub:workflow" && nothingYet() && selectedNodes.length && data.results.length) {
+                    const allResults = selectRunningHubResults(data.results, []);
+                    const extra = await this.materialize(allResults, signal, (nodeId, reason, url) => materializeErrors.push({ nodeId, url, reason }), config);
+                    const extraTexts = allResults.flatMap((item) => typeof item.text === "string" ? [{ nodeId: String(item.nodeId || ""), content: item.text }] : []);
+                    if (extra.length || extraTexts.length) {
+                        media = extra;
+                        texts.push(...extraTexts);
+                        outputNodeFallback = true;
+                        this.tasks.addEvent(task.id, "output_node_fallback", {
+                            selectedNodeIds: selectedNodes,
+                            availableNodeIds: data.results.map((r) => String(r.nodeId ?? r.node ?? "")).filter(Boolean),
+                        });
+                    }
+                }
                 const all = dedupeByStorageKey([...media, ...intermediates]);
-                if (materializeErrors.length || outputEndpointResultCount || outputEndpointError) this.tasks.addEvent(task.id, "output_materialization", {
-                    selectedNodeIds: outputNodesOf(task.params),
+                if (materializeErrors.length || outputEndpointResultCount || outputEndpointError || outputNodeFallback) this.tasks.addEvent(task.id, "output_materialization", {
+                    selectedNodeIds: selectedNodes,
                     queryResultCount: data.results.length,
                     selectedQueryResultCount: results.length,
                     outputEndpointResultCount,
                     archivedWebSocketResultCount: intermediates.length,
                     downloadFailures: materializeErrors.slice(0, 20),
                     ...(outputEndpointError ? { outputEndpointError } : {}),
+                    ...(outputNodeFallback ? { fallbackToAllOutputs: true } : {}),
                 });
-                if (task.kind === "runninghub:workflow" && !all.length && !texts.length) throw new Error(outputNodesOf(task.params).length ? `指定的输出节点没有产物：${outputNodesOf(task.params).join("、")}` : "RunningHub 工作流完成但没有可归档的媒体或文本结果");
+                if (task.kind === "runninghub:workflow" && !all.length && !texts.length) {
+                    const available = data.results.map((r) => String(r.nodeId ?? r.node ?? "")).filter(Boolean);
+                    throw new Error(selectedNodes.length
+                        ? `指定的输出节点没有产物：${selectedNodes.join("、")}${available.length ? `（平台返回的可选节点：${available.join("、")}）` : ""}`
+                        : "RunningHub 工作流完成但没有可归档的媒体或文本结果");
+                }
                 if (signal.aborted || this.tasks.get(task.id)?.status === "cancelled") return;
-                const result = { media: all, ...(texts.length ? { texts } : {}), taskId: config.remoteId, backend: "runninghub", mode: config.mode };
+                const result = { media: all, ...(texts.length ? { texts } : {}), taskId: config.remoteId, backend: "runninghub", mode: config.mode, ...(outputNodeFallback ? { warning: `指定的输出节点没有对应产物，已改用工作流全部输出节点（${selectedNodes.join("、")}）的结果` } : {}) };
                 this.tasks.addEvent(task.id, "result", result);
                 const checked: Record<string, any> = this.media ? await inspectH3Result(result, task.params, this.media) : result;
                 this.update(task.id, { status: checked.specification?.status === 'mismatch' ? 'failed' : 'succeeded', progress: 1, result: checked, ...(checked.specification?.status === 'mismatch' ? { error: checked.specification.issues.join('；') } : {}) });

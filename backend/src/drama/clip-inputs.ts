@@ -15,7 +15,7 @@ import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };
-export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "referenceOrder", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "referenceOrder", "tailFrameContinuation", "motionContextEnabled", "videoContinuation", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
 const ACTIVE_H3_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "running", "generating", "awaiting_confirmation", "awaiting_review", "paused", "cancelling"]);
 const TERMINAL_H3_SEGMENT_STATUSES = new Set(["idle", "success", "succeeded", "failed", "error", "cancelled", "canceled", "complete", "completed"]);
 type SharedClipImage = { storageKey?: string; url?: string; mimeType?: string; name?: string; bindingId?: string };
@@ -576,6 +576,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         // references and derived character-group images are merged by the H3 UI.
         referenceOrder: bindings.map(binding => String(binding.id || "")).filter(Boolean),
         tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
+        videoContinuation: boundary?.videoContinuation === true,
         directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
         ...(storyboardShots ? { storyboardShots } : {}),
         aspectRatio: settings.videoAspectRatio || object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
@@ -863,6 +864,7 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
                 mergedSegment.prompt = segment.prompt;
                 mergedSegment.tailFrameContinuation = segment.tailFrameContinuation;
                 mergedSegment.motionContextEnabled = segment.motionContextEnabled;
+                mergedSegment.videoContinuation = segment.videoContinuation;
             }
             reconcileSubjectImageReferences(mergedSegment, data.director!, group, segment.referenceBindings);
             if (preserveManualCharacterGroups) {
@@ -1155,11 +1157,13 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
             const boundaryPatch = {
                 tailFrameContinuation: boundary?.tailFrame === true,
                 motionContextEnabled: boundary?.motionContext === true,
+                videoContinuation: boundary?.videoContinuation === true,
                 ...(existing.resultStorageKey ? { inputOutdated: true } : {}),
             };
             if (projected.segment) Object.assign(projected.segment, boundaryPatch);
             else if (existing.tailFrameContinuation !== boundaryPatch.tailFrameContinuation
-                || existing.motionContextEnabled !== boundaryPatch.motionContextEnabled) {
+                || existing.motionContextEnabled !== boundaryPatch.motionContextEnabled
+                || existing.videoContinuation !== boundaryPatch.videoContinuation) {
                 operations.push({ type: "update_h3_segment", nodeId, segmentId: existing.id, patch: boundaryPatch });
             }
         }

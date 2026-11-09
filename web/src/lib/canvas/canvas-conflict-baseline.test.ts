@@ -75,3 +75,12 @@ test("不修改入参且不保留原对象引用（可安全落盘）", () => {
     assert.equal(JSON.stringify(project), before);
     assert.notEqual(base.nodes[0], project.nodes[0], "应复制，避免后续编辑串改基线");
 });
+
+test("cloneValues=false 共享 store 引用，outbox 默认仍深拷贝", () => {
+    const ops = [{ type: "update_node", id: "n1", metadata: { prompt: "新" } }];
+    const shared = buildCanvasConflictBaseline(project, ops, { cloneValues: false });
+    assert.equal(shared.nodes[0], project.nodes[0], "内存基线应直接共享节点引用");
+    assert.equal(shared.v, CANVAS_CONFLICT_BASELINE_VERSION);
+    assert.deepEqual((shared.nodes[0].metadata as any).segments, [{ id: "s1", prompt: "段1", status: "idle" }], "值不改写");
+    assert.notEqual(buildCanvasConflictBaseline(project, ops).nodes[0], project.nodes[0], "落盘路径仍必须深拷贝");
+});

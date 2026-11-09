@@ -37,7 +37,12 @@ function harness(logs: LogRow[], parentLog?: LogRow, historicalFields: Array<{ w
     const tasks = new Map<string, Record<string, unknown>>();
     const db = {
         createGenerationLog: (row: LogRow) => { logs.push(row); return { id: `log-${logs.length}` }; },
-        listGenerationLogs: (filter?: { runtimeTaskId?: string; platform?: string }) => parentLog && parentLog.runtimeTaskId === filter?.runtimeTaskId && parentLog.platform === filter?.platform ? [parentLog] : [],
+        listGenerationLogs: (filter?: { runtimeTaskId?: string; platform?: string }) => {
+            if (!parentLog) return [];
+            if (filter?.runtimeTaskId !== undefined && parentLog.runtimeTaskId !== filter.runtimeTaskId) return [];
+            if (filter?.platform !== undefined && parentLog.platform !== filter.platform) return [];
+            return [parentLog];
+        },
         getWorkflowFieldDefinitionsByIds: (ids: string[]) => historicalFields.filter(({ field }) => ids.includes(String(field.id))),
         updateGenerationLog: (id: string, patch: Partial<LogRow>) => {
             if (!parentLog || parentLog.id !== id) throw new Error(`unexpected log update: ${id}`);
@@ -134,4 +139,21 @@ test("画布父任务已写日志时，内层不再重复写（修掉每次生�
         await executor.run(WORKFLOW, CONFIG, {}, "client", undefined, "wf", "task-b", "project-1", "node-1", "canvas-task-b");
         assert.equal(logs.length, 0, "同一次生图不应产生第二条 workflow 日志");
     });
+});
+
+test("视频续写事实按 runtimeTaskId 命中 H3 自选模型日志（平台非 canvas-image），保留原有参数", () => {
+    const parentLog: LogRow = {
+        id: "h3-log",
+        platform: "selected-video-model",
+        status: "running",
+        workflow: "local-comfyui::武戏",
+        runtimeTaskId: "h3-parent",
+        params: { submission: { compiledPrompt: "x" }, generationSettings: { resume_prev: true, prev_video: "/media/video%3Aabc" } },
+    };
+    const executor = harness([], parentLog);
+    const summary = { prevVideoFile: "prev.mp4", addedNodes: 9, loopId: "14", startSegmentNode: "11", endSegmentNode: "10", continuationRewires: 10, overlapRewires: 2 };
+    (executor as unknown as { recordVideoContinuationLog: (id: string, s: typeof summary) => void }).recordVideoContinuationLog("h3-parent", summary);
+    assert.deepEqual(parentLog.params?.videoContinuation, summary, "续写事实必须写进用户实际查看的 selected-video-model 日志");
+    assert.deepEqual(parentLog.params?.generationSettings, { resume_prev: true, prev_video: "/media/video%3Aabc" }, "不得覆盖已有 generationSettings");
+    assert.deepEqual(parentLog.params?.submission, { compiledPrompt: "x" }, "不得覆盖已有 submission");
 });

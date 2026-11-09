@@ -1,4 +1,5 @@
-import type { WorkflowField } from "@/types/workflow";
+import type { WorkflowDurationTarget, WorkflowField } from "@/types/workflow";
+import { durationTargetFromField, isDurationTargetFor } from "./duration-target";
 
 /**
  * RunningHub 值来源。与本地 ComfyUI 的对应关系：
@@ -24,6 +25,7 @@ const input = "w-full rounded border border-border px-2 py-1 text-xs dark:bg-mut
  */
 export function FieldEditor({
     field, rawValue, comboOptions, showRunningHub, onUpdate, onRemove,
+    durationTarget, onDurationTargetChange,
 }: {
     field: WorkflowField;
     rawValue: unknown;
@@ -32,7 +34,11 @@ export function FieldEditor({
     showRunningHub: boolean;
     onUpdate: (patch: Partial<WorkflowField>) => void;
     onRemove: () => void;
+    /** 配置级单值：当前被选作时长输入的节点。勾选态从它派生，不在字段上另存一份。 */
+    durationTarget?: WorkflowDurationTarget | null;
+    onDurationTargetChange?: (next: WorkflowDurationTarget | null) => void;
 }) {
+    const isDurationTarget = isDurationTargetFor(durationTarget, field.node, field.input || "");
     return (
         <div className="space-y-2">
             <div>
@@ -119,6 +125,34 @@ export function FieldEditor({
                     />作为提示词
                 </label>
             )}
+
+            {/* 与「作为提示词」同一交互：点节点启用输入 → 在字段里勾一下。
+    配置落在 WorkflowConfig.durationTarget 单值上，勾选态由它派生；多节点字段没有唯一注入目标。 */}
+            {!showRunningHub && ["text", "number", "slider"].includes(field.type) && field.input && !field.node.includes(",") && onDurationTargetChange ? (
+                <>
+                    <label className="flex cursor-pointer items-center gap-2 text-[11px]">
+                        <input
+                            type="checkbox"
+                            checked={isDurationTarget}
+                            onChange={(e) => onDurationTargetChange(e.target.checked ? durationTargetFromField(field) : null)}
+                            className="size-3"
+                        />作为时长
+                    </label>
+                    {isDurationTarget && durationTarget ? (
+                        <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                            单位
+                            <select
+                                value={durationTarget.unit}
+                                onChange={(e) => onDurationTargetChange({ ...durationTarget, unit: e.target.value as WorkflowDurationTarget["unit"] })}
+                                className={`${input} flex-1`}
+                            >
+                                <option value="seconds">秒（直接写秒数）</option>
+                                <option value="frames">帧（17n+5 @24fps）</option>
+                            </select>
+                        </label>
+                    ) : null}
+                </>
+            ) : null}
 
             {field.type === "dropdown" && (
                 <div>

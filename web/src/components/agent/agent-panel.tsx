@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Badge, Button, Drawer, Tooltip } from "antd";
 import { Bell, BellOff, LoaderCircle, LocateFixed, MessageSquare, X } from "lucide-react";
@@ -137,11 +137,16 @@ export function AgentPanel() {
             <LocalAgentPanel embedded compact headless={!panelMounted || welcomeOpen} autoConnect headerAction={headerControls} />
         </div>
     </section>;
+    // 抽屉里是整页制作台：锁定元素引用，生产进度、跟随目标、面板开合等父级更新都不再连带重渲染整棵制作台。
+    // 制作数据仍由各 Store/Backend 事件驱动，制作对象或画布身份变化时才换 key 重建。
+    const productionEditor = useMemo(() => owner ? <div data-canvas-shortcuts-ignore data-canvas-no-zoom>
+        <Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense>
+    </div> : null, [owner?.kind, owner?.id]);
     return <>
         {workbenchCanvasOverlay ? createPortal(launcher, workbenchCanvasOverlay) : launcher}
         {workbenchCanvasOverlay ? createPortal(chatDialog, workbenchCanvasOverlay) : chatDialog}
         {owner && <Drawer rootClassName="canvas-blocking-overlay" open={objectOpen} forceRender title={objectAgentSwitch} onClose={closePanel} placement="right" size="min(1120px, calc(100vw - 24px))" styles={{ body: { overflow: "auto", padding: 16 } }}>
-            <div data-canvas-shortcuts-ignore data-canvas-no-zoom><Suspense fallback={null}><ProductionEditor key={`${owner.kind}:${owner.id}`} owner={owner} embedded dialog /></Suspense></div>
+            {productionEditor}
         </Drawer>}
     </>;
 }

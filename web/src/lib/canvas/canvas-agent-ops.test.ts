@@ -851,3 +851,91 @@ test("Agent 意图：自动排布写进 add_node 的显式坐标，提交后不�
     const hasExplicitIds = plan.operations.filter((operation) => operation.type === "connect_nodes").every((operation) => Boolean((operation as any).id));
     assert.ok(hasExplicitIds, "连线 op 必须自带稳定 id，回放才能命中");
 });
+
+const snapshotOf = (nodes: CanvasNodeData[], connections: CanvasConnection[] = []) =>
+    ({ projectId: "p", title: "画布", nodes, connections, selectedNodeIds: [] as string[] });
+
+const addedNodesOf = (plan: ReturnType<typeof planCanvasAgentOperations>) =>
+    plan.operations.filter((operation) => operation.type === "add_node") as unknown as Array<{
+        id: string;
+        position: { x: number; y: number };
+        width: number;
+        height: number;
+    }>;
+
+/** 两个矩形是否压在一起（含净距）。 */
+const rectsOverlap = (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }, gap = 0) =>
+    a.x < b.x + b.width + gap && a.x + a.width + gap > b.x && a.y < b.y + b.height + gap && a.y + a.height + gap > b.y;
+
+test("Agent 显式坐标撞车：就近找空位，不再一路向右铺成一行", () => {
+    const occupied = node("occupied", "image", 0, 0, 300, 200);
+    const spec = getNodeSpec("image");
+    const plan = planCanvasAgentOperations(snapshotOf([occupied]), [
+        { type: "add_node", nodeType: "image", id: "new", position: { x: 0, y: 0 } },
+    ]);
+    const [added] = addedNodesOf(plan);
+    assert.ok(added, "应产出 add_node");
+    assert.ok(added.position.x !== 0 || added.position.y !== 0, "占用点必须让开");
+    assert.ok(
+        Math.abs(added.position.x) <= spec.width + 48 + 1 && Math.abs(added.position.y) <= spec.height + 48 + 1,
+        `只挪一个节点位，实际 (${added.position.x}, ${added.position.y})`,
+    );
+    assert.ok(!rectsOverlap({ ...added.position, width: added.width, height: added.height }, { x: 0, y: 0, width: 300, height: 200 }), "不能压住已有节点");
+});
+
+test("Agent 新批次锚点：贴着既有内容右边界，并与既有内容顶部对齐", () => {
+    const a = node("a", "image", 100, 200, 300, 200);
+    const b = node("b", "image", 600, 260, 300, 200);
+    const plan = planCanvasAgentOperations(snapshotOf([a, b]), [
+        { type: "add_node", nodeType: "image", id: "src" },
+        { type: "add_node", nodeType: "image", id: "out" },
+        { type: "connect_nodes", fromNodeId: "src", toNodeId: "out" },
+    ]);
+    const added = addedNodesOf(plan);
+    assert.equal(added.length, 2);
+    const rightEdge = Math.max(a.position.x + a.width, b.position.x + b.width);
+    const topEdge = Math.min(a.position.y, b.position.y);
+    added.forEach((item) => {
+        assert.ok(item.position.x >= rightEdge + 48 - 1, `${item.id} 应停在既有内容右侧之外，实际 x=${item.position.x}`);
+        assert.ok(item.position.y >= topEdge - 1, `${item.id} 不应跑到既有内容上方，实际 y=${item.position.y}`);
+    });
+    const batchTop = Math.min(...added.map((item) => item.position.y));
+    assert.ok(batchTop - topEdge < 320, `新批次应与既有内容顶部对齐，实际偏移 ${batchTop - topEdge}`);
+});
+
+test("Agent 批量新建：仍按连接分层，且不与既有节点重叠", () => {
+    const existing = node("existing", "image", 0, 0, 300, 200);
+    const plan = planCanvasAgentOperations(snapshotOf([existing]), [
+        { type: "add_node", nodeType: "image", id: "src" },
+        { type: "add_node", nodeType: "image", id: "mid" },
+        { type: "add_node", nodeType: "image", id: "out" },
+        { type: "connect_nodes", fromNodeId: "src", toNodeId: "mid" },
+        { type: "connect_nodes", fromNodeId: "mid", toNodeId: "out" },
+    ]);
+    const added = addedNodesOf(plan);
+    const byId = new Map(added.map((item) => [item.id, item.position]));
+    assert.ok(byId.get("src")!.x < byId.get("mid")!.x && byId.get("mid")!.x < byId.get("out")!.x, "输入在左、输出在右");
+    added.forEach((item) => {
+        assert.ok(!rectsOverlap({ ...item.position, width: item.width, height: item.height }, { x: 0, y: 0, width: 300, height: 200 }), `${item.id} 不应压住既有节点`);
+    });
+    for (let i = 0; i < added.length; i++) {
+        for (let j = i + 1; j < added.length; j++) {
+            assert.ok(
+                !rectsOverlap({ ...added[i].position, width: added[i].width, height: added[i].height }, { ...added[j].position, width: added[j].width, height: added[j].height }),
+                `${added[i].id} 与 ${added[j].id} 不应重叠`,
+            );
+        }
+    }
+    // 回放后结果与提交的 op 一致：节点真的落在计划坐标上。
+    const replayed = applyCanvasAgentOps(snapshotOf([existing]), [
+        { type: "add_node", nodeType: "image", id: "src" },
+        { type: "add_node", nodeType: "image", id: "mid" },
+        { type: "add_node", nodeType: "image", id: "out" },
+        { type: "connect_nodes", fromNodeId: "src", toNodeId: "mid" },
+        { type: "connect_nodes", fromNodeId: "mid", toNodeId: "out" },
+    ]);
+    added.forEach((item) => {
+        const replayedNode = replayed.nodes.find((entry) => entry.id === item.id)!;
+        assert.deepEqual(replayedNode.position, item.position, `${item.id} 回放坐标应与计划一致`);
+    });
+});

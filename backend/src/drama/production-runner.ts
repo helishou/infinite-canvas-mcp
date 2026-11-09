@@ -777,7 +777,7 @@ export class EpisodeProductionRunner {
 
             };
             if (runSettings.parallelScenes) {
-                const predecessor = boundaries.find(item => item.to === chain[0].id && (item.tailFrame || item.motionContext));
+                const predecessor = boundaries.find(item => item.to === chain[0].id && (item.tailFrame || item.motionContext || item.videoContinuation));
                 const dependency = predecessor ? videoByGroup.get(predecessor.from) : undefined;
                 const completion = (async () => {
                     if (dependency) { const failure = await dependency; if (failure) throw new Error("H3 前段失败，本段保持未提交状态"); }

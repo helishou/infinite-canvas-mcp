@@ -9,7 +9,7 @@ type Handler = CanvasProductionEditing["reverseSyncPrompt"];
 type StoryboardHandler = (input: CanvasProductionStoryboardEditor, previousSegment?: Record<string, unknown>) => Promise<{ sourceSaved: boolean }>;
 type ContinuationBoundaryInput = Parameters<CanvasProductionEditing["setContinuationBoundary"]>[0];
 type ContinuationBoundariesInput = Parameters<CanvasProductionEditing["setContinuationBoundaries"]>[0];
-type ContinuationBoundaryHandler = (input: { boundaries: Array<{ targetId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }>; requireNext?: boolean }) => Promise<{ sourceSaved: boolean }>;
+type ContinuationBoundaryHandler = (input: { boundaries: Array<{ targetId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean; videoContinuation?: boolean }>; requireNext?: boolean }) => Promise<{ sourceSaved: boolean }>;
 type CompilePromptInput = Parameters<CanvasProductionEditing["compilePrompt"]>[0];
 // Capability routing only: edits still use the production editor's existing persistent command journal.
 const editors = new Map<string, { token: symbol; handler: Handler }>();
@@ -457,7 +457,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         if (!editor) throw new Error("PRODUCTION_EDITOR_NOT_READY: 制作台未连接，无法在 H3 端删除 Clip");
         return editor.handler({ nodeId: input.nodeId, segmentId: input.segmentId, action: "delete" });
     }, setContinuationBoundary: async (input: ContinuationBoundaryInput) => {
-        return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled }] }, true);
+        return setContinuationBoundaries({ nodeId: input.nodeId, boundaries: [{ segmentId: input.segmentId, tailFrameContinuation: input.tailFrameContinuation, motionContextEnabled: input.motionContextEnabled, videoContinuation: input.videoContinuation }] }, true);
     }, setContinuationBoundaries: async (input: ContinuationBoundariesInput) => setContinuationBoundaries(input, false) };
 
     async function setContinuationBoundaries(input: ContinuationBoundariesInput, requireNext: boolean) {
@@ -469,7 +469,7 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const projection = clip?.productionClipProjection as Record<string, unknown> | undefined;
             const targetId = typeof projection?.targetId === "string" ? projection.targetId : "";
             if (!clip || !targetId || typeof boundary.tailFrameContinuation !== "boolean" || typeof boundary.motionContextEnabled !== "boolean") throw new Error("CONTINUATION_BOUNDARY_PROJECTION_MISMATCH");
-            return { targetId, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled };
+            return { targetId, tailFrameContinuation: boundary.tailFrameContinuation, motionContextEnabled: boundary.motionContextEnabled, videoContinuation: boundary.videoContinuation === true };
         });
         const editor = boundaryEditors.get(projectId);
         if (editor) return editor.handler({ boundaries, ...(requireNext ? { requireNext: true } : {}) });
@@ -498,15 +498,18 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             const to = String(next.id || "");
             if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
             const previous = director.boundaries.find(edge => edge.from === boundary.targetId && edge.to === to);
+            const boundaryVideoContinuation = boundary.videoContinuation === true;
             const canvasSegment = (Array.isArray(node?.metadata?.segments) ? node.metadata.segments : [])
                 .find(segment => String((segment.productionClipProjection as Record<string, unknown> | undefined)?.targetId || "") === boundary.targetId);
             const projectionOutOfSync = canvasSegment && (
                 canvasSegment.tailFrameContinuation !== boundary.tailFrameContinuation
                 || canvasSegment.motionContextEnabled !== boundary.motionContextEnabled
+                || (canvasSegment.videoContinuation === true) !== boundaryVideoContinuation
             );
-            if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim() && !projectionOutOfSync) continue;
+            if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && (previous?.videoContinuation === true) === boundaryVideoContinuation && previous.reason?.trim() && !projectionOutOfSync) continue;
             operations.push({ type: "set_director_boundary", boundary: {
                 from: boundary.targetId, to, tailFrame: boundary.tailFrameContinuation, motionContext: boundary.motionContextEnabled,
+                videoContinuation: boundaryVideoContinuation,
                 reason: "由 H3 Clip 设置保存续段衔接",
             } });
         }

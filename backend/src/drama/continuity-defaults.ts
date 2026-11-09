@@ -25,6 +25,7 @@ export function defaultDirectorBoundary(director: DirectorProduction, from: stri
         from, to,
         tailFrame: !explicitOpening,
         motionContext: false,
+        videoContinuation: false,
         reason: explicitOpening
             ? "目标 Clip 已有明确首帧分镜图，沿用该首帧。"
             : "默认引用前段尾帧承接下一 Clip 的动作与场景状态；Motion Context 保持关闭。",

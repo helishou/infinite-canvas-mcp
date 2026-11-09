@@ -1,4 +1,5 @@
 import { comfyWorkflowSwitch } from "./workflow-switch.js";
+import { ComfyExecutionClock, comfyTimeoutMessage, readComfyQueueState, resolveComfyTimeoutMs } from "./execution-clock.js";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -20,6 +21,7 @@ import { H3_VIDEO_RATIOS } from "@basketikun/canvas-agent/plugins/minimax-h3/nod
 import { assertH3LatentUpscalerReady } from "./h3-latent-upscaler-preflight.js";
 import { H3_CONTINUATION_NODE_ID, h3ContinuationFolder, stageH3ContinuationSeed, type H3ContinuationIdentity } from "./continuation-seed.js";
 import { listLocalLoras } from "./local-lora-catalog.js";
+import { durationToFrames } from "../workflows/duration.js";
 import { createLogger } from "../logger.js";
 import { watchSlowOperation } from "../slow-operation.js";
 import { mediaToolPath } from "../runtime/media-tools.js";
@@ -205,6 +207,47 @@ export class ComfyUiBackend {
         assertIndependentMediaRoot(MEDIA_DIR, root);
         this.deps.settings.set("comfyui.localRootDir", root);
         return this.localH3DirectConfig();
+    }
+    /** 自定义工作流任务结束后，是否立即释放模型与执行缓存（连续分段场景）。
+     *  默认关闭：由 ComfyUI 自主调度；显存小于「文本编码器 + DiT」之和时，
+     *  同一流程的第二段起会与上一段残留争显存、反复换入换出，开启后每段都从干净状态加载。
+     *  与内置 H3 预设的「连续生成模式」无关：那条路径按 keepModelCache 决定是否释放。 */
+    releaseBeforeRepeat() {
+        return this.deps.settings.get("comfyui.releaseBeforeRepeat") === true;
+    }
+    setReleaseBeforeRepeat(value: unknown) {
+        const enabled = value === true;
+        this.deps.settings.set("comfyui.releaseBeforeRepeat", enabled);
+        return enabled;
+    }
+    /** 目标是否就是本 bridge 的本地实例：潜空间续写直接读写本地 output/，远端实例一律不适用。 */
+    isLocalUrl(comfyUrl: string): boolean {
+        try { return normalizeUrl(comfyUrl) === this.url; } catch { return false; }
+    }
+    /** 把媒体字节平铺写入本机 ComfyUI input/，绕开 /upload/image 的资产注册：
+     *  新版 ComfyUI 的 register_upload 对真实视频会原生崩溃（连接重置/进程退出）。
+     *  仅当目标就是本 bridge 的本地实例且本地根目录就绪时生效；否则返回 null，调用方回退 HTTP 上传。
+     *  与 localH3Input 的 flat 落盘同构，VHS_LoadVideo/LoadImage 基于 input/ 扁平枚举可直接读取。 */
+    stageLocalInput(data: Uint8Array, filename: string, comfyUrl: string): string | null {
+        let target: string;
+        try { target = normalizeUrl(comfyUrl); } catch { return null; }
+        if (target !== this.url) return null;
+        const direct = this.localH3DirectConfig();
+        if (!direct.ready) return null;
+        let safe = path.basename(filename).replace(/[^\w.\-]+/g, "_") || `input_${Date.now()}`;
+        if (fs.existsSync(path.join(direct.inputDir, safe))) {
+            const ext = path.extname(safe);
+            safe = `${safe.slice(0, safe.length - ext.length)}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+        }
+        const temporary = path.join(direct.inputDir, `.infinite-canvas-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+        fs.writeFileSync(temporary, data);
+        try {
+            fs.renameSync(temporary, path.join(direct.inputDir, safe));
+        } catch (error) {
+            try { fs.unlinkSync(temporary); } catch {}
+            throw error;
+        }
+        return safe;
     }
     presets() { return PRESETS; }
 
@@ -500,6 +543,9 @@ export class ComfyUiBackend {
         let wsCloseError: Error | null = null;
         let warnedWsFallback = false;
         let lastActivityAt = Date.now();
+        // /prompt 只是入队；只有本 prompt 真正开始执行才启动执行超时。
+        // WS 在提交前注册，所以用可空引用，提交后再赋值。
+        let executionClock: ComfyExecutionClock | null = null;
         let lastProgress = 0.05;
         let closeWs: () => void = () => {};
         try {
@@ -552,6 +598,8 @@ export class ComfyUiBackend {
                                 // 仍然记录 execution_success 的 prompt_id 匹配失败，但不接管
                                 return;
                             }
+                            // 属于本 prompt 的事件说明它已离开队列开始执行；排队时间不计入执行预算。
+                            executionClock?.markRunning();
                             if (msg.type === "progress") {
                                 const data = msg.data || {};
                                 const value = Number(data.value);
@@ -620,12 +668,14 @@ export class ComfyUiBackend {
             const execution = this.comfyExecutions.get(task.id);
             if (execution) execution.promptId = body.prompt_id;
             this.deps.tasks.addEvent(task.id, "submitted", actualSubmission ? { promptId: body.prompt_id, actualSubmission: { ...actualSubmission, promptId: body.prompt_id } } : { promptId: body.prompt_id });
-            const startedAt = Date.now();
-            const maxExecutionMs = Math.max(5 * 60 * 1000, Math.min(120 * 60 * 1000, Number(params.maxExecutionMs) || 120 * 60 * 1000));
+            const clock = new ComfyExecutionClock(Date.now(), resolveComfyTimeoutMs(params.maxExecutionMs));
+            executionClock = clock;
+            let unknownQueuePolls = 0;
             const stallTimeoutMs = params.stallTimeoutMs === undefined
                 ? 9000 * 1000
                 : Math.max(0, Number(params.stallTimeoutMs) || 0);
-            lastActivityAt = startedAt;
+            // 排队阶段按提交时刻单独计排队预算，进入 running 后自动切换为本任务的执行预算。
+            lastActivityAt = clock.submittedAt;
             let missingHistoryCount = 0;
             let consecutiveMissingInQueue = 0;
             // 收到 executed 信号后，先直接用消息携带的 outputs 回写（绕过 /history 被清理的坑）；
@@ -648,9 +698,27 @@ export class ComfyUiBackend {
             };
             for (;;) {
                 if (controller.signal.aborted) { closeWs(); throw new Error("任务已取消"); }
-                if (Date.now() - startedAt > maxExecutionMs) { closeWs(); throw new Error(`ComfyUI 任务执行超时（已超过 ${Math.round(maxExecutionMs / 60000)} 分钟），请检查 ComfyUI 是否仍在运行`); }
+                // 排队与执行各用一份预算：前序任务耗时不能吃掉本任务的执行时间。
+                if (clock.phase === "queued") {
+                    const queueState = await readComfyQueueState(comfyUrl, body.prompt_id, controller.signal);
+                    if (queueState === null) {
+                        // 拿不到队列状态时按「已经在执行」兜底，避免执行预算永远不启动。
+                        if (++unknownQueuePolls >= 3) clock.markRunning();
+                    } else {
+                        unknownQueuePolls = 0;
+                        if (queueState.running) {
+                            clock.markRunning();
+                            this.deps.tasks.addEvent(task.id, "execution_started", { promptId: body.prompt_id, queuedForMs: Date.now() - clock.submittedAt });
+                        }
+                    }
+                    // 排队不算「无进度」：队列里前序任务在跑时 watchdog 不该把本任务判成卡住。
+                    lastActivityAt = Date.now();
+                }
+                const timedOut = clock.timeout();
+                if (timedOut) { closeWs(); throw new Error(comfyTimeoutMessage(timedOut, body.prompt_id)); }
                 const watchdog = h3WatchdogState(Date.now(), lastActivityAt, stallTimeoutMs, lastProgress);
-                if (watchdog.stalled) {
+                // watchdog 只在本任务真正开始执行后才生效。
+                if (clock.phase === "running" && watchdog.stalled) {
                     let queueState = "unknown";
                     try {
                         const queueResponse = await fetch(`${comfyUrl}/queue`, { signal: controller.signal });
@@ -1879,11 +1947,6 @@ function validateNanFengSingleSigma(value: string) {
     const values = value.match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g)?.map(Number).filter(Number.isFinite) || [];
     if (values.length < 2 || values[0] < 0 || values[0] > 1 || Math.abs(values[values.length - 1]) > 1e-6) throw new Error("H3 一采手动 Sigma 至少需要两个数值，且必须从 0~1 开始并以 0 结束。");
     for (let index = 1; index < values.length; index += 1) if (values[index] > values[index - 1] + 1e-6) throw new Error("H3 一采手动 Sigma 序列必须单调递减。");
-}
-
-function durationToFrames(seconds: number) {
-    const frames = Math.max(5, Math.round(seconds * 24));
-    return frames + (5 - frames % 17) % 17;
 }
 
 /** DLSS 输出节点的完整入参：与原生 NanFengV15DLSSOutput 的 schema 一致，缺省即原样透传。 */

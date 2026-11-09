@@ -1,4 +1,5 @@
 import { comfyWorkflowSwitch } from "../comfyui/workflow-switch.js";
+import { ComfyExecutionClock, comfyTimeoutMessage, readComfyQueueState, resolveComfyTimeoutMs } from "../comfyui/execution-clock.js";
 import type { WorkflowConfig, WorkflowField, RuntimeTask, BackendDatabase } from "../db.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 import { collectOutputMedia } from "../comfyui/bridge.js";
@@ -7,6 +8,13 @@ import type { BackendEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
 import { workflowGenerationSettingsSnapshot } from "../canvas/generation-settings.js";
 import { convertComfyWorkflowToApi, removeUiNotes } from "./comfyui-workflow-conversion.js";
+import { applyVideoContinuation, type VideoContinuationSummary } from "./video-continuation.js";
+import { findH3ContinuationLatent, h3ContinuationFolder, normalizeH3ContinuationSlot, type H3ContinuationIdentity } from "../comfyui/continuation-seed.js";
+import {
+    applyLatentContinuation, applyV15LatentContinuation, detectH3AvHooks, findV15Generator,
+    type LatentContinuationSummary, type V15LatentContinuationSummary,
+} from "./latent-continuation.js";
+import { applyV15VideoReference, applyVideoReferenceFallback, type VideoReferenceFallbackSummary } from "./video-fallback.js";
 import {
     clearWorkflowLivePreview, decodeKjPreviewMessage, previewImageRefFromOutput,
     publishWorkflowLivePreview,
@@ -212,7 +220,8 @@ type WfNode = { class_type?: string; inputs?: Record<string, unknown> } | null;
 const MEDIA_LOADER_INPUTS: Record<string, string> = {
     LoadImage: "image",
     LoadAudio: "audio",
-    LoadVideo: "video",
+    // ComfyUI 原生 LoadVideo 的文件输入名是 file（不是 video）；VHS_LoadVideo 才是 video。
+    LoadVideo: "file",
     VHS_LoadVideo: "video",
 };
 
@@ -325,6 +334,12 @@ export function removeEmptyMediaNodes(workflow: Record<string, unknown>, fields:
             const item = workflow[id] as WfNode;
             const loaderInput = item!.class_type ? MEDIA_LOADER_INPUTS[item!.class_type] : undefined;
             if (!loaderInput || present.has(id)) continue;
+            // 可选媒体字段（如视频续写的上一段视频）：为空时无条件剪掉，交给下游兜底分支。
+            if (field.optionalWhenEmpty === true) {
+                removed.add(id);
+                fieldMissing = true;
+                continue;
+            }
             // 图片沿用既有裁剪行为；视频/音频仅在其下游全部是 H3 可选参考槽时裁剪。
             if (item!.class_type !== "LoadImage" && !consumersAreOptionalH3Refs(workflow, id)) continue;
             removed.add(id);
@@ -409,6 +424,8 @@ function isOptionalMediaLink(workflow: Record<string, unknown>, classType: strin
     // MiniMaxH3ReferenceToVideo 的参考图/视频/音频槽位全是可选自动增长输入：
     // 未提供参考时只断开连线，不能把 H3 节点本身级联删掉。
     if (classType === "MiniMaxH3ReferenceToVideo" && H3_OPTIONAL_REF_INPUT.test(inputName)) return true;
+    // easy-for-loop 的循环初值全是可选槽：上一段视频这类输入为空时只断线，不能把循环体级联删掉。
+    if ((classType === "easy forLoopStart" || classType === "forLoopStart") && /^initial_value\d+$/.test(inputName)) return true;
     if (classType === "TextEncodeQwenImage21" && inputName.startsWith("images.")) return true;
     if (classType === "TextEncodeQwenImage21GH" && /^image_\d{2}$/.test(inputName)) return true;
     if (classType === "QwenImagePromptOptimizer" && /^图像_\d{2}$/.test(inputName)) return true;
@@ -520,38 +537,61 @@ export function validatePromptGraph(prepared: Record<string, unknown>): void {
 }
 
 /**
- * 将媒体 dataURL 上传到 ComfyUI，获取 input 目录文件名。
+ * 把一个显式媒体引用（data: / http(s):// / /media/）上传到 ComfyUI input 目录，返回文件名。
+ * 媒体字段与视频续写的上一段成片共用这一条上传链。
  */
-async function uploadDataUrlToComfy(
-    dataUrl: string,
-    fieldId: string,
+export async function uploadMediaRefToComfy(
+    value: string,
+    label: string,
     comfyUrl: string,
     signal: AbortSignal,
+    stageLocal?: (data: Uint8Array, filename: string) => string | null,
 ): Promise<string> {
-    const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
-    if (!match) throw new Error(`Invalid dataURL for field ${fieldId}`);
-    const mimeType = match[1] || "application/octet-stream";
-    const base64 = match[2];
-    const ext = mimeType.split("/")[1]?.split(";")[0] || "png";
-    const filename = `workflow_${fieldId}_${Date.now()}.${ext}`;
-
-    const blob = Buffer.from(base64, "base64");
+    let bytes: Uint8Array;
+    let mimeType: string;
+    if (value.startsWith("data:")) {
+        const match = value.match(/^data:([^;]+);base64,(.*)$/);
+        if (!match) throw new Error(`无效的媒体 dataURL：${label}`);
+        mimeType = match[1] || "application/octet-stream";
+        bytes = Buffer.from(match[2], "base64");
+    } else {
+        let url = value;
+        if (value.startsWith("/media/")) {
+            // /media/ 路径由本 backend 服务（默认 17370），不从 ComfyUI 取
+            url = `http://127.0.0.1:${process.env.PORT || 17370}${value}`;
+        }
+        let resp: Response;
+        try {
+            resp = await fetch(url, { signal });
+        } catch (error) {
+            throw workflowRequestError(`读取${label}`, url, error);
+        }
+        if (!resp.ok) throw new Error(`为${label}拉取媒体失败: HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        mimeType = blob.type || "application/octet-stream";
+        bytes = new Uint8Array(await blob.arrayBuffer());
+    }
+    const ext = mimeType.split("/")[1]?.split(";")[0] || "mp4";
+    const filename = `workflow_${label.replace(/[^\w.\-]+/g, "_")}_${Date.now()}.${ext}`;
+    // 本地实例直接平铺落盘 input/，绕开新版 ComfyUI /upload/image 对真实视频的资产注册崩溃；
+    // 远程实例或未配置本地根目录时 stageLocal 返回 null，回退 HTTP 上传。
+    const staged = stageLocal?.(bytes, filename);
+    if (staged) return staged;
     const form = new FormData();
-    form.set("image", new Blob([blob], { type: mimeType }), filename);
+    form.set("image", new Blob([bytes as BlobPart], { type: mimeType }), filename);
     form.set("overwrite", "true");
-
-    const endpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
-    let response: Response;
+    const uploadEndpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
+    let uploadResp: Response;
     try {
-        response = await fetch(endpoint, { method: "POST", body: form, signal });
+        uploadResp = await fetch(uploadEndpoint, { method: "POST", body: form, signal });
     } catch (error) {
-        throw workflowRequestError("上传参考图片到 ComfyUI", endpoint, error);
+        throw workflowRequestError(`上传${label}到 ComfyUI`, uploadEndpoint, error);
     }
-    if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`ComfyUI upload failed: HTTP ${response.status} ${text.slice(0, 200)}`);
+    if (!uploadResp.ok) {
+        const text = await uploadResp.text().catch(() => "");
+        throw new Error(`ComfyUI 上传失败: HTTP ${uploadResp.status} ${text.slice(0, 200)}`);
     }
-    const body = (await response.json()) as { name?: string };
+    const body = (await uploadResp.json()) as { name?: string };
     if (!body.name) throw new Error("ComfyUI 未返回文件名");
     return body.name;
 }
@@ -565,6 +605,7 @@ async function processMediaFields(
     fieldValues: FieldValues,
     comfyUrl: string,
     signal: AbortSignal,
+    stageLocal?: (data: Uint8Array, filename: string) => string | null,
 ): Promise<FieldValues> {
     const result: FieldValues = { ...fieldValues };
     for (const field of fields) {
@@ -590,44 +631,7 @@ async function processMediaFields(
             result[field.id] = null;
             continue;
         }
-        if (value.startsWith("data:image") || value.startsWith("data:audio") || value.startsWith("data:video")) {
-            result[field.id] = await uploadDataUrlToComfy(value, field.id, comfyUrl, signal);
-        } else if (/^https?:\/\//.test(value) || value.startsWith("/media/")) {
-            // 媒体库引用是 URL 或 /media/ 路径，需要 fetch 后上传到 ComfyUI。
-            let url = value;
-            if (value.startsWith("/media/")) {
-                // /media/ 路径由本 backend 服务（默认 17370），不从 ComfyUI 取
-                const backendBase = `http://127.0.0.1:${process.env.PORT || 17370}`;
-                url = `${backendBase}${value}`;
-            }
-            let resp: Response;
-            try {
-                resp = await fetch(url, { signal });
-            } catch (error) {
-                throw workflowRequestError(`读取字段「${field.name || field.id}」的${mediaKind}`, url, error);
-            }
-            if (!resp.ok) throw new Error(`为字段 ${field.id} 拉取${mediaKind}失败: HTTP ${resp.status}`);
-            const blob = await resp.blob();
-            const ext = blob.type.split("/")[1]?.split(";")[0] || (mediaKind === "音频" ? "wav" : mediaKind === "视频" ? "mp4" : "png");
-            const filename = `workflow_${field.id}_${Date.now()}.${ext}`;
-            const form = new FormData();
-            form.set("image", blob, filename);
-            form.set("overwrite", "true");
-            const uploadEndpoint = `${comfyUrl.replace(/\/$/, "")}/upload/image`;
-            let uploadResp: Response;
-            try {
-                uploadResp = await fetch(uploadEndpoint, { method: "POST", body: form, signal });
-            } catch (error) {
-                throw workflowRequestError(`上传字段「${field.name || field.id}」到 ComfyUI`, uploadEndpoint, error);
-            }
-            if (!uploadResp.ok) {
-                const text = await uploadResp.text().catch(() => "");
-                throw new Error(`ComfyUI 上传失败: HTTP ${uploadResp.status} ${text.slice(0, 200)}`);
-            }
-            const body = (await uploadResp.json()) as { name?: string };
-            if (!body.name) throw new Error("ComfyUI 未返回文件名");
-            result[field.id] = body.name;
-        }
+        result[field.id] = await uploadMediaRefToComfy(value, `字段「${field.name || field.id}」的${mediaKind}`, comfyUrl, signal, stageLocal);
     }
     return result;
 }
@@ -674,6 +678,17 @@ export class WorkflowExecutor {
         });
     }
 
+    /** 把续写实际追加/改写的事实合并进父生成日志（不限平台）：H3 自选模型日志平台是
+     *  selected-video-model、workflow 是模型名，按 runtimeTaskId 定位才能命中。只追加
+     *  对应事实键，保留已有 generationSettings/submission，证明动态节点已进入本次执行图。 */
+    private recordContinuationLogParam(parentTaskId: string | undefined, key: "videoContinuation" | "latentContinuation", summary: object | undefined) {
+        if (!parentTaskId || !summary || !this.db) return;
+        const log = this.db.listGenerationLogs({ runtimeTaskId: parentTaskId, limit: 1 })[0];
+        if (!log) return;
+        const params = log.params && typeof log.params === "object" ? log.params : {};
+        this.db.updateGenerationLog(log.id, { params: { ...params, [key]: summary } });
+    }
+
     /**
      * 准备一次工作流运行：应用默认值、上传媒体、注入参数、裁剪、校验、创建任务。
      * 同步部分（媒体上传 + 校验）可能抛错，由调用方捕获。
@@ -707,6 +722,8 @@ export class WorkflowExecutor {
         /** 预览桥节点；空串表示该节点已被裁剪或从未选择，本次运行不采集预览。 */
         previewNodeId: string;
         parentTaskId: string | undefined;
+        /** V15 续写运行以 2 号槽保存；成功后需归一到 1 号槽供下一段取种子。 */
+        latentV15SlotFolder?: string;
     }> {
         // Compile the current authoritative source on every run, including UI graphs
         // saved before this version. Never write the derived prompt back to the store.
@@ -725,7 +742,99 @@ export class WorkflowExecutor {
             }
         }
         // 先处理媒体字段：上传 dataURL → 获取 ComfyUI input 文件名
-        const processedValues = await processMediaFields(config.fields, workflowJson, effectiveFieldValues, url, controller.signal);
+        // 本地实例优先平铺落盘 input/，绕开新版 ComfyUI /upload/image 对真实视频的资产注册崩溃。
+        const stageLocal = (data: Uint8Array, filename: string) => this.bridge.stageLocalInput(data, filename, url);
+        const processedValues = await processMediaFields(config.fields, workflowJson, effectiveFieldValues, url, controller.signal, stageLocal);
+        // 潜空间续写（H3 节点集成，非侵入）：源段开关让本次运行把采样器 AV latent 无损存进
+        // 自己运行目录；上一段开关让本次运行从上一段运行目录载入种子。只动本次执行的克隆图，
+        // 存储的原工作流从不改动。仅本机 ComfyUI 适用；缺种子或探测不到结构时回退到加载视频续写。
+        const resumePrev = processedValues.resume_prev === true && typeof processedValues.prev_video === "string" && Boolean(processedValues.prev_video.trim());
+        const latentSave = processedValues.latent_save === true;
+        const latentPrevTask = typeof processedValues.latent_prev_task === "string" ? processedValues.latent_prev_task.trim() : "";
+        const continuationActive = latentSave || resumePrev;
+        const v15 = continuationActive ? findV15Generator(workflowJson) : null;
+        const hooks = continuationActive && !v15 ? detectH3AvHooks(workflowJson) : null;
+        let latentSummary: LatentContinuationSummary | V15LatentContinuationSummary | undefined;
+        let latentLoaded = false;
+        let latentV15SlotFolder: string | undefined;
+        const localDirect = this.bridge.localH3DirectConfig();
+        const latentLocal = Boolean(parentTaskId && projectId && nodeId && localDirect.ready && this.bridge.isLocalUrl(url));
+        if (latentLocal && continuationActive && (v15 || hooks)) {
+            const target: H3ContinuationIdentity = { workflow: projectId!, group: nodeId!, run: parentTaskId! };
+            const folder = h3ContinuationFolder(target);
+            let loadFile: string | null = null;
+            let source: H3ContinuationIdentity | undefined;
+            if (resumePrev) {
+                source = latentPrevTask ? { workflow: projectId!, group: nodeId!, run: latentPrevTask } : undefined;
+                loadFile = source ? await findH3ContinuationLatent(localDirect.rootDir, h3ContinuationFolder(source)) : null;
+            }
+            if (v15 && (latentSave || loadFile)) {
+                const index = loadFile ? 2 : 1;
+                if (loadFile && source) await this.bridge.prepareH3ContinuationSeed(source, target, 1);
+                const applied = applyV15LatentContinuation(workflowJson, {
+                    descriptor: JSON.stringify({ workflow: projectId, node: "nf_v15", group: nodeId, run: parentTaskId, index }),
+                    folder, index,
+                });
+                workflowJson = applied.workflow;
+                latentSummary = applied.summary;
+                // 改号后字段/输出/预览仍引用旧 ID 会被 injectParams 静默跳过，必须在本次
+                // 运行的配置副本上同步改号（存储的 config 不动）。
+                if (applied.summary.renamedFrom) {
+                    const oldId = applied.summary.renamedFrom;
+                    const remap = (id: string) => id.split(",").map((part) => part.trim() === oldId ? "nf_v15" : part).join(",");
+                    config = {
+                        ...config,
+                        fields: (config.fields || []).map((field) => ({ ...field, node: remap(field.node) })),
+                        ...(Array.isArray(config.outputNodes) ? { outputNodes: config.outputNodes.map((id) => remap(String(id))) } : {}),
+                        ...(typeof config.previewNodeId === "string" ? { previewNodeId: remap(config.previewNodeId) } : {}),
+                    };
+                }
+                latentLoaded = Boolean(loadFile);
+                if (loadFile) latentV15SlotFolder = folder;
+            } else if (hooks && (loadFile || (latentSave && (!resumePrev || Boolean(hooks.loopId))))) {
+                // 非循环流缺种子的续写不在此单独导出：下方像素回退会把导出与加载视频续写一次性接好，避免 lc_save 重复。
+                // 循环流缺种子时仍挂导出侧支（采样器尾帧干净），续写交给下方原生循环种子机制。
+                const applied = applyLatentContinuation(workflowJson, hooks, {
+                    folder, save: latentSave,
+                    ...(loadFile ? { load: { file: loadFile, contextLength: "22", audioContextLength: 24 } } : {}),
+                });
+                workflowJson = applied.workflow;
+                latentSummary = applied.summary;
+                latentLoaded = Boolean(loadFile);
+            }
+        }
+        // 加载视频续写（非侵入式）：显式 resume_prev + 上一段成片才触发，潜空间载入已生效时跳过。
+        // 按图结构选载入点：非循环 H3 AV 图走 MotionContext 像素路径（尾帧/尾音频编码钉帧，可顺带导出）；
+        // 循环流走原生循环种子机制；V15 填视频参考槽；其余 H3 参考流填/替换视频加载器。
+        let continuationSummary: VideoContinuationSummary | VideoReferenceFallbackSummary | undefined;
+        if (resumePrev && !latentLoaded) {
+            const prevRef = String(processedValues.prev_video).trim();
+            const prevVideoFile = /^(https?:\/\/|\/media\/|data:)/.test(prevRef)
+                ? await uploadMediaRefToComfy(prevRef, "视频续写上一段成片", url, controller.signal, stageLocal)
+                : prevRef;
+            if (hooks && !hooks.loopId) {
+                const folder = latentLocal && parentTaskId && projectId && nodeId
+                    ? h3ContinuationFolder({ workflow: projectId, group: nodeId, run: parentTaskId }) : undefined;
+                const applied = applyLatentContinuation(workflowJson, hooks, {
+                    ...(folder ? { folder } : {}), save: latentSave && Boolean(folder),
+                    loadVideo: { file: prevVideoFile, contextLength: "22", audioContextLength: 24 },
+                });
+                workflowJson = applied.workflow;
+                latentSummary = applied.summary;
+            } else if (hooks?.loopId) {
+                const continuation = applyVideoContinuation(workflowJson, prevVideoFile);
+                workflowJson = continuation.workflow;
+                continuationSummary = continuation.summary;
+            } else if (v15) {
+                const applied = applyV15VideoReference(workflowJson, prevVideoFile);
+                workflowJson = applied.workflow;
+                continuationSummary = applied.summary;
+            } else {
+                const applied = applyVideoReferenceFallback(workflowJson, prevVideoFile);
+                workflowJson = applied.workflow;
+                continuationSummary = applied.summary;
+            }
+        }
         const promptText = buildPrompt(config.fields, processedValues) || config.title;
         const persistedFieldValues = redactInlineMedia(effectiveFieldValues);
         // 处理 seed=-1 随机化
@@ -735,6 +844,8 @@ export class WorkflowExecutor {
             }
         }
         this.updateCanvasImageWorkflowSettingsLog(parentTaskId, name, config.fields || [], processedValues);
+        this.recordContinuationLogParam(parentTaskId, "videoContinuation", continuationSummary);
+        this.recordContinuationLogParam(parentTaskId, "latentContinuation", latentSummary);
 
         // 处理多节点字段（node 含逗号，如 Flux2-Klein 的 width/height 需同时注入到 152 和 156）
         const multiNodeParams: RunParams = {};
@@ -822,7 +933,7 @@ export class WorkflowExecutor {
         }
         this.controllers.set(task.id, controller);
         this.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, outputNodes: Array.isArray(config.outputNodes) ? config.outputNodes : [], previewNodeId, parentTaskId };
+        return { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle: config.title, outputNodes: Array.isArray(config.outputNodes) ? config.outputNodes : [], previewNodeId, parentTaskId, ...(latentV15SlotFolder ? { latentV15SlotFolder } : {}) };
     }
 
     /**
@@ -848,8 +959,10 @@ export class WorkflowExecutor {
         previewNodeId: string;
         /** 画布父任务已自行写过生成日志时，内层不再重复写。 */
         parentTaskId: string | undefined;
+        /** V15 续写运行以 2 号槽保存；成功后需归一到 1 号槽供下一段取种子。 */
+        latentV15SlotFolder?: string;
     }): Promise<RunResult> {
-        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, outputNodes, previewNodeId, parentTaskId } = ctx;
+        const { task, prepared, url, controller, clientId, promptText, persistedFieldValues, projectId, nodeId, name, configTitle, outputNodes, previewNodeId, parentTaskId, latentV15SlotFolder } = ctx;
         // 画布任务（image/video/audio）已经写过一条更完整的生成日志时，这里不再重复写。
         // 否则同一次生图会在日志面板出现「生图」+「工作流」两条几乎一致的记录：
         // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
@@ -859,6 +972,18 @@ export class WorkflowExecutor {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
             const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name,
                 previewNodeId ? { nodeId: previewNodeId, taskIds: [task.id, parentTaskId] } : undefined);
+            // 必须在标记成功之前归一槽位：父任务一旦成功，下一段立刻按 clip_00001 取种子。
+            // 归一失败不判任务失败（视频已产出），留事件并让下一段取种时给出明确报错。
+            if (latentV15SlotFolder) {
+                try {
+                    await normalizeH3ContinuationSlot(this.bridge.localH3DirectConfig().rootDir, latentV15SlotFolder);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.warn(`[workflows:run] latent slot normalize failed: ${message}`);
+                    this.tasks.addEvent(task.id, "latent_slot_normalize_failed", { folder: latentV15SlotFolder, error: message });
+                }
+            }
+            await this.releaseAfterRun(url);
             this.tasks.update(task.id, { status: "succeeded", progress: 1, result: finalResult });
             this.events?.publish({ type: "task.completed", entityId: task.id, payload: finalResult });
             if (!skipLog) this.db?.createGenerationLog({
@@ -883,6 +1008,7 @@ export class WorkflowExecutor {
             return { taskId: task.id, ...finalResult };
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            await this.releaseAfterRun(url);
             if (this.tasks.get(task.id)?.status !== "cancelled") {
                 this.tasks.update(task.id, { status: "failed", error: message });
                 this.events?.publish({ type: "task.failed", entityId: task.id, payload: { error: message } });
@@ -908,6 +1034,23 @@ export class WorkflowExecutor {
             this.comfyExecutions.delete(task.id);
             // 预览帧只在生成态有意义；终态立即释放，避免任务 id 复用或长期占内存。
             clearWorkflowLivePreview([task.id, parentTaskId]);
+        }
+    }
+
+    /**
+     * 自定义工作流连续分段：任务一结束（成功、失败或取消）就把模型与执行缓存放掉。
+     * 默认关闭；开启后同一流程的第二段不再继承上一段驻留的文本编码器 + DiT，
+     * 加载与采样速度与第一段一致。
+     * 必须在标记终态之前完成：父任务成功后调用方会立刻提交下一段，晚一步就又会撞上残留显存。
+     * 释放失败或队列里还有别的 prompt 时只跳过清理，不影响任务结果；超时上限保证 ComfyUI 无响应时仍能收尾。
+     */
+    private async releaseAfterRun(url: string) {
+        if (!this.bridge.releaseBeforeRepeat()) return;
+        try {
+            const released = await comfyWorkflowSwitch.releaseIfIdle(url, AbortSignal.timeout(15_000));
+            if (!released) console.log("[workflows:run] 队列非空，跳过任务结束后的模型释放", { url });
+        } catch (error) {
+            console.warn(`[workflows:run] 任务结束后的模型释放失败: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
@@ -1013,6 +1156,8 @@ export class WorkflowExecutor {
         const activeExecution = { url: comfyUrl, cancelRequested: false } as { url: string; promptId?: string; cancelRequested: boolean; cancellation?: Promise<void> };
         this.comfyExecutions.set(task.id, activeExecution);
         const Ctor = (globalThis as any).WebSocket;
+        // /prompt 只是入队；只有本任务真正开始跑才启动执行超时。WS 回调先于提交注册，故用可空引用。
+        let executionClock: ComfyExecutionClock | null = null;
         let capturedPromptId: string | null = null;
         let ws: any = null;
         let wsExecutedAt: number | null = null;
@@ -1074,6 +1219,9 @@ export class WorkflowExecutor {
                                 return;
                             }
                             if (!msg?.type || !capturedPromptId || msg?.data?.prompt_id !== capturedPromptId) return;
+                            // 收到属于本 prompt 的事件即说明它已离开队列开始执行；
+                            // 排队阶段的时间不算进本任务的执行预算。
+                            executionClock?.markRunning();
                             if (msg.type === "executed" || msg.type === "execution_success") {
                                 if (msg.type === "execution_success") wsExecutedAt ??= Date.now();
                                 if (msg.data?.output && typeof msg.data.output === "object") {
@@ -1134,14 +1282,32 @@ export class WorkflowExecutor {
                 throw new Error("任务已取消");
             }
 
-            const startedAt = Date.now();
-            const maxExecutionMs = 30 * 60 * 1000;
+            const clock = new ComfyExecutionClock(Date.now(), resolveComfyTimeoutMs(process.env.COMFY_WORKFLOW_TIMEOUT_MS));
+            executionClock = clock;
+            let successObservedAt: number | null = null;
+            let unknownQueuePolls = 0;
             for (;;) {
                 if (controller.signal.aborted || activeExecution.cancelRequested) {
                     await this.cancelComfyExecution(task.id, activeExecution);
                     throw new Error("任务已取消");
                 }
-                if (Date.now() - startedAt > maxExecutionMs) throw new Error("ComfyUI 任务执行超时（30 分钟）");
+                // 排队中的本任务还没开始耗自己的执行预算：前序任务跑多久都不计入。
+                // WS 事件通常已标记 running，这里再用 /queue 兜底（部分 progress 事件不带 prompt_id）。
+                if (clock.phase === "queued") {
+                    const queueState = await readComfyQueueState(comfyUrl, promptId, controller.signal);
+                    if (queueState === null) {
+                        // 拿不到队列状态时按「已经在执行」兜底，避免执行预算永远不启动。
+                        if (++unknownQueuePolls >= 3) clock.markRunning();
+                    } else {
+                        unknownQueuePolls = 0;
+                        if (queueState.running) {
+                            clock.markRunning();
+                            this.tasks.addEvent(task.id, "execution_started", { promptId, queuedForMs: Date.now() - clock.submittedAt });
+                        }
+                    }
+                }
+                const timedOut = clock.timeout();
+                if (timedOut) throw new Error(comfyTimeoutMessage(timedOut, promptId));
                 if (wsError) {
                     // wsError 只在 socket 回调里赋值，TS 控制流看不到，先取成 Error。
                     const wsFailure = wsError as Error;
@@ -1187,13 +1353,28 @@ export class WorkflowExecutor {
                     }
                     // An output node finishing is not the prompt finishing.
                     if (statusStr === "success" || item?.status?.completed === true) {
+                        // 归档媒体的宽限期从「看到本任务完成」起算，不能用提交时刻：
+                        // 排队很久的任务一看到 success 就会被 60 秒阈值误判为「无可用媒体」。
+                        successObservedAt ??= Date.now();
                         if (!hasOutputs) throw new Error("ComfyUI 执行结束但无输出");
                         // 用户可指定输出节点：只保留选中的节点产物，未指定时保持原样。
-                        const outputs = selectOutputNodes(item.outputs, outputNodes);
-                        if (!Object.keys(outputs).length) throw new Error(`指定的输出节点没有产物：${outputNodes.join("、")}`);
+                        let outputs = selectOutputNodes(item.outputs, outputNodes);
+                        let outputNodeFallback = false;
+                        if (!Object.keys(outputs).length && outputNodes.length && Object.keys(item.outputs).length) {
+                            // 指定节点没有对应产物，但工作流整体成功且 ComfyUI 确实产出了结果：
+                            // 退而取全部输出节点产物，避免把一次成功生成当成失败丢掉。
+                            // 常见于 SaveVideo / VHS 这类节点：视频挂在更上游的产出节点，而非用户选中的那个。
+                            outputs = selectOutputNodes(item.outputs, []);
+                            outputNodeFallback = true;
+                            this.tasks.addEvent(task.id, "output_node_fallback", {
+                                selectedNodeIds: outputNodes,
+                                availableNodeIds: Object.keys(item.outputs),
+                            });
+                        }
+                        if (!Object.keys(outputs).length) throw new Error(`指定的输出节点没有产物：${outputNodes.join("、")}${Object.keys(item.outputs).length ? `（ComfyUI 返回的可选节点：${Object.keys(item.outputs).join("、")}）` : ""}`);
                         const media = await collectOutputMedia(outputs, comfyUrl, this.media, controller.signal);
-                        if (media.length) return { promptId, outputs, media, status: item.status || {} };
-                        if (Date.now() - startedAt > 60000) throw new Error("ComfyUI 执行结束但输出中没有可用媒体");
+                        if (media.length) return { promptId, outputs, media, status: item.status || {}, ...(outputNodeFallback ? { warning: `指定的输出节点没有对应产物，已改用工作流全部输出节点（${outputNodes.join("、")}）的结果` } : {}) };
+                        if (Date.now() - successObservedAt > 60000) throw new Error("ComfyUI 执行结束但输出中没有可用媒体");
                     }
                 }
                 // Completion is signalled before history is committed. Always try

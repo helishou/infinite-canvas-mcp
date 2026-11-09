@@ -48,6 +48,30 @@ export async function stageH3ContinuationSeed(rootDir: string, source: H3Continu
     }
 }
 
+/** 校验来源运行的输出潜变量槽位；命中时返回相对 output/ 的正斜杠文件路径，供 LoadLatent 直接消费。 */
+export async function findH3ContinuationLatent(rootDir: string, folder: string): Promise<string | null> {
+    const relative = `${folder}/clip_00001.safetensors`;
+    try { await inspectLatent(path.join(rootDir, "output", relative)); } catch { return null; }
+    return relative;
+}
+
+/** V15 续写运行以 index=2 保存（载入 1 号槽、输出 2 号槽）。收口后把输出归一到 1 号槽，
+ *  保持「每个运行的输出都在自己目录的 clip_00001」不变量，下一段种子复制永远取 1 号槽。 */
+export async function normalizeH3ContinuationSlot(rootDir: string, folder: string) {
+    const dir = path.join(rootDir, "output", folder);
+    const source = path.join(dir, "clip_00002.safetensors");
+    const target = path.join(dir, "clip_00001.safetensors");
+    await inspectLatent(source);
+    const temporary = path.join(dir, `clip_00001.${randomUUID()}.tmp`);
+    try {
+        await copyFile(source, temporary);
+        if (!await sameFileContent(source, temporary)) throw new Error("H3 潜变量槽位归一校验失败");
+        await rename(temporary, target);
+    } finally {
+        await unlink(temporary).catch(() => undefined);
+    }
+}
+
 async function inspectLatent(file: string) {
     const info = await stat(file).catch(() => null);
     if (!info?.isFile() || info.size < 32) throw new Error("上一段 H3 AV 潜变量不存在或不完整，请从组首重新运行");

@@ -45,6 +45,7 @@ http://localhost:3001
 - `canvas-agent/dist/...` 缺失时先运行 `corepack pnpm --filter @basketikun/canvas-agent run build`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
 - `safe-delete state lock timeout` 若来自宿主注入的 `NODE_OPTIONS`，应在该运行环境中排查注入与 Vite 缓存清理的冲突。项目启动脚本保留 `NODE_OPTIONS`，不自动移除删除守卫或其他宿主保护。
 - Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.160.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。模型下拉框使用 Canvas Agent 实际启动的 Codex app-server 返回的目录。
+- 视频节点的「镜头切分检测」由 Backend 调用 `backend/workers/detect_video_scenes.py`，依赖 `backend/workers/requirements-video-shot-detection.txt` 中的 `scenedetect-headless`。本地需先装进 Backend 使用的 Python（`python -m pip install -r backend/workers/requirements-video-shot-detection.txt`），或用 `SCENEDETECT_PYTHON` 指向已安装该包的解释器；缺失时该接口返回 503。Docker 镜像已内置。
 
 ## 数据与升级
 

@@ -36,6 +36,9 @@ const selectionStroke = (theme: CanvasTheme) => theme.canvas.selectionStroke;
 // 只有节点确实缩到难以承载编辑内容时才切换概览，避免常用缩放区间过早换壳。
 const NODE_DETAIL_MODE_ENTER_SCREEN_SIZE = 180;
 const NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE = 100;
+// 角色节点折叠时底部缩略条只展示前几张；只为这几张生成画布预览，
+// 避免多套 outfit 的角色节点把整套原图都下载并解码进内存。
+const CHARACTER_VISIBLE_THUMB_COUNT = 5;
 const emptyPluginView: Record<string, unknown> = {};
 const subscribeNoPluginView = () => () => undefined;
 
@@ -1696,13 +1699,14 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
         };
     }, [backendConnected, backendToken, primary?.url, primary?.storageKey]);
 
-    // 解析所有缩略图 URL
+    // 折叠时只有底部缩略条会显示前几张图；展开态由各卡片自己按需生成预览。
+    // 这里不再给整套 outfit 预生成，避免多图角色节点把原图全部下载解码进内存。
     useEffect(() => {
         let cancelled = false;
         const next: Record<number, string> = {};
         Promise.all(
             images.map(async (image, idx) => {
-                void ensureImagePreview(image.storageKey);
+                if (batchExpanded || idx < CHARACTER_VISIBLE_THUMB_COUNT) void ensureImagePreview(image.storageKey);
                 const key = image.storageKey || image.url;
                 if (!key) return null;
                 if (urlCache.current[key]) {
@@ -1722,7 +1726,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
         return () => {
             cancelled = true;
         };
-    }, [backendConnected, backendToken, images]);
+    }, [backendConnected, backendToken, images, batchExpanded]);
 
     useEffect(
         () => () => {
@@ -1743,7 +1747,7 @@ function CharacterNodeContent(props: NodeContentRendererProps) {
         );
     }
 
-    const visibleThumbs = images.slice(0, 5);
+    const visibleThumbs = images.slice(0, CHARACTER_VISIBLE_THUMB_COUNT);
     const overflow = images.length - visibleThumbs.length;
     const isBatchRoot = images.length > 1;
 

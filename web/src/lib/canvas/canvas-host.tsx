@@ -29,7 +29,7 @@ export function CanvasPortal({ children }: { children: ReactNode }) {
     const host = useCanvasHost();
     return host && !host.active ? null : createPortal(children, host?.popupContainer() || document.body);
 }
-/** Transient tools consume Escape before the canvas host collapses. */
+/** Transient tools consume Escape before other window-level handlers. */
 export function useCanvasTransientEscape(open: boolean, close: () => void, deferToPopovers = false) {
     const active = useCanvasHost()?.active ?? true;
     useEffect(() => {

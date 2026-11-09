@@ -46,7 +46,7 @@ import { findCharacterVoiceAsset, resolveCharacterVoiceName } from "@/lib/charac
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useAssetStore, saveLibraryAsset, acceptLibraryAsset, libraryErrorText, type Asset, type AudioAsset } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, splitDataUrl, resizeDataUrl } from "@/lib/canvas/canvas-image-data";
 import { canvasNodeImage, canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
 import { canvasNodeDownloadPlan } from "@/lib/canvas/canvas-media-download";
 import { convertImageNodeToProp as convertImageToPropNode } from "@/lib/canvas/prop-node-conversion";
@@ -69,7 +69,7 @@ import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-ang
 import type { CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
-import type { CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
+import type { CanvasImageResizeParams } from "@/components/canvas/canvas-node-resize-dialog";
 import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, hydrateNodeGenerationContext, recordLoopGenerationOutput, splitLoopPromptItems, type CanvasLoopRuntimeContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasLoopNode } from "@/components/canvas/canvas-loop-node";
 import { loopForGenerationCommand, resolveLoopInputPlan, runLoopGenerationRounds, singleLoopOutputBinding, upstreamLoopForGeneration } from "@/lib/canvas/canvas-loop-execution";
@@ -140,7 +140,7 @@ import {
     CanvasNodeMaskEditDialog,
     CanvasNodePromptPanel,
     CanvasNodeSplitDialog,
-    CanvasNodeUpscaleDialog,
+    CanvasNodeResizeDialog,
     CanvasPluginManagerModal,
     CanvasVideoCompareModal,
     CharacterNodeEditModal,
@@ -630,7 +630,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [stitchPreview, setStitchPreview] = useState<{ source: CanvasNodeData; target: CanvasNodeData; sourceUrl: string; targetUrl: string; direction: "horizontal" | "vertical"; reversed: boolean } | null>(null);
     const [stitchPreviewDataUrl, setStitchPreviewDataUrl] = useState("");
     const [stitchingImages, setStitchingImages] = useState(false);
-    const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
+    const [resizeNodeId, setResizeNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
@@ -1024,6 +1024,27 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         return { x: -currentViewport.x / k, y: -currentViewport.y / k, width: width / k, height: height / k };
     }, [size.height, size.width]);
 
+    // 新节点自动寻位：期望中心点 → 就近空位（优先可见视口）。
+    // 所有「在画布中心新建」的入口共用，避免连续新建全部叠在同一个点上。
+    const placeNewNodeAt = useCallback(
+        (
+            desiredCenter: Position | undefined,
+            nodeSize: { width: number; height: number },
+            options?: { obstacles?: CanvasNodeData[]; excludeIds?: Iterable<string> },
+        ) => {
+            const center = desiredCenter || getCanvasCenter();
+            return findFreeNodePosition({
+                desired: { x: center.x - nodeSize.width / 2, y: center.y - nodeSize.height / 2 },
+                size: nodeSize,
+                obstacles: placementObstacles(options?.obstacles ?? nodesRef.current),
+                bounds: getViewportBounds(),
+                gap: NODE_PLACEMENT_GAP,
+                excludeIds: options?.excludeIds,
+            });
+        },
+        [getCanvasCenter, getViewportBounds],
+    );
+
     const setConnecting = useCallback(
         (next: ConnectionHandle | null) => {
             connectingParamsRef.current = next;
@@ -1085,16 +1106,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const spec = getNodeSpec(type);
             // 连线创建时沿用源节点尺寸（视觉上与源节点同规格），再按实际尺寸就近寻位。
             const size = sourceNode ? { width: sourceNode.width, height: sourceNode.height } : { width: spec.width, height: spec.height };
-            const placement = findFreeNodePosition({
-                desired: { x: pending.position.x - size.width / 2, y: pending.position.y - size.height / 2 },
-                size,
-                obstacles: placementObstacles(nodesRef.current),
-                bounds: getViewportBounds(),
-                gap: NODE_PLACEMENT_GAP,
-            });
+            const placement = placeNewNodeAt(pending.position, size);
             const newNode = createCanvasNode(type, { x: placement.x + size.width / 2, y: placement.y + size.height / 2 }, metadata);
             newNode.width = size.width;
             newNode.height = size.height;
+            newNode.position = { x: placement.x, y: placement.y };
             if (pending.connection) {
                 const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
                 if (!connection) {
@@ -1114,7 +1130,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getViewportBounds, message, setConnecting, t],
+        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, message, placeNewNodeAt, setConnecting, t],
     );
 
     const cancelPendingConnectionCreate = useCallback(() => {
@@ -1283,10 +1299,10 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
-    const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
+    const resizeNode = resizeNodeId ? nodeById.get(resizeNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
-    const activeImageToolNode = cropNode || maskEditNode || splitNode || upscaleNode || angleNode;
+    const activeImageToolNode = cropNode || maskEditNode || splitNode || resizeNode || angleNode;
     const activeImageToolSource = activeImageToolNode ? canvasNodePrimaryImage(activeImageToolNode) : null;
     const [imageToolUrl, setImageToolUrl] = useState<{ nodeId: string; url: string } | null>(null);
     useEffect(() => {
@@ -1628,15 +1644,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const createNode = useCallback(
         (type: CanvasNodeTypeId, position?: Position) => {
             const spec = getNodeSpec(type);
-            const center = position || getCanvasCenter();
-            // 期望位置被占用时就近找空位：连续新建 / 在已有节点上右键新建都不会叠在一起。
-            const placement = findFreeNodePosition({
-                desired: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
-                size: { width: spec.width, height: spec.height },
-                obstacles: placementObstacles(nodesRef.current),
-                bounds: getViewportBounds(),
-                gap: NODE_PLACEMENT_GAP,
-            });
+            const placement = placeNewNodeAt(position, spec);
             const targetPosition = { x: placement.x + spec.width / 2, y: placement.y + spec.height / 2 };
             const configMetadata =
                 type === CanvasNodeType.Config
@@ -1666,7 +1674,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Character && type !== CanvasNodeType.Scene && type !== CanvasNodeType.Prop && type !== CanvasNodeType.Loop;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter, getViewportBounds],
+        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, placeNewNodeAt],
     );
 
     const deleteNodes = useCallback(
@@ -2216,8 +2224,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }),
             { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity },
         );
-        const dx = center.x - (bounds.left + bounds.right) / 2;
-        const dy = center.y - (bounds.top + bounds.bottom) / 2;
+        // 以剪贴板内容的整体包围盒寻位：期望在视口中心，被占用时就近挪开。
+        const clipboardSize = { width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
+        const placement = findFreeNodePosition({
+            desired: { x: center.x - clipboardSize.width / 2, y: center.y - clipboardSize.height / 2 },
+            size: clipboardSize,
+            obstacles: placementObstacles(nodesRef.current),
+            bounds: getViewportBounds(),
+            gap: NODE_PLACEMENT_GAP,
+        });
+        const dx = placement.x - bounds.left;
+        const dy = placement.y - bounds.top;
         const idMap = new Map<string, string>();
         const nextNodes = clipboard.nodes.map((node, index) => {
             const id = `${node.type}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`;
@@ -2263,13 +2280,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         });
 
         setNodes((prev) => [...prev, ...pastedNodes]);
+        nodesRef.current = [...nodesRef.current, ...pastedNodes];
         setConnections((prev) => [...prev, ...nextConnections]);
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
         setContextMenu(null);
         setDialogNodeId(pastedNodes[0]?.type === CanvasNodeType.Group ? null : pastedNodes[0]?.id || null);
         return true;
-    }, [getCanvasCenter]);
+    }, [getCanvasCenter, getViewportBounds]);
 
     const resetViewport = useCallback(() => {
         commitViewport({ x: size.width / 2, y: size.height / 2, k: 1 });
@@ -2951,8 +2969,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 if (document.querySelector("parsererror") || document.documentElement.localName !== "svg" || document.documentElement.namespaceURI !== "http://www.w3.org/2000/svg") {
                     throw new Error("invalid SVG");
                 }
-                const node = createCanvasNode("svg:vector", position, { content: source });
+                const spec = getNodeSpec("svg:vector");
+                const placement = placeNewNodeAt(position, spec);
+                const node = createCanvasNode("svg:vector", { x: placement.x + spec.width / 2, y: placement.y + spec.height / 2 }, { content: source });
                 node.title = file.name;
+                nodesRef.current = [...nodesRef.current, node];
                 setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([node.id]));
                 setSelectedConnectionId(null);
@@ -2967,16 +2988,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const previewUrl = URL.createObjectURL(file);
         const initialSize = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+        const placement = placeNewNodeAt(position, initialSize);
         const newNode: CanvasNodeData = {
             id,
             type: CanvasNodeType.Image,
             title: file.name,
-            position: { x: position.x - initialSize.width / 2, y: position.y - initialSize.height / 2 },
+            position: { x: placement.x, y: placement.y },
             width: initialSize.width,
             height: initialSize.height,
             metadata: { content: previewUrl, status: NODE_STATUS_LOADING, bytes: file.size, mimeType: file.type || "image/*" },
         };
 
+        nodesRef.current = [...nodesRef.current, newNode];
         setNodes((prev) => [...prev, newNode]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
@@ -2984,7 +3007,21 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         try {
             const image = await uploadImage(file);
             const size = fitNodeSize(image.width, image.height);
-            setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, width: size.width, height: size.height, metadata: { ...node.metadata, ...imageMetadata(image) } } : node)));
+            setNodes((prev) =>
+                prev.map((node) => {
+                    if (node.id !== id) return node;
+                    // 真实尺寸可能比占位尺寸大，等比替换后重新寻位，避免压住邻居。
+                    const nextPlacement = findFreeNodePosition({
+                        desired: { x: node.position.x, y: node.position.y },
+                        size,
+                        obstacles: placementObstacles(prev),
+                        bounds: getViewportBounds(),
+                        gap: NODE_PLACEMENT_GAP,
+                        excludeIds: [id],
+                    });
+                    return { ...node, position: { x: nextPlacement.x, y: nextPlacement.y }, width: size.width, height: size.height, metadata: { ...node.metadata, ...imageMetadata(image) } };
+                }),
+            );
             URL.revokeObjectURL(previewUrl);
             return true;
         } catch (error) {
@@ -2992,48 +3029,48 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             setNodes((prev) => prev.map((node) => (node.id === id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
             return false;
         }
-    }, [message, t]);
+    }, [getViewportBounds, message, placeNewNodeAt, t]);
 
     const createVideoFileNode = useCallback(async (file: File, position: Position) => {
         const video = await uploadMediaFile(file, "video");
         const size = fitNodeSize(video.width || 1280, video.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
         const id = `video-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        setNodes((prev) => [
-            ...prev,
-            {
-                id,
-                type: CanvasNodeType.Video,
-                title: file.name,
-                position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
-                width: size.width,
-                height: size.height,
-                metadata: videoMetadata(video),
-            },
-        ]);
+        const placement = placeNewNodeAt(position, size);
+        const node = {
+            id,
+            type: CanvasNodeType.Video,
+            title: file.name,
+            position: { x: placement.x, y: placement.y },
+            width: size.width,
+            height: size.height,
+            metadata: videoMetadata(video),
+        };
+        nodesRef.current = [...nodesRef.current, node];
+        setNodes((prev) => [...prev, node]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         setDialogNodeId(id);
-    }, []);
+    }, [placeNewNodeAt]);
 
     const createAudioFileNode = useCallback(async (file: File, position: Position) => {
         const audio = await uploadMediaFile(file, "audio");
         const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
         const id = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-        setNodes((prev) => [
-            ...prev,
-            {
-                id,
-                type: CanvasNodeType.Audio,
-                title: file.name,
-                position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
-                width: spec.width,
-                height: spec.height,
-                metadata: audioMetadata(audio),
-            },
-        ]);
+        const placement = placeNewNodeAt(position, spec);
+        const node = {
+            id,
+            type: CanvasNodeType.Audio,
+            title: file.name,
+            position: { x: placement.x, y: placement.y },
+            width: spec.width,
+            height: spec.height,
+            metadata: audioMetadata(audio),
+        };
+        nodesRef.current = [...nodesRef.current, node];
+        setNodes((prev) => [...prev, node]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
-    }, []);
+    }, [placeNewNodeAt]);
 
     // 内部引用拖拽（H3 输出视频 / 侧边栏素材）落库生成节点：复用 storageKey，不重新上传。
     const createNodeFromCanvasRef = useCallback(
@@ -3082,6 +3119,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const characterImages = ref.characterImages || [];
                 const title = ref.characterName || ref.name || "角色";
                 const id = `character-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                const placement = placeNewNodeAt(position, spec);
                 const voiceUrl = ref.characterVoiceUrl || ref.voice || "";
                 const voiceStorageKey = ref.characterVoiceStorageKey || ref.voiceStorageKey || "";
                 const voiceAssetId = ref.characterVoiceAssetId || ref.voiceAssetId || "";
@@ -3089,30 +3127,29 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     useAssetStore.getState().assets.filter((asset): asset is AudioAsset => asset.kind === "audio"),
                     { assetId: voiceAssetId, storageKey: voiceStorageKey, url: voiceUrl },
                 );
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Character,
-                        title,
-                        position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: {
-                            status: "success",
-                            characterAssetId: ref.characterAssetId,
-                            characterName: ref.characterName,
-                            characterDescription: ref.characterDescription,
-                            characterImages,
-                            characterPrimaryIndex: Math.min(Math.max(ref.characterPrimaryIndex || 0, 0), Math.max(characterImages.length - 1, 0)),
-                            characterVoiceUrl: voiceUrl || voiceAsset?.data.url || undefined,
-                            characterVoiceName: resolveCharacterVoiceName(ref.characterVoiceName || ref.voiceName, voiceAsset) || undefined,
-                            characterVoiceDescription: ref.characterVoiceDescription || ref.voiceDescription || undefined,
-                            characterVoiceStorageKey: voiceStorageKey || voiceAsset?.data.storageKey || undefined,
-                            characterVoiceAssetId: voiceAssetId || voiceAsset?.id || undefined,
-                        },
+                const node: CanvasNodeData = {
+                    id,
+                    type: CanvasNodeType.Character,
+                    title,
+                    position: { x: placement.x, y: placement.y },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: {
+                        status: "success",
+                        characterAssetId: ref.characterAssetId,
+                        characterName: ref.characterName,
+                        characterDescription: ref.characterDescription,
+                        characterImages,
+                        characterPrimaryIndex: Math.min(Math.max(ref.characterPrimaryIndex || 0, 0), Math.max(characterImages.length - 1, 0)),
+                        characterVoiceUrl: voiceUrl || voiceAsset?.data.url || undefined,
+                        characterVoiceName: resolveCharacterVoiceName(ref.characterVoiceName || ref.voiceName, voiceAsset) || undefined,
+                        characterVoiceDescription: ref.characterVoiceDescription || ref.voiceDescription || undefined,
+                        characterVoiceStorageKey: voiceStorageKey || voiceAsset?.data.storageKey || undefined,
+                        characterVoiceAssetId: voiceAssetId || voiceAsset?.id || undefined,
                     },
-                ]);
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
                 setSelectedConnectionId(null);
                 return;
@@ -3122,15 +3159,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const sceneImage = ref.sceneImage;
                 if (!sceneImage?.url) return;
                 const id = `scene-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                setNodes((prev) => [...prev, {
+                const placement = placeNewNodeAt(position, spec);
+                const node: CanvasNodeData = {
                     id,
                     type: CanvasNodeType.Scene,
                     title: ref.sceneName || ref.name || "场景",
-                    position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
+                    position: { x: placement.x, y: placement.y },
                     width: spec.width,
                     height: spec.height,
                     metadata: { status: "success", sceneAssetId: ref.sceneAssetId, sceneName: ref.sceneName, sceneDescription: ref.sceneDescription, sceneImage, sceneColorCard: ref.sceneColorCard, sceneColorPalette: ref.sceneColorPalette, sceneColorCardPrompt: ref.sceneColorCardPrompt },
-                }]);
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
                 setSelectedConnectionId(null);
                 return;
@@ -3140,52 +3180,52 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             if (type === "video") {
                 const size = fitNodeSize(ref.width || 1280, ref.height || 720, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Video,
-                        title: ref.name || "视频",
-                        position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
-                        width: size.width,
-                        height: size.height,
-                        metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "video/mp4", durationMs: ref.durationMs },
-                    },
-                ]);
+                const placement = placeNewNodeAt(position, size);
+                const node: CanvasNodeData = {
+                    id,
+                    type: CanvasNodeType.Video,
+                    title: ref.name || "视频",
+                    position: { x: placement.x, y: placement.y },
+                    width: size.width,
+                    height: size.height,
+                    metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "video/mp4", durationMs: ref.durationMs },
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
             } else if (type === "audio") {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Audio];
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Audio,
-                        title: ref.name || "音频",
-                        position: { x: position.x - spec.width / 2, y: position.y - spec.height / 2 },
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", bytes: ref.bytes, mimeType: ref.mimeType || "audio/mpeg", durationMs: ref.durationMs },
-                    },
-                ]);
+                const placement = placeNewNodeAt(position, spec);
+                const node: CanvasNodeData = {
+                    id,
+                    type: CanvasNodeType.Audio,
+                    title: ref.name || "音频",
+                    position: { x: placement.x, y: placement.y },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", bytes: ref.bytes, mimeType: ref.mimeType || "audio/mpeg", durationMs: ref.durationMs },
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
             } else {
                 const size = fitNodeSize(ref.width || 512, ref.height || 512);
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Image,
-                        title: ref.name || "图片",
-                        position: { x: position.x - size.width / 2, y: position.y - size.height / 2 },
-                        width: size.width,
-                        height: size.height,
-                        metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "image/png" },
-                    },
-                ]);
+                const placement = placeNewNodeAt(position, size);
+                const node: CanvasNodeData = {
+                    id,
+                    type: CanvasNodeType.Image,
+                    title: ref.name || "图片",
+                    position: { x: placement.x, y: placement.y },
+                    width: size.width,
+                    height: size.height,
+                    metadata: { content: resolvedUrl, storageKey: ref.storageKey, status: "success", naturalWidth: ref.width, naturalHeight: ref.height, bytes: ref.bytes, mimeType: ref.mimeType || "image/png" },
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
             }
             setSelectedNodeIds(new Set([id]));
             setSelectedConnectionId(null);
             setDialogNodeId(id);
         },
-        [],
+        [placeNewNodeAt],
     );
 
     const createTextNodeFromClipboard = useCallback(
@@ -3193,11 +3233,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const trimmed = text.trim();
             if (!trimmed) return false;
 
+            const spec = getNodeSpec(CanvasNodeType.Text);
+            const placement = placeNewNodeAt(undefined, spec);
             const node = {
-                ...createCanvasNode(CanvasNodeType.Text, getCanvasCenter(), { content: trimmed, status: NODE_STATUS_SUCCESS }),
+                ...createCanvasNode(CanvasNodeType.Text, { x: placement.x + spec.width / 2, y: placement.y + spec.height / 2 }, { content: trimmed, status: NODE_STATUS_SUCCESS }),
                 title: trimmed.slice(0, 32) || t("canvas.projectPage.clipboardText"),
             };
 
+            nodesRef.current = [...nodesRef.current, node];
             setNodes((prev) => [...prev, node]);
             setSelectedNodeIds(new Set([node.id]));
             setSelectedConnectionId(null);
@@ -3205,7 +3248,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             setDialogNodeId(node.id);
             return true;
         },
-        [getCanvasCenter, t],
+        [placeNewNodeAt, t],
     );
 
     const pasteSystemClipboard = useCallback(async () => {
@@ -4933,17 +4976,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         [effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, isAiConfigReady, message, openConfigDialog, projectId, startGenerationRequest, t, updateProject],
     );
 
-    const upscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
+    const resizeImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageResizeParams) => {
         if (imageToolUrl?.nodeId !== node.id) return;
-        const upscaled = await upscaleDataUrl(imageToolUrl.url, params);
-        setUpscaleNodeId(null);
-        const image = await uploadImage(upscaled);
+        const resized = await resizeDataUrl(imageToolUrl.url, params);
+        setResizeNodeId(null);
+        const image = await uploadImage(resized);
         const size = fitNodeSize(image.width, image.height);
         const childId = nanoid();
         const child: CanvasNodeData = {
             id: childId,
             type: CanvasNodeType.Image,
-            title: "Upscaled Image",
+            title: t("canvas.editors.resizeResultTitle"),
             position: { x: node.position.x + node.width + 96, y: node.position.y },
             width: size.width,
             height: size.height,
@@ -4956,7 +4999,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
-    }, [imageToolUrl]);
+    }, [imageToolUrl, t]);
 
     const autoLevelsImageNode = useCallback(async (node: CanvasNodeData) => {
         const sourceImage = canvasNodePrimaryImage(node);
@@ -6098,39 +6141,42 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadImage(image.dataUrl);
             const meta = storedImage.width === 1 && storedImage.height === 1 ? await readImageMeta(storedImage.url) : storedImage;
             const config = fitNodeSize(meta.width, meta.height);
-            const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+            const placement = placeNewNodeAt(undefined, config);
             const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             const node: CanvasNodeData = {
                 id,
                 type: CanvasNodeType.Image,
                 title: image.prompt.slice(0, 32) || "Generated Image",
-                position: { x: center.x - config.width / 2, y: center.y - config.height / 2 },
+                position: { x: placement.x, y: placement.y },
                 width: config.width,
                 height: config.height,
                 metadata: { ...imageMetadata({ ...storedImage, width: meta.width, height: meta.height }), prompt: image.prompt },
             };
 
+            nodesRef.current = [...nodesRef.current, node];
             setNodes((prev) => [...prev, node]);
             setSelectedNodeIds(new Set([id]));
             setSelectedConnectionId(null);
             setDialogNodeId(id);
         },
-        [screenToCanvas, size.height, size.width],
+        [placeNewNodeAt],
     );
 
     const insertAssistantText = useCallback(
         (text: string, title?: string) => {
-            const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+            const spec = getNodeSpec(CanvasNodeType.Text);
+            const placement = placeNewNodeAt(undefined, spec);
             const node = {
-                ...createCanvasNode(CanvasNodeType.Text, center, { content: text, status: NODE_STATUS_SUCCESS }),
+                ...createCanvasNode(CanvasNodeType.Text, { x: placement.x + spec.width / 2, y: placement.y + spec.height / 2 }, { content: text, status: NODE_STATUS_SUCCESS }),
                 title: title || text.slice(0, 32) || "Assistant Text",
             };
 
+            nodesRef.current = [...nodesRef.current, node];
             setNodes((prev) => [...prev, node]);
             setSelectedNodeIds(new Set([node.id]));
             setSelectedConnectionId(null);
         },
-        [screenToCanvas, size.height, size.width],
+        [placeNewNodeAt],
     );
 
     const handleAssetInsert = useCallback(
@@ -6148,12 +6194,14 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const asset = useAssetStore.getState().assets.find(asset => asset.id === payload.sharedAssetSource!.assetId);
                 if (!asset) { message.error(t("canvas.sharedLibrary.unavailable")); return; }
                 const source = payload.sharedAssetSource;
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
                 const spec = NODE_DEFAULT_SIZE[asset.kind as CanvasNodeType];
+                const placement = placeNewNodeAt(undefined, spec);
                 const id = nanoid();
                 const sourceNode = libraryAssetNode(asset);
-                setNodes(prev => [...prev, { ...sourceNode, id, position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 }, width: spec.width, height: spec.height,
-                    metadata: { ...sourceNode.metadata, sharedAssetReference: source, status: NODE_STATUS_SUCCESS } }]);
+                const node = { ...sourceNode, id, position: { x: placement.x, y: placement.y }, width: spec.width, height: spec.height,
+                    metadata: { ...sourceNode.metadata, sharedAssetReference: source, status: NODE_STATUS_SUCCESS } };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes(prev => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
                 return;
             }
@@ -6161,111 +6209,112 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 insertAssistantText(payload.content, payload.title);
             } else if (payload.kind === "video") {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
                 const id = `video-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                 const nextSize = fitNodeSize(payload.width || spec.width, payload.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Video,
-                        title: payload.title,
-                        position: { x: center.x - nextSize.width / 2, y: center.y - nextSize.height / 2 },
-                        width: nextSize.width,
-                        height: nextSize.height,
-                        metadata: { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS, naturalWidth: payload.width, naturalHeight: payload.height },
-                    },
-                ]);
+                const placement = placeNewNodeAt(undefined, nextSize);
+                const node = {
+                    id,
+                    type: CanvasNodeType.Video,
+                    title: payload.title,
+                    position: { x: placement.x, y: placement.y },
+                    width: nextSize.width,
+                    height: nextSize.height,
+                    metadata: { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS, naturalWidth: payload.width, naturalHeight: payload.height },
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
             } else if (payload.kind === "audio") {
                 const spec = { width: 320, height: 80 };
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const placement = placeNewNodeAt(undefined, spec);
                 const id = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Audio,
-                        title: payload.title,
-                        position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS, durationMs: payload.durationMs },
-                    },
-                ]);
+                const node = {
+                    id,
+                    type: CanvasNodeType.Audio,
+                    title: payload.title,
+                    position: { x: placement.x, y: placement.y },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS, durationMs: payload.durationMs },
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
             } else if (payload.kind === "character") {
                 // 角色资产：从资产库选择 / 工具栏 + 角色 / 拖入 → 统一创建 1 个 Character 节点，
                 // 不再展开为 Group + N 张 Image（旧的"快速散开"路径移除）。
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Character];
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const placement = placeNewNodeAt(undefined, spec);
                 const id = `character-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                 const firstImage = payload.images.find((image) => image.url);
-                setNodes((prev) => [
-                    ...prev,
-                    {
-                        id,
-                        type: CanvasNodeType.Character,
-                        title: payload.title || "角色",
-                        position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
-                        width: spec.width,
-                        height: spec.height,
-                        metadata: {
-                            status: NODE_STATUS_SUCCESS,
-                            characterName: payload.title,
-                            characterAssetId: payload.assetId,
-                            characterDescription: payload.description,
-                            characterImages: payload.images,
-                            characterPrimaryIndex: Math.min(Math.max(payload.primaryIndex, 0), Math.max(payload.images.length - 1, 0)),
-                            characterVoiceUrl: payload.voice || undefined,
-                            characterVoiceName: payload.voiceName || undefined,
-                            characterVoiceDescription: payload.voiceDescription || undefined,
-                            characterVoiceStorageKey: payload.voiceStorageKey || undefined,
-                            characterVoiceAssetId: payload.voiceAssetId || undefined,
-                            content: firstImage?.url,
-                            storageKey: firstImage?.storageKey,
-                            naturalWidth: firstImage?.width,
-                            naturalHeight: firstImage?.height,
-                            bytes: firstImage?.bytes,
-                            mimeType: firstImage?.mimeType,
-                        },
+                const node = {
+                    id,
+                    type: CanvasNodeType.Character,
+                    title: payload.title || "角色",
+                    position: { x: placement.x, y: placement.y },
+                    width: spec.width,
+                    height: spec.height,
+                    metadata: {
+                        status: NODE_STATUS_SUCCESS,
+                        characterName: payload.title,
+                        characterAssetId: payload.assetId,
+                        characterDescription: payload.description,
+                        characterImages: payload.images,
+                        characterPrimaryIndex: Math.min(Math.max(payload.primaryIndex, 0), Math.max(payload.images.length - 1, 0)),
+                        characterVoiceUrl: payload.voice || undefined,
+                        characterVoiceName: payload.voiceName || undefined,
+                        characterVoiceDescription: payload.voiceDescription || undefined,
+                        characterVoiceStorageKey: payload.voiceStorageKey || undefined,
+                        characterVoiceAssetId: payload.voiceAssetId || undefined,
+                        content: firstImage?.url,
+                        storageKey: firstImage?.storageKey,
+                        naturalWidth: firstImage?.width,
+                        naturalHeight: firstImage?.height,
+                        bytes: firstImage?.bytes,
+                        mimeType: firstImage?.mimeType,
                     },
-                ]);
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
             } else if (payload.kind === "scene") {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Scene];
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const placement = placeNewNodeAt(undefined, spec);
                 const id = `scene-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                setNodes((prev) => [...prev, {
+                const node = {
                     id,
                     type: CanvasNodeType.Scene,
                     title: payload.title || "场景",
-                    position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
+                    position: { x: placement.x, y: placement.y },
                     width: spec.width,
                     height: spec.height,
                     metadata: { status: NODE_STATUS_SUCCESS, sceneAssetId: payload.assetId, sceneName: payload.title, sceneDescription: payload.description, sceneImage: payload.image, sceneColorCard: payload.colorCard, sceneColorPalette: payload.colorPalette, sceneColorCardPrompt: payload.colorCardPrompt },
-                }]);
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
             } else if (payload.kind === "prop") {
                 const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Prop];
-                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const placement = placeNewNodeAt(undefined, spec);
                 const id = `prop-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                setNodes((prev) => [...prev, {
+                const node = {
                     id,
                     type: CanvasNodeType.Prop,
                     title: payload.title || "道具",
-                    position: { x: center.x - spec.width / 2, y: center.y - spec.height / 2 },
+                    position: { x: placement.x, y: placement.y },
                     width: spec.width,
                     height: spec.height,
                     metadata: { status: NODE_STATUS_SUCCESS, productionAssetId: payload.assetId, propName: payload.title, propDescription: payload.description, propImage: payload.image },
-                }]);
+                };
+                nodesRef.current = [...nodesRef.current, node];
+                setNodes((prev) => [...prev, node]);
                 setSelectedNodeIds(new Set([id]));
             } else {
                 insertAssistantImage({ id: `asset-${Date.now()}`, prompt: payload.title, dataUrl: payload.dataUrl, storageKey: payload.storageKey });
             }
             setAssetPickerOpen(false);
         },
-        [insertAssistantImage, insertAssistantText, screenToCanvas, size.height, size.width],
+        [insertAssistantImage, insertAssistantText, placeNewNodeAt],
     );
 
     const closeAssetPicker = useCallback(() => {
@@ -6929,7 +6978,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onStitch={beginImageStitch}
-                    onUpscale={(node) => setUpscaleNodeId(node.id)}
+                    onResizeImage={(node) => setResizeNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAutoLevels={(node) => void autoLevelsImageNode(node)}
                     onAngle={(node) => setAngleNodeId(node.id)}
@@ -7058,8 +7107,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
                     {splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog key="split" dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}
 
-                    {upscaleNode && imageToolUrl?.nodeId === upscaleNode.id ? (
-                        <CanvasNodeUpscaleDialog key="upscale" dataUrl={imageToolUrl.url} open onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode, params)} />
+                    {resizeNode && imageToolUrl?.nodeId === resizeNode.id ? (
+                        <CanvasNodeResizeDialog key="resize" dataUrl={imageToolUrl.url} open onClose={() => setResizeNodeId(null)} onConfirm={(params) => void resizeImageNode(resizeNode, params)} />
                     ) : null}
 
                     <Modal key="super-resolve" title={t("canvas.projectPage.superResolve")} open={Boolean(superResolveNode && canvasNodePrimaryImage(superResolveNode))} centered footer={null} onCancel={() => setSuperResolveNodeId(null)}>

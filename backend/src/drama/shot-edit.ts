@@ -73,6 +73,48 @@ function sliceUsages(shot: Row, start: number, end: number) {
         return to > from ? [{ ...usage, localStartFrame: from - start, localEndFrame: to - start }] : [];
     });
 }
+/**
+ * 克隆 / 拆镜 / 新增镜头时，正文关注到的主体若没有 subject_usages 条目，产物里的
+ * subject_definitions 就完全没有它——没有 <Subject N> 也就没有身份参考图，角色会凭空消失。
+ * subject_usages 才是编译器判断“这一镜有没有这个人”的唯一依据，所以这里按
+ * camera.attention_subject_ids ∪ characters 把缺失的 visible 用法补回来，身份图取
+ * subject_registry 的 identity 绑定。已存在的用法一律不动。
+ */
+function ensureAttendedUsages(source: Row, shot: Row) {
+    const camera = isRecord(shot.camera) ? shot.camera : {};
+    const wanted = [...new Set([
+        ...(Array.isArray(camera.attention_subject_ids) ? camera.attention_subject_ids : []),
+        ...rows(shot.characters).map(item => typeof item === "string" ? item : (item?.id || item?.character_id)),
+    ].map(value => String(value ?? "")).filter(Boolean))];
+    if (!wanted.length) return;
+    const usages = rows(shot.subject_usages).map(usage => ({ ...usage }));
+    const present = new Set(usages.map(usage => String(usage.subjectId)));
+    const registry = rows(source.subject_registry);
+    const duration = Number(shot.duration_frames) || 0;
+    for (const id of wanted) {
+        if (present.has(id)) continue;
+        const subject = registry.find(item => String(item.id) === id);
+        if (!subject) continue;
+        const bindings = rows(subject.pictureBindings);
+        const asStrings = (value: unknown): string[] => Array.isArray(value) ? value.map(item => String(item)) : [];
+        const identity = bindings.filter(binding => asStrings(binding.defaultFor).includes("identity") || asStrings(binding.provides).includes("identity"))
+            .map(binding => String(binding.id));
+        const scene = String(subject.kind || "") === "scene";
+        usages.push({
+            subjectId: id,
+            presentation: scene ? "state_context" : "visible",
+            pictureBindingIds: identity.length ? identity : bindings.map(binding => String(binding.id)),
+            referencePurpose: scene ? ["environment"] : ["identity"],
+            localStartFrame: 0,
+            localEndFrame: duration,
+            continuityFactIds: [],
+            stateRequirements: [],
+        });
+        present.add(id);
+    }
+    shot.subject_usages = usages;
+}
+
 function slicePerformance(value: Row | undefined, start: number, end: number, category = "动作") {
     if (!value || !Array.isArray(value.events)) return value;
     return { ...value, events: rows(value.events).flatMap(event => {
@@ -215,8 +257,28 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
 
     if (operation.action === "insert" || operation.action === "duplicate") {
         if (operation.action === "duplicate") requireSelected();
-        const authored: Row = operation.action === "duplicate" ? { ...selected!, id: freshId(operation.newShotId), title: `${selected!.title || "镜头"} · 副本`, keyframes: [], reference_requirements: [], utterance_refs: [], audio: {}, performance: undefined, outcome_events: [] } : structuredClone(operation.shot || {});
-        if (operation.action === "insert") authored.id = freshId(authored.id);
+        // 新建独立段落可以一次给整张镜表（shots[]）；省略则用单镜 shot。
+        // 组镜不落 shotId，落 shotId 时是往该镜所在段落里插镜。
+        const draftedRows = operation.action === "insert" && !selected && Array.isArray((operation as Row).shots) && (operation as Row).shots.length
+            ? rows((operation as Row).shots).map(row => structuredClone(row))
+            : [operation.action === "duplicate"
+                ? { ...selected!, id: freshId(operation.newShotId), title: `${selected!.title || "镜头"} · 副本`, keyframes: [], reference_requirements: [], utterance_refs: [], audio: {}, performance: undefined, outcome_events: [] }
+                : structuredClone(operation.shot || {})];
+        if (operation.action === "insert") {
+            const taken = new Set(shots.map(shot => String(shot.id)));
+            for (const row of draftedRows) {
+                const id = String(row.id || "");
+                if (!id) reject("SHOT_ID_CONFLICT", "shots.id", "新镜头需要未使用的稳定 ID");
+                if (taken.has(id)) reject("SHOT_ID_CONFLICT", `shots.${id}`, "新镜头需要未使用的稳定 ID");
+                taken.add(id);
+            }
+        }
+        const authored = draftedRows[0];
+        for (const row of draftedRows) {
+            if (!Number.isInteger(row.duration_frames) || row.duration_frames <= 0) reject("SHOT_DURATION", `shots.${row.id}.duration_frames`, "镜头时长必须为正整数帧");
+            requireShotFraming(row.camera, String(row.id));
+            ensureAttendedUsages(source, row);
+        }
         if (selected) {
             for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== selected[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增镜头须沿用所在片段的场次和时间线");
             Object.assign(authored, { scene_id: selected.scene_id, timeline_id: selected.timeline_id, ...(selected.source_scene_id ? { source_scene_id: selected.source_scene_id } : {}) });
@@ -248,16 +310,16 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
                 let suffix = 1;
                 while (occupied.has(String(segment.id))) segment.id = `${baseId}_${suffix++}`;
             }
-            segment.shot_ids = [authored.id];
+            segment.shot_ids = draftedRows.map(row => String(row.id));
             if (anchor && anchorGroup) {
                 const existingShotIds = (anchorGroup.shot_ids || []).map(String);
                 const anchorOffset = existingShotIds.indexOf(String(anchor.id));
                 if (anchorOffset < 0) reject("SHOT_CLIP_MISSING", `shots.${anchor.id}`, "锚点镜头未归属有效 Clip");
                 for (const key of ["scene_id", "source_scene_id", "timeline_id"]) if (authored[key] !== undefined && authored[key] !== anchor[key]) reject("SHOT_INSERT_SCOPE", `shots.${authored.id}.${key}`, "新增 Clip 须沿用锚点镜头所在的场次和时间线");
                 Object.assign(authored, { scene_id: anchor.scene_id, timeline_id: anchor.timeline_id, ...(anchor.source_scene_id ? { source_scene_id: anchor.source_scene_id } : {}) });
-                shots.splice(shots.indexOf(anchor) + 1, 0, authored);
+                shots.splice(shots.indexOf(anchor) + 1, 0, ...draftedRows);
                 if (anchorOffset < existingShotIds.length - 1) {
-                    const affectedIds = new Set([...existingShotIds, String(authored.id)]);
+                    const affectedIds = new Set([...existingShotIds, ...draftedRows.map(row => String(row.id))]);
                     const shotIds = shots.filter(row => affectedIds.has(String(row.id))).map(row => String(row.id));
                     const groupAudio = (ids: string[]) => {
                         if (!Array.isArray(anchorGroup.audio_bindings)) return { shot_ids: ids };
@@ -279,15 +341,17 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
                     const segmentIndex = segments.indexOf(anchorGroup);
                     source.segments = [...segments.slice(0, segmentIndex + 1), segment, ...segments.slice(segmentIndex + 1)];
                 }
-            } else { source.segments = [...rows(source.segments), segment]; shots.push(authored); }
+            } else { source.segments = [...rows(source.segments), segment]; shots.push(...draftedRows); }
         }
-        if (!Number.isInteger(authored.duration_frames) || authored.duration_frames <= 0) reject("SHOT_DURATION", `shots.${authored.id}.duration_frames`, "镜头时长必须为正整数帧");
         if (operation.action === "insert" && !selected) {
-            const seconds = Number(authored.duration_frames) / (Number(source.fps_num || 24) / Number(source.fps_den || 1));
-            if (!Number.isFinite(seconds) || seconds < 4 || seconds > 15) reject("CLIP_DURATION_OUT_OF_RANGE", `shots.${authored.id}.duration_frames`, `新 Clip 时长 ${seconds.toFixed(2)} 秒，必须在 4–15 秒范围内`);
+            const fps = Number(source.fps_num || 24) / Number(source.fps_den || 1);
+            const seconds = draftedRows.reduce((sum, row) => sum + Number(row.duration_frames || 0), 0) / fps;
+            if (!Number.isFinite(seconds) || seconds < 4 || seconds > 15) reject("CLIP_DURATION_OUT_OF_RANGE", "shots", `新 Clip 时长 ${seconds.toFixed(2)} 秒，必须在 4–15 秒范围内`);
         }
-        requireShotFraming(authored.camera, String(authored.id));
-        next.shotInputs[authored.id] = { assetIds: [], keyframePolicy: "none" };
+        for (const row of draftedRows) {
+            const supplied = isRecord((operation as Row).shotInputs) && isRecord(((operation as Row).shotInputs as Row)[String(row.id)]) ? ((operation as Row).shotInputs as Row)[String(row.id)] : {};
+            next.shotInputs[String(row.id)] = { assetIds: [], keyframePolicy: "none", ...supplied };
+        }
     } else if (operation.action === "delete") {
         const shot = requireSelected();
         if (group!.shot_ids.length === 1) reject("SHOT_LAST_IN_CLIP", `shots.${shot.id}`, "这是片段唯一镜头，请使用删除片段入口保留媒体历史");
@@ -304,6 +368,7 @@ export function editDirectorShot(director: DirectorProduction, operation: Edit) 
         const original = structuredClone(shot), right = structuredClone(shot);
         shot.duration_frames = cut; right.id = newId; right.duration_frames = duration - cut; right.title = `${shot.title || "镜头"} · 后半段`;
         shot.subject_usages = sliceUsages(original, 0, cut); right.subject_usages = sliceUsages(original, cut, duration);
+        ensureAttendedUsages(source, shot); ensureAttendedUsages(source, right);
         shot.performance = slicePerformance(original.performance, 0, cut); right.performance = slicePerformance(original.performance, cut, duration);
         if (original.audio && typeof original.audio === "object" && Array.isArray(original.audio.events)) { shot.audio = slicePerformance(original.audio, 0, cut, "声音"); right.audio = slicePerformance(original.audio, cut, duration, "声音"); }
         shot.keyframes = []; right.keyframes = [];

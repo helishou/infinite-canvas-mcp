@@ -1193,7 +1193,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       return [[entity.entityId, pictureBound, media]];
     });
     targets.push(...entities.filter(entity => !canvasNodes.some(node => matchesProductionAssetNode(node, entity.kind, owner, entity.entityId))).map(entity => `entity:${entity.kind}:${entity.entityId}`), ...pictureProjectionTargets);
-    const key = `${owner.kind}:${owner.id}:${production.revision}:${director.sourceHash}:${JSON.stringify(sharedPictureState)}:${[...new Set(targets)].sort().join(",")}`;
+    // 去重键只描述"需要准备什么"，不含 revision：准备本身会推进 revision，若把 revision
+    // 放进键里，一次没有实质变化的准备就会让 effect 立刻重发自己，形成永不收敛的写循环。
+    const key = `${owner.kind}:${owner.id}:${director.sourceHash}:${JSON.stringify(sharedPictureState)}:${[...new Set(targets)].sort().join(",")}`;
     if (preparedProjectionSource.current === key) return;
     preparedProjectionSource.current = key;
     if (targets.length) window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner, command: { kind: "prepare", targets: [...new Set(targets)] } } }));
@@ -2142,15 +2144,18 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         const to = String(next.id || "");
         if (!to) throw new Error("下一段缺少正式 Clip 标识，无法保存续段衔接");
         const previous = director.boundaries.find(edge => edge.from === boundary.targetId && edge.to === to);
+        const boundaryVideoContinuation = boundary.videoContinuation === true;
         const canvasSegment = canvasNodes.flatMap(node => Array.isArray(node.metadata?.segments) ? node.metadata.segments : [])
           .find(segment => String((segment.productionClipProjection as Record<string, unknown> | undefined)?.targetId || "") === boundary.targetId);
         const projectionOutOfSync = canvasSegment && (
           canvasSegment.tailFrameContinuation !== boundary.tailFrameContinuation
           || canvasSegment.motionContextEnabled !== boundary.motionContextEnabled
+          || (canvasSegment.videoContinuation === true) !== boundaryVideoContinuation
         );
-        if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && previous.reason?.trim() && !projectionOutOfSync) continue;
+        if (previous?.tailFrame === boundary.tailFrameContinuation && previous?.motionContext === boundary.motionContextEnabled && (previous?.videoContinuation === true) === boundaryVideoContinuation && previous.reason?.trim() && !projectionOutOfSync) continue;
         ops.push({ type: "set_director_boundary", boundary: {
           from: boundary.targetId, to, tailFrame: boundary.tailFrameContinuation, motionContext: boundary.motionContextEnabled,
+          videoContinuation: boundaryVideoContinuation,
           reason: "由场次 H3 节点续段衔接设置",
         } });
       }

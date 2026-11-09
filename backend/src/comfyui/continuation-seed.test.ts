@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { h3ContinuationFolder, stageH3ContinuationSeed } from "./continuation-seed.js";
+import { findH3ContinuationLatent, h3ContinuationFolder, normalizeH3ContinuationSlot, stageH3ContinuationSeed } from "./continuation-seed.js";
 
 const workflow = "JQrB0Mx2q0_XOfOY6ufm4";
 const group = "phoebe-date-pov-60s:S01";
@@ -58,4 +58,35 @@ test("缺失或截断的来源潜变量在提交前拒绝", async (t) => {
     await mkdir(sourceDir, { recursive: true });
     await writeFile(path.join(sourceDir, "clip_00002.safetensors"), Buffer.from("partial"));
     await assert.rejects(stageH3ContinuationSeed(root, source, target, 2), /不存在或不完整/);
+});
+
+test("来源槽位探测只认完整的 clip_00001，返回正斜杠相对路径", async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "h3-find-latent-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const folder = h3ContinuationFolder({ workflow, group, run: "prior-task" });
+    assert.equal(await findH3ContinuationLatent(root, folder), null);
+    const dir = path.join(root, "output", folder);
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "clip_00002.safetensors"), latent("wrong-slot"));
+    assert.equal(await findH3ContinuationLatent(root, folder), null, "2 号槽不是通用路径的输出约定");
+    await writeFile(path.join(dir, "clip_00001.safetensors"), Buffer.from("partial"));
+    assert.equal(await findH3ContinuationLatent(root, folder), null);
+    await writeFile(path.join(dir, "clip_00001.safetensors"), latent("complete-av"));
+    assert.equal(await findH3ContinuationLatent(root, folder), `${folder}/clip_00001.safetensors`);
+});
+
+test("V15 二槽输出归一到 clip_00001，校验失败不落半成品", async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "h3-normalize-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const folder = h3ContinuationFolder({ workflow, group, run: "v15-run" });
+    const dir = path.join(root, "output", folder);
+    await mkdir(dir, { recursive: true });
+    await assert.rejects(normalizeH3ContinuationSlot(root, folder), /不存在或不完整/);
+    const seed = latent("staged-seed");
+    const output = latent("run-output-av");
+    await writeFile(path.join(dir, "clip_00001.safetensors"), seed);
+    await writeFile(path.join(dir, "clip_00002.safetensors"), output);
+    await normalizeH3ContinuationSlot(root, folder);
+    assert.deepEqual(await readFile(path.join(dir, "clip_00001.safetensors")), output);
+    assert.deepEqual(await readFile(path.join(dir, "clip_00002.safetensors")), output, "归一不删 2 号槽原件");
 });

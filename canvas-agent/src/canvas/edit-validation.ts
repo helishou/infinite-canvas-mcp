@@ -20,7 +20,7 @@ export function validateNodeUpdate(operation: Record<string, any>, previous?: Re
     }
     return patch;
 }
-const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags"]);
+const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags", "videoContinuation"]);
 export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) {
     if (patch.h3ParameterOverrides !== undefined && (!Array.isArray(patch.h3ParameterOverrides) || patch.h3ParameterOverrides.some((key: unknown) => typeof key !== "string" || !(H3_PARAM_KEYS as readonly string[]).includes(key)))) throw new Error("H3 人工参数标记无效");
     for (const [key, value] of Object.entries(patch)) {

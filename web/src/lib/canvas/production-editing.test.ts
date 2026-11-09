@@ -157,12 +157,19 @@ test("production storyboard writeback routes only a verified formal Clip and wai
 });
 
 test("H3 continuation settings reverse-sync through the production boundary editor", async () => {
-    const order: string[] = [], request = { boundaries: [{ targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false }], requireNext: true };
+    const order: string[] = [], request = { boundaries: [{ targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false }], requireNext: true };
     const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {
         const service = createProductionEditing("canvas", () => node(), async () => { order.push("flush"); });
         assert.deepEqual(await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", tailFrameContinuation: true, motionContextEnabled: false }), { sourceSaved: true });
         assert.deepEqual(order, ["flush", "edit"]);
+        // videoContinuation 必须穿透到编辑器（2026-11-08 修复：此前漏传导致开关永远弹回关闭）。
+        const captured: Array<Record<string, unknown>> = [];
+        const removeCapture = registerProductionBoundaryEditor("canvas", async input => { captured.push(...input.boundaries as Array<Record<string, unknown>>); return { sourceSaved: true }; });
+        try {
+            await service.setContinuationBoundary({ nodeId: "H3", segmentId: "canvas-clip", tailFrameContinuation: false, motionContextEnabled: false, videoContinuation: true });
+            assert.equal(captured[0].videoContinuation, true);
+        } finally { removeCapture(); }
         await assert.rejects(service.setContinuationBoundary({ nodeId: "H3", segmentId: "missing", tailFrameContinuation: true, motionContextEnabled: false }), /CONTINUATION_BOUNDARY_PROJECTION_MISMATCH/);
     } finally { remove(); }
 });
@@ -171,8 +178,8 @@ test("global H3 continuation settings resolve every formal Clip and submit one b
     const order: string[] = [], current = node();
     current.metadata!.segments!.push({ id: "canvas-clip-next", productionClipProjection: { targetId: "SOURCE_C5" } });
     const request = { boundaries: [
-        { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false },
-        { targetId: "SOURCE_C5", tailFrameContinuation: false, motionContextEnabled: false },
+        { targetId: "SOURCE_C4", tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false },
+        { targetId: "SOURCE_C5", tailFrameContinuation: false, motionContextEnabled: false, videoContinuation: false },
     ] };
     const remove = registerProductionBoundaryEditor("canvas", async input => { order.push("edit"); assert.deepEqual(input, request); return { sourceSaved: true }; });
     try {

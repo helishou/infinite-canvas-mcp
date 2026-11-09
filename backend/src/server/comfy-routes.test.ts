@@ -10,11 +10,16 @@ import { registerComfyRoutes } from "./comfy-routes.js";
 
 function mockBridge(modelsCalls: { count: number }) {
     let url = "http://comfy.example";
+    let release = false;
     return {
         models: async () => { modelsCalls.count += 1; return { loras: ["a.safetensors"], checkpoints: ["b.safetensors"] }; },
         getUrl: () => url,
         setUrl: (next: string) => { url = next; return url; },
         status: async () => ({ online: false }),
+        // /comfy/config 会读目录与释放策略；这里给出最小可用的默认值。
+        localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }),
+        releaseBeforeRepeat: () => release,
+        setReleaseBeforeRepeat: (next: boolean) => (release = next === true),
     } as unknown as ComfyUiBackend;
 }
 
@@ -43,9 +48,14 @@ test("comfy/models 命中短 TTL 缓存时不重复读取清单，URL 变化后�
         assert.equal(calls.count, 1);
 
         // 切换 ComfyUI URL 后缓存失效，下一次请求重新读取
-        const switched = await (await fetch(`${base}/comfy/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: "http://other.example" }) })).json() as { ok: boolean; url: string };
+        const switched = await (await fetch(`${base}/comfy/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ url: "http://other.example" }) })).json() as { ok: boolean; url: string; releaseBeforeRepeat: boolean };
         assert.equal(switched.ok, true);
         assert.equal(switched.url, "http://other.example");
+        // 释放策略默认关闭，显式传布尔值才改。
+        assert.equal(switched.releaseBeforeRepeat, false);
+        const toggled = await (await fetch(`${base}/comfy/config`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ releaseBeforeRepeat: true }) })).json() as { ok: boolean; url: string; releaseBeforeRepeat: boolean };
+        assert.equal(toggled.releaseBeforeRepeat, true);
+        assert.equal(toggled.url, "http://other.example");
         await (await fetch(`${base}/comfy/models`)).json();
         assert.equal(calls.count, 2);
     } finally {

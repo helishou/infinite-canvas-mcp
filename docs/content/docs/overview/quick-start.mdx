@@ -41,6 +41,7 @@ Use source mode or the full Compose deployment for the base stack; configure mod
 - If `canvas-agent/dist/...` is missing, run `corepack pnpm --filter @basketikun/canvas-agent run build` or use the root startup commands. A failed build is not a Backend connection error.
 - If `safe-delete state lock timeout` comes from host-injected `NODE_OPTIONS`, investigate the host injection and Vite cache-cleanup conflict. Startup scripts preserve `NODE_OPTIONS` and do not automatically disable deletion guards or other host protections.
 - Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.160.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation. The model picker uses the catalog returned by the Codex app-server that Canvas Agent actually starts.
+- Shot-cut detection on a video node runs `backend/workers/detect_video_scenes.py` from Backend and needs `scenedetect-headless` from `backend/workers/requirements-video-shot-detection.txt`. Install it into the Python that Backend uses (`python -m pip install -r backend/workers/requirements-video-shot-detection.txt`), or point `SCENEDETECT_PYTHON` at an interpreter that has it. Without it the endpoint returns 503. Docker images already include it.
 
 ## Data and upgrades
 

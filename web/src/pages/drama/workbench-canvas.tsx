@@ -107,16 +107,11 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
                 const first = items[0], last = items.at(-1);
                 if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last?.focus(); }
                 else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-                return;
             }
-            if (event.key !== "Escape" || event.defaultPrevented) return;
-            if (document.querySelector("#canvas-director-dialog[aria-hidden='false']")) return;
-            if (document.querySelector(".ant-modal-wrap:not([style*='display: none']), .ant-dropdown:not(.ant-dropdown-hidden), .ant-drawer-open, [data-canvas-transient-tool]")) return;
-            queueMicrotask(() => { if (!event.defaultPrevented) collapse(); });
         };
         window.addEventListener("keydown", keydown);
         return () => { document.body.style.overflow = previousOverflow; window.removeEventListener("keydown", keydown); };
-    }, [visible, collapse]);
+    }, [visible]);
     useEffect(() => { if (workbench.current) workbench.current.inert = visible; }, [visible]);
     useEffect(() => {
         setWorkbenchCanvasOverlayTarget(visible ? overlay.current : null);

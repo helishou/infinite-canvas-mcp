@@ -254,6 +254,15 @@ export class ClipRefreshCoordinator {
                 : translations.some(item => ["queued", "translating", "applying"].includes(item)) ? "translating"
                 : translations.some(item => item === "retry_required") ? "retry_required"
                 : translations.some(item => item === "rejected_stale") ? "rejected_stale" : "pending";
+            const detailed = targets.map(item => ({ segmentId: item.segmentId, status: item.status, compilationOperationId: item.compilationOperationId,
+                referenceSync: item.referenceSync, ...(item.compiler ? { compiler: item.compiler } : {}),
+                ...(item.translation ? { translation: item.translation } : {}), ...(item.blockingDiagnostic ? { blockingDiagnostic: item.blockingDiagnostic } : {}) }));
+            // 状态轮询只需要段级状态；编译回执/参考同步明细走 view=targets，避免多目标时每次轮询回传几十 KB。
+            const listed = view === "status"
+                ? detailed.map(item => ({ segmentId: item.segmentId, status: item.status,
+                    ...(item.translation ? { translation: { status: item.translation.status, translatedCount: item.translation.translatedCount } } : {}),
+                    ...(item.blockingDiagnostic ? { blockingDiagnostic: item.blockingDiagnostic } : {}) }))
+                : detailed;
             const summary = { sourceSaved: true, operationId, status, targetCount: targets.length, targetIds: targets.map(item => item.segmentId),
                 counts: { ready: statuses.filter(item => item === "succeeded").length, running: statuses.filter(item => activeStatuses.includes(item as Status)).length,
                     blocked: statuses.filter(item => item === "blocked").length, failed: statuses.filter(item => item === "failed").length,
@@ -262,9 +271,7 @@ export class ClipRefreshCoordinator {
                 phases: { source: "saved", compilation: statuses.every(item => item === "succeeded") ? "succeeded" : status,
                 application: targets.every(item => item.referenceSync.some((sync: any) => sync.status === "ready")) ? "ready" : "pending",
                     translation: translationStatus, mediaSubmitted: false },
-                mediaSubmitted: false, targets: targets.map(item => ({ segmentId: item.segmentId, status: item.status, compilationOperationId: item.compilationOperationId,
-                    referenceSync: item.referenceSync, ...(item.compiler ? { compiler: item.compiler } : {}),
-                    ...(item.translation ? { translation: item.translation } : {}), ...(item.blockingDiagnostic ? { blockingDiagnostic: item.blockingDiagnostic } : {}) })),
+                mediaSubmitted: false, targets: listed,
                 nextAction: status === "running" ? { action: "wait", tool: "production_get_compilation", input: { id, kind: this.owner.startsWith("/canvas/") ? "canvas" : this.owner.startsWith("/drama/scenes/") ? "scene" : "episode", operationId } }
                     : status === "succeeded" ? { action: "done" } : { action: "review_targets", message: "先处理阻塞目标的诊断；已就绪目标无需重复编译。" } };
             if (view === "status") return summary;
@@ -373,22 +380,43 @@ export class ClipRefreshCoordinator {
         return "succeeded";
     }
     private async queueCompiledPromptTranslation(id: string, job: ClipRefreshJob, store: ClipRefreshStore) {
-        job.translationOperationId ||= `clip-refresh-translation:${crypto.createHash("sha256").update(job.operationId).digest("hex")}`;
+        // 同一次编辑里已经编译就绪的兄弟片段合并成一次翻译请求：每个片段各发一次会重复 N-1 次调度与模型往返。
+        // 只认还没有 translationOperationId 的片段，晚到的片段仍按单段路径补译；合并失败时退回逐段。
+        const siblings = store.byEditAll(job.parentOperationId).filter(item => item.status === "succeeded" && !item.translationOperationId && item.segmentId !== job.segmentId);
+        const batch = siblings.length > 0;
+        job.translationOperationId ||= `clip-refresh-translation:${crypto.createHash("sha256").update(batch ? `${job.parentOperationId}\0${job.savedRevision}` : job.operationId).digest("hex")}`;
         store.save(job);
         try {
             const production = this.service.get(id);
             job.translationExpectedRevision ??= production.revision;
             store.save(job);
+            const targetIds = [job.segmentId];
+            for (const item of siblings) {
+                item.translationOperationId = job.translationOperationId;
+                item.translationExpectedRevision = job.translationExpectedRevision;
+                store.save(item);
+                targetIds.push(item.segmentId);
+            }
             await this.service.translateCompiledPrompts(id, {
                 expectedRevision: job.translationExpectedRevision,
                 operationId: job.translationOperationId,
-                targetIds: [job.segmentId],
+                targetIds: [...new Set(targetIds)],
             });
             delete job.translationError;
             store.save(job);
         } catch (error) {
             job.translationError = error instanceof Error ? error.message : String(error);
             store.save(job);
+            // 合并翻译被某个目标拖垮时，逐段补译已就绪的片段，避免整批都停在未翻译。
+            for (const segmentId of [job.segmentId, ...siblings.map(item => item.segmentId)].filter((value, index, all) => all.indexOf(value) === index)) {
+                try {
+                    await this.service.translateCompiledPrompts(id, {
+                        expectedRevision: job.translationExpectedRevision ?? job.savedRevision,
+                        operationId: `clip-refresh-translation:${crypto.createHash("sha256").update(`${job.parentOperationId}:${segmentId}`).digest("hex")}`,
+                        targetIds: [segmentId],
+                    });
+                } catch { /* 逐段补译同样失败时保留该段自己的回执 */ }
+            }
         }
     }
 }

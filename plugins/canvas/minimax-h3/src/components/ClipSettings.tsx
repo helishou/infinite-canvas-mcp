@@ -274,7 +274,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             {selectedVideoModelSchema?.error ? <div className="nfh3-hint" role="alert">{h3Label(locale, "selectedVideoModelModeWarning")} {selectedVideoModelSchema.error}</div> : null}
             <div className="nfh3-control-grid">
                 {control("视觉风格模板", <H3Dropdown values={styleTemplateOptions} value={styleTemplateValue} onChange={selectStyleTemplate} format={styleTemplateLabel} placeholder="选择模板" searchable />, true)}
-                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "新建边界默认开启。目标 Clip 有明确首帧分镜图时关闭；否则下一段运行时截取本段尾帧并追加到图片参考末尾，作为下一段状态基准。" )}
+                {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false, videoContinuation: false } : {}) })} />, false, "新建边界默认开启。目标 Clip 有明确首帧分镜图时关闭；否则下一段运行时截取本段尾帧并追加到图片参考末尾，作为下一段状态基准。" )}
+                {control("视频续写到下一段（像素/音频引导）", <Switch checked={segment.videoContinuation === true} onChange={(checked) => patch({ videoContinuation: checked, ...(checked ? { tailFrameContinuation: false, motionContextEnabled: false } : {}) })} />, false, "使用上一段成片的像素帧与音频做引导（原无限流原生续段分支），与原流程完全一致的接缝。与尾帧参考、Motion Context 互斥；下一段运行时必须有上一段成片。") }
             </div>
             {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
             {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
@@ -374,8 +375,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
     const seamNote = seamOn ? ` · 接缝加噪${segment.continuationSeamNoiseMode === "gaussian" ? "(高斯)" : ""}` : "";
     const denoiseNote = segment.denoise != null && Number(segment.denoise) < 1 ? ` · 降噪 ${segment.denoise}` : "";
     const continuationSummary = segment.motionContextEnabled
-        ? <>{enabledSummary("潜空间续写至下一段")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧参考</span> : null}{denoiseNote || seamNote ? <span className="nfh3-enabled-summary">{seamNote}{denoiseNote}</span> : null}</>
-        : segment.tailFrameContinuation ? enabledSummary("尾帧参考") : "均关闭";
+        ? <>{enabledSummary("潜空间续写至下一段")}{segment.tailFrameContinuation ? <span className="nfh3-enabled-summary"> · 尾帧参考</span> : null}{segment.videoContinuation ? <span className="nfh3-enabled-summary"> · 视频续写</span> : null}{denoiseNote || seamNote ? <span className="nfh3-enabled-summary">{seamNote}{denoiseNote}</span> : null}</>
+        : segment.tailFrameContinuation ? enabledSummary("尾帧参考") : segment.videoContinuation ? enabledSummary("视频续写") : "均关闭";
     const setSeedMode = (value: string | number) => {
         const nextMode = String(value) as "random" | "fixed";
         const next: Partial<H3Segment> = { noiseSeedMode: nextMode };
@@ -414,7 +415,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         </div>)}
         {section("continuation", "续段衔接", continuationSummary, <div className="nfh3-control-grid">
             {control("尾帧参考（传给下一段）", <Switch checked={segment.tailFrameContinuation === true} onChange={(checked) => patch({ tailFrameContinuation: checked, ...(checked ? { motionContextEnabled: false } : {}) })} />, false, "新建边界默认开启。目标 Clip 有明确首帧分镜图时关闭；否则下一段运行时截取本段尾帧，自动追加到已有图片参考末尾，作为下一段状态基准，继承姿态、持物、动作进度和场景状态。下一段可改变机位、景别，但不能重置动作；运行时使用多参考模式接收尾帧，保存的模式不改写。与 Motion Context 互斥。") }
-            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked, ...(checked ? { tailFrameContinuation: false } : {}) })} />, false, "默认关闭。只有两段必须保持同一个不能切镜的摄影镜头时开启；同人物、同场景、对白或声音承接不自动开启。本段开关登记到下一段的衔接，实际由下一段消费本段的 AV latent 与上下文，本段自身输入不受影响。从组首生成会依次重跑全组，到第一个关闭的边界停止。")}
+            {control("潜空间续写到下一段 Motion Context（V15）", <Switch checked={segment.motionContextEnabled === true} onChange={(checked) => patch({ motionContextEnabled: checked, ...(checked ? { tailFrameContinuation: false, videoContinuation: false } : {}) })} />, false, "默认关闭。只有两段必须保持同一个不能切镜的摄影镜头时开启；同人物、同场景、对白或声音承接不自动开启。本段开关登记到下一段的衔接，实际由下一段消费本段的 AV latent 与上下文，本段自身输入不受影响。从组首生成会依次重跑全组，到第一个关闭的边界停止。")}
+            {control("视频续写到下一段（像素/音频引导）", <Switch checked={segment.videoContinuation === true} onChange={(checked) => patch({ videoContinuation: checked, ...(checked ? { tailFrameContinuation: false, motionContextEnabled: false } : {}) })} />, false, "使用上一段成片的像素帧与音频做引导（原无限流原生续段分支），与原流程完全一致的接缝。与尾帧参考、Motion Context 互斥；下一段运行时必须有上一段成片。") }
             {segment.motionContextEnabled ? <>
                 {choice("传给下一段的视频上下文帧数", ["22", "5", "39", "56"], segment.contextLength || "22", (value) => patch({ contextLength: String(value) }))}
                 {control("传给下一段的音频上下文帧数", <InputNumber style={field} min={0} max={240} value={segment.audioContextLength ?? 24} onChange={(value) => patch({ audioContextLength: value ?? undefined })} />)}

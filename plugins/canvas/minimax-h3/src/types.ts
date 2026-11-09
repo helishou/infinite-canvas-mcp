@@ -289,6 +289,7 @@ export type H3Segment = {
     trimOut?: number;
     // 本段的 outgoing 开关：将本段的 AV latent 传给紧邻下一段；后端负责连续组任务描述符。
     motionContextEnabled?: boolean;
+    videoContinuation?: boolean;
     // 上一段成品视频作为「参考视频」喂进本段：必须显式开启，默认关闭。
     // 只有链式续跑（runFromCurrent）时生效；标在本段上（index > 0 才有意义）。
     // 仅保留历史记录兼容；新配置和执行器不再消费该字段。

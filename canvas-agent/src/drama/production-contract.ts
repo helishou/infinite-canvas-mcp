@@ -55,7 +55,7 @@ const directorPatchObjectSchema = z.object(Object.fromEntries(
 
 export const directorModules = ["story", "assets", "shots", "performance", "effects", "model", "continuity"] as const;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-export const directorBoundarySchema = z.object({ from: id, to: id, tailFrame: z.boolean(), motionContext: z.boolean(), reason: z.string() });
+export const directorBoundarySchema = z.object({ from: id, to: id, tailFrame: z.boolean(), motionContext: z.boolean(), videoContinuation: z.boolean().optional(), reason: z.string() });
 export const sharedAssetSourceSchema = z.object({ dramaId: id, assetId: id, sourceProjectId: id, sourceNodeId: id }).strict();
 export const directorCurrentWorkSchema = z.object({
     workId: id,
@@ -750,7 +750,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
             textMode: z.enum(["whole", "segment", "partition"]).optional(), textCuts: z.array(z.number().int().positive()).optional(),
         }).strict().refine(value => Boolean(value.speakerSubjectId) !== Boolean(value.speakerName), "对白说话人须选择已登记 Subject 或填写本镜称呼")).max(32),
     }).strict(),
-    z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), anchorShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
+    z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), anchorShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), shots: z.array(z.record(z.unknown())).min(1).optional(), shotInputs: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
     z.object({ type: z.literal("edit_director_continuity"), changes: z.array(z.object({ collection: z.enum(["facts", "timelines", "initial", "events", "requirements", "coverage"]), action: z.enum(["upsert", "delete"]), id, value: z.record(z.unknown()).optional() }).strict()).min(1) }).strict(),

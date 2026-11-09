@@ -1,4 +1,4 @@
-import { Input, Select, Switch } from "antd";
+import { Input, Segmented, Select, Switch } from "antd";
 
 import type { WorkflowField } from "@/services/api/workflows";
 
@@ -85,20 +85,41 @@ function CustomFieldInput({ field, label, value, onChange }: { field: WorkflowFi
             );
         }
         case "number":
-        case "slider":
+        case "slider": {
+            // seed 类字段（randomEnabled）支持「固定 / 随机」两态：
+            // 随机态向工作流写 -1，后端 prepareRun 会把它换成每次新种子；
+            // 固定态就是输入框里的具体数值，可复现。
+            const randomCapable = field.type === "number" && field.randomEnabled !== false && /seed/i.test(field.id);
+            const isRandom = Number(value) === -1;
             return (
                 <label className="block">
                     {caption}
-                    <Input
-                        type="number"
-                        value={formatFieldNumber(value)}
-                        min={field.min}
-                        max={field.max}
-                        step={field.step}
-                        onChange={(event) => onChange(event.target.value === "" ? (field.default ?? 0) : Number(event.target.value))}
-                    />
+                    <div className="flex items-center gap-2">
+                        <Input
+                            type="number"
+                            value={isRandom ? "" : formatFieldNumber(value)}
+                            min={field.min}
+                            max={field.max}
+                            step={field.step}
+                            placeholder={isRandom ? "每次随机" : undefined}
+                            disabled={isRandom}
+                            onChange={(event) => onChange(event.target.value === "" ? (field.default ?? 0) : Number(event.target.value))}
+                        />
+                        {randomCapable && (
+                            <Segmented
+                                size="small"
+                                value={isRandom ? "random" : "fixed"}
+                                options={[
+                                    { label: "固定", value: "fixed" },
+                                    { label: "随机", value: "random" },
+                                ]}
+                                onChange={(next) => onChange(next === "random" ? -1 : (field.default ?? 0))}
+                            />
+                        )}
+                    </div>
                 </label>
             );
+        }
         case "text":
         default:
             return (

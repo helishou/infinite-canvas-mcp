@@ -154,8 +154,8 @@ export type CanvasProductionStoryboardEditor = {
     /** Skip the full canvas readback when the caller only needs the save receipt. */
     readBackSegment?: boolean;
 };
-export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean };
-export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean }> };
+export type CanvasProductionContinuationBoundary = { nodeId: string; segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean; videoContinuation?: boolean };
+export type CanvasProductionContinuationBoundaries = { nodeId: string; boundaries: Array<{ segmentId: string; tailFrameContinuation: boolean; motionContextEnabled: boolean; videoContinuation?: boolean }> };
 export type CanvasStoryboardTracks = {
     revision: number;
     tracks: Record<string, { storyboardShots: Array<Record<string, unknown>>; referenceBindings: Array<Record<string, unknown>>; duration: number }>;

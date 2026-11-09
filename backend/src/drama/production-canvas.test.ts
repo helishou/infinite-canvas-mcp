@@ -340,6 +340,39 @@ test("episode asset registration creates an identity-bound shared reference and 
     assert.ok(f.db.getAssetRecord("AST_SHARED_PERSON"), "removing a usage does not delete its shared source record");
 });
 
+test("saving a Subject with a shared binding supersedes a local copy and keeps its Shot reference valid", async t => {
+    const f = fixture(t), shared = ensureProductionCanvas(f.db, "shared-assets", "drama");
+    ensureProductionCanvas(f.db, "episode", "ep");
+    f.db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-person", nodeType: "character", title: "共享人物", position: { x: 80, y: 90 }, width: 240, height: 320,
+        metadata: { characterImages: [{ storageKey: "image:shared-person" }], characterPrimaryIndex: 0 } }], { runtimeWrite: true });
+    save(f.episode, "ep", director());
+    const operation: any = { type: "create_manual_director_asset", assetPlan: { id: "AST_SHARED_PERSON", kind: "character", asset_name: "共享人物", entity_id: "CHAR_SHARED_PERSON", version: "v1", description: "蓝色长发", purpose: "剧目共享资产", depends_on: [], status: "planned", canvas_scope: "episode",
+        sharedSource: { dramaId: "drama", assetId: "AST_SHARED_PERSON", sourceProjectId: shared.project.id, sourceNodeId: "shared-person" } },
+        assetCard: { id: "AST_SHARED_PERSON", asset_id: "AST_SHARED_PERSON", asset_kind: "character", asset_version: "v1", prompt: "", references: [] }, registryKind: "character",
+        registryEntity: { id: "CHAR_SHARED_PERSON", name: "共享人物", description: "蓝色长发", appearance: "蓝色长发" },
+        subject: { id: "SUBJECT_SHARED_PERSON", kind: "character", entityRef: { ownerKind: "episode", ownerId: "ep", kind: "character", id: "CHAR_SHARED_PERSON" }, pictureBindings: [] } };
+    const added = await f.episode.edit("ep", { operationId: "include-shared-person", expectedRevision: f.episode.get("ep").revision, ops: [operation] });
+    const sharedBinding = added.draft.director!.source.subject_registry.find((subject: any) => subject.id === "SUBJECT_SHARED_PERSON")!.pictureBindings[0];
+    assert.ok(added.draft.director!.source.asset_plan.find((plan: any) => plan.id === sharedBinding.assetId)?.sharedSource, "the kept binding is the shared-source one");
+
+    // 旧数据现场：共享绑定之外还留着一条用途重叠的本地副本，镜头正引用这条副本。
+    const localBinding = { id: "picture:local-copy", assetId: "LOCAL_COPY", sourceNode: { projectId: f.db.getDramaEpisode("ep")!.canvasId!, nodeId: "local-copy-node" },
+        selection: { mode: "node_selection" }, provides: ["identity"], retain: ["character identity"], exclude: ["pose"], applicableState: {}, defaultFor: [] };
+    const stored = JSON.parse(String(f.db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id='ep'").get()?.draft_json));
+    const storedSubject = stored.director.source.subject_registry.find((subject: any) => subject.id === "SUBJECT_SHARED_PERSON");
+    storedSubject.pictureBindings.push(localBinding);
+    stored.director.source.shots[0].subject_usages = [{ subjectId: "SUBJECT_SHARED_PERSON", presentation: "visible", pictureBindingIds: [localBinding.id] }];
+    f.db.db.prepare("UPDATE episode_productions SET draft_json=? WHERE episode_id='ep'").run(JSON.stringify(stored));
+
+    const current = f.episode.get("ep");
+    const dirtySubject = current.draft.director!.source.subject_registry.find((subject: any) => subject.id === "SUBJECT_SHARED_PERSON")!;
+    assert.deepEqual(dirtySubject.pictureBindings.map((binding: any) => binding.id), [sharedBinding.id, localBinding.id]);
+    const saved = await f.episode.edit("ep", { operationId: "save-subject-with-local-copy", expectedRevision: current.revision, ops: [{ type: "upsert_director_subject", subject: dirtySubject as any }] });
+    const savedSubject = saved.draft.director!.source.subject_registry.find((subject: any) => subject.id === "SUBJECT_SHARED_PERSON")!;
+    assert.deepEqual(savedSubject.pictureBindings.map((binding: any) => binding.id), [sharedBinding.id], "the local copy yields to the shared reference binding");
+    assert.deepEqual(saved.draft.director!.source.shots[0].subject_usages[0].pictureBindingIds, [sharedBinding.id], "the Shot keeps a valid reference by pointing at the shared binding");
+});
+
 test("shared asset registration keeps the entity name when it differs from the canvas node title", async t => {
     const f = fixture(t), shared = ensureProductionCanvas(f.db, "shared-assets", "drama");
     ensureProductionCanvas(f.db, "episode", "ep");

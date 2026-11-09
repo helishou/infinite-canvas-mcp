@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { dataUrlBytes } from "./image-input.js";
 
 export type Json = Record<string, any>;
-export type LlmProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; systemPrompt: string; kind?: "codex-cli"; supportsImages?: boolean };
+export type LlmProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; systemPrompt: string; kind?: "codex-cli"; supportsImages?: boolean; headers?: Record<string, string> };
 /** Agent 回看归档图片的工具名；历史占位文本与能力提示都引用同一常量。 */
 export const IMAGE_TOOL_NAME = "agent_view_image";
 export type LlmPart = { text: string } | { image: string } | { imageRef: string };
@@ -59,6 +59,13 @@ export async function expandImageRefs(messages: LlmMessage[], resolve: (storageK
 }
 const record = (value: unknown): Json => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const rows = (value: unknown): Json[] => Array.isArray(value) ? value.map(record) : [];
+/** Channel-defined request headers (for example `x-opencode-session`); built-in auth headers win on collision. */
+function headerRecord(value: unknown): Record<string, string> | undefined {
+    const entries = Object.entries(record(value))
+        .map(([key, item]) => [key.trim(), typeof item === "string" ? item.trim() : ""] as const)
+        .filter(([key, item]) => key && item && !/[\r\n]/.test(key + item));
+    return entries.length ? Object.fromEntries(entries) : undefined;
+}
 
 /** The same channel-qualified identifiers and API formats used by the canvas. */
 export function configuredLlmProviders(value: unknown): LlmProvider[] {
@@ -68,11 +75,13 @@ export function configuredLlmProviders(value: unknown): LlmProvider[] {
         const cli = channel.kind === "codex-cli";
         const apiFormat = cli ? "openai" : channel.apiFormat || config.apiFormat || "openai";
         if (!["openai", "openai-chat", "gemini"].includes(apiFormat)) return [];
+        const headers = cli ? undefined : headerRecord(channel.headers);
         return rows(channel.models).filter(model => model.capability === "text" && !String(model.script || "").trim()).map(model => ({
             id: `${channel.id}::${model.name}`, model: String(model.name), name: `${channel.name || channel.id} / ${model.name}`,
             baseUrl: cli ? "" : String(channel.baseUrl || config.baseUrl || "").trim(), apiKey: cli ? "" : String(channel.apiKey || config.apiKey || "").trim(), apiFormat,
             systemPrompt: String(config.systemPrompt || "").trim(),
             ...(typeof model.supportsImages === "boolean" ? { supportsImages: model.supportsImages } : {}),
+            ...(headers ? { headers } : {}),
             ...(cli ? { kind: "codex-cli" as const } : {}),
         }));
     });
@@ -107,9 +116,9 @@ export async function requestLlm(provider: LlmProvider, instructions: string, me
             if (message.role === "tool") return { role: "user", parts: [{ functionResponse: { id: message.callId, name: message.callName, response: { result: textOf(message) } } }] };
             return { role: message.role === "assistant" ? "model" : "user", parts: [...message.parts.map(part => "text" in part ? part : geminiImage(imageDataOf(part))), ...(message.calls || []).map(call => ({ functionCall: { id: call.id, name: call.name, args: JSON.parse(call.arguments) } }))] };
         }), ...(tools.length ? { tools: [{ functionDeclarations: tools.map(tool => ({ name: tool.name, description: tool.description, parametersJsonSchema: tool.inputSchema })) }] } : {}) };
-        headers = { "content-type": "application/json", ...(provider.apiKey ? { "x-goog-api-key": provider.apiKey } : {}) };
+        headers = { ...provider.headers, "content-type": "application/json", ...(provider.apiKey ? { "x-goog-api-key": provider.apiKey } : {}) };
     } else {
-        headers = { "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) };
+        headers = { ...provider.headers, "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) };
         if (provider.apiFormat === "openai-chat") {
             url = `${openAiBase(provider.baseUrl)}/chat/completions`;
             body = { model: provider.model, stream: true, messages: [{ role: "system", content: system }, ...messages.map(message => ({ role: message.role, content: message.role === "tool" || message.parts.every(part => "text" in part) && message.parts.length ? textOf(message) : message.parts.length ? message.parts.map(part => "text" in part ? { type: "text", text: part.text } : { type: "image_url", image_url: { url: imageDataOf(part) } }) : null, ...(message.calls?.length ? { tool_calls: message.calls.map(call => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })) } : {}), ...(message.callId ? { tool_call_id: message.callId } : {}) }))], ...(tools.length ? { tools: tools.map(tool => ({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })) } : {}) };

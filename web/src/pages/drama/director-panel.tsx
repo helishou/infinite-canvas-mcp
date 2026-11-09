@@ -2020,12 +2020,12 @@ export function DirectorPanel({
     // 没有相邻段就没有边界可设：返回 null，避免在「连续性状态」里留一条空分隔线。
     if (!boundaryDraft) return null;
     return <div className="flex flex-wrap items-center gap-x-5 gap-y-2" data-shot-continuity>
-      {([["tailFrame", "director.studio.tailFrameLabel"], ["motionContext", "director.studio.motionContextLabel"]] as const).map(([key, label]) => <label key={key} className="flex cursor-pointer items-center gap-2">
+      {([["tailFrame", "director.studio.tailFrameLabel"], ["motionContext", "director.studio.motionContextLabel"], ["videoContinuation", "director.studio.videoContinuationLabel"]] as const).map(([key, label]) => <label key={key} className="flex cursor-pointer items-center gap-2">
         <span>{t(label)}</span>
         {/* 两个边界互斥：打开一个自动关掉另一个（同一次提交里把另一个置 false）。开态用手工绿色，默认主题的 primary 在暗色下是近白色，开关几乎看不出差别。 */}
         <Switch size="small" checked={Boolean(boundaryDraft[key])} disabled={busy} aria-label={t(label)}
           style={boundaryDraft[key] ? { backgroundColor: "#10b981" } : undefined}
-          onChange={checked => void onBoundary({ ...boundaryDraft, tailFrame: key === "tailFrame" && checked, motionContext: key === "motionContext" && checked })} />
+          onChange={checked => void onBoundary({ ...boundaryDraft, tailFrame: key === "tailFrame" && checked, motionContext: key === "motionContext" && checked, videoContinuation: key === "videoContinuation" && checked })} />
       </label>)}
     </div>;
   };

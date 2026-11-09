@@ -10,7 +10,7 @@ import { resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 
 type Owner = { kind: "episode" | "canvas" | "scene"; id: string };
 const nodes = (project: Record<string, any>): Record<string, any>[] => project.nodes || [];
-const h3ProjectionFields = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+const h3ProjectionFields = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "tailFrameContinuation", "motionContextEnabled", "videoContinuation", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
 const projectionHash = (value: unknown) => crypto.createHash("sha256").update(canonicalProduction(value ?? null)).digest("hex");
 function h3InputHash(segment: Record<string, any>) {
     const fields: Array<[string, unknown]> = h3ProjectionFields.map(key => [key, segment[key] ?? null]);

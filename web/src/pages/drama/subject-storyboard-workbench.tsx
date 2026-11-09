@@ -1005,9 +1005,9 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                         const runtimeMatches = productionSegmentRuntimeMatches(canvasNodes as any, from);
                         const runtimeBoundary = runtimeMatches.length === 1 ? runtimeMatches[0].segment : undefined;
                         const transitionMode = runtimeBoundary
-                            ? runtimeBoundary.tailFrameContinuation ? "tailFrame" : runtimeBoundary.motionContextEnabled ? "motionContext" : "none"
-                            : savedBoundary?.tailFrame ? "tailFrame" : savedBoundary?.motionContext ? "motionContext" : "none";
-                        return <ClipBoundaryHandle vertical pairIndex={entry.index} leftClipId={from} rightClipId={to} leftIds={clipShotIds(entry.group)} rightIds={clipShotIds(boundary.group)} profileConflict={clipProfileKey(entry.group) !== clipProfileKey(boundary.group)} shots={shots} fps={fps} chips={chipRefs} track={trackRef} disabled={!partitionEnabled} transitionMode={transitionMode} transitionDisabled={busy || compileBusy || compilePending || !onH3Boundary} onTransitionChange={mode => onH3Boundary?.({ from, to, tailFrame: mode === "tailFrame", motionContext: mode === "motionContext", reason: savedBoundary?.reason || "" })} onCommit={count => commitBoundary(entry.index, count)} onMerge={profileSourceId => mergeBoundaryClips(entry.index, profileSourceId)} addClip={onEditShot && partitionEnabled && subjectAssembly ? (() => {
+                            ? runtimeBoundary.tailFrameContinuation ? "tailFrame" : runtimeBoundary.motionContextEnabled ? "motionContext" : runtimeBoundary.videoContinuation ? "videoContinuation" : "none"
+                                : savedBoundary?.tailFrame ? "tailFrame" : savedBoundary?.motionContext ? "motionContext" : savedBoundary?.videoContinuation ? "videoContinuation" : "none";
+                        return <ClipBoundaryHandle vertical pairIndex={entry.index} leftClipId={from} rightClipId={to} leftIds={clipShotIds(entry.group)} rightIds={clipShotIds(boundary.group)} profileConflict={clipProfileKey(entry.group) !== clipProfileKey(boundary.group)} shots={shots} fps={fps} chips={chipRefs} track={trackRef} disabled={!partitionEnabled} transitionMode={transitionMode} transitionDisabled={busy || compileBusy || compilePending || !onH3Boundary} onTransitionChange={mode => onH3Boundary?.({ from, to, tailFrame: mode === "tailFrame", motionContext: mode === "motionContext", videoContinuation: mode === "videoContinuation", reason: savedBoundary?.reason || "" })} onCommit={count => commitBoundary(entry.index, count)} onMerge={profileSourceId => mergeBoundaryClips(entry.index, profileSourceId)} addClip={onEditShot && partitionEnabled && subjectAssembly ? (() => {
                     const anchorShot = shots.find(item => String(item.id) === String(clipShotIds(entry.group)[clipShotIds(entry.group).length - 1]));
                     if (!anchorShot) return undefined;
                     const segmentBase = { ...(entry.group.mode ? { mode: entry.group.mode } : {}), ...(entry.group.mode_lock !== undefined ? { mode_lock: entry.group.mode_lock } : {}), ...(entry.group.styleTemplateId !== undefined ? { styleTemplateId: entry.group.styleTemplateId } : {}) };
@@ -1101,7 +1101,7 @@ function ShotClipSplitHandle({ disabled, onSplit, vertical = false }: { disabled
 function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, rightIds, profileConflict, shots, fps, chips, track, disabled, transitionMode = "none", transitionDisabled = true, onTransitionChange, onCommit, onMerge, addClip, vertical = false }: {
     vertical?: boolean; pairIndex: number; leftClipId: string; rightClipId: string; leftIds: string[]; rightIds: string[]; profileConflict: boolean; shots: Array<Record<string, any>>; fps: number;
     chips: { current: Map<string, HTMLElement> }; track: { current: HTMLDivElement | null }; disabled: boolean;
-    transitionMode?: "tailFrame" | "motionContext" | "none"; transitionDisabled?: boolean; onTransitionChange?: (mode: "tailFrame" | "motionContext" | "none") => void;
+    transitionMode?: "tailFrame" | "motionContext" | "videoContinuation" | "none"; transitionDisabled?: boolean; onTransitionChange?: (mode: "tailFrame" | "motionContext" | "videoContinuation" | "none") => void;
     onCommit: (count: number) => Promise<unknown> | unknown; onMerge: (profileSourceId?: string) => Promise<unknown> | unknown;
     addClip?: { source: Record<string, any>; anchorShot: Record<string, any>; segmentBase: Record<string, any>; onEdit: (operation: ShotOperation) => Promise<boolean>; onSelect: (id: string) => void };
 }) {
@@ -1220,6 +1220,7 @@ function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, right
     const transitionItems = [
         { key: "tailFrame", label: t("director.atomic.clipTransitionTailFrame") },
         { key: "motionContext", label: t("director.atomic.clipTransitionMotionContext") },
+        { key: "videoContinuation", label: t("director.atomic.clipTransitionVideoContinuation") },
         { key: "none", label: t("director.atomic.clipTransitionNone") },
     ];
     const mergedDuration = clipDurationSeconds(allIds, shots, fps);
@@ -1242,7 +1243,7 @@ function ClipBoundaryHandle({ pairIndex, leftClipId, rightClipId, leftIds, right
         </div>, track.current) : null;
     return <>{guide}
     {vertical ? <div className="storyboard-boundary group" data-clip-boundary={`${pairIndex + 1}-${pairIndex + 2}`}>
-        {onTransitionChange ? <Dropdown trigger={["click"]} disabled={transitionDisabled} menu={{ items: transitionItems, selectedKeys: [transitionMode], onClick: ({ key }) => onTransitionChange(key as "tailFrame" | "motionContext" | "none") }}>
+        {onTransitionChange ? <Dropdown trigger={["click"]} disabled={transitionDisabled} menu={{ items: transitionItems, selectedKeys: [transitionMode], onClick: ({ key }) => onTransitionChange(key as "tailFrame" | "motionContext" | "videoContinuation" | "none") }}>
             <button type="button" disabled={transitionDisabled} aria-label={t("director.atomic.clipTransitionLabel")} title={t("director.atomic.clipTransitionLabel")} aria-haspopup="menu" className="storyboard-boundary-menu storyboard-boundary-transition">
                 {transitionItems.find(item => item.key === transitionMode)?.label} <ChevronDown className="size-3 shrink-0" aria-hidden="true" />
             </button>

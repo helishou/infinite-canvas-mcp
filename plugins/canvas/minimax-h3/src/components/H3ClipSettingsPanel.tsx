@@ -54,7 +54,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
     const patchSettings = globalScope ? patchAllSettings : patchSelected;
     const continuationSaveInFlight = useRef(false);
     const patchClipSettings = (patch: Partial<H3Segment>) => {
-        const editsContinuation = Object.hasOwn(patch, "tailFrameContinuation") || Object.hasOwn(patch, "motionContextEnabled");
+        const editsContinuation = Object.hasOwn(patch, "tailFrameContinuation") || Object.hasOwn(patch, "motionContextEnabled") || Object.hasOwn(patch, "videoContinuation");
         if (globalScope && editsContinuation) {
             if (continuationSaveInFlight.current) return;
             const clips = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
@@ -83,7 +83,10 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
             if (!setBoundary) { message.error("正式制作 Clip 的续段衔接需要制作台连接，未修改参数。"); return; }
             const tailFrameContinuation = Object.hasOwn(patch, "tailFrameContinuation") ? patch.tailFrameContinuation === true : selected?.tailFrameContinuation === true;
             const motionContextEnabled = Object.hasOwn(patch, "motionContextEnabled") ? patch.motionContextEnabled === true : selected?.motionContextEnabled === true;
-            void setBoundary({ nodeId: ctx.node.id, segmentId: String(selected?.id || ""), tailFrameContinuation, motionContextEnabled })
+            // videoContinuation 必须显式传给制作台：漏传会被后端按缺省写成 false，
+            // 表现为开关点击后永远弹回关闭（2026-11-08 修复）。
+            const videoContinuation = Object.hasOwn(patch, "videoContinuation") ? patch.videoContinuation === true : selected?.videoContinuation === true;
+            void setBoundary({ nodeId: ctx.node.id, segmentId: String(selected?.id || ""), tailFrameContinuation, motionContextEnabled, videoContinuation })
                 .then(result => { if (!result.sourceSaved) message.error("制作台未保存续段衔接设置。"); })
                 .catch(error => message.error(error instanceof Error ? error.message : String(error)));
             return;

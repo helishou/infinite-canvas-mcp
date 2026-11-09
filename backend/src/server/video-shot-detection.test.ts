@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Express } from "express";
 import type { Stores } from "../stores/types.js";
-import { registerVideoShotDetectionRoute } from "./video-shot-detection.js";
+import { registerVideoShotDetectionRoute, resolveSceneDetectPython } from "./video-shot-detection.js";
 
 type Handler = (req: any, res: any) => unknown;
 
@@ -48,4 +48,11 @@ test("scene detection rejects missing or unarchived video nodes before invoking 
 
     assert.equal(res.statusCode, 409);
     assert.equal(invoked, false);
+});
+
+test("scene detection python prefers the explicit override, then the repository venv, then PATH", () => {
+    assert.equal(resolveSceneDetectPython("win32", () => true, { SCENEDETECT_PYTHON: "C:/py/scene.exe" }), "C:/py/scene.exe");
+    assert.match(resolveSceneDetectPython("win32", (candidate) => String(candidate).endsWith("venv\\Scripts\\python.exe"), {}), /venv[\\/]Scripts[\\/]python\.exe$/);
+    assert.equal(resolveSceneDetectPython("win32", () => false, {}), "python");
+    assert.equal(resolveSceneDetectPython("linux", () => false, {}), "python3");
 });

@@ -92,6 +92,28 @@ test("文本渠道解析透传视觉声明与稳定标识", () => {
     assert.equal("supportsImages" in resolveTextProvider(aiConfig, "c1::auto-model"), false, "未声明时保持自动探测");
 });
 
+test("渠道自定义请求头随文本请求发送，且不覆盖内置鉴权头", async () => {
+    const originalFetch = globalThis.fetch;
+    let seen: Record<string, string> = {};
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+        seen = init?.headers as Record<string, string>;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+        const provider = resolveTextProvider({ channels: [{
+            id: "c1", name: "OpenCode Go", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "k", apiFormat: "openai-chat",
+            headers: { "x-opencode-session": "canvas-session", Authorization: "custom" },
+            models: [{ name: "kimi-k3", capability: "text" }],
+        }] }, "c1::kimi-k3");
+        assert.equal(provider.headers?.["x-opencode-session"], "canvas-session");
+        assert.equal(await requestOpenAiText(provider, "hi", []), "ok");
+        assert.equal(seen["x-opencode-session"], "canvas-session");
+        assert.equal(seen.Authorization, "Bearer k");
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
 test("渠道声明仅文本时，带图文本任务在请求模型前失败", async () => {
     const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
     let calls = 0;

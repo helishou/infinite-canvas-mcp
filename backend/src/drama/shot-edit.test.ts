@@ -257,3 +257,27 @@ test("production transaction replays structural edits once, keeps other episodes
     assert.deepEqual(service.get("ep").draft.director!.source.utterances, []);
     assert.deepEqual(service.get("other"), other);
 });
+
+test("insert 不传 shotId 时可用 shots[] 一次建多镜段落，并按合计校验时长", () => {
+    const d = fixture();
+    const shot = (id: string, frames: number) => ({ id, timeline_id: "T", scene_id: "SC", duration_frames: frames, title: id,
+        visual: "动作。", camera: { framing: "WS", attention_subject_ids: ["SUB"], editorial_reason: "验证" }, subject_usages: [] });
+    editDirectorShot(d, { type: "edit_director_shot", action: "insert", anchorShotId: "S2", segment: { id: "NEW", summary: "新段" },
+        shotInputs: { S9: { keyframePolicy: "reuse", assetIds: ["K"] } },
+        shots: [shot("S8", 48), shot("S9", 72)] } as any);
+    const source = d.source as any;
+    assert.deepEqual(source.segments.map((segment: any) => segment.id), ["C", "NEW"]);
+    assert.deepEqual(source.segments[1].shot_ids, ["S8", "S9"]);
+    assert.equal(source.segments[1].mode, "T2VA");
+    // 克隆模板没有该主体用法时按 attention_subject_ids 补齐
+    assert.deepEqual(source.shots.find((row: any) => row.id === "S8").subject_usages.map((usage: any) => usage.subjectId), ["SUB"]);
+    assert.equal(d.shotInputs.S9.keyframePolicy, "reuse");
+    assert.equal(d.shotInputs.S8.keyframePolicy, "none");
+
+    const tooLong = fixture();
+    assert.throws(() => editDirectorShot(tooLong, { type: "edit_director_shot", action: "insert", anchorShotId: "S2",
+        shots: [shot("S8", 240), shot("S9", 240)] } as any), /4–15 秒/);
+    const tooShort = fixture();
+    assert.throws(() => editDirectorShot(tooShort, { type: "edit_director_shot", action: "insert", anchorShotId: "S2",
+        shots: [shot("S8", 24), shot("S9", 12)] } as any), /4–15 秒/);
+});

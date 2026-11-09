@@ -5,6 +5,10 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- The H3 workbench no longer pins "use the current saved content / linked to the director baseline" at the bottom and no longer dumps the director prompt there; that state now lives in the prompt editor. When the existing render was produced from older inputs, the prompt area shows an amber "inputs changed" note. When the director baseline prompt differs from the canvas prompt, a "director baseline updated · view prompt diff" details panel appears and expands to a line diff (− current canvas / + director baseline) with unchanged runs collapsed. Check that nothing renders when there is no difference, the panel follows the selected Clip, the diff colours stay readable in both themes, and the workbench bottom keeps no empty row.
+
+- The image-node Resize tool (previously Upscale) now both enlarges and shrinks: any target long edge between 32 and 4096 px is accepted. The slider, numeric input and 256/512/1K/2K/4K presets must agree on output size and scale ratio. Enlarge and shrink with each of the three interpolation algorithms and verify the new image node keeps the aspect ratio and exact dimensions. Check that 4K or larger sources open with a shrinkable default, unchanged or out-of-range targets disable the button with a hint, clearing the numeric input does not instantly restore a default, both locales and light/dark themes render correctly, and users with customized quick toolbars keep the button in place after a refresh.
+
 - Shot editing now uses a single-select Camera movement: the 132 Previs moves from the camera library are grouped by category and searchable by ID, Chinese name or English name. Picking from the dropdown or selecting after a video preview in Browse camera library must write the same move name and Previs ID; reopening the library preselects the current move, and clearing the dropdown also unbinds the Previs ID. Free-text values from older drafts stay visible with a hint to pick a library move, produce no draft change and are not rewritten automatically. After recompiling, check that `Movement:` in the Shot prompt carries only the library's English name (for example `Tilt`) with no Chinese name, while older hand-written movement descriptions without an English name compile unchanged.
 
 - Formal storyboard tracks and the production workbench use the same Shot keyframe. Replace and clear an image from either editor, then refresh: verify the same opening keyframe and track slot update, no duplicate opening is added, and unrelated composition or timed keyframes remain intact. Check failed saves are reported as failed.
@@ -441,6 +445,8 @@ description: Implemented changes that still need manual verification
 ## ComfyUI preset task timeout
 
 - ComfyUI preset generation, including H3 Clips, waits up to 120 minutes by default instead of 30 minutes. The configurable execution timeout also allows up to 120 minutes. Verify that a task still running after 30 minutes continues waiting and receives its result; exceeding the timeout reports failure with the actual limit and asks users to check ComfyUI.
+
+- Submitting to ComfyUI only enqueues the task; time spent waiting behind earlier queued prompts no longer consumes that task's execution budget. Verify that a task submitted behind several earlier jobs that together run over 30 minutes still gets its own full limit once it starts and receives its result, and that frontend polling no longer fails it early. A stuck queue and an execution timeout report distinct messages with the actual limit and promptId.
 
 ## Director Clip duration
 

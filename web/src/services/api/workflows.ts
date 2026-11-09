@@ -148,11 +148,12 @@ export async function pollWorkflowTask(
     options?: { signal?: AbortSignal; intervalMs?: number; timeoutMs?: number },
 ): Promise<WorkflowRunResult> {
     const interval = options?.intervalMs ?? 1500;
-    const timeout = options?.timeoutMs ?? 30 * 60 * 1000;
+    // 与后端 ComfyUI 执行时限一致：后端仍在排队/执行时，前端不能先用 30 分钟把任务判死。
+    const timeout = options?.timeoutMs ?? 120 * 60 * 1000;
     const startedAt = Date.now();
     for (;;) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        if (Date.now() - startedAt > timeout) throw new Error("工作流任务轮询超时（30 分钟）");
+        if (Date.now() - startedAt > timeout) throw new Error(`工作流任务轮询超时（${Math.round(timeout / 60000)} 分钟）；任务可能仍在 ComfyUI 队列中，请到任务面板查看实际状态`);
         const res = await fetchBackendTask(taskId, options?.signal);
         const task = res.task;
         if (!task) throw new Error("工作流任务不存在");

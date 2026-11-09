@@ -22,6 +22,7 @@ import { promptEnhanceImagePayload } from "../services/prompt-enhance-references
 import { captureH3PromptRequest } from "../services/h3-prompt-request";
 import { translateH3Prompt } from "../services/h3-prompt-translation";
 import { bindLiteralSubjectsToReferences, literalPromptSubjects } from "../services/prompt-subject-definitions";
+import { diffPromptLines } from "../services/prompt-diff";
 import type { StoryboardPromptReference } from "../services/storyboard-prompt";
 import { createH3Id } from "../services/h3-id";
 import { assembleH3Prompt, readH3PromptSection } from "../../../../../canvas-agent/src/plugins/minimax-h3/prompt-sections";
@@ -660,6 +661,13 @@ export function H3PromptSection({
  const prompt = textStatus.ready ? textStatus.text : String(selected?.prompt || "");
   const productionProjection = selected?.productionClipProjection as Record<string, unknown> | undefined;
   const hasProductionCompileTarget = typeof productionProjection?.targetId === "string" && Boolean(productionProjection.targetId);
+  // 导演基线的 prompt 是「导演新编译、但画布已人工改过而没自动覆盖」的那一版。
+  const directorNextValues = productionProjection?.nextValues as Record<string, unknown> | undefined;
+  const directorPrompt = typeof directorNextValues?.prompt === "string" ? directorNextValues.prompt : undefined;
+  const directorPromptDiff = useMemo(
+    () => typeof directorPrompt === "string" && directorPrompt.trim() !== prompt.trim() ? diffPromptLines(prompt, directorPrompt) : [],
+    [directorPrompt, prompt],
+  );
   const promptSubjectSection = readPromptSection(prompt, "subject_definitions");
   const literalSubjects = useMemo(() => literalPromptSubjects(`subject_definitions:\n${promptSubjectSection}`), [promptSubjectSection]);
   const TextEditor = ctx.TextEditor;
@@ -1871,6 +1879,20 @@ export function H3PromptSection({
         {promptDiffersFromCompiled && canReverseSyncPrompt ? <Button size="small" loading={promptReverseSyncing} disabled={promptReverseSyncing || !textStatus.ready || textStatus.blocked} onClick={() => void requestPromptReverseSync()}>反向同步到分镜源稿</Button> : null}
         {promptDiffersFromCompiled && !canReverseSyncPrompt ? <span>当前编译回执没有可用的唯一来源映射，人工 Prompt 仍保留在此 Clip。</span> : null}
       </div> : null}
+      {selected?.inputOutdated === true ? <div className="minimax-prompt-help-panel minimax-prompt-stale" role="status">
+        输入已修改 · 现有成片基于旧输入，重新生成后更新。
+      </div> : null}
+      {directorPromptDiff.length ? <details key="director-prompt-diff" className="minimax-prompt-help-panel minimax-prompt-director-diff">
+        <summary>导演基线有更新 · 查看提示词差异（− 当前画布 / + 导演基线）</summary>
+        <div className="minimax-prompt-diff-lines" role="group" aria-label="当前提示词与导演基线的行级差异">
+          {directorPromptDiff.map((line, index) => line.kind === "gap"
+            ? <div key={index} className="minimax-prompt-diff-row is-gap">… 省略 {line.count} 行相同内容</div>
+            : <div key={index} className={`minimax-prompt-diff-row is-${line.kind}`}>
+              <span className="minimax-prompt-diff-mark">{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</span>
+              <span className="minimax-prompt-diff-text">{line.text || " "}</span>
+            </div>)}
+        </div>
+      </details> : null}
       {promptReverseSyncError ? <div className="minimax-prompt-reference-error" role="alert">反向同步未完成：{promptReverseSyncError}</div> : null}
       {promptCompileError ? <div className="minimax-prompt-reference-error" role="alert">编译 Prompt 未完成：{promptCompileError}</div> : null}
       {!storyboardMode ? <div key="prompt-modes" className="minimax-prompt-modes">

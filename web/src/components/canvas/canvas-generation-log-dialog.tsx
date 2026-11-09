@@ -199,6 +199,62 @@ function actualSubmissionText(params: unknown) {
     ].join("\n");
 }
 
+function videoContinuationText(params: unknown) {
+    const root = params && typeof params === "object" ? params as Record<string, unknown> : {};
+    const value = root.videoContinuation;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const summary = value as Record<string, unknown>;
+    if (summary.mode === "v15-reference") {
+        return [
+            "已生效（回退）：无潜变量种子，把上一段成片填入 V15 视频参考槽续写，存储的原工作流未改动",
+            `上一段成片：${String(summary.prevVideoFile || "-")}`,
+            `主节点：${String(summary.targetNode || "-")}；参考槽：${String(summary.slot || "-")}`,
+        ].join("\n");
+    }
+    if (summary.mode === "reference-slot") {
+        return [
+            "已生效（回退）：潜空间机制不适用，把上一段成片载入工作流视频参考输入续写，存储的原工作流未改动",
+            `上一段成片：${String(summary.prevVideoFile || "-")}`,
+            `视频加载器：${String(summary.targetNode || "-")}；参考槽：${String(summary.slot || "-")}`,
+            summary.replaced ? "方式：替换源视频（人物替换/动作迁移的 motion 源即上一段）" : "方式：填入空参考槽",
+            ...(summary.audioWired ? ["已顺带接入同序号参考视频音频"] : []),
+        ].join("\n");
+    }
+    return [
+        "已生效：非侵入动态加节点，存储的原工作流未改动",
+        `上一段成片：${String(summary.prevVideoFile || "-")}`,
+        `动态追加节点：${String(summary.addedNodes ?? "-")} 个`,
+        `循环入口：${String(summary.loopId || "-")}；起始段号 ${String(summary.startSegmentNode || "-")}=1；结束段号 ${String(summary.endSegmentNode || "-")}=1`,
+        `续段/多段判定改写：${String(summary.continuationRewires ?? "-")} 处；重叠帧规划改写：${String(summary.overlapRewires ?? "-")} 处`,
+    ].join("\n");
+}
+
+function latentContinuationText(params: unknown) {
+    const root = params && typeof params === "object" ? params as Record<string, unknown> : {};
+    const value = root.latentContinuation;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+    const summary = value as Record<string, unknown>;
+    if (summary.family === "v15") {
+        return [
+            "已生效：V15 主节点内置潜空间续写，仅填开关与任务描述符，存储的原工作流未改动",
+            `主节点：${String(summary.generatorNode || "-")}${summary.renamedFrom ? `（由 ${String(summary.renamedFrom)} 改号）` : ""}`,
+            `运行目录：${String(summary.folder || "-")}`,
+            Number(summary.index) === 2 ? "模式：载入上一段种子续写（输出收口后归一到 1 号槽）" : "模式：仅导出本段潜变量供下一段续写",
+        ].join("\n");
+    }
+    return [
+        summary.loadedVideoFrom
+            ? "已生效（回退）：无潜变量种子，加载上一段成片经 VAE 编码钉帧续写，存储的原工作流未改动"
+            : "已生效：非侵入动态加节点，存储的原工作流未改动",
+        `运行目录：${String(summary.folder || "-")}`,
+        summary.loadedFrom ? `载入上一段潜变量：${String(summary.loadedFrom)}`
+            : summary.loadedVideoFrom ? `载入上一段成片（像素回退）：${String(summary.loadedVideoFrom)}`
+            : "仅导出本段潜变量供下一段续写",
+        `动态追加节点：${String(summary.addedNodes ?? "-")} 个；条件改写：${String(summary.conditioningRewires ?? "-")} 处；输出改写：${String(summary.outputRewires ?? "-")} 处`,
+        ...(summary.loopForced && typeof summary.loopForced === "object" ? [`循环强制单段：起始 ${String((summary.loopForced as Record<string, unknown>).startNode || "-")}=1；结束 ${String((summary.loopForced as Record<string, unknown>).endNode || "-")}=1`] : []),
+    ].join("\n");
+}
+
 function LogCard({ log, compact, canvasLabel, currentStorageKey, onSelectResult, onDelete }: { log: GenerationLog; compact?: boolean; canvasLabel?: string; currentStorageKey?: string; onSelectResult?: SelectHistoryResult; onDelete?: () => void }) {
     const { t } = useTranslation();
     const [expanded, setExpanded] = useState(false);
@@ -210,6 +266,8 @@ function LogCard({ log, compact, canvasLabel, currentStorageKey, onSelectResult,
     const loopInputs = Array.isArray(logParams.loopInputImages) ? logParams.loopInputImages.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
     const actualSubmission = actualSubmissionText(log.params);
     const generationSettings = generationSettingsText(log.params);
+    const videoContinuation = videoContinuationText(log.params);
+    const latentContinuation = latentContinuationText(log.params);
     const kind = logKind(log);
     // 生文类日志（插件翻译/增强提示词等）把模型输出存进 outputs，这里渲染成可展开的文本段
     const textOutputs = log.outputs.filter((output) => String(output.type || "") === "text" && String(output.text || "").trim());
@@ -228,6 +286,8 @@ function LogCard({ log, compact, canvasLabel, currentStorageKey, onSelectResult,
         {log.prompt ? <ExpandableText label="提示词" value={log.prompt} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.prompt || "")} /> : null}
         {textOutputs.map((output, index) => <ExpandableText key={`${log.id}-text-${index}`} label="输出文本" value={String(output.text || "")} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(String(output.text || ""))} />)}
         {generationSettings ? <ExpandableText label="生成参数" value={generationSettings} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(generationSettings)} /> : null}
+        {videoContinuation ? <ExpandableText label="视频续写" value={videoContinuation} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(videoContinuation)} /> : null}
+        {latentContinuation ? <ExpandableText label="潜空间续写" value={latentContinuation} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(latentContinuation)} /> : null}
         {actualSubmission ? <ExpandableText label="实际提交配置" value={actualSubmission} expanded={expanded} onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(actualSubmission)} /> : null}
         </details>
         {log.error ? <ExpandableText label="错误" value={log.error} expanded={expanded} error onToggle={() => setExpanded((value) => !value)} onCopy={() => void copy(log.error || "")} /> : null}

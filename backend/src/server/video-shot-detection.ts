@@ -1,10 +1,22 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Express, Request, Response } from "express";
 import type { Stores } from "../stores/types.js";
 
 const workerPath = fileURLToPath(new URL("../../workers/detect_video_scenes.py", import.meta.url));
+
+/** 优先级：显式 SCENEDETECT_PYTHON > 仓库 backend/venv（worker 依赖按该 venv 隔离） > PATH 上的 python。 */
+export function resolveSceneDetectPython(platform = process.platform, exists = fs.existsSync, env = process.env): string {
+    const configured = String(env.SCENEDETECT_PYTHON || "").trim();
+    if (configured) return configured;
+    const venv = platform === "win32"
+        ? fileURLToPath(new URL("../../venv/Scripts/python.exe", import.meta.url))
+        : fileURLToPath(new URL("../../venv/bin/python", import.meta.url));
+    if (exists(venv)) return venv;
+    return platform === "win32" ? "python" : "python3";
+}
 
 export function registerVideoShotDetectionRoute(app: Express, stores: Stores, detect = detectVideoScenes) {
     app.get("/canvas/projects/:id/video/:nodeId/scene-cuts", async (req: Request, res: Response) => {
@@ -43,7 +55,7 @@ function mediaStorageKey(content: unknown): string {
 export type DetectedVideoCut = { frame: number; time: number };
 
 export async function detectVideoScenes(videoPath: string): Promise<{ cuts: DetectedVideoCut[] }> {
-    const python = process.env.SCENEDETECT_PYTHON || (process.platform === "win32" ? "python" : "python3");
+    const python = resolveSceneDetectPython();
     const { stdout, stderr, code } = await runPython(python, [workerPath, path.resolve(videoPath)]);
     if (code !== 0) throw new Error(stderr.trim() || `PySceneDetect exited with ${code}`);
     let output: unknown;

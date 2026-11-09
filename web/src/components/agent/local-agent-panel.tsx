@@ -11,7 +11,7 @@ import { ACHENG_DIRECTOR_SKILL_NAME, findProjectAchengDirectorSkill, creativeLau
 import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
 import { enqueueAgentPrompt } from "@/lib/agent/agent-prompt-queue";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { resizeDataUrl } from "@/lib/canvas/canvas-image-data";
 import { imageMetadata } from "@/lib/canvas/canvas-node-factory";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
 import { resolveCanvasReferenceImages } from "@/lib/canvas/canvas-resource-references";
@@ -2047,7 +2047,7 @@ function createId() {
 
 async function createMessageAttachmentMetadata(item: AgentAttachment) {
     const url = Math.max(item.width, item.height) > MESSAGE_PREVIEW_LONG_EDGE || item.dataUrl.length > MESSAGE_PREVIEW_MAX_LENGTH
-        ? await upscaleDataUrl(item.dataUrl, { targetLongEdge: MESSAGE_PREVIEW_LONG_EDGE, algorithm: "high" })
+        ? await resizeDataUrl(item.dataUrl, { targetLongEdge: MESSAGE_PREVIEW_LONG_EDGE, algorithm: "high" })
         : item.dataUrl;
     return { id: item.id, name: item.name, type: item.type, size: item.size, width: item.width, height: item.height, url };
 }

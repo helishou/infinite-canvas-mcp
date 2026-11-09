@@ -7,7 +7,7 @@ import { openAiBase, type LlmMessage, type LlmProvider } from "./llm-provider.js
  * 探针会发一次极小的计费请求，因此只缓存确定的结论；网络、鉴权、限流、5xx 等
  * 模糊失败一律视为“未知”放行，不能因为探测失败阻断用户正常的图片请求。
  */
-export type VisionProvider = Pick<LlmProvider, "id" | "model" | "name" | "baseUrl" | "apiKey" | "apiFormat" | "supportsImages" | "kind">;
+export type VisionProvider = Pick<LlmProvider, "id" | "model" | "name" | "baseUrl" | "apiKey" | "apiFormat" | "supportsImages" | "kind" | "headers">;
 
 const PROBE_TIMEOUT_MS = 20_000;
 /** 32×32 纯色 JPEG（273 字节），足够让服务端校验图片输入而不产生可读内容。 */
@@ -72,8 +72,8 @@ async function probeImageSupport(provider: VisionProvider, signal?: AbortSignal)
 }
 
 function probeHeaders(provider: VisionProvider): Record<string, string> {
-    if (provider.apiFormat === "gemini") return { "content-type": "application/json", ...(provider.apiKey ? { "x-goog-api-key": provider.apiKey } : {}) };
-    return { "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) };
+    if (provider.apiFormat === "gemini") return { ...provider.headers, "content-type": "application/json", ...(provider.apiKey ? { "x-goog-api-key": provider.apiKey } : {}) };
+    return { ...provider.headers, "content-type": "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) };
 }
 
 function probeRequest(provider: VisionProvider): string {

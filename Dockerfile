@@ -22,12 +22,15 @@ RUN pnpm --filter @helishou/infinite-canvas-backend --prod deploy /deploy/backen
 # Backend has no GPU/model dependency. ComfyUI is a separately configured service.
 FROM node:22-bookworm-slim AS backend
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pil git ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pil python3-pip git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=production-deps /deploy/backend ./backend
 COPY --from=build /app/scripts/acheng-engine.mjs ./scripts/acheng-engine.mjs
 COPY --from=build /app/scripts/acheng ./scripts/acheng
+# 视频节点的镜头切分检测在 Backend 进程内调用 Python worker，依赖须随镜像声明安装。
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    -r ./backend/workers/requirements-video-shot-detection.txt
 ENV NODE_ENV=production \
     PORT=17370 \
     INFINITE_CANVAS_LISTEN_HOST=0.0.0.0 \

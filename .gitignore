@@ -42,6 +42,8 @@ tmp
 .tmp
 # 构建与调试产生的临时目录变体（.tmp-build/.tmp-esbuild/.tmp-vite-esbuild 等）
 .tmp*/
+# 会话产生的一次性临时文件（回执、脚本、预览图），磁盘保留但不入库
+/.tmp-*
 # 本地产物区：构建源码快照、预览图、一次性脚本与日志，不入库
 /work/
 .learnings

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 type Row = Record<string, any>;
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter((item): item is Row => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
@@ -147,7 +148,8 @@ export function createManualDirectorAsset(director: DirectorProduction, operatio
     if (subject) nextSource.subject_registry = [...rows(source.subject_registry), subject];
     director.source = nextSource as DirectorProduction["source"];
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
-    director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+    // 按 scoped inputHash 判新旧，而不是一刀切：增删某个资产不该废掉无关 Clip 的产物。
+    director.artifacts = director.artifacts.map(artifact => currentCompilationArtifact(director, artifact) ? artifact : { ...artifact, status: "stale" as const });
     director.executionAuthorized = false;
     if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
 }
@@ -158,9 +160,13 @@ export function deleteDirectorAsset(director: DirectorProduction, assetId: strin
     if (!id) throw new Error("ASSET_ID_REQUIRED: 资产 ID 不能为空");
     const source = director.source as Record<string, any>;
     const plans = rows(source.asset_plan), plan = plans.find(row => valueOf(row) === id);
-    if (!plan) throw new Error(`ASSET_NOT_FOUND: ${id}`);
+    // 绑定型资产没有 asset_plan 条目：它只以 binding key 存在于 director.assets（多为跨集残留的
+    // keyframe/storyboard 绑定）。这类条目没有任何 plan 可删，但仍然阻塞 readiness，必须能清掉。
+    const bindingOnly = !plan && Object.entries(director.assets || {}).some(([key, value]) =>
+        key === id || String((value as Row)?.canvasReferenceBindingId || "") === id);
+    if (!plan && !bindingOnly) throw new Error(`ASSET_NOT_FOUND: ${id}`);
 
-    const kind = String(plan.kind || plan.asset_type || plan.role || "").toLowerCase();
+    const kind = String(plan?.kind || plan?.asset_type || plan?.role || "").toLowerCase();
     const entityKind = kind === "character" || kind === "person" || kind === "role" ? "character"
         : kind === "scene" || kind === "environment" || kind === "location" ? "scene" : "asset";
     const allSubjects = rows(source.subject_registry);
@@ -218,7 +224,8 @@ export function deleteDirectorAsset(director: DirectorProduction, assetId: strin
     director.assets = nextAssets;
     director.shotInputs = detachReferences(director.shotInputs || {}, assetIds, subjectAndBindingIds, noEntityIds, removedFacts) as DirectorProduction["shotInputs"];
     director.sourceHash = crypto.createHash("sha256").update(canonicalProduction(director.source)).digest("hex");
-    director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+    // 按 scoped inputHash 判新旧，而不是一刀切：增删某个资产不该废掉无关 Clip 的产物。
+    director.artifacts = director.artifacts.map(artifact => currentCompilationArtifact(director, artifact) ? artifact : { ...artifact, status: "stale" as const });
     director.executionAuthorized = false;
     if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
 }

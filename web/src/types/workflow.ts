@@ -29,6 +29,14 @@ export type WorkflowField = {
     rhIndex?: number;
 };
 
+/** 自定义工作流的时长输入节点（单值）。与 backend/src/workflows/duration.ts 对齐。 */
+export type DurationUnit = "seconds" | "frames";
+export type WorkflowDurationTarget = {
+    nodeId: string;
+    input: string;
+    unit: DurationUnit;
+};
+
 export type WorkflowConfig = {
     title: string;
     backend: string;
@@ -45,6 +53,11 @@ export type WorkflowConfig = {
      * 不参与产物筛选、归档与生成日志；留空表示不采集。仅本地 ComfyUI 链生效。
      */
     previewNodeId?: string;
+    /**
+     * 时长输入节点（单选）：画布生成时把制作台的秒数换算后写进这个节点输入。
+     * 与提示词自动注入同构，不要求该输入是可填字段。未配置 / null 表示不注入。
+     */
+    durationTarget?: WorkflowDurationTarget | null;
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
     /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）；留空表示没绑定。 */

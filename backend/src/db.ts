@@ -8,6 +8,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { mcpEfficiencyReport } from "./mcp-efficiency-report.js";
 import { decodeStoredJson, encodeStoredJson, storedJsonText, type StoredJson } from "./json-storage.js";
+import type { WorkflowDurationTarget } from "./workflows/duration.js";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
@@ -157,6 +158,11 @@ export type WorkflowField = {
     options?: string[];
     randomEnabled?: boolean;
     isPrompt?: boolean;
+    /**
+     * 可选媒体字段：值为空时直接把加载器节点从提交图里剪掉（连同悬空连线），
+     * 让下游的“可选输入”分支退回原始行为。用于视频续写这类“有就用、没有就当首段”的加载器。
+     */
+    optionalWhenEmpty?: boolean;
 };
 
 export type WorkflowConfig = {
@@ -172,6 +178,12 @@ export type WorkflowConfig = {
      * 只影响展示，不参与产物筛选、归档与生成日志。留空表示不采集预览。
      */
     previewNodeId?: string;
+    /**
+     * 时长输入节点（单值）：画布视频生成时，把制作台的秒数换算后写入这个节点输入。
+     * 与提示词 isPrompt 的自动注入同构，不要求该输入同时是一个可填字段。
+     * 未配置 / null 表示不注入，旧工作流行为不变。仅本地 ComfyUI 链生效。
+     */
+    durationTarget?: WorkflowDurationTarget | null;
     mediaInputs?: Record<string, unknown>;
     miniCards?: Record<string, unknown>;
     /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）。留空表示没绑定。 */
@@ -190,6 +202,8 @@ export type WorkflowConfigRow = {
     outputNodesJson: string;
     /** 预览桥节点 id；空串表示未选择。 */
     previewNodeId: string;
+    /** 时长输入目标的原始 JSON；空串表示未配置（含显式清空）。 */
+    durationTargetJson: string;
 };
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -433,6 +447,7 @@ export class BackendDatabase {
                 run_target TEXT NOT NULL DEFAULT 'local',
                 output_nodes_json TEXT NOT NULL DEFAULT '',
                 preview_node_id TEXT NOT NULL DEFAULT '',
+                duration_target_json TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
             );
         `);
@@ -451,6 +466,10 @@ export class BackendDatabase {
         // 预览桥节点：老库补列，空串 = 未选择，绝不阻断生成。
         if (!workflowColumns.some((column) => column.name === "preview_node_id")) {
             this.db.exec("ALTER TABLE workflow_configs ADD COLUMN preview_node_id TEXT NOT NULL DEFAULT ''");
+        }
+        // 时长输入节点：老库补列，空串 = 未配置，旧工作流不注入任何时长。
+        if (!workflowColumns.some((column) => column.name === "duration_target_json")) {
+            this.db.exec("ALTER TABLE workflow_configs ADD COLUMN duration_target_json TEXT NOT NULL DEFAULT ''");
         }
         // 文本身份属于对象的一次生命周期，不得由可复用的 nodeId / segmentId 推导。
         const textColumns = this.db.prepare("PRAGMA table_info(canvas_text_documents)").all() as Array<{ name: string }>;
@@ -3331,6 +3350,7 @@ export class BackendDatabase {
                 runTarget: String(row.run_target || 'local'),
                 outputNodesJson: String(row.output_nodes_json ?? ''),
                 previewNodeId: String(row.preview_node_id ?? ''),
+                durationTargetJson: String(row.duration_target_json ?? ''),
                 updatedAt: String(row.updated_at),
             };
         } catch { return null; }
@@ -3370,12 +3390,13 @@ export class BackendDatabase {
         title?: string; backend?: string; description?: string; operation?: string;
         fieldsJson?: string; mediaInputsJson?: string; miniCardsJson?: string;
         runningHubProfileId?: string; runTarget?: string; outputNodesJson?: string; previewNodeId?: string;
+        durationTargetJson?: string;
     }): void {
         const now = new Date().toISOString();
         const existing = this.getWorkflowConfig(name);
         this.db.prepare(`
-            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, output_nodes_json, preview_node_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_configs (name, title, backend, description, operation, fields_json, media_inputs_json, mini_cards_json, runninghub_profile_id, run_target, output_nodes_json, preview_node_id, duration_target_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 title = excluded.title, backend = excluded.backend, description = excluded.description,
                 operation = excluded.operation, fields_json = excluded.fields_json,
@@ -3384,6 +3405,7 @@ export class BackendDatabase {
                 run_target = excluded.run_target,
                 output_nodes_json = excluded.output_nodes_json,
                 preview_node_id = excluded.preview_node_id,
+                duration_target_json = excluded.duration_target_json,
                 updated_at = excluded.updated_at
         `).run(
             name,
@@ -3398,6 +3420,7 @@ export class BackendDatabase {
             config.runTarget ?? existing?.runTarget ?? 'local',
             config.outputNodesJson ?? existing?.outputNodesJson ?? '',
             config.previewNodeId ?? existing?.previewNodeId ?? '',
+            config.durationTargetJson ?? existing?.durationTargetJson ?? '',
             now,
         );
     }

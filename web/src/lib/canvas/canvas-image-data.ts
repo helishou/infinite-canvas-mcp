@@ -12,13 +12,14 @@ export type ImageAngleTransform = {
     wideAngle: boolean;
 };
 
-export type ImageUpscaleAlgorithm = "nearest" | "bilinear" | "high";
+export type ImageResizeAlgorithm = "nearest" | "bilinear" | "high";
 
-export const MAX_UPSCALE_LONG_EDGE = 4096;
+export const MIN_RESIZE_LONG_EDGE = 32;
+export const MAX_RESIZE_LONG_EDGE = 4096;
 
-export type ImageUpscaleParams = {
+export type ImageResizeParams = {
     targetLongEdge: number;
-    algorithm: ImageUpscaleAlgorithm;
+    algorithm: ImageResizeAlgorithm;
 };
 
 export type ImageSplitParams = {
@@ -112,15 +113,19 @@ export async function transformAngleDataUrl(dataUrl: string, params: ImageAngleT
     return canvas.toDataURL("image/png");
 }
 
-export async function upscaleDataUrl(dataUrl: string, params: ImageUpscaleParams) {
+/** 等比调整图片分辨率：目标长边小于源图时缩小，大于源图时放大。 */
+export async function resizeDataUrl(dataUrl: string, params: ImageResizeParams) {
     const image = await loadImage(dataUrl);
-    const { width, height } = resolveUpscaleSize(image.width, image.height, params.targetLongEdge);
-    return params.algorithm === "high" ? drawStepUpscale(image, width, height) : drawResize(image, image.width, image.height, width, height, params.algorithm);
+    const { width, height } = resolveResizeSize(image.width, image.height, params.targetLongEdge);
+    if (width === image.width && height === image.height) return dataUrl;
+    if (params.algorithm !== "high") return drawResize(image, image.width, image.height, width, height, params.algorithm);
+    // 高清插值在放大时逐级翻倍、缩小时逐级减半，避免单次大比例重采样丢细节或产生锯齿。
+    return width > image.width ? drawStepUpscale(image, width, height) : drawStepDownscale(image, width, height);
 }
 
-export function resolveUpscaleSize(width: number, height: number, targetLongEdge: number) {
+export function resolveResizeSize(width: number, height: number, targetLongEdge: number) {
     const longEdge = Math.max(1, width, height);
-    const target = Math.min(MAX_UPSCALE_LONG_EDGE, Math.max(1, Math.round(targetLongEdge)));
+    const target = Math.min(MAX_RESIZE_LONG_EDGE, Math.max(MIN_RESIZE_LONG_EDGE, Math.round(targetLongEdge)));
     const scale = target / longEdge;
     return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
@@ -152,11 +157,27 @@ function drawStepUpscale(image: HTMLImageElement, width: number, height: number)
     return drawResize(source, sourceWidth, sourceHeight, width, height, "high");
 }
 
-function drawResize(source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, algorithm: ImageUpscaleAlgorithm) {
+function drawStepDownscale(image: HTMLImageElement, width: number, height: number) {
+    let source: CanvasImageSource = image;
+    let sourceWidth = image.width;
+    let sourceHeight = image.height;
+
+    while (sourceWidth / 2 > width && sourceHeight / 2 > height) {
+        const nextWidth = Math.max(1, Math.round(sourceWidth / 2));
+        const nextHeight = Math.max(1, Math.round(sourceHeight / 2));
+        source = drawResizeCanvas(source, sourceWidth, sourceHeight, nextWidth, nextHeight, "high");
+        sourceWidth = nextWidth;
+        sourceHeight = nextHeight;
+    }
+
+    return drawResize(source, sourceWidth, sourceHeight, width, height, "high");
+}
+
+function drawResize(source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, algorithm: ImageResizeAlgorithm) {
     return drawResizeCanvas(source, sourceWidth, sourceHeight, width, height, algorithm).toDataURL("image/png");
 }
 
-function drawResizeCanvas(source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, algorithm: ImageUpscaleAlgorithm) {
+function drawResizeCanvas(source: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, algorithm: ImageResizeAlgorithm) {
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;

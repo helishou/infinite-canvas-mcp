@@ -59,6 +59,8 @@ export type ModelChannel = {
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
     kind?: "api" | "local" | "comfyui" | "codex-cli";
+    /** 渠道自定义请求头（如 OpenCode Go 的 x-opencode-session）；内置鉴权头优先。 */
+    headers?: Record<string, string>;
 };
 
 export type AiConfig = {
@@ -637,6 +639,7 @@ export function normalizeModelWorkflowParams(value: unknown, workflows: string[]
 
 export function createModelChannel(channel?: Partial<ModelChannel>): ModelChannel {
     const apiFormat = normalizeApiFormat(channel?.apiFormat);
+    const headers = normalizeChannelHeaders(channel?.headers);
     return {
         id: channel?.id?.trim() || nanoid(),
         name: channel?.name?.trim() || i18n.t("config.channels.newName"),
@@ -645,7 +648,16 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         apiFormat,
         models: normalizeChannelModels(channel?.models),
         kind: channel?.kind || "api",
+        ...(headers ? { headers } : {}),
     };
+}
+
+function normalizeChannelHeaders(value: unknown): Record<string, string> | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const entries = Object.entries(value as Record<string, unknown>)
+        .map(([key, item]) => [key.trim(), typeof item === "string" ? item.trim() : ""] as const)
+        .filter(([key, item]) => key && item && !/[\r\n]/.test(key + item));
+    return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 export function upsertChannelCredentials(config: AiConfig, input: { baseUrl?: string | null; apiKey?: string | null }): ChannelCredentialsImportResult & { config: AiConfig } {

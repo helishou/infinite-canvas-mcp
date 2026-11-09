@@ -213,6 +213,66 @@ function remapSubjectPictureBindings(director: DirectorProduction, legacyIds: Se
         }
     }
 }
+/**
+ * 共享来源绑定在同一 Subject 上存在时，用途重叠的本地副本绑定必须让位：共享画布才是本集的唯一参考来源。
+ * 旧数据可能同时存着共享绑定与本地导入副本，任何一次 Subject 保存都要一并收敛。
+ * 只针对本地绑定：`selected_result`（服装变体）与其他共享绑定保持原样。
+ * 返回 旧绑定 id → 顶替它的共享绑定 id，供调用方改指镜头/关键帧引用。
+ */
+export function localBindingsShadowedByShared(director: DirectorProduction, bindings: Array<Record<string, any>>, canonicalNodeId = "") {
+    const shadowed = new Map<string, string>();
+    if (!bindings.length) return shadowed;
+    const plans = clipRows(director.source.asset_plan);
+    // A binding can carry a ":selection:<hash>" suffix when one subject selects several
+    // images from the same shared asset. The suffix is a presentation key, not a different
+    // asset: grouping must use the base asset id or the canonical binding looks unrelated
+    // to the shared source and loses to a legacy copy.
+    const baseAssetId = (value: unknown) => {
+        const id = String(value || "");
+        const cut = id.indexOf(":selection:");
+        return cut < 0 ? id : id.slice(0, cut);
+    };
+    const sharedAssetIds = new Set(plans.filter(plan => plan.sharedSource && typeof plan.sharedSource === "object")
+        .map(plan => String(plan.id || plan.asset_id || "")));
+    if (!sharedAssetIds.size) return shadowed;
+    const groups = new Map<string, Array<Record<string, any>>>();
+    for (const binding of bindings) {
+        const base = baseAssetId(binding.assetId);
+        if (!sharedAssetIds.has(base)) continue;
+        groups.set(base, [...(groups.get(base) || []), binding]);
+    }
+    for (const [assetId, group] of groups) {
+        const plan = plans.find(item => String(item.id || item.asset_id || "") === assetId);
+        const kind = String(plan?.kind || "");
+        if (!["character", "scene", "prop"].includes(kind)) continue;
+        // The binding that points at this episode's own stable entity node is canonical.
+        // A copied legacy binding keeps the same asset id but another canvas's node id;
+        // letting it win hides the canonical binding forever, and every workspace read
+        // re-requests the same projection (a self-feeding prepare loop).
+        const survivor = (canonicalNodeId ? group.find(item => String(item.sourceNode?.nodeId || "") === canonicalNodeId) : undefined)
+            || group.find(item => item.selection?.mode !== "selected_result") || group[0];
+        const survivorId = String(survivor.id || "");
+        const survivorNode = String(survivor.sourceNode?.nodeId || "");
+        for (const candidate of group) {
+            const candidateId = String(candidate.id || "");
+            if (!candidateId || candidateId === survivorId) continue;
+            // Costume/variant selections are explicit user choices and stay untouched.
+            if (candidate.selection?.mode === "selected_result") continue;
+            if (String(candidate.sourceNode?.nodeId || "") === survivorNode) continue;
+            shadowed.set(candidateId, survivorId);
+        }
+        // Legacy fallback: a local import of the same entity/storage under another asset id.
+        const entityId = String(plan?.entity_id || plan?.id || plan?.asset_id || "");
+        const purpose = kind === "scene" ? "environment" : kind === "prop" ? "prop" : "identity";
+        for (const legacyId of legacySharedBindingIds(director, bindings, assetId, entityId, survivorNode, purpose)) {
+            if (legacyId === survivorId || shadowed.has(legacyId)) continue;
+            const legacy = bindings.find(item => String(item.id || "") === legacyId);
+            if (legacy && baseAssetId(legacy.assetId) === assetId) continue;
+            shadowed.set(legacyId, survivorId);
+        }
+    }
+    return shadowed;
+}
 function ensureSharedSubjectPictureBinding(director: DirectorProduction, episodeId: string, canvasId: string, assetPlan: Record<string, any>, subjectId: string): boolean {
     const kind = String(assetPlan.kind || "");
     const assetId = String(assetPlan.id || assetPlan.asset_id || "");
@@ -2666,6 +2726,7 @@ export class EpisodeProductionService {
             else if (index < segments.length - 1 && !outgoingBoundary?.reason.trim()) continuityWarnings.push(`边界 ${segmentId} → ${String(segments[index + 1].id)} 缺少理由`);
             else if (index === segments.length - 1 && outgoingBoundaries.length) continuityWarnings.push(`最后一个 Segment ${segmentId} 有多余连续性边界`);
             if (outgoingBoundary?.tailFrame && outgoingBoundary.motionContext) blockers.push(`边界 ${segmentId} 同时启用了尾帧参考与 Motion Context`);
+            if (outgoingBoundary?.videoContinuation && (outgoingBoundary?.tailFrame || outgoingBoundary?.motionContext)) blockers.push(`边界 ${segmentId} 的视频续写不能与尾帧参考或 Motion Context 同时启用`);
             if (!canvasId) blockers.push("制作对象尚未关联画布");
             if (artifact?.status === "ready" && canvasId) {
                 try { validateDirectorMedia(this.db, canvasId, director, [segmentId], mediaRead); }
@@ -3831,6 +3892,15 @@ export class EpisodeProductionService {
                 assertDirectorWorkScope(record.draft.director, draft.director, packets.map(packet => packet.scope));
             }
             if (published && input.ops.some((operation) => operation.type === "review_keyframe" || operation.type === "review_director_asset")) this.prepare("UPDATE episode_production_versions SET snapshot_json=? WHERE episode_id=? AND version=?").run(JSON.stringify(withoutDirectorProjection(published)), episodeId, record.publishedVersion);
+            // 只改主体、且规范化后源稿一字未变的写入不推进 revision。工作台的自动准备 effect 以
+            // revision/sourceHash 作为重发依据，一次"什么都没改"的写入会让它立刻重发同一请求，
+            // 变成每轮往返一次的自我驱动写循环（并在此期间把页面锁在忙碌态）。
+            const noOpSubjectWrite = input.ops.length > 0 && input.ops.every(operation => operation.type === "upsert_director_subject")
+                && !input.adoptions && !refreshes.length && !packets.length && !archiveOp
+                && canonicalProduction(record.draft.director?.source) === canonicalProduction(draft.director?.source)
+                && fingerprint(record.draft.settings) === fingerprint(draft.settings)
+                && canonicalProduction(record.published ?? null) === canonicalProduction(published ?? null);
+            if (noOpSubjectWrite) return record;
             return { ...record, revision: record.revision + 1, draft, published, updatedAt: new Date().toISOString() };
         };
         const commitOptions: Parameters<EpisodeProductionService["commitCore"]>[5] = {
@@ -4246,6 +4316,20 @@ export class EpisodeProductionService {
             // 乐观锁放行（last-write-wins）：客户端过期 revision 不再拦截，版本号继续自增。
             measure("pre_mutation_hook", () => options.beforeMutation?.(current, scriptCommits));
             const finishMutation = (next: ProductionRecord & { impact?: ProductionImpact }) => {
+            // 一次没有改变正式内容的写入：记录回执与 operation key，但不推进 revision、不重投影画布。
+            // 工作台的自动准备 effect 以 revision/sourceHash 作为重发依据；无实质变化的版本号会让它
+            // 立刻重发同一请求，形成每轮往返一次的自我驱动写循环（并在此期间把页面锁在忙碌态）。
+            if (next === current) {
+                measure("dependency_and_receipt_persist", () => {
+                    this.prepare("INSERT INTO episode_production_operations (operation_id, episode_id, request_hash, receipt_json, created_at) VALUES (?, ?, ?, ?, ?)")
+                        .run(operationId, episodeId, requestHash, encodeReceipt(dedupReceipt(publicProductionRecord(current) as ProductionRecord)), current.updatedAt);
+                    this.prepare("INSERT INTO production_operation_keys(owner_kind,owner_id,operation_id,request_hash,committed_revision,created_at) VALUES(?,?,?,?,?,?)")
+                        .run(this.ownerKind, episodeId, operationId, requestHash, current.revision, current.updatedAt);
+                });
+                measure("pre_commit_hook", () => options.beforeCommit?.(current));
+                measure("sqlite_commit", () => this.db.db.exec("COMMIT"));
+                return { ...current, replayed: false };
+            }
             const shotProjectionIds = typeof options.shotProjectionIds === "function"
                 ? options.shotProjectionIds(current, next)
                 : options.shotProjectionIds;
@@ -4993,6 +5077,30 @@ export class EpisodeProductionService {
                 usage.pictureBindingIds = [...new Set((Array.isArray(usage.pictureBindingIds) ? usage.pictureBindingIds : []).map(id => bindingRemap.get(String(id)) || String(id)))];
             }
             incoming.pictureBindings = deduped as typeof incoming.pictureBindings;
+            // 共享来源绑定在场时，本地副本绑定在落库前就让位，镜头/关键帧引用改指共享绑定。
+            // 让位规则必须以本集自己的稳定实体节点为准：从别的画布复制来的旧绑定同样带 shared
+            // assetId，如果让它当"胜者"，规范绑定每次都被删掉，工作区就会反复重发同一次投影。
+            const subjectEntityKind = String(incoming.entityRef?.kind || "") === "asset" ? "prop" : String(incoming.entityRef?.kind || "");
+            const canonicalSharedNodeId = this.ownerKind === "episode" && incoming.entityRef?.ownerKind === "episode" && incoming.entityRef?.ownerId === episodeId
+                && ["character", "scene", "prop"].includes(subjectEntityKind)
+                ? productionLayoutStableId("production-entity", "episode", episodeId, subjectEntityKind, String(incoming.entityRef?.id || "")) : "";
+            const shadowedBindings = localBindingsShadowedByShared(draft.director, incoming.pictureBindings as Array<Record<string, any>>, canonicalSharedNodeId);
+            if (shadowedBindings.size) {
+                for (const [legacyId, replacementId] of shadowedBindings) remapSubjectPictureBindings(draft.director, new Set([legacyId]), replacementId);
+                incoming.pictureBindings = incoming.pictureBindings.filter(binding => !shadowedBindings.has(String(binding.id))) as typeof incoming.pictureBindings;
+                // 收敛后同一共享资产只剩一条绑定：把 ":selection:<hash>" 后缀还原成共享资产 id。
+                // 后缀本来只是同一资产多选时的展示键，留着会让 director.assets 查不到这条绑定，
+                // 图片变成空引用，下一次投影又把同一条绑定当成缺失。
+                const remainingBindings = incoming.pictureBindings as Array<Record<string, any>>;
+                for (const binding of remainingBindings) {
+                    const assetId = String(binding.assetId || ""), cut = assetId.indexOf(":selection:");
+                    if (cut < 0) continue;
+                    const baseAssetId = assetId.slice(0, cut);
+                    if (!clipRows(draft.director.source.asset_plan).some(plan => plan.sharedSource && String(plan.id || plan.asset_id || "") === baseAssetId)) continue;
+                    if (remainingBindings.some(other => other !== binding && String(other.assetId || "").startsWith(`${baseAssetId}:selection:`))) continue;
+                    binding.assetId = baseAssetId;
+                }
+            }
             const episodeCanvasId = this.episodeInfo(episodeId).canvasId;
             if (episodeCanvasId) {
                 const episodeProject = this.db.getCanvasProject(episodeCanvasId);

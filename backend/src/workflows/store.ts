@@ -6,6 +6,7 @@ import type { BackendDatabase } from "../db.js";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
 import { mergeInheritedFields } from "./workflow-field-inherit.js";
 import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
+import { parseWorkflowDurationTarget } from "./duration.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
 
 const CUSTOM_SUBDIR = "custom";
@@ -21,6 +22,12 @@ function parseOutputNodes(raw: string): string[] {
         const parsed: unknown = JSON.parse(raw);
         return Array.isArray(parsed) ? parsed.map(String) : [];
     } catch { return []; }
+}
+
+/** 解析持久化的时长输入目标。空串 / 坏数据一律视为未配置，绝不阻断生成。 */
+function parseStoredDurationTarget(raw: string) {
+    if (!raw) return null;
+    try { return parseWorkflowDurationTarget(JSON.parse(raw)); } catch { return null; }
 }
 const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
     "IndexTTS-2.5.json": {
@@ -356,6 +363,10 @@ export class WorkflowStore {
             outputNodesJson: Array.isArray(config.outputNodes) ? JSON.stringify(config.outputNodes) : undefined,
             // 预览桥节点：没带沿用旧值，显式传 '' 表示清空选择。
             previewNodeId: config.previewNodeId === undefined ? undefined : config.previewNodeId,
+            // 时长输入节点：没带沿用旧值；显式 null 表示清空（存空串）。
+            durationTargetJson: config.durationTarget === undefined
+                ? undefined
+                : config.durationTarget ? JSON.stringify(config.durationTarget) : "",
         });
         return { config };
     }
@@ -395,6 +406,8 @@ export class WorkflowStore {
                 // 空串 = 用户显式关闭预览；字段缺失 = 从未配置（前端据此推荐唯一的预览桥）。
                 // 两者行为不同，不能合并成一个默认值。
                 previewNodeId: row.previewNodeId,
+                // 空串 / 坏数据 = 未配置，旧工作流完全不注入时长。
+                durationTarget: parseStoredDurationTarget(row.durationTargetJson),
             };
             if (name === "custom/视频修复FlashVSR1.1.json") {
                 config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);

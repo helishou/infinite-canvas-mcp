@@ -19,6 +19,7 @@ import { RunHistoryList } from "./run-history-list";
 import { lastOutputNodeId, normalizeOutputNodeSelection, OutputNodePicker } from "./output-node-picker";
 import { PreviewNodePicker } from "./preview-node-picker";
 import { preferredPreviewNodeId } from "./preview-node-candidates";
+import type { WorkflowDurationTarget } from "@/types/workflow";
 import { RunningHubWorkflowImport } from "./runninghub-workflow-import";
 import { ComfyUIWorkflowImport } from "./comfyui-workflow-import";
 import { useRunningHubUpload } from "./runninghub-workflow-upload";
@@ -608,6 +609,11 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
         if (selected) void handleSaveConfig(selected, { ...selected.config, previewNodeId: next });
     };
 
+    const handleDurationTargetChange = (next: WorkflowDurationTarget | null) => {
+        // null 是「显式清空」，不能写成 undefined（后端会沿用旧值）。
+        if (selected) void handleSaveConfig(selected, { ...selected.config, durationTarget: next });
+    };
+
     const loadHistory = useCallback(async () => {
         const version = ++historyRequest.current;
         setLoadingHistory(true);
@@ -1155,6 +1161,8 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                             setSelected((current) => current?.name === owner.name ? { ...current, workflow, config: { ...current.config, outputNodes: nextOutputNodes } } : current);
                                         }).catch((error) => message.error(error instanceof Error ? error.message : "保存节点图失败")).finally(() => markSaving(owner.name, false));
                                     }}
+                                    durationTarget={selected.config.durationTarget}
+                                    onDurationTargetChange={handleDurationTargetChange}
                                 /></fieldset>
                             }
                             run={
@@ -1186,6 +1194,11 @@ function WorkflowWorkspace({ connectionScope }: { connectionScope: string }) {
                                         <div className="space-y-3">
                                             <OutputNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={outputNodes} onChange={handleOutputNodesChange} />
                                             <PreviewNodePicker disabled={savingOwners.has(selected?.name || "")} graph={selected.workflow} value={selected.config.previewNodeId} onChange={handlePreviewNodeChange} />
+                                            {selected.config.durationTarget ? (
+                                                <p className="text-xs text-muted-foreground">
+                                                    时长输入：#{selected.config.durationTarget.nodeId} · {selected.config.durationTarget.input} · {selected.config.durationTarget.unit === "frames" ? "帧" : "秒"}（在「节点图」页签修改）
+                                                </p>
+                                            ) : null}
                                         </div>
                                     }
                                     advanced={

@@ -48,6 +48,8 @@ export type TextProvider = {
     reasoningEffort: string;
     /** 渠道里对该模型的显式视觉声明；缺省时由能力探测判断。 */
     supportsImages?: boolean;
+    /** 渠道自定义请求头；内置 Content-Type / Authorization 优先。 */
+    headers?: Record<string, string>;
 };
 
 type TextRequest = (provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal) => Promise<string>;
@@ -84,6 +86,7 @@ export function resolveTextProvider(
     const apiKey = String(channel.apiKey || config.apiKey || "").trim();
     if (!baseUrl) throw new Error(`文本模型「${model}」缺少 Base URL`);
     if (!apiKey) throw new Error(`文本模型「${model}」缺少 API Key`);
+    const headers = headerRecord(channel.headers);
     return {
         id,
         name,
@@ -94,6 +97,7 @@ export function resolveTextProvider(
         systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(),
         reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"),
         ...(supportsImages === undefined ? {} : { supportsImages }),
+        ...(headers ? { headers } : {}),
     };
 }
 
@@ -495,7 +499,7 @@ async function postJson(provider: TextProvider, path: string, body: Record<strin
     try {
         response = await fetch(apiUrl(provider.baseUrl, path), {
             method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
+            headers: { ...provider.headers, "Content-Type": "application/json", Authorization: `Bearer ${provider.apiKey}` },
             body: JSON.stringify(body),
             signal,
         });
@@ -561,4 +565,12 @@ function arrayRecords(value: unknown): Array<Record<string, unknown>> {
 
 function recordOf(value: unknown): Record<string, any> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+/** 渠道自定义请求头（如 `x-opencode-session`）；内置鉴权头在请求处优先。 */
+function headerRecord(value: unknown): Record<string, string> | undefined {
+    const entries = Object.entries(recordOf(value))
+        .map(([key, item]) => [key.trim(), typeof item === "string" ? item.trim() : ""] as const)
+        .filter(([key, item]) => key && item && !/[\r\n]/.test(key + item));
+    return entries.length ? Object.fromEntries(entries) : undefined;
 }

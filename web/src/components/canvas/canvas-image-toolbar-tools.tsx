@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Columns2, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scissors, SlidersHorizontal, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Columns2, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scaling, Scissors, SlidersHorizontal, Sparkles, Upload } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
+// "upscale" 是快捷工具栏配置里已持久化的稳定 id；功能已扩展为可放大也可缩小，改名会丢失用户保存的工具栏配置。
 export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "stitch" | "upscale" | "superResolve" | "autoLevels" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "convertToCharacter" | "convertToScene" | "convertToProp" | ImageNodeActionToolId;
 
@@ -14,7 +15,7 @@ export type ImageToolHandlers = {
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
     onStitch: (node: CanvasNodeData) => void;
-    onUpscale: (node: CanvasNodeData) => void;
+    onResizeImage: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAutoLevels: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
@@ -111,10 +112,10 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
     {
         id: "upscale",
         defaultVisible: true,
-        label: () => i18n.t("canvas.imageTools.upscale"),
-        title: () => i18n.t("canvas.imageTools.upscaleTitle"),
-        icon: () => <ZoomIn className="size-4" />,
-        run: (node, handlers) => handlers.onUpscale(node),
+        label: () => i18n.t("canvas.imageTools.resizeImage"),
+        title: () => i18n.t("canvas.imageTools.resizeImageTitle"),
+        icon: () => <Scaling className="size-4" />,
+        run: (node, handlers) => handlers.onResizeImage(node),
     },
     {
         id: "superResolve",

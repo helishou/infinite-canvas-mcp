@@ -27,7 +27,7 @@ export function patchH3GlobalSettings(metadata: Record<string, unknown>, patch: 
     return { h3GlobalSettings: { ...globalH3Settings(metadata), ...Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, value === undefined ? null : value])) } };
 }
 
-export function patchAllH3Clips(metadata: Record<string, unknown>, segments: H3Segment[], patch: Partial<H3Segment>) {
+export function patchAllH3Clips(metadata: Record<string, unknown>, segments: H3Segment[], patch: Partial<H3Segment>): Record<string, unknown> & { h3GlobalSettings: Record<string, unknown>; segments: H3Segment[]; h3LastSelectedVideoModel?: string } {
     const { h3ParameterOverrides: _overrides, ...atomicPatch } = withH3ParameterEdits({}, patch);
     return { ...patchH3GlobalSettings(metadata, atomicPatch as Partial<H3Segment>), segments: compactSegmentStarts(segments.map((segment) => ({ ...segment, ...withH3ParameterEdits(segment as unknown as Record<string, unknown>, patch) } as H3Segment))) };
 }
@@ -41,8 +41,10 @@ export function formalContinuationBoundaryUpdates(segments: H3Segment[], patch: 
             segmentId: segment.id,
             tailFrameContinuation: effective.tailFrameContinuation === true,
             motionContextEnabled: effective.motionContextEnabled === true,
+            // 必须回带 videoContinuation，否则 patchAllSettings 的边界回写会把它强制归零。
+            videoContinuation: effective.videoContinuation === true,
         };
     });
-    if (updated.length) updated[updated.length - 1] = { ...updated[updated.length - 1], tailFrameContinuation: false, motionContextEnabled: false };
+    if (updated.length) updated[updated.length - 1] = { ...updated[updated.length - 1], tailFrameContinuation: false, motionContextEnabled: false, videoContinuation: false };
     return { boundaries: updated.slice(0, -1), projectedValues: updated };
 }

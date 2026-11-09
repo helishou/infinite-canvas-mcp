@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "antd";
 import { useTranslation } from "react-i18next";
-import type { WorkflowField } from "@/types/workflow";
+import type { WorkflowDurationTarget, WorkflowField } from "@/types/workflow";
 import { fetchWorkflowComboOptions } from "@/services/api/workflows";
 import { graphFieldTargetsNode, WorkflowGraphView, type WorkflowGraphJson } from "./workflow-graph-view";
 import { NodeFieldPopupShell } from "./node-field-popup";
@@ -39,9 +39,12 @@ type Props = {
     fields: WorkflowField[];
     onFieldsChange: (fields: WorkflowField[]) => void;
     onWorkflowChange: (workflow: WorkflowJson) => void;
+    /** 时长输入目标（配置级单值），用于节点浮窗里的「作为时长」勾选态。 */
+    durationTarget?: WorkflowDurationTarget | null;
+    onDurationTargetChange?: (next: WorkflowDurationTarget | null) => void;
 };
 
-export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onFieldsChange, onWorkflowChange }: Props) {
+export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onFieldsChange, onWorkflowChange, durationTarget, onDurationTargetChange }: Props) {
     const workflow = useMemo(() => workflowDisplayGraph(sourceWorkflow), [sourceWorkflow]);
     const { t } = useTranslation();
     const [popupNodeId, setPopupNodeId] = useState<string | null>(null);
@@ -127,7 +130,7 @@ export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onF
     return (
         <div className="flex h-full flex-col">
             <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">点击节点可暴露输入为字段；或直接扫描媒体加载节点</span>
+                <span className="text-xs text-muted-foreground">点击节点可暴露输入为字段，字段里可勾「作为提示词 / 作为时长」；或直接扫描媒体加载节点</span>
                 <Button size="small" onClick={autoDetectMediaFields}>自动识别媒体字段</Button>
             </div>
             <div className="relative min-h-0 flex-1">
@@ -150,6 +153,8 @@ export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onF
                         onUpdateField={updateField}
                         onRemoveField={removeField}
                         onClose={close}
+                        durationTarget={durationTarget}
+                        onDurationTargetChange={onDurationTargetChange}
                     />
                 )}
             />
@@ -180,6 +185,7 @@ export function WorkflowGraphPanel({ name, workflow: sourceWorkflow, fields, onF
 // ─── 浮窗组件 ───
 function NodeFieldPopup({
     nodeId, node, fields, comboOptions, onToggleField, onUpdateField, onRemoveField, onClose,
+    durationTarget, onDurationTargetChange,
 }: {
     nodeId: string;
     node: { class_type?: string; inputs?: Record<string, unknown> };
@@ -189,6 +195,8 @@ function NodeFieldPopup({
     onUpdateField: (fieldId: string, updates: Partial<WorkflowField>) => void;
     onRemoveField: (fieldId: string) => void;
     onClose: () => void;
+    durationTarget?: WorkflowDurationTarget | null;
+    onDurationTargetChange?: (next: WorkflowDurationTarget | null) => void;
 }) {
     // 只显示非连接型输入（连接型是 [nodeId, slot] 数组）
     const inputs = Object.entries(node.inputs || {}).filter(
@@ -215,6 +223,8 @@ function NodeFieldPopup({
                             showRunningHub={false}
                             onUpdate={(patch) => onUpdateField(field.id, patch)}
                             onRemove={() => onRemoveField(field.id)}
+                            durationTarget={durationTarget}
+                            onDurationTargetChange={onDurationTargetChange}
                         />
                     ) : undefined,
                 };

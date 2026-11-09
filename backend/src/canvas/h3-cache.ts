@@ -23,7 +23,9 @@ export function stableH3Fingerprint(value: unknown): string {
 export function h3ClipDependsOnPrevious(segment: Record<string, unknown>, params: Record<string, unknown> = {}) {
     return segment.motionContextEnabled === true || params.motionContextEnabled === true
         || segment.tailFrameContinuation === true || params.tailFrameContinuation === true
-        || segment.previousTailFrameContinuation === true;
+        || segment.videoContinuation === true || params.videoContinuation === true
+        || segment.previousTailFrameContinuation === true
+        || segment.previousVideoContinuation === true;
 }
 
 export function h3ClipCacheFingerprint(input: {
@@ -37,8 +39,8 @@ export function h3ClipCacheFingerprint(input: {
     const { segment, params, references, compiledPrompt, previousFingerprint, styleTemplates } = input;
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries([
-        "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "tailFrameContinuation",
-        "previousTailFrameContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots", "styleTemplateId",
+        "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "tailFrameContinuation", "videoContinuation",
+        "previousTailFrameContinuation", "previousVideoContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots", "styleTemplateId",
     ].filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
     const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
     // 同一模板 ID 的正文修订也会改变生成输入，不能复用旧风格的成片。

@@ -715,3 +715,11 @@ body { font-family: var(--font-sans); }
     .ui-controls .ant-btn-sm, .ui-result-action.ant-btn, .ui-controls .prompt-filter-tag.ant-tag-checkable, .ui-controls .ant-dropdown-menu-item { min-height: 44px; }
     .ui-controls .ant-input-affix-wrapper, .ui-controls .ant-select { min-height: 44px; }
 }
+
+/* 全局轻提示（包括「本地 Agent 已连接」）是纯信息层，不拦截指针：
+   盖在画布上时点击、框选和拖拽直接穿透到底层元素。
+   antd 6 为支持 hover 暂停给 .ant-message-notice 设了 pointer-events:auto，这里显式覆盖。 */
+.ant-message,
+.ant-message * {
+    pointer-events: none !important;
+}

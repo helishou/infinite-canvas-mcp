@@ -747,7 +747,7 @@ export class CanvasH3Runner {
                     const output = { url: pending.firstPassResult, storageKey: pending.firstPassStorageKey, mimeType: "video/mp4" };
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, cursor: planIndex + 1, pending: [], revision: confirmation.revision + 1 }, media: [...completedOutput(), output] } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: pending.firstPassChildTaskId, output, fingerprint: pending.firstPassFingerprint } })!;
                     if (!task) throw new Error("H3 保留一采决议冲突");
-                    completedByKey.set(key, { output, fingerprint: pending.firstPassFingerprint });
+                    completedByKey.set(key, { output, fingerprint: pending.firstPassFingerprint, childTaskId: pending.firstPassChildTaskId });
                     this.publish(task, "task.updated");
                     continue;
                 }
@@ -852,7 +852,7 @@ export class CanvasH3Runner {
                 }
                 task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 1) / plans.length), result: { ...recordOf(task.result), phase: "remaining", confirmation: { ...confirmation, pending: [], inFlight: undefined, cursor: planIndex + 1, revision: confirmation.revision + 1 }, media, ...output } }, { type: "clip_completed", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, output, fingerprint: cache.fingerprint } })!;
                 if (!task) throw new Error("H3 Clip 收口状态冲突");
-                completedByKey.set(key, { output, fingerprint: cache.fingerprint });
+                completedByKey.set(key, { output, fingerprint: cache.fingerprint, childTaskId: child.id });
             }
             const finished = this.stores.tasks.get(initial.id)!;
             if (finished.status !== "running" || confirmationOf(finished).pending.length) return;
@@ -933,7 +933,7 @@ export class CanvasH3Runner {
             : null;
         const useFirstPassReferences = firstPassReferences
             && stableH3Fingerprint(stableReferenceInputs(firstPassReferences)) === stableH3Fingerprint(stableReferenceInputs(compilation.references));
-        const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true };
+        const segmentFingerprintInput = { ...segment, previousTailFrameContinuation: previous?.tailFrameContinuation === true, previousVideoContinuation: previous?.videoContinuation === true };
         const fingerprintInput = { segment: segmentFingerprintInput, params: h3ConfirmationFingerprintParams(segment, params), compiledPrompt: scenePrompt, previousFingerprint };
         const fingerprint = h3ClipCacheFingerprint({ ...fingerprintInput, styleTemplates: defaults.styleTemplates, references: referenceFingerprintInputs(compilation.references) });
         // v1 first-pass caches were fingerprinted from the raw params and complete
@@ -1172,12 +1172,43 @@ export class CanvasH3Runner {
             : previousCurrent;
         // Previous output is read only for tail extraction or post-processing; AV latent carries Motion Context.
         const chained = parent.input.runFromCurrent === true && plan.segmentIndex > 0;
-        const { usePreviousAsReference, useTailFrame, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
+        const { usePreviousAsReference, useTailFrame, useVideoContinuation, needsPreviousVideo } = resolveClipContinuation(segment, previous, chained, params);
         const seamNeedsPrevious = params.faceRefineEnabled === true && (Number(params.seamFaceFadeFrames || 0) > 0 || Number(params.seamColourMatch || 0) > 0 || Number(params.seamAudioCrossfadeMs || 0) > 0);
         if (useTailFrame && !previous?.result) throw new Error(`Clip ${plan.segmentIndex} 已开启尾帧参考，但上一段没有可用成品视频`);
+        if (useVideoContinuation && !previous?.result) throw new Error(`上一段（Clip ${plan.segmentIndex - 1}）已开启视频续写、对本段生效，但上一段没有可用成品视频，请先生成上一段`);
         const previousPath = (needsPreviousVideo || seamNeedsPrevious) && previous?.result
             ? await this.resolveRef({ url: previous.result, storageKey: previous.resultStorageKey, name: `clip-${plan.segmentIndex}.mp4`, type: "video" })
             : "";
+        // 视频续写：把上一段成片当作工作流的“上一段视频”输入，并让工作流按续段分支执行。
+        // 逻辑完全走工作流原生路径（像素尾帧 → AddGuide → 裁头），这里只补输入与段号。
+        // 潜空间续写同边界语义：本段开关 → 本次运行导出 latent（latent_save）；上一段开关 →
+        // 本次运行携带上一段运行 ID（latent_prev_task），执行器探测到 H3 AV 结构时优先无损续写，
+        // 探测不到或种子缺失才回落到这里的 mp4 输入。批内来源取 completedByKey 的 childTaskId
+        // （runPlan 冻结快照看不到本批回写），跨批/缓存复用取 results 末条的 taskId。
+        const latentSave = segment.videoContinuation === true;
+        const previousResults = Array.isArray(recordOf(previousSnapshot).results) ? recordOf(previousSnapshot).results as Array<Record<string, unknown>> : [];
+        const latentPrevTask = String(completedByKey.get(`${plan.nodeId}:${String(previousSnapshot?.id || "")}`)?.childTaskId || previousResults.at(-1)?.taskId || "");
+        if (useSelectedVideoModel && ((useVideoContinuation && previous?.result) || latentSave)) {
+            const clipNumber = plan.numbering?.clipNumber ?? plan.segmentIndex + 1;
+            const configured = recordOf(params.selectedVideoModelFieldValues);
+            const keys = Object.keys(configured).length ? Object.keys(configured) : [String(params.selectedVideoModel || "")];
+            const nextValues: Record<string, unknown> = {};
+            for (const key of keys) {
+                if (!key) continue;
+                nextValues[key] = {
+                    ...recordOf(configured[key]),
+                    ...(latentSave ? { latent_save: true } : {}),
+                    ...(useVideoContinuation && previous?.result ? {
+                        prev_video: String(previous.result),
+                        resume_prev: true,
+                        start_segment: clipNumber,
+                        end_segment: clipNumber,
+                        ...(latentPrevTask ? { latent_prev_task: latentPrevTask } : {}),
+                    } : {}),
+                };
+            }
+            if (Object.keys(nextValues).length) params.selectedVideoModelFieldValues = nextValues;
+        }
         let prompt = scenePrompt;
         const submittedImageReferences = imageRefs.map((ref) => isCompositeRef(ref) && compositeMedia
             ? { ...ref, url: this.stores.media.url(compositeMedia), storageKey: compositeMedia.storageKey }
@@ -1591,10 +1622,15 @@ export function resolveClipContinuation(
     const usePreviousAsReference = false; // Legacy flags are preserved in history but never consumed.
     // 尾帧是上一段到下一段的首状态锚点，单独运行当前 Clip 时仍可生效。
     const useTailFrame = previous?.tailFrameContinuation === true;
+    // 视频续写走工作流原生续段分支：上一段成片作为“上一段视频”输入，像素帧 + 音频都做引导。
+    // 与尾帧参考同为边界语义：开关挂在源段上，由下一段运行时消费（2026-11-08 修复，
+    // 此前误读当前段自己的开关，导致第一段挂开关后运行报“上一段没有可用成品视频”）。
+    const useVideoContinuation = previous?.videoContinuation === true;
     return {
         usePreviousAsReference,
         useTailFrame,
-        needsPreviousVideo: (usePreviousAsReference || useTailFrame) && Boolean(previous?.result),
+        useVideoContinuation,
+        needsPreviousVideo: (usePreviousAsReference || useTailFrame || useVideoContinuation) && Boolean(previous?.result),
     };
 }
 

@@ -61,12 +61,13 @@ export function registerComfyRoutes(ctx: { app: import("express").Express; store
         res.type(response.headers.get("content-type") || "application/octet-stream").send(body);
     });
 
-    app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl(), localH3Direct: bridge.localH3DirectConfig() }));
+    app.get(routePath("/comfy/config"), (_req, res) => res.json({ ok: true, url: bridge.getUrl(), localH3Direct: bridge.localH3DirectConfig(), releaseBeforeRepeat: bridge.releaseBeforeRepeat() }));
     app.put(routePath("/comfy/config"), (req, res) => {
         const url = typeof req.body?.url === "string" ? bridge.setUrl(req.body.url) : bridge.getUrl();
         if (typeof req.body?.url === "string") resetModelCatalogCache();
         const localH3Direct = Object.prototype.hasOwnProperty.call(req.body || {}, "localH3RootDir") ? bridge.setLocalH3ComfyRoot(String(req.body.localH3RootDir || "")) : bridge.localH3DirectConfig();
-        res.json({ ok: true, url, localH3Direct });
+        const releaseBeforeRepeat = typeof req.body?.releaseBeforeRepeat === "boolean" ? bridge.setReleaseBeforeRepeat(req.body.releaseBeforeRepeat) : bridge.releaseBeforeRepeat();
+        res.json({ ok: true, url, localH3Direct, releaseBeforeRepeat });
     });
     app.get(routePath("/comfy/presets"), (_req, res) => res.json({ ok: true, data: bridge.presets() }));
 

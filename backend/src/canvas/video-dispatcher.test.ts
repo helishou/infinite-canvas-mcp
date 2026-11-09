@@ -15,10 +15,12 @@ function fixture(t: TestContext, pending = false) {
     const stores = createStores(db);
     stores.settings.set("ai.config", { channels: [{ id: "local", kind: "comfyui", models: [{ name: "movie", workflowRouting: { text: "movie.json", single: "movie.json", multi: "movie.json" } }] }] });
     let calls = 0;
+    let lastValues: Record<string, unknown> = {};
     const rejects = new Map<string, (error: Error) => void>();
     const executor = {
         run: (...args: any[]) => {
             calls++;
+            lastValues = args[2];
             const id = args[6];
             stores.tasks.create(id, "workflow", {}, { parentTaskId: args[9] });
             if (pending) return new Promise((_resolve, reject) => rejects.set(id, reject));
@@ -37,7 +39,7 @@ function fixture(t: TestContext, pending = false) {
     const dispatcher = new CanvasVideoDispatcher(stores, { cancel: () => {} } as never, workflows as never, executor as never, { cancel: () => {} } as never);
     const input = { projectId: "p", nodeId: "video", sourceNodeId: "source", model: "local::movie", prompt: "电影", size: "1920x1080", seconds: "8", resolution: "1080p", params: { ratio: "16:9", generateAudio: true, watermark: false }, clientTaskId: "outer" };
     const node = (id: string) => (db.getCanvasProject("p")!.nodes as Array<Record<string, any>>).find((item) => item.id === id)!;
-    return { db, stores, dispatcher, input, node, calls: () => calls };
+    return { db, stores, dispatcher, input, node, calls: () => calls, lastValues: () => lastValues };
 }
 
 async function settle(db: BackendDatabase, id = "outer") {
@@ -60,6 +62,20 @@ test("普通 Comfy 视频绑定父任务，结果经 ops 原地回写并保留�
     assert.equal(node("source").metadata.status, "success");
     assert.equal((db.getCanvasProject("p")!.nodes as unknown[]).length, 2);
     assert.ok(db.readCanvasChanges("p", 0).commits.some((commit) => commit.operationId === "video-task-result:outer"));
+});
+
+test("H3 续写注入的裸 model 键字段值必须合并进执行器输入（用户从未自定义字段时注入点只有裸键）", async (t) => {
+    const { db, dispatcher, input, lastValues } = fixture(t);
+    const injected = { resume_prev: true, prev_video: "/media/prev.mp4", latent_save: true, latent_prev_task: "prev-run" };
+    dispatcher.start({ ...input, params: { ...input.params, selectedVideoModelFieldValues: { "local::movie": injected } } });
+    await settle(db);
+    assert.equal(lastValues().resume_prev, true);
+    assert.equal(lastValues().latent_save, true);
+    assert.equal(lastValues().latent_prev_task, "prev-run");
+    assert.equal(lastValues().prev_video, "/media/prev.mp4");
+    // UI 持久化的 `model::workflow` 键优先级高于裸 model 兜底键。
+    const ui = { ...input, params: { ...input.params, selectedVideoModelFieldValues: { "local::movie": injected, "local::movie::movie.json": { latent_save: false } } } };
+    assert.equal(dispatcher.generationSettings(ui).latent_save, false);
 });
 
 test("普通视频取消覆盖子任务，迟到失败不覆盖取消；重试换绑新父任务", async (t) => {

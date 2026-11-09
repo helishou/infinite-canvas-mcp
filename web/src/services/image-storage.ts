@@ -264,8 +264,8 @@ function evictInactiveImagePreviewUrls() {
     }
 }
 
-async function deleteImagePreview(storageKey: string) {
-    const cacheKey = previewCacheKey(storageKey);
+async function deleteImagePreview(storageKey: string, knownCacheKey?: string) {
+    const cacheKey = knownCacheKey || previewCacheKey(storageKey);
     const url = previewUrls.get(cacheKey);
     if (url) URL.revokeObjectURL(url);
     previewUrls.delete(cacheKey);
@@ -298,12 +298,18 @@ export async function deleteStoredImages(keys: Iterable<string>) {
 }
 
 export async function cleanupUnusedImages(usedData: unknown) {
-    const usedKeys = collectImageStorageKeys(usedData);
+    // previewStore 的 key 是 previewCacheKey(storageKey)（带 Backend 地址前缀），
+    // collectImageStorageKeys 收集的是裸 storageKey。直接比较会把所有缓存判成孤儿，
+    // 而 deleteImagePreview 又会对孤儿 key 再包一层前缀，结果一个也删不掉。
+    const usedKeys = new Set([...collectImageStorageKeys(usedData)].map((key) => previewCacheKey(key)));
     const orphanPreviews: string[] = [];
     await previewStore.iterate((_value, key) => {
         if (!usedKeys.has(key)) orphanPreviews.push(key);
     });
-    await Promise.all(orphanPreviews.map(deleteImagePreview));
+    await Promise.all(orphanPreviews.map(async (cacheKey) => {
+        const storageKey = cacheKey.split("\u0000").pop() || cacheKey;
+        await deleteImagePreview(storageKey, cacheKey);
+    }));
 }
 
 export function collectImageStorageKeys(value: unknown, keys = new Set<string>()) {

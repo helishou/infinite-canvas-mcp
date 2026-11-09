@@ -3,9 +3,10 @@ import { backendMediaUrl, getBackendUrl, uploadBackendMedia, request } from "@/s
 import { getBackendTokenShared } from "@/lib/backend-token";
 import { useAgentStore } from "@/stores/use-agent-store";
 
-type ComfyConfig = { localH3Direct: { rootDir: string; inputDir: string; cacheDir: string; mediaDir: string; ready: boolean } };
+type ComfyConfig = { localH3Direct: { rootDir: string; inputDir: string; cacheDir: string; mediaDir: string; ready: boolean }; releaseBeforeRepeat: boolean };
 export const fetchComfyConfig = () => request<ComfyConfig>("GET", "/comfy/config");
 export const saveComfyRoot = (localH3RootDir: string) => request<ComfyConfig>("PUT", "/comfy/config", { localH3RootDir });
+export const saveComfyReleaseBeforeRepeat = (releaseBeforeRepeat: boolean) => request<ComfyConfig>("PUT", "/comfy/config", { releaseBeforeRepeat });
 
 /**
  * 本地 ComfyUI 任务的请求端点解析。

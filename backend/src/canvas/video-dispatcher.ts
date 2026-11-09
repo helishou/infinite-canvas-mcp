@@ -15,6 +15,7 @@ import { DirectVideoBackend } from "../runtime/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
 import { generationSettingsSnapshot } from "./generation-settings.js";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
+import { injectDurationTarget, parseWorkflowDurationTarget, readDurationSeconds, resolveDurationValue } from "../workflows/duration.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -59,21 +60,35 @@ export class CanvasVideoDispatcher {
     generationSettings(input: CanvasVideoGenerationInput) {
         const plan = this.plan(this.prepare(input));
         const params = { ...(plan.input.params || {}) };
-        const workflowFields = plan.workflow ? this.workflows.getConfig(plan.workflow)?.fields || [] : [];
+        const workflowConfig = plan.workflow ? this.workflows.getConfig(plan.workflow) : null;
+        const workflowFields = workflowConfig?.fields || [];
         if (plan.workflow) {
             const configured = recordOf(params.selectedVideoModelFieldValues);
-            const selected = recordOf(configured[`${plan.input.model}::${plan.workflow}`] ?? configured[plan.workflow]);
+            const selected = selectedWorkflowFieldValues(configured, plan.input.model, plan.workflow);
             Object.assign(params, selected);
         } else if (plan.kind === "direct") {
             const configured = recordOf(params.selectedVideoModelFieldValues);
             Object.assign(params, recordOf(configured[`direct:${plan.input.model}`]));
         }
         delete params.selectedVideoModelFieldValues;
+        // 时长注入的实际解析结果进生成日志，便于核对「制作台秒 → 哪个节点输入 → 最终值」。
+        // 只有本地自定义工作流分支会注入时长；RunningHub 走 node::input 字段桥，暂不适配。
+        const durationTarget = plan.kind === "workflow" ? parseWorkflowDurationTarget(workflowConfig?.durationTarget) : null;
+        const durationSeconds = durationTarget ? readDurationSeconds(params, plan.input) : null;
+        const durationResolution = durationTarget && durationSeconds !== null ? {
+            source: "clipDuration",
+            seconds: durationSeconds,
+            unit: durationTarget.unit,
+            value: resolveDurationValue(durationSeconds, durationTarget.unit),
+            nodeId: durationTarget.nodeId,
+            input: durationTarget.input,
+        } : null;
         return generationSettingsSnapshot(params, {
             ...(plan.workflow ? { workflow: plan.workflow } : {}),
             executor: plan.kind,
             ...(plan.input.runTarget ? { runTarget: plan.input.runTarget } : {}),
             ...(plan.input.workflowReferenceCount !== undefined ? { workflowReferenceCount: plan.input.workflowReferenceCount } : {}),
+            ...(durationResolution ? { durationResolution } : {}),
         }, workflowFields);
     }
 
@@ -325,19 +340,50 @@ export class CanvasVideoDispatcher {
         }
         const detail = await this.workflows.get(plan.workflow!);
         if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
-        const fields = detail.config?.fields || [];
+        const baseConfig = detail.config || emptyWorkflowConfig(plan.workflow!);
+        let fields = baseConfig.fields || [];
+        let effectiveConfig = baseConfig;
         const values: Record<string, unknown> = { ...(plan.input.params || {}) };
         if (values.seconds === undefined && plan.input.seconds !== undefined) values.seconds = plan.input.seconds;
         const configuredVideoFields = recordOf(plan.input.params?.selectedVideoModelFieldValues);
-        const selectedVideoFields = recordOf(configuredVideoFields[`${plan.input.model}::${plan.workflow!}`] ?? configuredVideoFields[plan.workflow!]);
+        const selectedVideoFields = selectedWorkflowFieldValues(configuredVideoFields, plan.input.model, plan.workflow!);
         Object.assign(values, selectedVideoFields);
         for (const field of fields) if (field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt")) values[field.id] = plan.input.prompt;
+        // 时长输入节点（与 isPrompt 同构）：声明过就以制作台秒数为准，换算后直接写图，
+        // 覆盖同位置的手填字段值，且不让 buildParams 的 Math.round 把小数秒抹成整数。
+        const durationTarget = parseWorkflowDurationTarget(baseConfig.durationTarget);
+        if (durationTarget) {
+            const seconds = readDurationSeconds(values, plan.input);
+            if (seconds !== null) {
+                const resolved = injectDurationTarget(
+                    detail.workflow,
+                    durationTarget,
+                    resolveDurationValue(seconds, durationTarget.unit),
+                );
+                if (resolved.injected) {
+                    detail.workflow = resolved.workflow;
+                    const kept = fields.filter((field) => !(String(field.node) === durationTarget.nodeId && field.input === durationTarget.input));
+                    if (kept.length !== fields.length) {
+                        fields = kept;
+                        effectiveConfig = { ...baseConfig, fields };
+                    }
+                }
+            }
+        }
         const imageFields = fields.filter((field) => isImageField(field, detail.workflow));
         const videoFields = fields.filter((field) => isVideoField(field, detail.workflow));
         const audioFields = fields.filter((field) => isAudioField(field, detail.workflow));
         await this.fillMediaFields(values, imageFields, plan.input.references || []);
         await this.fillMediaFields(values, videoFields, plan.input.videoReferences || []);
         await this.fillMediaFields(values, audioFields, plan.input.audioReferences || []);
+        // 视频续写守卫：resume_prev 只有真的拿到上一段视频种子才允许打开。种子缺失时
+        // 若仍走续段分支，工作流首段迭代会消费空的循环携带值，导致
+        // h3_context_noise: expected an IMAGE batch [B,H,W,C], got () 直接崩任务
+        // （2026-11-08）。降级为普通分段运行并留痕，保证任务不中断。
+        if (values.resume_prev === true && !values.prev_video) {
+            values.resume_prev = false;
+            console.warn(`[video-dispatcher:${taskId}] resume_prev=true 但 prev_video 种子缺失（工作流未声明/未提供上一段视频加载器），已降级为普通分段运行`);
+        }
         for (const [kind, supplied, mapped] of [
             ["图片", plan.input.references || [], imageFields],
             ["视频", plan.input.videoReferences || [], videoFields],
@@ -351,7 +397,7 @@ export class CanvasVideoDispatcher {
         try {
             const existing = this.stores.tasks.get(childId);
             if (existing && ["succeeded", "failed", "cancelled"].includes(existing.status)) return firstMedia(await waitForTask(this.stores.tasks, childId));
-            const result = await this.workflowExecutor.run(detail.workflow, detail.config || emptyWorkflowConfig(plan.workflow!), values,
+            const result = await this.workflowExecutor.run(detail.workflow, effectiveConfig, values,
                 crypto.randomUUID(), plan.input.comfyUrl, plan.workflow, childId, plan.input.projectId, plan.input.nodeId, taskId);
             const media = result.media.find((item) => String(item.mimeType || "").startsWith("video/")) || result.media[0];
             if (!media) throw new Error("视频工作流完成但没有返回媒体");
@@ -447,7 +493,15 @@ export class CanvasVideoDispatcher {
         return this.stores.media.store(Buffer.from(await response.arrayBuffer()), { name: reference.name || "reference", mimeType: reference.mimeType || response.headers.get("content-type") || "application/octet-stream", category: "input" });
     }
     private async fillMediaFields(values: Record<string, unknown>, fields: WorkflowField[], references: CanvasVideoReference[]) {
-        for (let index = 0; index < fields.length; index++) values[fields[index].id] = references[index] ? await this.dataUrl(references[index]) : null;
+        for (let index = 0; index < fields.length; index++) {
+            const field = fields[index];
+            const explicit = values[field.id];
+            // 没有对应位置的参考时，保留显式注入的字段值（如视频续写的 prev_video URL），
+            // 不能按位置冲成 null——否则种子加载器会被 removeEmptyMediaNodes 当空媒体剪掉。
+            values[field.id] = references[index]
+                ? await this.dataUrl(references[index])
+                : (explicit !== undefined && explicit !== null && String(explicit).trim() !== "" ? explicit : null);
+        }
     }
     private async dataUrl(reference: CanvasVideoReference) { const stored = await this.materialize(reference); return `data:${stored.mimeType};base64,${(await this.stores.media.read(stored.storageKey)).toString("base64")}`; }
     private assertActive(taskId: string) { if (this.stores.tasks.get(taskId)?.status === "cancelled") throw new Error("视频任务已取消，未启动子执行器"); }
@@ -475,10 +529,15 @@ function isVideoField(field: WorkflowField, workflow: Record<string, unknown>) {
 function isAudioField(field: WorkflowField, workflow: Record<string, unknown>) { return field.type === "audio" || field.node.split(",").some((id) => /(?:^|_)LoadAudio/.test((workflow[id] as any)?.class_type || "")); }
 function emptyWorkflowConfig(name: string): WorkflowConfig { return { title: name, backend: "", operation: "", description: "", fields: [] }; }
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+/** 字段值查找：UI 持久化用 `model::workflow`（旧数据用裸 workflow）；H3 运行时的续写注入
+ *  在用户从未自定义过字段时只能写裸 model 键（注入点解析不到路由后的工作流名），一并兜底。 */
+function selectedWorkflowFieldValues(configured: Record<string, unknown>, model: string, workflow: string) {
+    return recordOf(configured[`${model}::${workflow}`] ?? configured[workflow] ?? configured[model]);
+}
 function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
     const values = { ...(input.params || {}) };
     const configured = recordOf(values.selectedVideoModelFieldValues);
-    Object.assign(values, recordOf(configured[`${input.model}::${workflow}`] ?? configured[workflow]));
+    Object.assign(values, selectedWorkflowFieldValues(configured, input.model, workflow));
     delete values.selectedVideoModelFieldValues;
     // Keep generic canvas video settings available to RunningHub's node::input
     // bridge. The local WorkflowExecutor applies these same fallback values before
