@@ -9,6 +9,7 @@ import { exportAchengDeliveryBundle } from "../src/lib/acheng-delivery-export";
 import i18n from "../src/i18n";
 import { getAntThemeConfig } from "../src/lib/app-theme";
 import "../src/styles/globals.css";
+import "../src/pages/drama/production.css";
 
 const hash = "a".repeat(64);
 const imagePrompt = "A restrained blue-gray dock at dawn, persistent mist, polished graphic-novel texture.";
@@ -32,6 +33,18 @@ const source = {
   ],
 };
 const clipScenario = new URLSearchParams(window.location.search).get("scenario");
+if (clipScenario === "clip-fields" || clipScenario === "music-policy") Object.assign(source.segments[0], {
+  summary: "信使握住封蜡，整段保持紧张停顿。",
+  overall_soundscape: "河风与衣料摩擦声。",
+  non_diegetic_music: "112–124 BPM, low taiko pulses under a dry guqin tremolo layer.",
+  motion_profile: { one_take: "single continuous take", beat_density: "2 beats / 5s" },
+  audio_bindings: [{ id: "VOICE", label: "信使音色", role: "voice" }],
+  references: [{ label: "<Picture 1>", definition: "码头环境" }],
+});
+if (clipScenario === "clip-fields") {
+  Object.assign(source, { prompt_assembly: { version: 2 }, subject_registry: [] });
+  source.shots.forEach(shot => Object.assign(shot, { duration_frames: shot.end_frame - shot.start_frame, subject_usages: [], keyframes: [] }));
+}
 if (clipScenario === "single") source.segments = source.segments.slice(0, 1);
 if (clipScenario === "middle") {
   source.shots.push({ ...source.shots[1], id: "s3", title: "信使接过信封", start_frame: 240, end_frame: 360 });
@@ -67,7 +80,7 @@ const data: EpisodeProduction["draft"] = {
   keyframeReviews: {}, clipGroups: [
     { id: "SEG1", shotIds: ["s1"], nodeId: "h3-node", segmentId: "segment-1", sourceVersion: 1 },
     { id: "SEG2", shotIds: ["s2"], nodeId: "h3-node", segmentId: "segment-2", sourceVersion: 1 },
-  ], settings: { mode: "manual", imageModel: "test-image", h3Model: "test-h3", imageModels: {}, h3Models: {} }, legacyImports: [],
+  ], settings: { backgroundMusicEnabled: clipScenario === "clip-fields", mode: "manual", imageModel: "test-image", h3Model: "test-h3", imageModels: {}, h3Models: {} }, legacyImports: [],
 };
 const initialProduction: EpisodeProduction = { episodeId: "fixture", revision: 4, draft: data, published: structuredClone(data), publishedVersion: 1, updatedAt: new Date().toISOString() };
 if (clipScenario === "diagnostics") {
@@ -101,6 +114,7 @@ function Harness() {
   const [continuityReport, setContinuityReport] = useState<ProductionContinuity>({ owner: { kind: "episode", id: "fixture" }, snapshot: "draft", revision: 4, publishedVersion: 1, sourceHash: hash, status: "blocked", coverageStatus: "incomplete", semanticDiscovery: "not_performed", checkedAt: new Date().toISOString(), diagnostics: { total: 1, blocked: 1, unresolved: 1 }, items: [], total: 1, nextCursor: null, report: { status: "blocked", coverageStatus: "incomplete", semanticDiscovery: "not_performed", selectedTargets: ["SEG1", "SEG2"], diagnostics: [{ code: "CONTINUITY_COVERAGE_MISSING", path: "source.script_scenes.line1.blocks.B01", targetId: "s1", affectedTargets: ["SEG1", "SEG2"], severity: "error", message: "剧本块 B01 尚无连续性覆盖证据" }], trajectories: { s1: { timelineId: "main", storyOrder: 0, start: { F_COAT: "blue" }, end: { F_COAT: "blue" } }, s2: { timelineId: "main", storyOrder: 1, start: { F_COAT: "blue" }, end: { F_COAT: "blue" } } } } });
   const updateDirector = (next: DirectorProduction) => { setDirector(next); setProduction(current => ({ ...current, revision: current.revision + 1, draft: { ...current.draft, director: next } })); setSaves(n => n + 1); };
   const patch = (entity: "style" | "scene" | "asset" | "shot" | "segment", id: string | undefined, fields: Record<string, unknown>) => {
+    if (clipScenario === "clip-fields" && fields.non_diegetic_music === "REJECT_SAVE") return false;
     if (entity === "style") {
       const nextSource = { ...director.source };
       if (fields.anchor_asset_id !== undefined) nextSource.style_lock = { ...director.source.style_lock, anchor_asset_id: fields.anchor_asset_id };
@@ -144,17 +158,19 @@ function Harness() {
   return <ConfigProvider theme={getAntThemeConfig(dark)}><App><main className={`${dark ? "dark " : ""}min-h-screen bg-background p-6 text-foreground`}>
     <div className="mb-4 flex gap-2"><button onClick={() => setDark(!dark)}>theme</button><button onClick={() => { const next = locale === "zh-CN" ? "en-US" : "zh-CN"; setLocale(next); void i18n.changeLanguage(next); }}>language</button></div>
     <button onClick={() => { setWorkspace("production"); setFocusTarget("segment:SEG1"); }}>Edit Clip style</button>
+    {clipScenario === "clip-fields" && <button onClick={() => patch("segment", "SEG1", { execution_gate: "Independently updated reference check" })}>更新测试参考核验</button>}
     {clipScenario === "references" && <button onClick={() => { const subjects = director.source.subject_registry as Array<Record<string, any>>; updateDirector({ ...director, source: { ...director.source, subject_registry: subjects.map(subject => ({ ...subject, pictureBindings: subject.pictureBindings.map((binding: Record<string, any>) => ({ ...binding, sourceNode: { projectId: "fixture", nodeId: "image-replacement" } })) })) } }); }}>更换测试图片来源</button>}
-    <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => setWorkspace(key)}>{i18n.t(`director.workspace.tab.${key}`)}</button>)}</nav>
+    <nav className="mb-4 flex flex-wrap gap-2">{(["overview", "story", "assets", "shots", "continuity", "clips", "production", "advanced"] as DirectorWorkspace[]).map(key => <button key={key} onClick={() => { setWorkspace(key); setFocusTarget(undefined); }}>{i18n.t(key === "clips" ? "director.atomic.view.clips" : `director.workspace.tab.${key}`)}</button>)}</nav>
     <DirectorPanel
       workspace={workspace} focusTarget={focusTarget} compact={Boolean(focusTarget)} director={director} production={production} readiness={readiness} continuityReport={continuityReport} run={activeRun} batches={batches}
-      canvasNodes={[{ id: "h3-node", type: "minimax-h3:video", metadata: { segments: [{ id: "segment-1", styleTemplateId: "soft-light" }] } }, { id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
+      canvasNodes={[{ id: "h3-node", type: "minimax-h3:video", metadata: { segments: [{ id: "segment-1", styleTemplateId: clipScenario === "custom-style" ? "custom-f7144ab2-7545-442b-9d5c-6e50253c05cc" : "soft-light", ...(clipScenario === "custom-style" ? { productionClipProjection: { targetId: "SEG1", styleTemplateDeclared: true } } : {}) }] } }, { id: "image-style", title: "STYLE_MOTHER output", type: "image" }, { id: "image-frame", title: "Keyframe output", type: "image" }]}
       legacy={[{ source: "script.md", sha256: hash, text: "旧剧本文本：完整台词和历史事实。" }]} versions={[{ version: 1, stage: "director", createdAt: new Date(0).toISOString() }]}
       busy={false} canvasId="fixture" canvasRole="episode" onOpenSharedAsset={() => undefined} onPromoteExistingSharedAsset={() => setAsks(n => n + 1)} sourceDrafts={sourceDrafts} runStartPending={false} activeTargetIds={[...new Set(batches.filter(item => ["pending", "running", "paused", "awaiting_review"].includes(item.status)).flatMap(item => item.targets))]}
       briefDraft={String(director.source.brief || "")} onBriefDraftChange={brief => { updateDirector({ ...director, source: { ...director.source, brief } }); }}
       onSourceDraftChange={(key, value) => setSourceDrafts(current => { if (value === undefined) { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: value }; })}
       onBrief={brief => updateDirector({ ...director, source: { ...director.source, brief } })}
       onPatch={patch} onAdoptClipStyle={async (id, styleTemplateId) => { patch("segment", id, { styleTemplateId }); return true; }} onRegroup={regroup} onWorkflow={workflow => updateDirector({ ...director, workflow: { ...director.workflow, ...workflow } })}
+      onSettings={settings => setProduction(current => ({ ...current, draft: { ...current.draft, settings: { ...current.draft.settings, ...settings } } }))}
       onBindAsset={(assetId, nodeId) => updateDirector({ ...director, assets: { ...director.assets, [assetId]: { ...(director.assets[assetId] || { version: "v1", status: "planned" as const }), nodeId } } })}
       onBoundary={boundary => updateDirector({ ...director, boundaries: [...boundaries.filter(item => item.from !== boundary.from), boundary] })}
       onSaveContinuity={async (ledger, preview) => { if (preview) return false; updateDirector({ ...director, source: { ...director.source, ledger } }); return true; }}

@@ -53,6 +53,7 @@
   "files": [
     "dist",
     "agent-instructions.md",
+    "instructions",
     "README.md"
   ],
   "scripts": {

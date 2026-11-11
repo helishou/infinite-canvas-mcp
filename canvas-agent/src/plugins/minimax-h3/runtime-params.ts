@@ -65,8 +65,10 @@ export function canonicalH3TaskMode(value: unknown): string {
 /** A deliberate field edit remains effective even when the Clip otherwise follows defaults. */
 export function withH3ParameterEdits(segment: Record<string, unknown>, patch: Record<string, unknown>) {
     // Save the companion field too, so inherited defaults cannot re-enable it.
-    if (patch.tailFrameContinuation === true) patch = { ...patch, motionContextEnabled: false };
-    else if (patch.motionContextEnabled === true) patch = { ...patch, tailFrameContinuation: false };
+    // 尾帧参考 / Motion Context / 视频续写三选一，任一项开启时同事务关掉另两项。
+    if (patch.tailFrameContinuation === true) patch = { ...patch, motionContextEnabled: false, videoContinuation: false };
+    else if (patch.motionContextEnabled === true) patch = { ...patch, tailFrameContinuation: false, videoContinuation: false };
+    else if (patch.videoContinuation === true) patch = { ...patch, tailFrameContinuation: false, motionContextEnabled: false };
     if (patch.audioDrive === true || (patch.audioDrive !== false && segment.audioDrive === true)) patch = { ...patch, lockAudio: true };
     if (patch.steps !== undefined && patch.videoSteps === undefined) patch = { ...patch, videoSteps: patch.steps };
     const keys = new Set(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
@@ -154,7 +156,7 @@ export const H3_PARAM_KEYS = [
     "t8Enabled", "t8ResidualThreshold", "t8StartPercent", "t8EndPercent", "t8MaxConsecutiveHits", "t8CacheDevice", "t8MetricStride", "t8Verbose",
     "videoSigmaShift", "audioSigmaShift", "dualSampling", "dualSamplingRatio", "dualSampler",
     "secondPassEnabled", "firstPassSteps", "secondPassSteps", "secondPassMegapixels", "secondPassUpscaleMethod", "secondPassDenoise", "secondPassSampler", "secondPassScheduler", "secondPassModel", "secondPassSigma",
-    "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
+    "dedicatedAttention", "startupMode", "faceRefineEnabled", "faceRefineDetector", "faceRefineConfidence", "faceRefineCropFactor", "faceRefineCanvasSize", "faceRefineDenoise", "faceRefineSteps", "faceRefineSampler", "faceRefineScheduler", "faceRefinePasteRegion", "faceRefineMaskDilation", "faceRefineFeather", "faceRefineColourMatch", "faceRefineBlend", "confirmationMode", "autoAcceptConfirmation", "seamFaceFadeFrames", "seamColourMatch", "seamAudioCrossfadeMs", "lowMemoryAttentionHeads", "reservedVramGb", "runtimeReserveEnabled", "uniBlockSwapEnabled", "uniBlockSwapBlocks", "keepModelCache",
     "latentUpscaleEnabled", "latentUpscaleConfirmationMode", "h3FirstSteps", "h3SecondSteps", "h3FullSigma", "v81ManualSigma", "latentUpscaleModel", "latentUpscaleMegapixels", "latentUpscaleAlign", "latentUpscalePrecision",
     "realtimePreviewEnabled", "realtimePreviewLongEdge", "realtimePreviewFrames", "realtimePreviewFps", "realtimePreviewJpegQuality",
     "rtxEnabled", "rtxResizeMode", "rtxScale", "rtxWidth", "rtxHeight", "rtxQuality",

@@ -54,6 +54,7 @@ async function mount() {
             <button onClick={() => { state.shared = { inputHash: hash, reviewCurrent: false, source: { asset_cards: [{ id: "STYLE", name: "风格母图", prompt: "低饱和蓝灰与晨雾，角色与环境保持同一电影质感。" }] }, media: [] }; state.revision++; setSharedDemo(true); setRevision(state.revision); }}>模拟共同素材待审核</button>
             <button onClick={() => { state.shared = { reviewCurrent: false, error: "共同素材尚未生成" }; state.revision++; setSharedDemo(true); setRevision(state.revision); }}>模拟共同素材未就绪</button>
             <SceneProductionSettings value={plan} onChange={patch => setPlan({ ...plan, ...patch })} />
+            <output data-testid="music-settings">{String(plan.backgroundMusicEnabled === true)}</output>
             <output data-testid="review-settings">{JSON.stringify(plan.reviewPolicy || null)}</output>
             <SceneProductionPanel onAskDirector={scope => { directorRequests.push(scope); renderDirector(value => value + 1); }} commandPending={commandPending} onCommand={async (action, revision) => { setCommandPending(true); try { return await submitProductionSceneAction("scene-fixture", action, revision, nanoid()); } finally { setCommandPending(false); } }} production={production} owner="scene-fixture" onRefresh={() => setRevision(state.revision)} />
             <output data-testid="director-requests">{JSON.stringify(directorRequests)}</output>

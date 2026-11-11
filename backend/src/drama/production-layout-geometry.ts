@@ -33,8 +33,11 @@ export function productionOutputPosition(nodes: Node[]): Position {
 }
 
 export function productionSceneLayout(members: Node[], shotIds: string[], origin: Position) {
+    const leftColumnWidth = 760, columnGap = 120, videoLeftOffset = 40 + leftColumnWidth + columnGap;
+    const videos = members.filter(node => node.type === "minimax-h3:video");
+    const leftMembers = members.filter(node => node.type !== "minimax-h3:video");
     const slots = new Map<string, Node[]>();
-    for (const node of members) {
+    for (const node of leftMembers) {
         const key = String(node.metadata?.productionShotId || node.id);
         slots.set(key, [...(slots.get(key) || []), node]);
     }
@@ -43,20 +46,23 @@ export function productionSceneLayout(members: Node[], shotIds: string[], origin
         return (ai < 0 ? shotIds.length : ai) - (bi < 0 ? shotIds.length : bi);
     }).map(([, nodes]) => nodes.sort((a, b) => Number(a.type === "config") - Number(b.type === "config")));
     const positions: Array<{ id: string; position: Position }> = [];
-    let y = origin.y + 70, width = 0;
-    for (let row = 0; row < ordered.length; row += 3) {
-        let x = origin.x + 20, rowHeight = 0;
-        for (const slot of ordered.slice(row, row + 3)) {
-            let slotY = y;
-            for (const node of slot) {
-                positions.push({ id: node.id, position: { x, y: slotY } });
-                slotY += nodeSize(node.height, 260) + 60;
-            }
-            rowHeight = Math.max(rowHeight, slotY - y);
-            x += Math.max(...slot.map(node => nodeSize(node.width, 340))) + 80;
+    let y = origin.y + 70;
+    for (const slot of ordered) {
+        let slotY = y;
+        for (const node of slot) {
+            positions.push({ id: node.id, position: { x: origin.x + 20, y: slotY } });
+            slotY += nodeSize(node.height, 260) + 60;
         }
-        width = Math.max(width, x - origin.x - 60);
-        y += rowHeight + 60;
+        y = slotY;
     }
-    return { positions, width: Math.max(1100, width), height: Math.max(800, y - origin.y) };
+    const leftHeight = y - origin.y;
+    let videoY = origin.y + 70, videoWidth = 0;
+    for (const node of videos) {
+        positions.push({ id: node.id, position: { x: origin.x + videoLeftOffset, y: videoY } });
+        videoWidth = Math.max(videoWidth, nodeSize(node.width, 620));
+        videoY += nodeSize(node.height, 500) + 100;
+    }
+    const rightHeight = videoY - origin.y;
+    const width = Math.max(2160, videoLeftOffset + videoWidth + 40);
+    return { positions, width, height: Math.max(900, leftHeight, rightHeight) };
 }

@@ -349,6 +349,10 @@ export function compilationScopeInput(director: DirectorProduction, scope: Compi
     const inputAssets = Object.fromEntries(Object.entries(projected.assets).filter(([id]) => referenced.has(id) || Boolean(scene && !shots.size)).map(([id, asset]) => [id, { nodeId: asset.nodeId, assetId: asset.assetId, version: asset.version, storageKey: asset.storageKey, sha256: asset.sha256 }]));
     const bindings = Object.fromEntries(Object.entries(projected.assets).map(([id, asset]) => [id, { nodeId: asset.nodeId ?? null, assetId: asset.assetId ?? null }]));
     const hashSource = { ...projected.source };
+    if (segments.length) {
+        hashSource.background_music_enabled = hashSource.background_music_enabled === true;
+        if (!hashSource.background_music_enabled) hashSource.segments = rows(hashSource.segments).map(segment => ({ ...segment, non_diegetic_music: "N/A" }));
+    } else delete hashSource.background_music_enabled;
     // Backend compiler isolation markers and the derived continuity asset lookup
     // are validation context, not authored model inputs. Exclude them so packet
     // hashes remain valid when the scoped prompt is applied to the unmarked source.

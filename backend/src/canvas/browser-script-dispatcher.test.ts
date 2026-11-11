@@ -36,6 +36,10 @@ test("浏览器脚本任务由 Backend 绑定、单实例认领并原子回写�
     assert.equal(metadata().status, "success");
     const result = (db.getCanvasProject("p")!.nodes as Array<{ type: string; metadata: Record<string, unknown> }>).find((node) => node.type === "text");
     assert.equal(result?.metadata.content, "浏览器结果");
+    const log = db.listGenerationLogs({ runtimeTaskId: "browser-1", limit: 1 })[0];
+    assert.equal(log?.platform, "canvas-text");
+    assert.equal(log?.status, "success");
+    assert.equal(String((log?.outputs[0] || {}).text || ""), "浏览器结果");
     assert.throws(() => dispatcher.complete("browser-1", "tab-a", { texts: ["迟到结果"] }, "old-token"), /状态 succeeded/);
 });
 

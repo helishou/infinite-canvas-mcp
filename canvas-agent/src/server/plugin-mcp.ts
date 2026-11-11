@@ -60,6 +60,9 @@ export type PluginMcpContext = {
 /** 插件 MCP 实际使用的最小 Backend 能力。 */
 export type PluginMcpBackend = {
     backendUrl?: string;
+    /** 直连 Backend 的通用读写口（仅用于制作台等 Backend 既有路由，不引入新的业务源）。 */
+    get?(path: string, signal?: AbortSignal): Promise<unknown>;
+    post?(path: string, body?: unknown, signal?: AbortSignal): Promise<unknown>;
     /** Backend-owned local preparation artifacts, not arbitrary plugin filesystem access. */
     preparedH3Updates?: {
         readSource(filePath: string, fileSha256: string): Promise<{ value: unknown; sha256: string; bytes: number }>;

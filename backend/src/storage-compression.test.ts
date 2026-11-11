@@ -54,6 +54,17 @@ test("compressed task inputs survive restart, SQL filters, summaries, usage, ret
     assert.deepEqual(summaries[0].input, { projectId: "p" });
     assert.deepEqual(summaries[0].outputs, [{ storageKey: "image:result" }]);
     assert.deepEqual(f.db.listCanvasTaskModelUsage().map(row => ({ ...row })), [{ model: "image-model", channelId: "channel", count: 2 }]);
+    // 大 params 经 updateTask 压缩成 gzip BLOB 后，统计与摘要投影仍须按存储格式解码，不能抛 malformed JSON。
+    const largeParams = { model: "image-model", channelId: "params-channel", parentTaskId: "parent-1", snapshot: prompt };
+    const compressedParams = f.db.createTask("compressed-params", "canvas-image", { projectId: "p" }, largeParams);
+    assert.equal(f.db.db.prepare("SELECT typeof(params_json) AS type FROM tasks WHERE id='compressed-params'").get()?.type, "text");
+    f.db.updateTask(compressedParams.id, { status: "running" });
+    assert.equal(f.db.db.prepare("SELECT typeof(params_json) AS type FROM tasks WHERE id='compressed-params'").get()?.type, "blob");
+    assert.deepEqual(
+        f.db.listCanvasTaskModelUsage().map(row => ({ ...row })).sort((a, b) => a.channelId.localeCompare(b.channelId)),
+        [{ model: "image-model", channelId: "channel", count: 2 }, { model: "image-model", channelId: "params-channel", count: 1 }],
+    );
+    assert.equal(f.db.listTaskSummaries({ limit: 10 }).find(row => row.id === "compressed-params")?.parentTaskId, "parent-1");
     assert.deepEqual(f.db.createTask("task", "canvas-image", { prompt: "retry" }, {}).input, input);
     const before = f.db.db.prepare("SELECT input_json FROM tasks WHERE id='task'").get()?.input_json;
     f.db.db.prepare("UPDATE tasks SET params_json=? WHERE id='task'").run(JSON.stringify({ image: "data:image/png;base64,AAAA" }));

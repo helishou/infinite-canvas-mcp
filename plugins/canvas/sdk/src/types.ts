@@ -360,6 +360,8 @@ export type CanvasStoryboardTracks = {
 export type CanvasProductionEditing = {
     /** Current authored Clip ordinals keyed by stable source Segment ID. */
     clipNumbers?: Readonly<Record<string, number>>;
+    /** Per-target compilation readiness keyed by production target ID (segment). */
+    clipReadiness?: Readonly<Record<string, "ready" | "blocked" | "needs_review" | "complete">>;
     /**
      * 分镜格派生轨：owner 是制作稿 `shot.keyframes`，服务端读取时现算。
      * H3 面板用它覆盖画布 segment 上的副本，避免「制作台改了、节点没跟」。

@@ -26,6 +26,35 @@ const layoutOf = (nodes: CanvasNodeData[], connections: CanvasConnection[], norm
 
 const centerOf = (pos: { y: number }, height: number) => pos.y + height / 2;
 
+test("整理多个 H3：旧位置不参与停放避让，新位置保持右列且不重叠", () => {
+    const nodes = [
+        node("ref", "image", 0, 0, 300, 240),
+        node("h3-a", "minimax-h3:video", 1000, 0, 3000, 1800),
+        node("h3-b", "minimax-h3:video", 1000, 2000, 2400, 2200),
+        node("h3-c", "minimax-h3:video", 1000, 4000, 3600, 1600),
+    ];
+    const run = (items: CanvasNodeData[], ids = items.map(item => item.id)) => computeFlowLayout({
+        nodes: items, connections: [], ids, anchorX: 0, anchorY: 0,
+        parkAtRight: nodes.slice(1).map(item => item.id), centerInPlace: true, normalizeSizes: true,
+    });
+    const positions = run(nodes);
+    assert.deepEqual(overlaps(nodes, positions), []);
+    const parked = nodes.slice(1).map(item => positions.get(item.id)!);
+    assert.equal(new Set(parked.map(pos => pos.x)).size, 1, "H3 应保持同一右列");
+    assert.ok(parked[0].x >= positions.get("ref")!.x + 300 + 48);
+    nodes.slice(1).forEach(item => {
+        assert.equal(positions.get(item.id)!.width, undefined, "保留 H3 原宽高");
+    });
+    const applied = nodes.map(item => ({ ...item, position: positions.get(item.id)! }));
+    assert.deepEqual(run(applied), positions, "重复整理不漂移");
+
+    const onlyH3 = nodes.slice(1);
+    const obstacle = node("unselected", "image", 0, 0, 3200, 2400);
+    const parkedOnly = run([...onlyH3, obstacle], onlyH3.map(item => item.id));
+    assert.deepEqual(overlaps([...onlyH3, obstacle], new Map([...parkedOnly, [obstacle.id, obstacle.position]])), []);
+    assert.equal(parkedOnly.has(obstacle.id), false, "不移动未选节点");
+});
+
 test("输出跟随输入：下方链的输出不会被拉到顶部", () => {
     const nodes = [
         node("inA", "image", 0, 0, 340, 240),

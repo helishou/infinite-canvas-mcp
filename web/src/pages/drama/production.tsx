@@ -368,7 +368,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setCanvasId(resolvedCanvasId);
     setCanvasRead(context.canvas && Array.isArray(context.canvas.nodes) ? { id: resolvedCanvasId, revision: Number(context.canvas.revision || 0), nodes: context.canvas.nodes as ProductionCanvasSnapshot["nodes"] } : undefined);
     setSharedCanvasNodes(undefined);
-    setProduction(prod.production);
+    // 同版本重读保持对象身份：下游按导演快照身份缓存编译新鲜度，重复 load 不应让整批 Clip 重新投影哈希。
+    setProduction(previous => !previous || previous.episodeId !== prod.production.episodeId || prod.production.revision > previous.revision ? prod.production : previous);
     setReadiness(null);
     setVersions([]);
     setBatches([]);
@@ -1722,7 +1723,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     const lockOnly = entity === "segment" && Object.keys(patch).length > 0 && Object.keys(patch).every(key => key === "locked" || key === "preLockNoiseSeedMode");
     const expectedRefreshRevision = production ? production.revision + 1 : null;
     if (lockOnly && expectedRefreshRevision !== null) skipProductionRefreshRevision.current = expectedRefreshRevision;
-    const saved = await edit([{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }]);
+    const ops: ProductionOperation[] = [{ type: "patch_director_source", entity, ...(id ? { id } : {}), patch }];
+    if (entity === "segment" && id && !lockOnly) ops.push(...clipRefreshOps([id]));
+    const saved = await edit(ops);
     if (!saved && lockOnly && skipProductionRefreshRevision.current === expectedRefreshRevision) skipProductionRefreshRevision.current = null;
     return saved;
   };

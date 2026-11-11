@@ -4,7 +4,7 @@ import { Alert, App, Button, Dropdown, Input, Modal, Progress, Radio, Select, Ta
 import { ArrowLeft, ArrowRight, ArrowUpRight, CheckCircle2, ChevronDown, Circle, CircleAlert, Database, Eye, GripHorizontal, Image as ImageIcon, LoaderCircle, Locate, Lock, LockOpen, Play, Search, Trash2, WandSparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { productionNumbering, isSubjectPromptAssembly, type DirectorProduction } from "@basketikun/canvas-agent/drama/production-contract";
-import { compilationArtifactFreshness, currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { compilationArtifactFreshness, type CompilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { subjectShotWindows, subjectStateProjection } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { backendMediaUrl, fetchProductionWorkbench, type EpisodeProduction, type ProductionCompilationDiagnostic, type ProductionTarget } from "@/services/backend-api";
 import { records, formatSeconds, readableText } from "./director-display";
@@ -34,18 +34,19 @@ const workbenchCache = new Map<string, Record<string, any>>();
 
 /**
  * 编译新鲜度缓存：每次判定都会重新投影并哈希整份导演输入，而镜头/分镜列表在
- * 同一次渲染里会按 Clip 反复查询同一批产物。导演对象按不可变快照更新，因此按
- * 对象身份缓存判定结果即可，产物换新时自动失效。
+ * 同一次渲染里会按 Clip 反复查询同一批产物（状态行与过期原因各查一次）。导演对象
+ * 按不可变快照更新，因此按对象身份缓存完整判定结果即可，产物换新时自动失效。
  */
-const currentArtifactCache = new WeakMap<DirectorProduction, WeakMap<DirectorProduction["artifacts"][number], boolean>>();
+const artifactFreshnessCache = new WeakMap<DirectorProduction, WeakMap<DirectorProduction["artifacts"][number], CompilationArtifactFreshness>>();
+function cachedCompilationArtifactFreshness(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
+    let byArtifact = artifactFreshnessCache.get(director);
+    if (!byArtifact) { byArtifact = new WeakMap(); artifactFreshnessCache.set(director, byArtifact); }
+    let freshness = byArtifact.get(artifact);
+    if (!freshness) { freshness = compilationArtifactFreshness(director, artifact); byArtifact.set(artifact, freshness); }
+    return freshness;
+}
 function isCurrentCompilationArtifact(director: DirectorProduction, artifact: DirectorProduction["artifacts"][number]) {
-    let byArtifact = currentArtifactCache.get(director);
-    if (!byArtifact) { byArtifact = new WeakMap(); currentArtifactCache.set(director, byArtifact); }
-    const cached = byArtifact.get(artifact);
-    if (cached !== undefined) return cached;
-    const current = currentCompilationArtifact(director, artifact);
-    byArtifact.set(artifact, current);
-    return current;
+    return cachedCompilationArtifactFreshness(director, artifact).current;
 }
 
 export type StoryboardViewMemory = { current?: { selectedId: string; sceneFilter: string; search: string; view: "shots" | "clips"; mobileEditing: boolean; detailView: "editing" | "context"; shotSection?: "direction" | "sound" | "subjects" | "anchors"; scrollTop: number } };
@@ -62,6 +63,7 @@ type Props = {
     canvasId: string; onLocateClip?: (id: string) => void;
     canvasNodes: Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>;
     renderEditor: (shot: Record<string, any>, workbench?: Record<string, any>) => ReactNode; clipEditor: (scope: { sceneId?: string; shotIds: string[]; editable: boolean }) => ReactNode;
+    renderClipFields?: (segment: Record<string, any>) => ReactNode;
     /** 该镜头的起止状态（镜头开始时 / 镜头结束时），由 DirectorPanel 注入到左栏「连续性状态」，原在「画面与摄影」里。 */
     renderShotState?: (shot: Record<string, any>) => ReactNode;
     /** 该镜头的连续性动作（与下一段的边界开关），由 DirectorPanel 注入到左栏编辑区下方的「连续性状态」。 */
@@ -138,7 +140,7 @@ function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnost
 }
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, lockReadOnly = false, autoTranslateCompilation, onClip, onDeleteClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderClipFields, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, lockReadOnly = false, autoTranslateCompilation, onClip, onDeleteClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message, modal } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -439,7 +441,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         .some(match => /^minimax|^smart-minimax/i.test(String(match.node.type || "")));
     const compileStaleReason = (artifact: DirectorProduction["artifacts"][number] | undefined, projection?: Record<string, unknown>) => {
         if (!artifact) return t("compileStaleReason.generic");
-        const freshness = compilationArtifactFreshness(director, artifact);
+        const freshness = cachedCompilationArtifactFreshness(director, artifact);
         if (!freshness.current) {
             if (freshness.staleReason === "compiler_changed") return t("compileStaleReason.compilerChanged");
             if (freshness.staleReason === "source_changed") return t("compileStaleReason.sourceChanged");
@@ -836,6 +838,35 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
         const clipId = String(entry.group.id);
         onDiscuss(clipId, `${t("director.atomic.discussClipInstruction")} ${clipLabel(entry.index)} (${clipId}).`, "shots", true);
     };
+    const renderClipStatus = (item: (typeof visibleClipStates)[number], showNumber = false) => {
+                    const clipNumber = t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 });
+                    const refreshJob = activeRefreshJob(item.id);
+                    const locked = lockedClipIds.has(item.id);
+                    const compiledPrompt = viewableCompiledPrompts.find(candidate => candidate.targetId === item.id);
+                    const translationStatus = translationStatusFor(item.id);
+                    const translationColor = translationStatus === "failed" || translationStatus === "writeFailed" ? "red"
+                        : translationStatus === "complete" || translationStatus === "cached" ? "green"
+                            : translationStatus === "translating" || translationStatus === "writing" ? "blue"
+                                : translationStatus === "translated" ? "cyan" : undefined;
+                    return <div className="clip-sheet-actions">
+                    {showNumber && <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{clipNumber}</button>}
+                    <Tag className="!mr-0 !text-[11px] !leading-4" color={locked ? "default" : item.color} title={locked ? t("director.atomic.clipLocked") : item.reason || t("director.atomic.savedSourceStatus")}><span className="grid"><span className={`col-start-1 row-start-1 ${locked ? "invisible" : ""}`} aria-hidden={locked}>{item.label}</span><span className={`col-start-1 row-start-1 ${locked ? "" : "invisible"}`} aria-hidden={!locked}>{t("director.atomic.clipLocked")}</span></span><CompileElapsed updatedAt={refreshJob?.updatedAt} status={refreshJob?.status} /></Tag>
+                    {translationStatus && <Tag className="!mr-0 !text-[11px] !leading-4" color={translationColor} data-clip-translation-status={translationStatus}>{t(`director.atomic.translationClipStatus.${translationStatus}`)}</Tag>}
+                    {compiledPrompt && <Button type="text" size="small" className="!px-1.5" icon={<Eye className="size-3" />} aria-label={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} title={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} onClick={() => setPromptPreviewClipId(item.id)} />}
+                    {onToggleClipLock && <Button type="text" size="small" className="!px-1.5" icon={locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} aria-pressed={locked} aria-label={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} title={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} disabled={lockReadOnly || compileBusy || compilePending || clipLockPending[item.id] === true} onClick={() => { const next = !locked; setClipLockOverrides(current => ({ ...current, [item.id]: next })); setClipLockPending(current => ({ ...current, [item.id]: true })); const action = clipLockQueueRef.current.then(async () => {
+                        while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                        const callback = onToggleClipLockRef.current;
+                        const saved = await callback?.(item.id, next);
+                        if (!saved) setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; });
+                        else {
+                            if (onToggleClipLockRef.current === callback) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                            while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
+                        }
+                    }).catch(() => { setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; }); }).finally(() => setClipLockPending(current => { const value = { ...current }; delete value[item.id]; return value; })); clipLockQueueRef.current = action; }} />}
+                    {!locked && onGenerateClip && item.tone === "ready" && <Button type="text" size="small" className="!px-1.5" icon={<Play className="size-3" />} loading={runStartPending} disabled={busy || compileBusy || compilePending || runStartPending} aria-label={t("director.atomic.generateOneClip", { clip: clipNumber })} title={t("director.atomic.generateOneClip", { clip: clipNumber })} onClick={() => onGenerateClip?.(item.id)} />}
+                    {!locked && <Button type="text" size="small" className="!px-1.5" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: clipNumber })} title={t("director.atomic.compileOneClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || translatingPrompts || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />}
+                </div>;
+    };
     return <div className="space-y-6" data-subject-storyboard-workbench data-storyboard-view={view} data-canvas-id={canvasId} data-mobile-editing={mobileEditing && Boolean(selected) && view === "shots"} data-production-section-root>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="storyboard-toolbar border-b border-border pb-1">
@@ -859,46 +890,19 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             {/* 编译状态与编译入口：Clip 组合是「保存 → 校验 → 编译 → 同步」的落点，状态与按钮放同一行，逐 Clip 显示。 */}
             <div className="flex flex-wrap items-center justify-between gap-3">
                 <p className="text-sm text-muted-foreground">{t(subjectAssembly ? "director.atomic.packagingHint" : "director.atomic.legacyPackagingHint")}</p>
-                <div className="flex shrink-0 items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                     {visibleClipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.blocked ? " · " + t("director.atomic.blockedCompileCount", { count: compileCounts.blocked }) : "") + (compileCounts.recorded ? " · " + t("director.atomic.recordedCompileCount", { count: compileCounts.recorded }) : "") + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
+                    {renderClipFields && activeVisibleClipStates.length > 0 && <Button size="small" type="text" loading={translatingPrompts} disabled={!canTranslateCompiledPrompts} title={!visibleClipStates.every(item => item.tone === "ready") ? t("director.atomic.translationRequiresCompile") : undefined} onClick={() => void translateCompiledPrompts()}>{translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}</Button>}
                     <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || translatingPrompts || !clipsNeedingCompile.length || !onCompile || sceneFilter === "__unassigned__" || !sceneCompileAvailable} title={sceneFilter === "__unassigned__" ? t("director.atomic.compileUnassignedHint") : undefined} onClick={() => onCompile?.(undefined, undefined, clipsNeedingCompile.map(item => item.id))}>{compilePending ? t("drama.production.recoverReceipt") : t("director.atomic.compileAction")}</Button>
                 </div>
             </div>
             {compileError && <Alert type="error" showIcon message={t("director.atomic.compileFailed")} description={compileError} style={{ whiteSpace: "pre-line" }} />}
             {compileNotice && <Alert type="success" showIcon message={<div className="flex flex-wrap items-center justify-between gap-2"><span>{compileNotice}</span>{orderedCompileDiagnostics.length > 0 && <Button type="link" size="small" className="px-0" icon={<WandSparkles className="size-3.5" />} disabled={busy || compileBusy} onClick={() => { const task = compileDiagnosticTaskContext(orderedCompileDiagnostics); onDiscuss(task.targetId, task.instruction); }}>{t("director.atomic.compileAskDirector")}</Button>}</div>} description={orderedCompileDiagnostics.length > 0 ? <details className="text-sm"><summary className="cursor-pointer underline underline-offset-2">{t("director.atomic.compileViewDiagnostics", { count: orderedCompileDiagnostics.length })}</summary><ul className="mt-2 max-h-72 list-disc space-y-2 overflow-auto pl-5">{orderedCompileDiagnostics.map((item, index) => <li key={`${item.code || "diagnostic"}:${item.path || ""}:${item.targetId || ""}:${index}`}><p>{item.message || item.code || t("director.atomic.compileHintOther")}</p><p className="mt-0.5 text-xs text-muted-foreground">{[item.code, item.path, item.targetId, item.shotId].filter(Boolean).join(" · ")}</p></li>)}</ul></details> : undefined} style={{ whiteSpace: "pre-line" }} />}
-            {visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
+            {!renderClipFields && visibleClipStates.length > 0 && <div className="flex flex-wrap items-center gap-1.5" aria-label={t("director.atomic.compileStatus")}>
                 <span className="mr-1 text-xs text-muted-foreground">{t("director.atomic.compileStatus")}</span>
-                {visibleClipStates.map(item => {
-                    const clipNumber = t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 });
-                    const refreshJob = activeRefreshJob(item.id);
-                    const locked = lockedClipIds.has(item.id);
-                    const compiledPrompt = viewableCompiledPrompts.find(candidate => candidate.targetId === item.id);
-                    const translationStatus = translationStatusFor(item.id);
-                    const translationColor = translationStatus === "failed" || translationStatus === "writeFailed" ? "red"
-                        : translationStatus === "complete" || translationStatus === "cached" ? "green"
-                            : translationStatus === "translating" || translationStatus === "writing" ? "blue"
-                                : translationStatus === "translated" ? "cyan" : undefined;
-                    return <span key={item.id} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-0.5 text-xs">
-                    <button type="button" onClick={() => onClip(item.id)} className="text-muted-foreground hover:text-foreground">{clipNumber}</button>
-                    <Tag className="!mr-0 !text-[11px] !leading-4" color={locked ? "default" : item.color} title={locked ? t("director.atomic.clipLocked") : item.reason || t("director.atomic.savedSourceStatus")}><span className="grid"><span className={`col-start-1 row-start-1 ${locked ? "invisible" : ""}`} aria-hidden={locked}>{item.label}</span><span className={`col-start-1 row-start-1 ${locked ? "" : "invisible"}`} aria-hidden={!locked}>{t("director.atomic.clipLocked")}</span></span><CompileElapsed updatedAt={refreshJob?.updatedAt} status={refreshJob?.status} /></Tag>
-                    {translationStatus && <Tag className="!mr-0 !text-[11px] !leading-4" color={translationColor} data-clip-translation-status={translationStatus}>{t(`director.atomic.translationClipStatus.${translationStatus}`)}</Tag>}
-                    {compiledPrompt && <Button type="text" size="small" className="!h-5 !px-1" icon={<Eye className="size-3" />} aria-label={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} title={`${t("director.atomic.viewCompiledPrompt")} · ${clipNumber}`} onClick={() => setPromptPreviewClipId(item.id)} />}
-                    {onToggleClipLock && <Button type="text" size="small" className="!h-5 !px-1" icon={locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} aria-pressed={locked} aria-label={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} title={locked ? t("director.atomic.unlockClip", { clip: clipNumber }) : t("director.atomic.lockClip", { clip: clipNumber })} disabled={lockReadOnly || compileBusy || compilePending || clipLockPending[item.id] === true} onClick={() => { const next = !locked; setClipLockOverrides(current => ({ ...current, [item.id]: next })); setClipLockPending(current => ({ ...current, [item.id]: true })); const action = clipLockQueueRef.current.then(async () => {
-                        while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
-                        const callback = onToggleClipLockRef.current;
-                        const saved = await callback?.(item.id, next);
-                        if (!saved) setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; });
-                        else {
-                            if (onToggleClipLockRef.current === callback) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
-                            while (lockBusyRef.current) await new Promise<void>(resolve => lockRenderWaitersRef.current.push(resolve));
-                        }
-                    }).catch(() => { setClipLockOverrides(current => { const value = { ...current }; delete value[item.id]; return value; }); }).finally(() => setClipLockPending(current => { const value = { ...current }; delete value[item.id]; return value; })); clipLockQueueRef.current = action; }} />}
-                    {!locked && onGenerateClip && item.tone === "ready" && <Button type="text" size="small" className="!h-5 !px-1" icon={<Play className="size-3" />} loading={runStartPending} disabled={busy || compileBusy || compilePending || runStartPending} aria-label={t("director.atomic.generateOneClip", { clip: clipNumber })} title={t("director.atomic.generateOneClip", { clip: clipNumber })} onClick={() => onGenerateClip?.(item.id)} />}
-                    {!locked && <Button type="text" size="small" className="!h-5 !px-1" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: clipNumber })} title={t("director.atomic.compileOneClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || translatingPrompts || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />}
-                </span>;
-                })}
+                {visibleClipStates.map(item => <Fragment key={item.id}>{renderClipStatus(item, true)}</Fragment>)}
             </div>}
-            {activeVisibleClipStates.length > 0 && <div className="flex flex-wrap items-center justify-end gap-3">
+            {!renderClipFields && activeVisibleClipStates.length > 0 && <div className="flex flex-wrap items-center justify-end gap-3">
                 <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={translatingPrompts} disabled={!canTranslateCompiledPrompts} title={!visibleClipStates.every(item => item.tone === "ready") ? t("director.atomic.translationRequiresCompile") : undefined} onClick={() => void translateCompiledPrompts()}>
                     {translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}
                 </Button>
@@ -906,7 +910,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
             <Modal open={Boolean(promptPreviewClipId && selectedPromptPreview)} onCancel={() => setPromptPreviewClipId("")} footer={null} title={t("director.atomic.viewCompiledPrompt")} width={900} destroyOnHidden>
                 <Input.TextArea value={selectedPromptPreview?.prompt || ""} readOnly autoSize={{ minRows: 18, maxRows: 30 }} className="font-mono text-xs" />
             </Modal>
-            {visibleClipStates.length > 0 && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live={translationProgress ? "polite" : undefined} data-translation-progress>
+            {translationProgress && translationProgress.phase !== "complete" && visibleClipStates.length > 0 && <section className="space-y-3 rounded-xl border border-border bg-card p-4 shadow-sm" aria-live="polite" data-translation-progress>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="flex min-w-0 items-start gap-3">
                         <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"><WandSparkles className="size-4" aria-hidden="true" /></span>
@@ -956,6 +960,18 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 {clipsWithCompileErrors.filter(item => !lockedClipIds.has(item.id)).map(item => <Alert key={item.id} type="error" showIcon message={`${t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 })} · ${t("director.atomic.compileTargetError")}`} description={<div className="space-y-2"><ul className="list-disc space-y-1 pl-5">{(item.messages.length ? item.messages : [t("director.atomic.compileTargetNoReason", { status: item.label })]).map((value, index) => <li key={`${item.id}:${index}`}>{value}</li>)}</ul><Button size="small" type="primary" icon={<WandSparkles className="size-3" />} disabled={busy || compileBusy || compilePending || !onCompile} onClick={() => onCompile?.(undefined, item.id)}>{t("director.atomic.compileOneClip", { clip: t("director.studio.clipNumber", { number: clips.findIndex(clip => String(clip.id) === item.id) + 1 }) })}</Button></div>} />)}
             </div>}
             {sceneFilter && !clipEditorScope.editable && <Alert type="info" showIcon message={t("director.atomic.clipPartitionScopeHint")} />}
+            {renderClipFields && <div className="space-y-4" data-clip-source-list>{clipEditorSegments.map(segment => {
+                const clipId = String(segment.id), index = clips.findIndex(item => String(item.id) === clipId);
+                const members = shots.filter(shot => clipShotIds(segment).includes(String(shot.id)));
+                const state = visibleClipStates.find(item => item.id === clipId);
+                return <section key={clipId} data-production-clip-id={clipId} className="storyboard-clip-group" ref={element => { if (element) clipCardRefs.current.set(clipId, element); else clipCardRefs.current.delete(clipId); }}>
+                    <header className="storyboard-clip-heading flex flex-wrap items-center justify-between gap-3">
+                        <div className="clip-sheet-title"><button type="button" onClick={() => onClip(clipId)}>{clipLabel(index)}</button><div className="clip-sheet-meta"><span>{t("director.atomic.clipSummary", { count: members.length, seconds: formatSeconds(members.reduce((sum, shot) => sum + duration(shot), 0)) })}</span><span>{String(segment.mode || "")}</span></div></div>
+                        <div className="clip-sheet-actions">{state && renderClipStatus(state)}{onLocateClip && productionSegmentRuntimeMatches(canvasNodes as any, clipId).length === 1 && <Button size="small" type="text" icon={<ArrowUpRight className="size-3.5" />} title={t("director.atomic.locateClip")} onClick={() => onLocateClip(clipId)}>H3</Button>}</div>
+                    </header>
+                    {renderClipFields(segment)}
+                </section>;
+            })}</div>}
             {clipEditor(clipEditorScope)}
         </div> : !shots.length ? <div className="space-y-3"><p className="text-sm text-muted-foreground">{t("director.workspace.noShots")}</p>{subjectAssembly && onEditShot && <ShotOperations source={source} busy={busy} onEdit={onEditShot} onSelect={selectShot} />}</div> : <>
             <div className="storyboard-columns">

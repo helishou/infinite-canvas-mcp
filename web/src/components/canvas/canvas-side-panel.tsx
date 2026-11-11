@@ -1,5 +1,5 @@
 import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
-import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { App, Drawer, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -50,6 +50,7 @@ type Props = {
     selectedNodeIds: Set<string>;
     onFocusNode: (nodeId: string) => void;
     onPreviewNode: (nodeId: string) => void;
+    onNodeContextMenu: (event: ReactMouseEvent, nodeId: string) => void;
     onInsertAsset: (payload: InsertAssetPayload) => void;
 };
 
@@ -73,7 +74,7 @@ const STATUS_COLOR: Record<string, string> = {
     idle: "transparent",
 };
 
-export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onInsertAsset, onSelectionChange }: Props) {
+export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes, selectedNodeIds, onFocusNode, onPreviewNode, onNodeContextMenu, onInsertAsset, onSelectionChange }: Props) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [tab, setTab] = useState<PanelTab>("canvas");
@@ -130,7 +131,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={focusFromDirectory} onPreviewNode={onPreviewNode} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
+                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={focusFromDirectory} onPreviewNode={onPreviewNode} onNodeContextMenu={onNodeContextMenu} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={insertFromDirectory} theme={theme} />
                     ) : (
@@ -197,7 +198,7 @@ function imageCoverForNode(node: CanvasNodeData) {
     return undefined;
 }
 
-const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, theme, focusSearchRequest }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; theme: CanvasTheme; focusSearchRequest: number }) {
+const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, onNodeContextMenu, theme, focusSearchRequest }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; onNodeContextMenu: Props["onNodeContextMenu"]; theme: CanvasTheme; focusSearchRequest: number }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
     const registryVersion = useNodeRegistryVersion((state) => state.version);
@@ -330,7 +331,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                             const isChecked = checked.has(node.id);
                             const active = selectMode ? isChecked : selectedNodeIds.has(node.id);
                             if (nodeViewMode === "grid") return (
-                                <button key={node.id} type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id)} onDoubleClick={() => onPreviewNode(node.id)} className="absolute top-0 flex flex-col gap-1 rounded-lg p-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5" style={{ left: `${virtualRow.lane * 100 / gridColumns}%`, width: `${100 / gridColumns}%`, height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
+                                <button key={node.id} type="button" data-canvas-node-row={node.id} onContextMenu={(event) => onNodeContextMenu(event, node.id)} aria-pressed={isChecked} onClick={(event) => selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id)} onDoubleClick={() => onPreviewNode(node.id)} className="absolute top-0 flex flex-col gap-1 rounded-lg p-1.5 text-left hover:bg-black/5 dark:hover:bg-white/5" style={{ left: `${virtualRow.lane * 100 / gridColumns}%`, width: `${100 / gridColumns}%`, height: virtualRow.size, transform: `translateY(${virtualRow.start}px)`, ...(active ? { background: theme.toolbar.activeBg } : {}) }}>
                                     <span className="relative grid h-[96px] w-full place-items-center overflow-hidden rounded-md">
                                         {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-6 opacity-60" />}
                                         {selectMode ? <span className="absolute left-1 top-1"><CheckMark checked={isChecked} theme={theme} /></span> : null}
@@ -347,7 +348,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                             <ChevronRight className={cn("size-3.5 transition-transform", !collapsedGroups.has(node.id) && "rotate-90")} />
                                         </button>
                                     ) : null}
-                                    <button type="button" data-canvas-node-row={node.id} aria-pressed={isChecked} onClick={(event) => (selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.navigation.rowHint")}>
+                                    <button type="button" data-canvas-node-row={node.id} onContextMenu={(event) => onNodeContextMenu(event, node.id)} aria-pressed={isChecked} onClick={(event) => (selectMode || event.ctrlKey || event.metaKey ? toggleChecked(node.id) : onFocusNode(node.id))} className={cn("flex min-w-0 flex-1 items-center gap-3 py-2 pr-2 text-left", node.type === CanvasNodeType.Group && hasChildren ? "pl-0" : "pl-2")} title={selectMode ? undefined : t("canvas.navigation.rowHint")}>
                                         {selectMode ? <CheckMark checked={isChecked} theme={theme} /> : null}
                                         <span className="grid size-10 shrink-0 place-items-center overflow-hidden rounded-md">
                                             {hasImageCover || isCharacter || isScene || isProp ? <CanvasNodeCover node={node} /> : <Icon className="size-5 opacity-60" />}

@@ -86,6 +86,9 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
             // videoContinuation 必须显式传给制作台：漏传会被后端按缺省写成 false，
             // 表现为开关点击后永远弹回关闭（2026-11-08 修复）。
             const videoContinuation = Object.hasOwn(patch, "videoContinuation") ? patch.videoContinuation === true : selected?.videoContinuation === true;
+            // 画布侧先落（放开后正式 Clip 也接受续接编辑），再写回制作稿边界：
+            // 两侧保存同一组三选一开关，任一侧修改后另一侧刷新即读到同值。
+            patchSettings(patch);
             void setBoundary({ nodeId: ctx.node.id, segmentId: String(selected?.id || ""), tailFrameContinuation, motionContextEnabled, videoContinuation })
                 .then(result => { if (!result.sourceSaved) message.error("制作台未保存续段衔接设置。"); })
                 .catch(error => message.error(error instanceof Error ? error.message : String(error)));

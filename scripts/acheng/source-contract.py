@@ -41,6 +41,7 @@ def contract():
     return {
         "contractVersion": "2", "promptAssemblyVersions": [2], "ref2vaMaximumWords": None, "scopedCompilation": True,
         "jsonSchema": {"type": "object", "properties": {
+            "background_music_enabled": {"type": "boolean", "default": False, "description": "Background score is disabled unless explicitly enabled. Disabled or absent always compiles non_diegetic_music as N/A."},
             "storyboard_policy": {"type": "object", "properties": {"version": {"type": "integer", "enum": [1]}}, "required": ["version"]},
             "prompt_assembly": {"type": "object", "properties": {"version": {"type": "integer", "enum": [2]}}, "required": ["version"]},
             "subject_registry": {"type": "array", "items": {"type": "object", "required": ["id", "entityRef", "pictureBindings"]}},

@@ -671,6 +671,8 @@ export const clipGroupSchema = z.object({
 });
 
 export const productionSettingsSchema = z.object({
+    /** Explicit opt-in; absent legacy settings compile without background music. */
+    backgroundMusicEnabled: z.boolean().optional().describe("Off by default. Enable only when the user explicitly requests background scoring; otherwise compile non_diegetic_music as N/A."),
     parallelScenes: z.boolean().optional(),
     reviewPolicy: directorReviewPolicySchema.default(defaultDirectorReviewPolicy),
     videoAspectRatio: z.string().regex(/^[1-9]\d*:[1-9]\d*$/).nullable().optional(),
@@ -688,6 +690,7 @@ export const productionSettingsSchema = z.object({
 });
 
 export const dramaProductionPlanSchema = z.object({
+    backgroundMusicEnabled: productionSettingsSchema.shape.backgroundMusicEnabled,
     parallelScenes: productionSettingsSchema.shape.parallelScenes,
     reviewPolicy: directorReviewPolicySchema.default(defaultDirectorReviewPolicy),
     requirements: z.string().default(""),
@@ -866,7 +869,7 @@ export type ProductionEdit = z.infer<typeof productionEditSchema>;
 export type ProductionPublish = z.infer<typeof productionPublishSchema>;
 
 export function emptyEpisodeProduction(): EpisodeProductionData {
-    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {}, reviewPolicy: { ...defaultDirectorReviewPolicy } }, legacyImports: [] };
+    return { scenes: [], shots: [], keyframes: {}, keyframeReviews: {}, clipGroups: [], settings: { backgroundMusicEnabled: false, mode: "manual", imageModel: "", h3Model: "", imageModels: {}, imageModelsByKind: {}, h3Models: {}, reviewPolicy: { ...defaultDirectorReviewPolicy } }, legacyImports: [] };
 }
 
 /** The H3 storyboard slot is a projection of this authored Shot keyframe. */

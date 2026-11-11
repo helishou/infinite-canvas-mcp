@@ -16,6 +16,7 @@ import { H3_LIST_MODELS_TOOL, H3_GET_CLIP_TOOL, H3_GET_CLIP_RUNTIME_TOOL, H3_UPD
 import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
 import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
 import { readClipResult } from "./clip-result.js";
+import { CONTINUATION_FIELDS, syncContinuationBoundaries } from "./continuation-sync.js";
 
 // H3 片段(节点 metadata.segments 中的元素)
 type H3Segment = Record<string, unknown>;
@@ -86,7 +87,10 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
         for (const key of ["title", "prompt"]) if (Object.hasOwn(patch, key) && typeof patch[key] !== "string") throw new Error(`Clip ${segmentId} 的 ${key} 必须为字符串`);
         for (const key of ["referenceBindings", "subjects", "timeline"]) if (Object.hasOwn(patch, key) && !Array.isArray(patch[key])) throw new Error(`Clip ${segmentId} 的 ${key} 必须为数组`);
         validateH3Edit(patch);
-        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots", "storyboardInput", "tailFrameContinuation", "motionContextEnabled", "videoContinuation"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
+        // 续接配置（尾帧参考 / Motion Context / 视频续写）是正式 Clip 允许人工编辑的字段：
+        // 画布与制作台两侧都能改，重新编译时按三方合并保留人工值（见 mergeDirectorInput）。
+        // 编译身份、正文、参考与分镜仍由源稿投影，继续拒绝在画布直接改。
+        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots", "storyboardInput"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
         assertH3ClipPatch(project, target, patch, true);
         operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
         entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch), ...(edited ? { editSummary: edited.summary } : {}) });
@@ -413,6 +417,31 @@ function segmentsOf(node: AgentCanvasNode): H3Segment[] {
 
 function recordOf(value: unknown): Record<string, unknown> {
     return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+/**
+ * 画布侧改了正式 Clip 的续接配置后，把结果写回制作台源稿 boundary。
+ * 只读画布已提交的结果，不重复读整稿；未涉及续接字段时完全跳过。
+ */
+async function syncContinuationAfterCommit(
+    context: PluginMcpContext,
+    projectId: string,
+    segments: H3Segment[],
+    entries: Array<Record<string, unknown>>,
+    operationId: string,
+    signal?: AbortSignal,
+) {
+    const fields = (entry: Record<string, unknown>) => Array.isArray(entry.updatedFields) ? entry.updatedFields.map(String) : [];
+    const touched = entries.filter(entry => fields(entry).some(field => (CONTINUATION_FIELDS as readonly string[]).includes(field)));
+    if (!touched.length) return undefined;
+    const receipt = await syncContinuationBoundaries(context.backend, {
+        projectId,
+        segments: segments as unknown as Array<Record<string, unknown>>,
+        segmentIds: touched.map(entry => String(entry.segmentId || "")),
+        operationId,
+        signal,
+    });
+    return receipt.boundaries.length || receipt.skipped.length || receipt.error ? receipt : undefined;
 }
 
 function activeImageOf(node: AgentCanvasNode) {
@@ -1330,8 +1359,10 @@ export const pluginMcp: PluginMcpModule = {
                         // Preparation diffs stay in the preparation receipt, not in every commit/replay receipt.
                         return { segmentId: entry.segmentId, segmentIndex: entry.segmentIndex, updatedFields: entry.updatedFields, ...committedH3Fields(segment, entry.updatedFields) };
                     });
+                    const continuationBoundary = await syncContinuationAfterCommit(context, projectId, refreshed, plan.entries, plan.operationId, request?.signal);
                     return { ok: true, atomic: true, dryRun: false, applied: true, valueSource: "committed", projectId, nodeId, preparedId: input.preparedId,
-                        operationId: plan.operationId, replayed: result.duplicated === true, revision: result.revision, count: items.length, items };
+                        operationId: plan.operationId, replayed: result.duplicated === true, revision: result.revision, count: items.length, items,
+                        ...(continuationBoundary ? { continuationBoundary } : {}) };
                 }
                 const operationId = String(input.operationId || "");
                 if (!operationId) throw Object.assign(new Error("内联更新必须提供稳定 operationId"), { code: "INVALID_INPUT" });
@@ -1384,9 +1415,13 @@ export const pluginMcp: PluginMcpModule = {
                 receiptPreview = recordOf(frozen.receipt);
                 }
                 const result = await context.backend.applyCanvasOperations(projectId, operations, revision, operationId, true, identity, request?.signal);
+                const committedNode = (Array.isArray(result.project.nodes) ? result.project.nodes : []).find((value) => (value as Record<string, unknown>).id === nodeId) as AgentCanvasNode | undefined;
+                const continuationBoundary = committedNode
+                    ? await syncContinuationAfterCommit(context, projectId, segmentsOf(committedNode), entries, operationId, request?.signal)
+                    : undefined;
                 const committed = await context.backend.getMcpCommandReceipt(operationId, request?.signal);
-                if (committed.command?.status === "committed") return { ...recordOf(committed.command.receipt), projectId, revision: committed.command.committedRevision, replayed: result.duplicated === true };
-                return { ...receiptPreview, ok: true, committed: true, operationId, replayed: result.duplicated === true, projectId, revision: result.revision, segmentIds: entries.map(entry => String(entry.segmentId)) };
+                if (committed.command?.status === "committed") return { ...recordOf(committed.command.receipt), projectId, revision: committed.command.committedRevision, replayed: result.duplicated === true, ...(continuationBoundary ? { continuationBoundary } : {}) };
+                return { ...receiptPreview, ok: true, committed: true, operationId, replayed: result.duplicated === true, projectId, revision: result.revision, segmentIds: entries.map(entry => String(entry.segmentId)), ...(continuationBoundary ? { continuationBoundary } : {}) };
             },
             h3_move_clip: async (input) => {
                 const projectId = String(input.projectId || "");

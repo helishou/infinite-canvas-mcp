@@ -11,7 +11,7 @@ import { Alert, App, Button, Input, InputNumber, Modal, Radio, Select, Switch, T
 import { ArrowRight, ArrowLeft, ArrowUp, ArrowDown, ArrowDownToLine, Check, Pause, Play, RotateCcw, WandSparkles, Users, MapPin, Image as ImageIcon, Film, Pencil, BookOpen, Search, ChevronDown, Plus, Trash2, TriangleAlert, Volume2, Share2, Split } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { directorModules, resolveSubjectPictureBindingIds, directorProductionSchema, isSubjectPromptAssembly, canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
-import { backendMediaUrl, fetchBackendGenerationLogs, fetchProductionWorkbench, type BackendGenerationLog, type ProductionCompilationDiagnostic, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
+import { backendMediaUrl, fetchBackendGenerationLogs, fetchBackendH3Defaults, fetchProductionWorkbench, type BackendGenerationLog, type ProductionCompilationDiagnostic, type ProductionTarget, type ProductionSceneAction, type BackendRuntimeTask, type EpisodeProduction, type ProductionBatch, type ProductionReadiness } from "@/services/backend-api";
 import { nanoid } from "nanoid";
 import { MediaImage } from "@/components/media/media-image";
 import { canvasNodeImage } from "@/lib/canvas/canvas-image-renderability";
@@ -22,7 +22,7 @@ import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { saveAs } from "file-saver";
 import { ContinuityPanel } from "./continuity-panel";
 import { SceneProductionPanel } from "./scene-production-panel";
-import { H3_STYLE_TEMPLATES } from "../../../../canvas-agent/src/plugins/minimax-h3/style-templates";
+import { clipStyleCatalog } from "./clip-style-options";
 import { subjectShotWindows } from "@basketikun/canvas-agent/drama/subject-assembly";
 import { SubjectShotEditor } from "./subject-shot-editor";
 import { keyframeBindingState } from "./keyframe-binding-state";
@@ -37,6 +37,7 @@ import type { ImageNodeChoice } from "./smart-image-node-options";
 import { createManualDirectorAsset, manualAssetsForSubject, type ManualAssetKind } from "./manual-director-assets";
 import { createManualScriptScene } from "./manual-director-scenes";
 import { readClipPartitionDraft } from "./subject-clip-draft";
+import { ClipSourceFields } from "./clip-source-fields";
 import { storyboardDurationFrames } from "./storyboard-display";
 import { productionOverviewMedia } from "./production-overview-media";
 import { useReferenceResultVersion } from "./use-reference-result-version";
@@ -575,6 +576,7 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
 }) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+
   const [saving, setSaving] = useState(false);
   const adjacency = (left: Record<string, any>, right: Record<string, any>) => `${left.id}\0${right.id}`;
   const initialCuts = () => {
@@ -732,6 +734,29 @@ export function DirectorPanel({
 }) {
   const { t } = useTranslation();
   const { message } = App.useApp();
+  const [h3StyleDefaults, setH3StyleDefaults] = useState<Record<string, unknown>>({});
+  const styleCatalog = useMemo(() => clipStyleCatalog(h3StyleDefaults, (key, options) => t(key, options)), [h3StyleDefaults, t]);
+  useEffect(() => {
+    let active = true, version = 0;
+    const read = async () => {
+      const requestVersion = ++version;
+      try { const settings = await fetchBackendH3Defaults(); if (active && version === requestVersion) setH3StyleDefaults(settings); }
+      catch { /* Preserve the last confirmed names until Backend reconnects. */ }
+    };
+    const updated = (event: Event) => {
+      const settings = (event as CustomEvent<Record<string, unknown>>).detail;
+      if (settings && typeof settings === "object" && !Array.isArray(settings)) { version++; setH3StyleDefaults(settings); }
+    };
+    const backendUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+      if (detail?.type === "settings.updated" && detail.entityId === "plugin:minimax-h3:defaults:v1") void read();
+    };
+    void read();
+    window.addEventListener("minimax-h3-defaults-updated", updated);
+    window.addEventListener("backend-connected", read);
+    window.addEventListener("backend-event", backendUpdated);
+    return () => { active = false; window.removeEventListener("minimax-h3-defaults-updated", updated); window.removeEventListener("backend-connected", read); window.removeEventListener("backend-event", backendUpdated); };
+  }, []);
   const [activeSceneKey, setActiveSceneKey] = useState('');
   const [sceneSplitDraft, setSceneSplitDraft] = useState<DirectorSceneSplitDraft | null>(null);
   const [sceneSplitPending, setSceneSplitPending] = useState(false);
@@ -1098,6 +1123,18 @@ export function DirectorPanel({
       readySegments: items.filter(item => item.kind === "segment" && item.status === "ready").length,
     };
   }, [readiness?.targets]);
+  const sceneCapacity = useMemo(() => {
+    const entries = productionSceneEntries(source);
+    if (entries.length < 2) return [];
+    const readyIds = new Set((readiness?.targets || []).filter(item => item.kind === "segment" && (item.status === "ready" || item.status === "complete")).map(item => item.targetId));
+    return entries.map(entry => {
+      const shotSet = new Set(entry.shotIds);
+      const sceneSegs = segments.filter(seg => Array.isArray(seg.shot_ids) && seg.shot_ids.some((id: string) => shotSet.has(String(id))));
+      const compiled = sceneSegs.filter(seg => readyIds.has(String(seg.id || ""))).length;
+      const generated = sceneSegs.filter(seg => { const match = productionSegmentRuntimeMatches(canvasNodes as any, String(seg.id || "")); return match.length > 0 && Boolean(match[0].segment.resultStorageKey); }).length;
+      return { id: entry.id, title: entry.title, total: sceneSegs.length, compiled, generated };
+    }).filter(row => row.total > 0);
+  }, [source, segments, readiness?.targets, canvasNodes]);
   const presentation = readiness?.presentation;
   const presentationTarget = presentation?.targetId ? readiness?.targets.find(item => item.targetId === presentation.targetId && (!presentation.targetKind || item.kind === (presentation.targetKind === "frame" ? "keyframe" : presentation.targetKind))) : undefined;
   const presentationWorkspace = (presentation?.workspace || "overview") as DirectorWorkspace;
@@ -1431,6 +1468,7 @@ export function DirectorPanel({
         <div className="flex flex-wrap gap-2"><Tag>{t("director.workspace.targetKind.asset")} · {t("director.workspace.targetStatus.ready")}: {readinessCounts.readyAssets}</Tag><Tag>{t("director.workspace.targetKind.keyframe")} · {t("director.workspace.targetStatus.ready")}: {readinessCounts.readyKeyframes}</Tag><Tag>{t("director.workspace.targetKind.segment")} · {t("director.workspace.targetStatus.ready")}: {readinessCounts.readySegments}</Tag></div>
         <span className="text-muted-foreground">{t("director.atomic.counts", { shots: sourceShots.length, clips: segments.length, seconds: formatSeconds(sourceShots.reduce((sum, shot) => sum + storyboardDurationFrames(shot) / fps, 0)) })}</span>
       </section>
+      {sceneCapacity.length > 0 && <section className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground" data-overview-scene-capacity>{sceneCapacity.map(row => <span key={row.id} title={t("director.workspace.sceneCapacityHint", { total: row.total, compiled: row.compiled, generated: row.generated })}><strong className="font-medium text-foreground">{row.title}</strong> {t("director.workspace.sceneCapacity", { total: row.total, compiled: row.compiled, generated: row.generated })}</span>)}</section>}
       <div className="grid min-w-0 items-start gap-4 lg:grid-cols-2" data-overview-workspaces>
         <section className="min-w-0" aria-label={t("director.workspace.overview.objectStatus")}>
           {objectRows.map(row => <button key={row.key} type="button" aria-current={row.current ? "page" : undefined} onClick={() => row.firstBlockedTarget ? openManualTarget(row.firstBlockedTarget) : onNavigate(row.key)} title={humanMessage(row.summary)} className={`flex w-full items-center gap-3 border-b border-border px-2 py-2.5 text-left transition-colors last:border-b-0 ${row.current ? "bg-muted/40" : "hover:bg-muted/30"}`}>
@@ -2060,6 +2098,7 @@ export function DirectorPanel({
   const renderShots = (activeView: "shots" | "clips" = "shots") => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} activeView={activeView} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
       initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onToggleClipLock={toggleClipLock} shotDrafts={sourceDrafts}
+      renderClipFields={segment => <ClipSourceFields key={String(segment.id)} segment={segment} musicEnabled={production.draft.settings.backgroundMusicEnabled === true} busy={busy || readOnly} names={nameMap} sourceDrafts={sourceDrafts} onDraftChange={onSourceDraftChange} onSave={async patch => onPatch("segment", String(segment.id), patch)} settings={renderSegmentStyle(segment, true)} />}
       shotKeyframe={frameForShot}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
       renderShotState={shot => renderShotState(shot)}
@@ -2134,6 +2173,7 @@ export function DirectorPanel({
       <label className="mb-2 block text-sm font-medium">{t('director.workspace.videoAspectRatio')}</label>
       <Select className="min-w-48" disabled={busy} value={production.draft.settings.videoAspectRatio || ''} onChange={value => onSettings({ videoAspectRatio: value || null, videoAspectRatioConfirmed: true })} options={['', '9:16', '16:9', '1:1', '4:3', '3:4', '2:3', '3:2', '21:9'].map(value => ({ value, label: value || t('director.workspace.inheritVideoAspectRatio') }))} />
       <p className="mt-2 text-xs text-muted-foreground">{t('director.workspace.videoAspectRatioHint')}</p>
+      <div className="mt-4 border-t border-border pt-4"><label className="flex items-center justify-between gap-3 text-sm"><span>{t("director.studio.backgroundMusic")}</span><Switch aria-label={t("director.studio.backgroundMusic")} checked={production.draft.settings.backgroundMusicEnabled === true} disabled={busy || readOnly} onChange={backgroundMusicEnabled => onSettings({ backgroundMusicEnabled })} /></label><p className="mt-2 text-xs text-muted-foreground">{t("director.studio.backgroundMusicHint")}</p></div>
     </section>
     {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2" data-production-spec-settings aria-label={t("director.workspace.productionSpec")}>
       <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.fps")}</span><div className="flex items-center gap-2"><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_num ?? 24)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_num: value }); }} /><span className="text-xs text-muted-foreground">/</span><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_den ?? 1)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_den: value }); }} /></div></label>
@@ -2218,15 +2258,17 @@ export function DirectorPanel({
     </>}
   </div>;
 
-  const renderSegmentStyle = (segment: Record<string, any>) => {
+  const renderSegmentStyle = (segment: Record<string, any>, compact = false) => {
     const runtime = clipRuntime(String(segment.id));
     const clip = runtime?.segment;
     const styleDeclared = clip ? clip.productionClipProjection?.styleTemplateDeclared === true || clip.h3ParameterOverrides?.includes("styleTemplateId") : Object.hasOwn(segment, "styleTemplateId");
     const sourceStyle = segment.styleTemplateId ?? null;
     const liveStyle = clip?.styleTemplateId ?? null;
-    const disabled = busy;
-    const styleName = (value: string | null) => value ? t(`director.workspace.clipStyleNames.${value}`) : t("director.workspace.clipStyleNone");
-    return <div className="mt-3 space-y-2" data-production-clip-style={segment.id}><label className="flex flex-wrap items-center gap-3 text-sm"><span>{t("director.workspace.clipStyle")}</span><Select className="w-56 max-w-full" aria-label={t("director.workspace.clipStyle")} value={styleDeclared ? (clip ? liveStyle : sourceStyle) || "" : "__inherit__"} disabled={disabled} options={[...(!styleDeclared ? [{ value: "__inherit__", label: t("director.workspace.clipStyleInherit"), disabled: true }] : []), { value: "", label: styleName(null) }, ...H3_STYLE_TEMPLATES.map(template => ({ value: template.id, label: styleName(template.id) }))]} onChange={value => { if (value !== "__inherit__") { if (onEditCanvasClip && runtime?.node.id && runtime.segment.id) void onEditCanvasClip(runtime.node.id, String(runtime.segment.id), { styleTemplateId: value || null }); else void onPatch("segment", segment.id, { styleTemplateId: value || null }); } }} /></label><p className="text-xs text-muted-foreground">{t("director.workspace.clipStyleHint")}</p>{clip && liveStyle !== sourceStyle && onAdoptClipStyle && <Button size="small" disabled={disabled} onClick={() => { void onAdoptClipStyle(segment.id, liveStyle); }}>{t("director.workspace.adoptClipStyle", { style: styleName(liveStyle) })}</Button>}</div>;
+    const disabled = busy || readOnly;
+    const styleName = styleCatalog.name;
+    const currentStyle = clip ? liveStyle : sourceStyle;
+    const styleOptions = [...styleCatalog.options, ...(currentStyle && !styleCatalog.options.some(item => item.value === currentStyle) ? [{ value: currentStyle, label: styleName(currentStyle), disabled: true }] : [])];
+    return <div className="mt-3 space-y-2" data-production-clip-style={segment.id}><label className="flex flex-wrap items-center gap-3 text-sm"><span>{t("director.workspace.clipStyle")}</span><Select className="w-56 max-w-full" aria-label={t("director.workspace.clipStyle")} value={styleDeclared ? (clip ? liveStyle : sourceStyle) || "" : "__inherit__"} disabled={disabled} options={[...(!styleDeclared ? [{ value: "__inherit__", label: t("director.workspace.clipStyleInherit"), disabled: true }] : []), { value: "", label: styleName(null) }, ...styleOptions]} onChange={value => { if (value !== "__inherit__") { if (onEditCanvasClip && runtime?.node.id && runtime.segment.id) void onEditCanvasClip(runtime.node.id, String(runtime.segment.id), { styleTemplateId: value || null }); else void onPatch("segment", segment.id, { styleTemplateId: value || null }); } }} /></label>{!compact && <p className="text-xs text-muted-foreground">{t("director.workspace.clipStyleHint")}</p>}{clip && liveStyle !== sourceStyle && onAdoptClipStyle && <Button size="small" disabled={disabled} onClick={() => { void onAdoptClipStyle(segment.id, liveStyle); }}>{t("director.workspace.adoptClipStyle", { style: styleName(liveStyle) })}</Button>}</div>;
   };
   const inputDiff = (target: { id: string; targetId: string; kind: string }) => {
     const runtime = target.kind === "segment" ? clipRuntime(target.targetId) : undefined;
@@ -2300,6 +2342,7 @@ export function DirectorPanel({
           return <BoundaryCard key={draftKey} from={from} to={to} fromLabel={segmentTitle(from)} toLabel={segmentTitle(to)} boundary={d?.boundaries.find(item => item.from === from && item.to === to)} draftValue={sourceDrafts[draftKey]} onDraftChange={value => onSourceDraftChange(draftKey, value)} disabled={busy} onSave={onBoundary} />;
         })}<Button type="text" size="small" onClick={() => onNavigate("continuity")}>{t("director.studio.viewContinuity")}</Button></div>
       </details>}
+      <ClipSourceFields key={focusedId} segment={focusedSegment} musicEnabled={production.draft.settings.backgroundMusicEnabled === true} busy={busy || readOnly} names={nameMap} sourceDrafts={sourceDrafts} onDraftChange={onSourceDraftChange} onSave={async patch => onPatch("segment", focusedId, patch)} />
       <details className="border-t border-border pt-4" data-clip-complete-source>
         <summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.clipSourceDetails")}</summary>
         <div className="mt-4 space-y-4"><p className="text-xs text-muted-foreground">{t("director.studio.clipSourceHint")}</p><SourceData value={focusedSegment} names={nameMap} />{Boolean(ledger) && <details><summary className="cursor-pointer text-sm text-muted-foreground">{t("director.studio.continuityLedger")}</summary><div className="mt-3"><SourceData value={ledger} names={nameMap} /></div></details>}</div>

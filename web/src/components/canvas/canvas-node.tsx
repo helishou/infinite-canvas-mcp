@@ -28,6 +28,7 @@ import { SmartImageHistoryActions } from "./smart-image-history-actions";
 import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
 import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 import { useCanvasNodeLivePreview, type CanvasNodeLivePreview } from "@/services/canvas-node-live-preview";
+import { productionReadinessStore } from "@/stores/canvas/production-readiness";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 // 选中态取画布主题：浅色 #2f80ff / 深色 #60a5fa。写死亮蓝会让暗色主题下的
@@ -369,6 +370,9 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const generatingBaseFill = `color-mix(in srgb, ${generatingAccent} 16%, ${theme.node.fill})`;
     const borderColor = active ? selectionStroke(theme) : generating ? generatingAccent : isRelated ? theme.node.muted : nodeAccentColor(data, theme);
     const summary = overviewSummary(data);
+    const readinessRollups = useSyncExternalStore(productionReadinessStore.subscribe, productionReadinessStore.getNodeRollupMap);
+    const readiness = !generating && isH3 ? readinessRollups[data.id] : undefined;
+    const readinessColor = readiness === "ready" ? "#22c55e" : readiness === "attention" ? "#f59e0b" : undefined;
 
     return (
         <div
@@ -457,6 +461,15 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                         style={{ width: generatingBadgeSize, height: generatingBadgeSize, background: generatingAccent }}
                     />
                     {showGeneratingPercent ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>{generatingPercent}%</span> : null}
+                </div>
+            ) : null}
+            {readinessColor ? (
+                <div
+                    className="pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full font-medium"
+                    style={{ background: theme.toolbar.panel, color: theme.node.text, padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
+                >
+                    <span aria-hidden="true" className="block shrink-0 rounded-full" style={{ width: generatingBadgeSize, height: generatingBadgeSize, background: readinessColor }} />
+                    {width * scale >= 96 ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>{readiness === "ready" ? "就绪" : "待编译"}</span> : null}
                 </div>
             ) : null}
         </div>

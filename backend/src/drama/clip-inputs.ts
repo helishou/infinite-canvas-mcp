@@ -611,6 +611,21 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     segment.prompt = prompt;
     segment.referenceBindings = normalizedPreflight.bindings;
     segment.referenceOrder = normalizedPreflight.bindings.map(binding => String(binding.id || "")).filter(Boolean);
+    const incomingBoundary = d.boundaries.find(edge => edge.to === group.id && edge.tailFrame === true);
+    if (incomingBoundary) {
+        const prevGroup = published.clipGroups.find(g => g.id === incomingBoundary.from);
+        const prevNode = prevGroup ? nodes.find((n: any) => n.id === prevGroup.nodeId) : undefined;
+        const prevSegment = prevNode && prevGroup?.segmentId ? (object(prevNode.metadata).segments || []).find((s: any) => s.id === prevGroup.segmentId) : undefined;
+        const anchor = object(prevSegment?.tailFrameAnchor);
+        if (anchor.storageKey) {
+            const anchorBinding = { id: stableId("anchor", group.id, String(anchor.storageKey)), assetId: stableId("asset", "tail-anchor", String(anchor.storageKey)),
+                label: `<Picture ${segment.referenceBindings.length + 1}> 尾帧空间锚点`, role: "continuity_anchor", tags: [], enabled: true, usage: "continuity_reference",
+                mediaType: "image", storageKey: String(anchor.storageKey), order: segment.referenceBindings.length, sourceSegmentId: incomingBoundary.from };
+            segment.referenceBindings = [...segment.referenceBindings, anchorBinding];
+            segment.referenceOrder = [...segment.referenceOrder, anchorBinding.id];
+            segment.tailFrameAnchor = { storageKey: String(anchor.storageKey), sourceSegmentId: incomingBoundary.from };
+        }
+    }
     const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
     segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
         promptAssemblyVersion: isSubjectPromptAssembly(d.source) ? 2 : 1, promptSourceMapAvailable: authored.status === "ready" && isSubjectPromptAssembly(d.source) && promptSourceMap.success && promptSourceMap.data.entries.length > 0,

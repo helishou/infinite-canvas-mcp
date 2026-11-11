@@ -4336,8 +4336,19 @@ export class BackendDatabase {
     }
 
     listCanvasTaskModelUsage(): Array<{ model: string; channelId: string; count: number }> {
-        return this.db.prepare(`SELECT model, COALESCE(NULLIF(json_extract(params_json, '$.channelId'), ''), NULLIF(json_extract(stored_json_text(input_json), '$.channelId'), ''), '') AS channelId, COUNT(*) AS count
-            FROM tasks WHERE project_id IS NOT NULL AND model IS NOT NULL AND model != ''
+        // params_json / input_json 可能是旧 TEXT 或 gzip BLOB（大参数经 updateTask 压缩）。
+        // 直接 json_extract(BLOB) 会让 SQLite 抛 malformed JSON，整个统计接口 500。
+        return this.db.prepare(`SELECT model,
+            COALESCE(
+                NULLIF(CASE WHEN json_valid(params) THEN json_extract(params, '$.channelId') END, ''),
+                NULLIF(CASE WHEN json_valid(input) THEN json_extract(input, '$.channelId') END, ''),
+                ''
+            ) AS channelId,
+            COUNT(*) AS count
+            FROM (
+                SELECT model, stored_json_text(params_json) AS params, stored_json_text(input_json) AS input
+                FROM tasks WHERE project_id IS NOT NULL AND model IS NOT NULL AND model != ''
+            )
             GROUP BY model, channelId`).all() as Array<{ model: string; channelId: string; count: number }>;
     }
 
@@ -4352,7 +4363,7 @@ export class BackendDatabase {
         // never become JavaScript object graphs during task-list polling.
         const rows = this.db.prepare(`WITH page AS MATERIALIZED (
             SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
-            CASE WHEN json_valid(params_json) THEN json_extract(params_json, '$.parentTaskId') END AS parent_task_id,
+            CASE WHEN json_valid(stored_json_text(params_json)) THEN json_extract(stored_json_text(params_json), '$.parentTaskId') END AS parent_task_id,
             input_json, result_json FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
         ) SELECT id, kind, status, progress, error, created_at, updated_at, project_id, node_id, segment_id, model,
             parent_task_id, result_json,

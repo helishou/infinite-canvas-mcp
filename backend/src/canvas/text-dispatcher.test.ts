@@ -129,6 +129,7 @@ test("渠道声明仅文本时，带图文本任务在请求模型前失败", as
         },
         settings: { get: () => ({ channels: [{ id: "c", name: "C", baseUrl: "http://127.0.0.1:8000/v1", apiKey: "k", apiFormat: "openai", models: [{ name: "mystery-model", capability: "text", supportsImages: false }] }] }) },
         projects: { get: () => project, applyOperations: () => project },
+        logs: { create: () => ({ id: "log" }), update: () => undefined, list: () => [], get: () => null },
         media: {
             meta: () => ({ storageKey: "image:ref" }),
             read: async () => png,
@@ -170,6 +171,7 @@ test("文本任务完成后原子追加结果节点并连接源配置节点", as
             get: () => project,
             applyOperations: (_id: string, _revision: number, operations: Array<Record<string, unknown>>) => { applied.push(...operations); return project; },
         },
+        logs: { create: () => ({ id: "log" }), update: () => undefined, list: () => [], get: () => null },
         media: { read: () => Buffer.from([0]), store: () => ({ storageKey: "image:stored", url: "/media/stored" }) },
     };
     const dispatcher = new CanvasTextDispatcher({ url: "http://127.0.0.1:17370" } as any, stores, async () => "脸部与服装特征");
@@ -246,6 +248,7 @@ test("取消后提供方迟到成功不回写、不改终态、不继续批量�
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(db.getTask(input.clientTaskId)!.status, "cancelled");
     assert.equal(metadata().status, "cancelled");
+    assert.equal(db.listGenerationLogs({ runtimeTaskId: input.clientTaskId, limit: 1 })[0]?.status, "cancelled");
     assert.equal(calls, 1);
     assert.deepEqual(db.getCanvasProject("p"), before);
 });
@@ -285,6 +288,50 @@ test("插件文本任务通过统一执行器保留本次系统提示词", async
     await settle(db, "plugin-text");
     assert.equal(systemPrompt, "只返回优化后的中文提示词");
     assert.equal(db.getTask("plugin-text")!.status, "succeeded");
+});
+
+test("原生文本任务登记生成日志并在成功时写入输出文本", async (t) => {
+    const { db, stores, dispatcher, input } = liveFixture(t, async () => "日志里的文本");
+    dispatcher.start({ ...input, clientTaskId: "logged-text" });
+    await settle(db, "logged-text");
+    const log = stores.logs.list({ projectId: "p", runtimeTaskId: "logged-text", limit: 1 })[0];
+    assert.ok(log, "原生文本任务应写入生成日志");
+    assert.equal(log.platform, "canvas-text");
+    assert.equal(log.status, "success");
+    assert.equal(log.prompt, "测试");
+    assert.equal(log.nodeId, "source");
+    assert.equal(log.taskMode, "t2t");
+    assert.equal(String((log.outputs[0] || {}).text || ""), "日志里的文本");
+    assert.ok(log.durationMs >= 0);
+});
+
+test("原生文本任务失败时生成日志同步失败并保留错误", async (t) => {
+    const { db, stores, dispatcher, input } = liveFixture(t, async () => { throw new Error("渠道不可用"); });
+    dispatcher.start({ ...input, clientTaskId: "failed-text" });
+    await settle(db, "failed-text");
+    const log = stores.logs.list({ runtimeTaskId: "failed-text", limit: 1 })[0];
+    assert.equal(log?.status, "failed");
+    assert.match(log?.error || "", /渠道不可用/);
+});
+
+test("调用方已登记日志时不再重复写入", async (t) => {
+    const { db, stores, dispatcher, input } = liveFixture(t, async () => "插件结果");
+    dispatcher.start({ ...input, clientTaskId: "plugin-managed-log", params: { generationLogHandled: true } });
+    await settle(db, "plugin-managed-log");
+    assert.equal(stores.logs.list({ runtimeTaskId: "plugin-managed-log", limit: 1 }).length, 0);
+});
+
+test("插件登记的文本任务重试时由 Backend 为新任务补登记日志", async (t) => {
+    let calls = 0;
+    const { db, stores, dispatcher, input } = liveFixture(t, async () => { if (++calls === 1) throw new Error("首次失败"); return "重试结果"; });
+    dispatcher.start({ ...input, clientTaskId: "plugin-log-retry", params: { generationLogHandled: true } });
+    await settle(db, "plugin-log-retry");
+    assert.equal(stores.logs.list({ runtimeTaskId: "plugin-log-retry", limit: 1 }).length, 0);
+    const retried = dispatcher.retry(db.getTask("plugin-log-retry")!);
+    await settle(db, retried.id);
+    const log = stores.logs.list({ runtimeTaskId: retried.id, limit: 1 })[0];
+    assert.equal(log?.status, "success");
+    assert.equal(String((log?.outputs[0] || {}).text || ""), "重试结果");
 });
 
 test("文本结果重试通过 Backend 原位更新目标节点，不重复创建结果", async (t) => {    const { db, dispatcher, input } = liveFixture(t, async () => "原位重试结果");

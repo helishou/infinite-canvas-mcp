@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { AGENT_PROMPT } from "../config.js";
+import { AGENT_PROMPT_FULL } from "../config.js";
 import { createAgentLogWriter } from "../utils/agent-runtime.js";
 import { errorMessage } from "../utils/value.js";
 import type { AgentEmit } from "./types.js";
@@ -15,7 +15,7 @@ export function runClaudeTurn(prompt: string, emit: AgentEmit) {
 
 /** 为 Claude CLI 请求拼接 Canvas Agent 指令。 */
 function withAgentPrompt(prompt: string) {
-    return prompt.trim() ? `${AGENT_PROMPT}\n\n用户请求：${prompt}` : "";
+    return prompt.trim() ? `${AGENT_PROMPT_FULL}\n\n用户请求：${prompt}` : "";
 }
 
 /** 将 Claude CLI 的 JSON Lines 输出转换为 Agent 事件。 */

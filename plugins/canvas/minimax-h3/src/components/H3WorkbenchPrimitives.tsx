@@ -29,10 +29,13 @@ export function requestH3Run(ctx: CanvasNodeContext, all = false, forceRegenerat
     ctx.emit("minimax-h3:run", { nodeId: ctx.node.id, all, forceRegenerate, segmentId: target?.id || targetId });
 }
 
-export function H3StatusBadge({ status, error, onRetry }: { status: string; error: string; onRetry: () => void }) {
+const FAILURE_LAYER_LABELS: Record<string, string> = { connection: "连接", validation: "校验", generation: "生成", archive: "归档", specification: "规格", unknown: "未知" };
+
+export function H3StatusBadge({ status, error, failureLayer, onRetry }: { status: string; error: string; failureLayer?: string; onRetry: () => void }) {
     const [copiedError, setCopiedError] = useState(false);
     if (!status || status === "idle") return null;
-    const label = status === "preparing" ? "正在检查输入并提交…" : status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败：${error || "未知错误"}` : status;
+    const layerTag = status === "error" && failureLayer ? `[${FAILURE_LAYER_LABELS[failureLayer] || failureLayer}] ` : "";
+    const label = status === "preparing" ? "正在检查输入并提交…" : status === "queued" ? "排队中…" : status === "loading" ? "生成中…" : status === "awaiting_confirmation" ? "一采待确认" : status === "success" ? "已完成" : status === "cancelled" ? "已取消" : status === "error" ? `失败${layerTag ? " " + layerTag : "："}${error || "未知错误"}` : status;
     const copyError = async () => {
         const text = error || "未知错误";
         let copied = false;

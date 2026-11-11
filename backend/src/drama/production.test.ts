@@ -29,6 +29,40 @@ function fixture(t: test.TestContext) {
     return { db, dir, file, service };
 }
 
+test("background music defaults off and the saved setting owns the compiler source flag", async (t) => {
+    const { service } = fixture(t);
+    assert.equal(service.get("episode").draft.settings.backgroundMusicEnabled, false);
+    await service.edit("episode", { operationId: "music-seed", expectedRevision: 0, ops: [{ type: "set_director_brief", brief: "A quiet scene with dialogue and footsteps." }] });
+    const before = service.get("episode");
+    assert.notEqual(before.draft.director?.source.background_music_enabled, true);
+    const originalScenes = structuredClone(before.draft.director?.source.script_scenes);
+    await service.edit("episode", { operationId: "music-on", expectedRevision: before.revision, ops: [{ type: "set_settings", patch: { backgroundMusicEnabled: true } }] });
+    const enabled = service.get("episode");
+    assert.equal(enabled.draft.settings.backgroundMusicEnabled, true);
+    assert.equal(enabled.draft.director?.source.background_music_enabled, true);
+    const incoming = structuredClone(enabled.draft.director!);
+    incoming.source.background_music_enabled = false;
+    await service.edit("episode", { operationId: "music-source", expectedRevision: enabled.revision, ops: [{ type: "set_director_production", director: incoming }] });
+    assert.equal(service.get("episode").draft.director?.source.background_music_enabled, true);
+    const current = service.get("episode");
+    const request = { operationId: "music-off", expectedRevision: current.revision, ops: [{ type: "set_settings" as const, patch: { backgroundMusicEnabled: false } }] };
+    await service.edit("episode", request);
+    const disabled = service.get("episode");
+    assert.equal(disabled.draft.settings.backgroundMusicEnabled, false);
+    assert.equal(disabled.draft.director?.source.background_music_enabled, false);
+    assert.deepEqual(disabled.draft.director?.source.script_scenes, originalScenes);
+    await service.edit("episode", request);
+    assert.equal(service.get("episode").revision, disabled.revision);
+});
+
+test("new episodes inherit only the explicitly confirmed drama background music choice", (t) => {
+    const { db, service } = fixture(t);
+    const folder = db.listCanvasFolders().find(item => item.id === "drama")!;
+    db.upsertCanvasFolder({ ...folder, outline: "Confirmed outline", expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
+        productionPlan: { requirements: "", imageModel: "", imageModelsByKind: {}, h3Model: "", backgroundMusicEnabled: true, confirmedOutline: "Confirmed outline", confirmedAt: new Date().toISOString() } });
+    assert.equal(service.get("episode").draft.settings.backgroundMusicEnabled, true);
+});
+
 test("current v2 draft remains usable with an older published snapshot, while restoring that snapshot is rejected without mutation", async (t) => {
     const { db, service } = fixture(t);
     await service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });

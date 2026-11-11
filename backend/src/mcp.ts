@@ -124,6 +124,8 @@ async function createBackendMcpInstance(
   const directBackend: PluginMcpBackend = {
     backendUrl: config.url,
     preparedH3Updates,
+    get: (path, signal) => backendApi.get(path, signal),
+    post: (path, body, signal) => backendApi.post(path, body, signal),
     prepareMcpCommand: (input, signal) => backendApi.prepareMcpCommand(input, signal),
     getMcpCommandReceipt: (operationId, signal) => backendApi.getMcpCommandReceipt(operationId, signal),
     checkMcpCommandReceipt: (operationId, identity, signal) => backendApi.checkMcpCommandReceipt(operationId, identity, signal),

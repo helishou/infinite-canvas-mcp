@@ -1813,6 +1813,7 @@ export class EpisodeProductionService {
         const drama = this.db.listCanvasFolders().find(folder => this.projectScope ? folder.sharedAssetCanvasId === episodeId : folder.id === dramaId);
         const plan = drama?.productionPlan;
         if (plan?.confirmedAt && plan.confirmedOutline === drama?.outline) Object.assign(draft.settings, {
+            backgroundMusicEnabled: plan.backgroundMusicEnabled === true,
             ...(plan.parallelScenes !== undefined ? { parallelScenes: plan.parallelScenes } : {}),
             ...(plan.reviewPolicy ? { reviewPolicy: structuredClone(plan.reviewPolicy) } : {}),
             imageModel: plan.imageModel, imageModelsByKind: structuredClone(plan.imageModelsByKind), h3Model: plan.h3Model,
@@ -4171,7 +4172,7 @@ export class EpisodeProductionService {
 
     private initializeDirector(data: EpisodeProductionData, brief: string, initialScriptScenes?: Record<string, unknown>[]) {
         const runtime = resolveAchengEngine();
-        const source = { version: 2, prompt_assembly: { version: 2 }, brief, fps_num: 24, fps_den: 1,
+        const source = { version: 2, prompt_assembly: { version: 2 }, background_music_enabled: data.settings.backgroundMusicEnabled === true, brief, fps_num: 24, fps_den: 1,
             script_scenes: initialScriptScenes || [], shots: [], utterances: [], subject_registry: [],
             character_registry: [], scene_registry: initialScriptScenes?.length ? [{ id: String(initialScriptScenes[0].scene_id || initialScriptScenes[0].id), name: String(initialScriptScenes[0].scene_name || initialScriptScenes[0].scene_id || initialScriptScenes[0].id), location: String(initialScriptScenes[0].location || ""), time_of_day: String(initialScriptScenes[0].time_of_day || "") }] : [], asset_plan: [], asset_cards: [], segments: [],
             ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] } };
@@ -4402,7 +4403,7 @@ export class EpisodeProductionService {
                     const deferShotClipProjection = Boolean(options.shotDependencyFreeEdit
                         && !options.overwriteCompiledPromptTargets?.size && !options.forceBoundaryTargets?.size);
                     const { sceneOperations, clips } = measure("clip_and_scene_projection", () => ({
-                        sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults),
+                        sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults, next.published),
                         clips: deferShotClipProjection
                             ? { operations: [], referenceSync: [] }
                             : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets, options.clipSync?.pending),
@@ -4903,6 +4904,8 @@ export class EpisodeProductionService {
                 if (!trustedManualIds.has(String(normalized.id || normalized.asset_id || ""))) delete normalized.created_by;
                 return normalized;
             });
+            // The source flag is a compiler projection of the saved production setting.
+            if (draft.settings.backgroundMusicEnabled === true || Object.hasOwn(incoming.source, "background_music_enabled")) incoming.source.background_music_enabled = draft.settings.backgroundMusicEnabled === true;
             incoming.sourceHash = directorHash(incoming.source);
             const existing = draft.director;
             if (existing) {
@@ -6009,6 +6012,11 @@ export class EpisodeProductionService {
             for (const shotId of shotIds) { delete draft.keyframes[shotId]; delete draft.keyframeReviews[shotId]; }
         } else if (op.type === "set_settings") {
             draft.settings = { ...draft.settings, ...op.patch };
+            if (draft.director && Object.hasOwn(op.patch, "backgroundMusicEnabled")) {
+                draft.director.source.background_music_enabled = draft.settings.backgroundMusicEnabled === true;
+                draft.director.sourceHash = directorHash(draft.director.source);
+                projectDirector(draft);
+            }
             if (draft.director && Object.hasOwn(op.patch, "storyboardImageMode")) projectDirector(draft);
         } else if (op.type === "review_keyframe") {
             if (!draft.keyframes[op.shotId]?.storageKey) throw new Error("关键帧没有可访问媒体");

@@ -220,22 +220,27 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const sceneId = sceneByShot.get(shotId); if (!sceneId) continue;
         sceneFrameAssets.set(sceneId, [...(sceneFrameAssets.get(sceneId) || []), shotId]);
     }
-    const sceneGeometry = new Map<string, { position: Position; height: number; width: number; framesTopOffset: number; videoTopOffset: number; videoNodeHeights: number[] }>();
+    const sceneGeometry = new Map<string, { position: Position; height: number; width: number; framesTopOffset: number; videoTopOffset: number; videoLeftOffset: number; videoNodeHeights: number[] }>();
+    const leftColumnWidth = 760, columnGap = 120;
     for (const scene of scenes) {
         const sceneScripts = scriptByScene.get(scene.id) || [], frameShots = sceneFrameAssets.get(scene.id) || [];
         const legacyGroupId = productionLayoutStableId("production-scene", owner.id, scene.id), groupNode = nodeById.get(legacyGroupId), priorGroup = oldUnits.get(`scene:${scene.id}`);
         const groupPosition = groupNode?.position ? { x: Number(groupNode.position.x), y: Number(groupNode.position.y) } : priorGroup?.bounds.position || { x: 0, y: sceneY };
         const framesTopOffset = 70 + sceneScripts.length * 380 + (frameShots.length ? 40 : 0);
-        const frameBottomOffset = frameShots.length ? framesTopOffset + Math.ceil(frameShots.length / 3) * 1000 + 780 : framesTopOffset;
-        const videoTopOffset = frameBottomOffset + 120;
+        const frameBottomOffset = frameShots.length ? framesTopOffset + frameShots.length * 1000 + 780 : framesTopOffset;
+        const videoTopOffset = 70;
+        const videoLeftOffset = 40 + leftColumnWidth + columnGap;
         const videoHeights = (videoNodesByScene.get(scene.id) || []).map(nodeId => {
             return videoSize(nodeId).height;
         });
         const videoStackHeight = videoHeights.reduce((total, videoHeight) => total + videoHeight, 0) + Math.max(0, videoHeights.length - 1) * 100;
-        const height = Math.max(900, videoHeights.length ? videoTopOffset + videoStackHeight + 80 : frameBottomOffset + 80, sceneScripts.length ? 70 + sceneScripts.length * 380 + 80 : 0);
-        const width = Math.max(2160, ...((videoNodesByScene.get(scene.id) || []).map(nodeId => videoSize(nodeId).width + 80)));
+        const leftHeight = Math.max(frameBottomOffset + 80, sceneScripts.length ? 70 + sceneScripts.length * 380 + 80 : 0);
+        const rightHeight = videoHeights.length ? videoTopOffset + videoStackHeight + 80 : 0;
+        const height = Math.max(900, leftHeight, rightHeight);
+        const maxVideoWidth = Math.max(0, ...(videoNodesByScene.get(scene.id) || []).map(nodeId => videoSize(nodeId).width));
+        const width = Math.max(2160, videoLeftOffset + maxVideoWidth + 40);
         const requiredGroupSize = { width: Math.max(width, size(groupNode?.width, width)), height: Math.max(height, size(groupNode?.height, height)) };
-        sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoNodeHeights: videoHeights });
+        sceneGeometry.set(scene.id, { position: groupPosition, height: requiredGroupSize.height, width: requiredGroupSize.width, framesTopOffset, videoTopOffset, videoLeftOffset, videoNodeHeights: videoHeights });
         // Keep a logical scene anchor in the plan for target lookup and stable
         // scene bounds. Scene groups are no longer materialized onto the canvas.
         const sceneUnit = createUnit(`scene:${scene.id}`, "scene", [`scene:${scene.id}`], scene.id, groupPosition, requiredGroupSize,
@@ -248,7 +253,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         }
         for (let index = 0; index < frameShots.length; index++) {
             const shotId = frameShots[index], assetId = String(inputAssetByShot[shotId]?.keyframeAssetId), nodeId = String(production.keyframes[shotId]?.nodeId || director?.assets[assetId]?.nodeId || productionLayoutStableId("production-asset", owner.id, assetId));
-            const cell = { x: groupPosition.x + 20 + index % 3 * 720, y: groupPosition.y + framesTopOffset + Math.floor(index / 3) * 1000 };
+            const cell = { x: groupPosition.x + 20, y: groupPosition.y + framesTopOffset + index * 1000 };
             const existing = nodeById.get(nodeId), sharedShots = shotsByKeyframeAsset.get(assetId) || [], multiScene = new Set(sharedShots.map(id => sceneByShot.get(id)).filter(Boolean)).size > 1;
             const assetIndex = assetOrder.indexOf(assetId), assetCell = { x: assetIndex % 3 * 720, y: assetAreaTop + Math.floor(assetIndex / 3) * 840 };
             const imagePosition = existing?.position || (multiScene ? { x: assetCell.x + 140, y: assetCell.y + 80 } : { x: cell.x + 140, y: cell.y });
@@ -274,7 +279,7 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
         const sceneVideoIds = sceneId ? videoNodesByScene.get(sceneId) || [] : [];
         const videoIndex = sceneVideoIds.indexOf(nodeId);
         const heightBefore = sceneVideoIds.slice(0, videoIndex).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 100, 0);
-        const preferred = geometry ? { x: geometry.position.x + 40, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) };
+        const preferred = geometry ? { x: geometry.position.x + geometry.videoLeftOffset, y: geometry.position.y + geometry.videoTopOffset + heightBefore } : { x: 0, y: sceneY + videoNodeIds.slice(0, index).reduce((total, priorNodeId) => total + videoSize(priorNodeId).height + 160, 0) };
         const position = existing?.position && geometry && Number(existing.position.x) >= geometry.position.x && Number(existing.position.y) >= geometry.position.y
             && Number(existing.position.x) + videoSize(nodeId).width <= geometry.position.x + geometry.width
             && Number(existing.position.y) + videoSize(nodeId).height <= geometry.position.y + geometry.height
@@ -339,6 +344,6 @@ export function compileProductionLayout({ canvasId, owner, production, project, 
     });
     const structureHash = hash({ entities: productionEntities(director?.source || {}, owner).map(entity => [entity.kind, entity.entityId]), assets: explicitAssets.map(item => [item.id, item.item.kind || item.item.role || "other", item.item.canvas_scope || "", item.item.depends_on || []]), scripts: scripts.map(script => [script.sceneId, script.scriptId]), scenes: scenes.map(scene => [scene.id, scene.shotIds]), frames: Object.entries(inputAssetByShot).map(([id, input]) => [id, input.keyframeAssetId || "", input.keyframePolicy]), clips: production.clipGroups.map(group => [group.id, group.shotIds, group.nodeId || ""]) });
     const geometryHash = hash(fixed.map(node => [node.id, node.position, node.width, node.height]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
-    const body = { schemaVersion: 1, algorithmVersion: "production-layout-v1", canvasId, owner, structureHash, geometryHash, regions, units: planUnits, diagnostics };
+    const body = { schemaVersion: 1, algorithmVersion: "production-layout-v2", canvasId, owner, structureHash, geometryHash, regions, units: planUnits, diagnostics };
     return productionLayoutPlanSchema.parse({ ...body, planHash: hash(body) });
 }

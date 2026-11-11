@@ -570,6 +570,13 @@ def _infer_segment_mode(source, segment):
     return "T2VA"
 
 
+def effective_non_diegetic_music(production, segment):
+    """Background scoring requires an explicit production-level opt-in."""
+    if production.get("background_music_enabled") is not True:
+        return "N/A"
+    return str(segment.get("non_diegetic_music") or "N/A")
+
+
 def adapt_production(production, *, draft=False):
     """Project authored v2 data to the mature H3 packaging schema without writing it back."""
     if (production.get("prompt_assembly") or {}).get("version") != 2:
@@ -1012,7 +1019,7 @@ def adapt_production(production, *, draft=False):
                                      "generation_clip_duration": duration, "style": str(segment.get("style") or ""),
                                      "summary": summary, "references": refs, "subjects": subject_entries,
                                      "overall_soundscape": str(segment.get("overall_soundscape") or "Synchronized dialogue, ambience and action sounds follow the authored shots."),
-                                     "non_diegetic_music": str(segment.get("non_diegetic_music") or "N/A")})
+                                     "non_diegetic_music": effective_non_diegetic_music(source, segment)})
         source_maps[segment_id] = _source_map_inputs(source, segment, shot_ids, windows, subject_uses)
 
     transformed_by_id = {str(item.get("id")): item for item in all_transformed_shots}
@@ -1763,7 +1770,7 @@ def compile_prompt_v2(production, segment, *, draft=False):
     scoped_indexes = [line for line in (presence_index, camera_index) if line]
     detail = "\n".join(scoped_indexes + detail_rows)
     soundscape = str(segment.get("overall_soundscape") or "Synchronized dialogue, ambience and action sounds follow the authored shots.")
-    music = str(segment.get("non_diegetic_music") or "N/A")
+    music = effective_non_diegetic_music(production, segment)
     if mode == "Ref2VA":
         picture_definitions = [str(item.get("definition") or "") for item in references if not item.get("source_only", False)]
         definitions = "\n".join([*picture_definitions, *(str(subject.get("definition") or "") for subject in segment.get("subjects", []))])

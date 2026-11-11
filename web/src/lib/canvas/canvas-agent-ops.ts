@@ -400,18 +400,6 @@ export function computeFlowLayout(opts: {
         result.set(id, size ? { x, y, width: size.width, height: size.height } : { x, y });
     };
 
-    // 没有任何可排布的非停放节点：仅把停放节点纵向堆叠在 anchor 处。
-    if (flowIds.length === 0) {
-        let stackedY = anchorY;
-        ids.filter((id) => parkSet.has(id)).forEach((id) => {
-            const size = sizeOf(id);
-            const pos = resolveFreePosition(nodes, { x: anchorX, y: stackedY }, size.width, size.height, { excludeIds: [id] });
-            put(id, pos.x, pos.y);
-            stackedY = pos.y + size.height + gap;
-        });
-        return result;
-    }
-
     const idSet = new Set(flowIds);
     const scopedEdges = connections.filter((conn) => idSet.has(conn.toNodeId) && (scopeEdges ? idSet.has(conn.fromNodeId) : byId.has(conn.fromNodeId)));
 
@@ -439,7 +427,7 @@ export function computeFlowLayout(opts: {
     // 试过按包围盒面积搜索更优宽度，但会选出「两块并排」这类极端扁长的形状
     // ——面积只小十几个百分点，画布却宽一倍，浏览体验更差，所以不采用。
     const shelfLimit = Math.max(
-        Math.max(...blocks.map((block) => block.width)),
+        Math.max(0, ...blocks.map((block) => block.width)),
         Math.ceil(Math.sqrt(blocks.reduce((sum, block) => sum + block.width * block.height, 0))),
     );
     let shelfY = anchorY;
@@ -459,14 +447,14 @@ export function computeFlowLayout(opts: {
         shelfHeight = Math.max(shelfHeight, block.height);
     });
 
-    // 停放节点：统一放到排布结果的最右列，纵向堆叠（从 anchorY 起，互不重叠，且避让画布上其它节点）。
-    const rightEdge = Math.max(...[...result.entries()].map(([id, pos]) => pos.x + sizeOf(id).width), anchorX) + gap;
+    // 停放节点按本次布局的真实宽高堆叠；不能逐个避让参与整理节点的旧位置，
+    // 否则可能被推回已排好的节点上。选区外障碍在下方对完整结果统一避让。
+    const rightEdge = result.size ? Math.max(...[...result.entries()].map(([id, pos]) => pos.x + sizeOf(id).width)) + gap : anchorX;
     let parkY = anchorY;
-    ids.filter((id) => parkSet.has(id)).forEach((id) => {
+    [...expanded].filter((id) => parkSet.has(id) && byId.has(id) && !wrapperGroups.has(id)).forEach((id) => {
         const size = sizeOf(id);
-        const pos = resolveFreePosition(nodes, { x: rightEdge, y: parkY }, size.width, size.height, { excludeIds: [id] });
-        put(id, pos.x, pos.y);
-        parkY = pos.y + size.height + gap;
+        put(id, rightEdge, parkY);
+        parkY += size.height + gap;
     });
 
     // 组成员已经跟着整批排完，现在让每个承载成员的组重新包住自己的成员 ——

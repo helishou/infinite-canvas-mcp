@@ -42,7 +42,7 @@ export function h3ClipCacheFingerprint(input: {
         "confirmationMode", "latentUpscaleConfirmationMode", "motionContextEnabled", "tailFrameContinuation", "videoContinuation",
         "previousTailFrameContinuation", "previousVideoContinuation", "storyboardCompositeEnabled", "storyboardDurations", "storyboardShots", "styleTemplateId",
     ].filter((key) => segment[key] !== undefined).map((key) => [key, segment[key]]));
-    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
+    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference", "autoAcceptConfirmation"].includes(key)));
     // 同一模板 ID 的正文修订也会改变生成输入，不能复用旧风格的成片。
     const styleTemplateId = segment.styleTemplateId === undefined
         ? styleTemplateFromPrompt(compiledPrompt, String(params.taskMode || params.mode || "ref2va"), styleTemplates)
@@ -61,9 +61,9 @@ export function h3ClipCacheFingerprintV1(input: {
     const dependency = h3ClipDependsOnPrevious(segment, params) ? String(previousFingerprint || "missing") : "independent";
     const segmentInputs = Object.fromEntries(Object.entries(segment).filter(([key]) => ![
         "result", "resultStorageKey", "results", "status", "progress", "runtimeTaskId", "errorDetails",
-        "cacheFingerprint", "firstPassFingerprint", "firstPassReady", "firstPassResult", "firstPassStorageKey",
+        "cacheFingerprint", "firstPassFingerprint", "firstPassReady", "firstPassResult", "firstPassStorageKey", "autoAcceptConfirmation",
     ].includes(key)));
-    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference"].includes(key)));
+    const fingerprintParams = Object.fromEntries(Object.entries(params).filter(([key]) => !["confirmSecondPass", "postGenerationOnly", "previousVideoAsReference", "autoAcceptConfirmation"].includes(key)));
     return stableH3Fingerprint({ version: 1, segment: segmentInputs, params: fingerprintParams, references, compiledPrompt, dependency });
 }
 

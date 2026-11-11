@@ -5,11 +5,12 @@ import { ensureImageSupport } from "@basketikun/canvas-agent/agent/vision-capabi
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { ResolvedConfig } from "../config.js";
-import type { RuntimeTask } from "../db.js";
+import type { GenerationLog, RuntimeTask } from "../db.js";
 import type { Stores } from "../stores/types.js";
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { generationSettingsSnapshot } from "./generation-settings.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasTextReference = {
@@ -53,6 +54,9 @@ export type TextProvider = {
 };
 
 type TextRequest = (provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal) => Promise<string>;
+
+/** 生成日志只展示模型调用设置，节点归属与运行时标记留在任务/日志绑定字段。 */
+const TEXT_LOG_EXCLUDED_PARAMS = new Set(["targetTextNodeId", "nodeId", "segmentId", "generationLogHandled"]);
 
 /**
  * 从 ai.config 解析一次文本调用的渠道与凭据。
@@ -156,14 +160,17 @@ export class CanvasTextDispatcher {
             this.stores.tasks.update(task.id, { status: "failed", error: error instanceof Error ? error.message : String(error) });
             throw error; // 绑定未落库不得调用模型，也不能让恢复流程盲目接管节点。
         }
+        const logId = this.createLog(input, provider.model, provider.reasoningEffort, task);
+        const startedAt = Date.now();
         const controller = new AbortController();
         this.controllers.set(task.id, controller);
-        void this.execute(input, provider, task, controller).catch((error) => {
+        void this.execute(input, provider, task, controller, logId, startedAt).catch((error) => {
             const failure = error instanceof Error ? error : new Error(String(error));
             const current = this.stores.tasks.get(task.id);
             if (current && current.status !== "cancelled" && current.status !== "failed") {
                 this.stores.tasks.update(task.id, { status: "failed", error: failure.message });
                 this.markCanvasFailed(task.id, input, failure.message, false);
+                this.finishLog(logId, "failed", failure.message);
             }
         }).finally(() => this.controllers.delete(task.id));
         return { taskId: task.id, executor };
@@ -171,7 +178,10 @@ export class CanvasTextDispatcher {
 
     retry(task: RuntimeTask) {
         if (task.kind !== "canvas-text") throw new Error(`任务类型 ${task.kind} 不是画布文本任务`);
-        const result = this.start({ ...(task.input as CanvasTextGenerationInput), clientTaskId: `canvas-text-retry-${crypto.randomUUID()}` });
+        const input = task.input as CanvasTextGenerationInput;
+        // 插件只在首次提交时自行登记日志；任务中心重试时由 Backend 为新任务补一条记录。
+        const { generationLogHandled: _generationLogHandled, ...params } = input.params || {};
+        const result = this.start({ ...input, params, clientTaskId: `canvas-text-retry-${crypto.randomUUID()}` });
         const retried = this.stores.tasks.get(result.taskId);
         if (!retried) throw new Error("文本重试任务创建失败");
         this.stores.tasks.addEvent(retried.id, "retry", { parentTaskId: task.id });
@@ -181,6 +191,8 @@ export class CanvasTextDispatcher {
     resume(task: RuntimeTask) {
         if (task.kind !== "canvas-text" || !["queued", "running"].includes(task.status)) return;
         const input = task.input as CanvasTextGenerationInput;
+        const log = this.findLog(task.id);
+        const startedAt = log ? Date.parse(log.startedAt) : Date.parse(task.createdAt);
         let provider: TextProvider;
         try {
             const project = this.canvasTarget(input);
@@ -192,16 +204,18 @@ export class CanvasTextDispatcher {
             const message = error instanceof Error ? error.message : String(error);
             this.stores.tasks.update(task.id, { status: "failed", error: message });
             this.markCanvasFailed(task.id, input, message, false);
+            this.finishLog(log?.id || null, "failed", message);
             return;
         }
         const controller = new AbortController();
         this.controllers.set(task.id, controller);
-        void this.execute(input, provider, task, controller).catch((error) => {
+        void this.execute(input, provider, task, controller, log?.id || null, startedAt).catch((error) => {
             const failure = error instanceof Error ? error : new Error(String(error));
             const current = this.stores.tasks.get(task.id);
             if (current && current.status !== "cancelled" && current.status !== "failed") {
                 this.stores.tasks.update(task.id, { status: "failed", error: failure.message });
                 this.markCanvasFailed(task.id, input, failure.message, false);
+                this.finishLog(log?.id || null, "failed", failure.message);
             }
         }).finally(() => this.controllers.delete(task.id));
     }
@@ -212,10 +226,11 @@ export class CanvasTextDispatcher {
         this.controllers.get(id)?.abort();
         const cancelled = this.stores.tasks.cancel(id);
         this.markCanvasFailed(id, task.input as CanvasTextGenerationInput, "", true);
+        this.finishLog(this.findLog(id)?.id || null, "cancelled");
         return cancelled;
     }
 
-    private async execute(input: CanvasTextGenerationInput, provider: TextProvider, task: RuntimeTask, controller: AbortController) {
+    private async execute(input: CanvasTextGenerationInput, provider: TextProvider, task: RuntimeTask, controller: AbortController, logId: string | null = null, startedAt = Date.now()) {
         this.stores.tasks.update(task.id, { status: "running", progress: 0.05 });
         // 参考图在进入模型前统一归一化（EXIF 转正、限边、限体积），与 Agent 侧共用同一实现。
         const imageDataUrls = await Promise.all((input.references || []).map(async (reference) => normalizeImageDataUrl(await this.referenceDataUrl(reference))));
@@ -231,9 +246,74 @@ export class CanvasTextDispatcher {
             this.stores.tasks.update(task.id, { progress: 0.1 + ((index + 1) / count) * 0.75 });
         }
         this.writeBackCanvasText(task.id, input, contents, provider.model, provider.reasoningEffort);
+        this.updateLog(logId, {
+            status: "success",
+            outputs: contents.map((content, index) => ({ type: "text", text: content, index })),
+            finishedAt: new Date().toISOString(),
+            durationMs: Math.max(0, Date.now() - startedAt),
+        });
         const result = { texts: contents.map((content, index) => ({ index, content })) };
         this.stores.tasks.update(task.id, { status: "succeeded", progress: 1, result });
         this.stores.tasks.addEvent(task.id, "result", result);
+    }
+
+    /** 浏览器脚本/浏览器模型文本任务与原生文本共用同一套生成日志。 */
+    beginExternalLog(task: RuntimeTask) {
+        const input = task.input as CanvasTextGenerationInput;
+        return this.createLog(input, modelOptionName(String(input.model || "")), String(input.params?.reasoningEffort || "auto"), task);
+    }
+
+    completeExternalLog(taskId: string, contents: string[]) {
+        const log = this.findLog(taskId);
+        if (!log || !["queued", "running"].includes(log.status)) return;
+        this.updateLog(log.id, {
+            status: "success",
+            outputs: contents.map((content, index) => ({ type: "text", text: content, index })),
+            finishedAt: new Date().toISOString(),
+            durationMs: Math.max(0, Date.now() - Date.parse(log.startedAt)),
+        });
+    }
+
+    /** 原生文本任务进入画布生成日志；调用方已自行登记（插件翻译/增强提示词）时不重复写入。 */
+    private createLog(input: CanvasTextGenerationInput, model: string, reasoningEffort: string, task: RuntimeTask): string | null {
+        if (!input.projectId || input.params?.generationLogHandled === true) return null;
+        const count = Math.max(1, Math.min(4, Math.floor(Number(input.count || 1))));
+        const settingsParams = Object.fromEntries(Object.entries(input.params || {}).filter(([key]) => !TEXT_LOG_EXCLUDED_PARAMS.has(key)));
+        try {
+            return this.stores.logs.create({
+                projectId: input.projectId,
+                nodeId: input.nodeId,
+                status: "running",
+                platform: "canvas-text",
+                model,
+                taskMode: input.references?.length ? "i2t" : "t2t",
+                prompt: input.prompt,
+                references: (input.references || []).map((reference) => ({ name: reference.name, mimeType: reference.mimeType, storageKey: reference.storageKey })),
+                inputCounts: { references: input.references?.length || 0, count },
+                runtimeTaskId: task.id,
+                startedAt: new Date().toISOString(),
+                durationMs: 0,
+                outputs: [],
+                params: { generationSettings: generationSettingsSnapshot(settingsParams, { count, reasoningEffort }) },
+            }).id;
+        } catch { return null; }
+    }
+
+    private findLog(taskId: string): GenerationLog | null {
+        try { return this.stores.logs.list({ runtimeTaskId: taskId, limit: 1 })[0] || null; } catch { return null; }
+    }
+
+    private updateLog(id: string | null, patch: Partial<Omit<GenerationLog, "id" | "projectId" | "createdAt" | "updatedAt">>) {
+        if (!id) return;
+        try { this.stores.logs.update(id, patch); } catch { /* 日志写入失败不影响生成 */ }
+    }
+
+    private finishLog(logId: string | null, status: "failed" | "cancelled", error?: string) {
+        if (!logId) return;
+        let log: GenerationLog | null;
+        try { log = this.stores.logs.get(logId); } catch { return; }
+        if (log && !["queued", "running"].includes(log.status)) return;
+        this.updateLog(logId, { status, ...(error ? { error } : {}), finishedAt: new Date().toISOString(), durationMs: Math.max(0, Date.now() - (log ? Date.parse(log.startedAt) : Date.now())) });
     }
 
     /**
@@ -335,6 +415,7 @@ export class CanvasTextDispatcher {
 
     markExternalFailed(taskId: string, input: CanvasTextGenerationInput, error: string, cancelled = false) {
         this.markCanvasFailed(taskId, input, error, cancelled);
+        this.finishLog(this.findLog(taskId)?.id || null, cancelled ? "cancelled" : "failed", cancelled ? undefined : error);
     }
 
     private writeBackCanvasText(taskId: string, input: CanvasTextGenerationInput, contents: string[], model: string, reasoningEffort: string) {

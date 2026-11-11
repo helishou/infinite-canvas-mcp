@@ -43,7 +43,7 @@ type H3RunInput = {
 };
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
-type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean };
+type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean; tailFrameAnchor?: { storageKey?: string; sourceSegmentId?: string; capturedAt?: number } };
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; numbering?: import("@basketikun/canvas-agent/drama/production-contract").ProductionNumbering["clips"][number] | null; continuation?: { group: string; index: number } };
 type H3ResumeSeed = { nodeId: string; sourceNodeId: string; group: string; previousIndex: number; sourceParentTaskId: string; sourceChildTaskId: string; sourceSegmentId: string; sourceStorageKey: string; contextParams: Record<string, unknown> };
 type H3RunPlan = { referenceDigests?: Record<string, string>; version: 1; plans: H3Plan[]; project: { nodes: Array<Record<string, unknown>>; referenceCatalog: Array<Record<string, unknown>> }; defaults: Record<string, unknown>; requirements?: import('../stores/types.js').H3ProductionRequirements | null; resumeSeed?: H3ResumeSeed };
@@ -843,6 +843,13 @@ export class CanvasH3Runner {
                 if (h3ConfirmationKind(cache.segment, cache.params) && !secondPass) {
                     const snapshot = confirmation.prepared || {};
                     const waiting: PendingH3 = { nodeId: plan.nodeId, segmentId: plan.segmentId, firstPassFingerprint: cache.fingerprint, firstPassResult: String(output.url || ""), firstPassStorageKey: String(output.storageKey || ""), firstPassChildTaskId: child.id, previousOutput: snapshot };
+                    if (cache.params.autoAcceptConfirmation === true) {
+                        const autoInFlight: NonNullable<H3Confirmation["inFlight"]> = { nodeId: plan.nodeId, segmentId: plan.segmentId, action: "confirm", attempt: 1, childTaskId: h3ChildId(task.id, plan.nodeId, plan.segmentId, "second_pass", 1), postpassParams: { ...cache.params, confirmSecondPass: true } };
+                        task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "running", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "second_pass", confirmation: { ...confirmation, pending: [waiting], inFlight: autoInFlight, cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedOutput() } }, { type: "h3_auto_accepted", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: autoInFlight.childTaskId, fingerprint: cache.fingerprint } })!;
+                        if (!task) throw new Error("H3 自动验收状态冲突");
+                        planIndex--;
+                        continue;
+                    }
                     task = this.stores.tasks.transitionH3(task.id, "running", confirmation.revision, { status: "awaiting_confirmation", progress: Math.min(0.99, (planIndex + 0.5) / plans.length), result: { ...recordOf(task.result), phase: "awaiting_confirmation", confirmation: { ...confirmation, pending: [waiting], cursor: planIndex, prepared: undefined, revision: confirmation.revision + 1 }, media: completedOutput() } }, { type: "first_pass_ready", payload: { nodeId: plan.nodeId, segmentId: plan.segmentId, childTaskId: child.id, fingerprint: cache.fingerprint, output } })!;
                     if (!task) throw new Error("H3 一采暂停状态冲突");
                     this.runningHub.queue.holdForConfirmation?.(task.id);
@@ -872,7 +879,7 @@ export class CanvasH3Runner {
                 }, { type: "h3_completed_with_specification_mismatches", payload: { taskId: finished.id, specificationMismatches: mismatches.map(({ output: _output, ...item }) => item) } })!;
                 if (!task) throw new Error("H3 规格不符收口状态冲突");
                 this.publish(task, "task.failed");
-                this.finishParentNode(task, "error", error);
+                this.finishParentNode(task, "error", error, "specification");
                 this.cancelled.delete(task.id);
                 return;
             }
@@ -1219,8 +1226,10 @@ export class CanvasH3Runner {
             ...audioRefs,
         ];
         let runtimeTaskMode = taskMode;
-        if (previousPath && useTailFrame) {
+        const anchorAlreadyCompiled = Boolean(segment.tailFrameAnchor?.storageKey);
+        if (previousPath && useTailFrame && !anchorAlreadyCompiled) {
             const tail = await this.captureTailFrame(previousPath, `h3-tail-${parent.id}-${plan.segmentIndex}.png`);
+            if (previous?.id) this.patchSegment(input.projectId, plan.nodeId, String(previous.id), { tailFrameAnchor: { storageKey: tail.storageKey, capturedAt: Date.now() } });
             const routed = routeTailFrameInput(taskMode, images, actualReferences, {
                 id: `runtime-tail-${plan.segmentId}`, name: `Clip ${plan.segmentIndex} 尾帧参考`, type: "image", role: "motion_reference", usage: "continuity_reference",
                 runtime: true, sourceSegmentId: previous?.id, resolved: tail.filePath, url: this.stores.media.url(tail), storageKey: tail.storageKey,
@@ -1438,7 +1447,7 @@ export class CanvasH3Runner {
         });
     }
 
-    private finishParentNode(task: RuntimeTask, status: string, error = "") {
+    private finishParentNode(task: RuntimeTask, status: string, error = "", failureLayer = "") {
         const input = normalizeInput(task.input as H3RunInput);
         const project = this.stores.projects.get(input.projectId);
         if (!project) return;
@@ -1455,7 +1464,7 @@ export class CanvasH3Runner {
                 && (segment.parentTaskId || segment.status === "awaiting_confirmation" && segment.runtimeTaskId));
             const operations: CanvasOperation[] = owned.map((segment) => ({
                 type: "update_h3_segment", nodeId: String(node.id), segmentId: String(segment.id),
-                patch: { status, progress: task.progress, runtimeTaskId: "", parentTaskId: "", ...(status === "error" ? { errorDetails: error } : {}) },
+                patch: { status, progress: task.progress, runtimeTaskId: "", parentTaskId: "", ...(status === "error" ? { errorDetails: error, failureLayer } : {}) },
                 ...(status === "cancelled" ? { patchDelete: ["errorDetails"] } : {}),
                 expectedFields: { parentTaskId: task.id },
             }));
@@ -1519,8 +1528,10 @@ export class CanvasH3Runner {
     private fail(id: string, error: unknown) {
         if (this.stores.tasks.get(id)?.status === "cancelled") return;
         const message = error instanceof Error ? error.message : String(error);
-        const task = this.update(id, { status: "failed", error: message });
-        this.finishParentNode(task, "error", message);
+        const failureLayer = classifyH3Failure(message);
+        const current = this.stores.tasks.get(id);
+        const task = this.update(id, { status: "failed", error: message, result: { ...recordOf(current?.result), failureLayer } });
+        this.finishParentNode(task, "error", message, failureLayer);
         this.currentChildren.delete(id);
     }
 
@@ -1678,6 +1689,15 @@ function videoModelReference(reference: Record<string, unknown>) {
 function confirmationOf(task: RuntimeTask): H3Confirmation {
     const value = recordOf(task.result?.confirmation);
     return { cursor: Number(value.cursor || 0), revision: Number(value.revision || 0), pending: Array.isArray(value.pending) ? value.pending as PendingH3[] : [], ...(value.inFlight ? { inFlight: value.inFlight as H3Confirmation["inFlight"] } : {}), ...(value.prepared ? { prepared: value.prepared as H3Confirmation["prepared"] } : {}) };
+}
+
+function classifyH3Failure(message: string): string {
+    if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up|连接.*失败|ComfyUI.*不可达|网络/i.test(message)) return "connection";
+    if (/媒体不存在|回写失败|归档|storage|storeStream|filePath/i.test(message)) return "archive";
+    if (/规格不符|specification|分辨率.*不匹配|尺寸.*不符/i.test(message)) return "specification";
+    if (/验证|validation|参考.*缺少|编译|参数.*不匹配|不匹配.*模式|prompt_outputs|invalid/i.test(message)) return "validation";
+    if (/生成失败|execution|采样|sampling|OOM|CUDA|out of memory/i.test(message)) return "generation";
+    return "unknown";
 }
 
 function h3ChildId(parentId: string, nodeId: string, segmentId: string, phase: string, attempt: number): string {

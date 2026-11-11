@@ -3,7 +3,8 @@
 // Fast Refresh 会沿用旧 fiber 的 hook 链，让 CanvasSurface 后续的 useState 拿到错位槽位并抛
 // "Should have a queue"。此指令让本模块更新时强制重挂载所有使用者，而不是就地刷新。
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import { previewH3Generation, fetchProductionClipNumbers, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
+import { previewH3Generation, fetchProductionClipNumbers, fetchProductionReadiness, fetchBackendH3Defaults, saveBackendH3Defaults, resetBackendH3Defaults } from '@/services/backend-api';
+import { productionReadinessStore, computeNodeReadinessRollup, type ClipReadinessState } from "@/stores/canvas/production-readiness";
 import { useTranslation } from "react-i18next";
 
 import { storeGeneratedVideo } from "@/services/api/video";
@@ -76,6 +77,7 @@ export function usePluginHost(params: PluginHostParams) {
     const { t } = useTranslation();
     const { projectId, effectiveConfig, isAiConfigReady, openConfigDialog, theme, nodes, nodesRef, connectionsRef, viewportRef, setNodes, setDialogNodeId, openAssetPicker, openMediaPreview, applyAgentOps } = params;
     const [clipNumbers, setClipNumbers] = useState<Record<string, number>>({});
+    const [clipReadiness, setClipReadiness] = useState<Record<string, ClipReadinessState>>({});
     const productionOwners = [...new Set(nodes.filter(node => node.metadata?.productionOwnerId).map(node => String(node.metadata?.productionOwnerId)))].sort().join("|");
     // 片段目标集合（新增、删除或重投影 Clip）变化时重新拉取编号；不参与清空判断，避免整排卡片先闪 "?"。
     const productionTargets = [...new Set(nodes.flatMap(node => Array.isArray(node.metadata?.segments)
@@ -89,15 +91,37 @@ export function usePluginHost(params: PluginHostParams) {
         if (productionScopeRef.current !== scope) {
             productionScopeRef.current = scope;
             setClipNumbers({});
+            setClipReadiness({});
+            productionReadinessStore.clear();
         }
         if (!productionOwners) return;
         const refresh = async () => {
             const version = ++requestVersion;
             try {
-                const numbers = await fetchProductionClipNumbers({ projectId });
-                if (active && version === requestVersion) setClipNumbers(numbers);
+                const [numbers, readinessResult] = await Promise.all([
+                    fetchProductionClipNumbers({ projectId }),
+                    fetchProductionReadiness({ projectId }).catch(() => null),
+                ]);
+                if (!active || version !== requestVersion) return;
+                setClipNumbers(numbers);
+                const targetMap: Record<string, ClipReadinessState> = {};
+                const targets = readinessResult?.readiness?.targets;
+                if (Array.isArray(targets)) {
+                    for (const t of targets) {
+                        if (t.kind === "segment" && t.targetId) targetMap[t.targetId] = t.status as ClipReadinessState;
+                    }
+                }
+                setClipReadiness(targetMap);
+                const rollups: Record<string, ReturnType<typeof computeNodeReadinessRollup>> = {};
+                for (const node of nodesRef.current) {
+                    if (!node.metadata?.productionOwnerId) continue;
+                    const segments = node.metadata?.segments as Array<{ productionClipProjection?: { targetId?: string } }> | undefined;
+                    const rollup = computeNodeReadinessRollup(segments, targetMap);
+                    if (rollup) rollups[node.id] = rollup;
+                }
+                productionReadinessStore.set(targetMap, rollups);
             } catch {
-                if (active && version === requestVersion) setClipNumbers({});
+                if (active && version === requestVersion) { setClipNumbers({}); setClipReadiness({}); productionReadinessStore.clear(); }
             }
         };
         const onEvent = (event: Event) => {
@@ -190,7 +214,7 @@ export function usePluginHost(params: PluginHostParams) {
                     references: logMeta.references || [], inputCounts: {}, startedAt: new Date().toISOString(), durationMs: 0, outputs: [], params: {},
                 }).catch(() => null) : null;
                 try {
-                    const task = await observeCanvasGenerationTask({ mode: "text", projectId, model: config.model, prompt, references, count: 1, params: { ...(options?.system ? { systemPrompt: options.system } : {}), ...(logMeta?.nodeId ? { nodeId: logMeta.nodeId } : {}), ...(logMeta?.segmentId ? { segmentId: logMeta.segmentId } : {}), reasoningEffort: config.reasoningEffort } }, signal(options?.signal), "插件文本");
+                    const task = await observeCanvasGenerationTask({ mode: "text", projectId, model: config.model, prompt, references, count: 1, params: { ...(options?.system ? { systemPrompt: options.system } : {}), ...(logMeta?.nodeId ? { nodeId: logMeta.nodeId } : {}), ...(logMeta?.segmentId ? { segmentId: logMeta.segmentId } : {}), reasoningEffort: config.reasoningEffort, ...(log ? { generationLogHandled: true } : {}) } }, signal(options?.signal), "插件文本");
                     const text = String(task.result?.texts?.[0]?.content || "");
                     if (!text) throw new Error("插件文本任务成功但没有返回文本");
                     options?.onDelta?.(text);
@@ -327,9 +351,9 @@ export function usePluginHost(params: PluginHostParams) {
             openAssetPicker,
             openMediaPreview,
             generationLogs,
-            production: { ...createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)), clipNumbers },
+            production: { ...createProductionEditing(projectId, graphAccess.getNode, () => flushCanvasProjectBeforeGeneration(projectId)), clipNumbers, clipReadiness },
         }),
-        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes, clipNumbers],
+        [applyAgentOps, generationLogs, graphAccess, h3Defaults, openAssetPicker, openMediaPreview, pluginAi, projectId, references, setNodes, clipNumbers, clipReadiness],
     );
 
     const renderPluginPanel = useCallback(

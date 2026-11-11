@@ -10,6 +10,19 @@ export function scopedDirector(): DirectorProduction {
     const source = { brief: "confirmed", script_scenes: [{ id: "A", scene_id: "ROOM", beat_ids: ["a"] }, { id: "B", scene_id: "ROOM", beat_ids: ["b"] }], shots: [{ id: "SA", source_scene_id: "A", scene_id: "ROOM", visual: "A", required_assets: ["ROLE"] }, { id: "SB", source_scene_id: "B", scene_id: "ROOM", visual: "B", required_assets: ["ROLE"] }], segments: [{ id: "GA", shot_ids: ["SA"] }, { id: "GB", shot_ids: ["SB"] }], asset_plan: [{ id: "ROLE", canvas_scope: "shared" }, { id: "KA", canvas_scope: "episode", shot_ids: ["SA"], depends_on: ["ROLE"] }, { id: "KB", canvas_scope: "episode", shot_ids: ["SB"], depends_on: ["ROLE"] }], asset_cards: [{ id: "KA", references: [{ asset_id: "ROLE" }] }, { id: "KB", references: [{ asset_id: "ROLE" }] }] };
     return { schemaVersion: 1, engine: { commit: "a".repeat(40), patchVersion: "test", runtimeId: "test", version: "test" }, source, sourceHash: compilationHash(source), modules: {}, artifacts: [], assets: { ROLE: { version: "v1", status: "approved", storageKey: "role", sha256: "a".repeat(64) }, KA: { version: "v1", status: "planned" }, KB: { version: "v1", status: "planned" } }, shotInputs: { SA: { assetIds: ["ROLE"], keyframeAssetId: "KA" }, SB: { assetIds: ["ROLE"], keyframeAssetId: "KB" } }, boundaries: [], workflow: {}, unresolved: [], executionAuthorized: false };
 }
+
+test("music policy invalidates H3 inputs without invalidating image inputs or disabled scoring text", () => {
+    const director = scopedDirector();
+    const clipScope = { targetIds: ["GA"] }, imageScope = { targetIds: ["KA"] };
+    const clipOff = compilationScopeInput(director, clipScope).inputHash;
+    const imageOff = compilationScopeInput(director, imageScope).inputHash;
+    director.source.background_music_enabled = true;
+    assert.notEqual(compilationScopeInput(director, clipScope).inputHash, clipOff);
+    assert.equal(compilationScopeInput(director, imageScope).inputHash, imageOff);
+    director.source.background_music_enabled = false;
+    (director.source.segments as any[])[0].non_diegetic_music = "Legacy drums must be ignored.";
+    assert.equal(compilationScopeInput(director, clipScope).inputHash, clipOff);
+});
 test("same-environment scene occurrences have isolated compiler inputs and real dependency closures", () => {
     const d = scopedDirector(), a = compilationScopeInput(d, { sceneId: "A" });
     assert.deepEqual((a.director.source.shots as any[]).map(item => item.id), ["SA"]);

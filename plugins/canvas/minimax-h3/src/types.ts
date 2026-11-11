@@ -84,6 +84,7 @@ export type H3Segment = {
     // H3Runner catch 块写 segment.status: "error" 时把 errorDetails 也写到 segment 上，
     // H3ClipCard 用它显示 hover 提示，避免前端"卡片不更新"的视觉假象。
     errorDetails?: string;
+    failureLayer?: string;
     taskMode?: string;
     storyboardCompositeEnabled?: boolean;
     /** 设置中选择的视觉风格模板 id；仅运行时注入提示词，null = 不加模板。 */
@@ -144,6 +145,7 @@ export type H3Segment = {
     faceRefineBlend?: number;
     /** Two-phase mode uses a durable decoded first-pass video; it does not reuse V15 latent. */
     confirmationMode?: boolean;
+    autoAcceptConfirmation?: boolean;
     firstPassResult?: string;
     firstPassStorageKey?: string;
     firstPassFingerprint?: string;
@@ -298,6 +300,7 @@ export type H3Segment = {
     // （仅运行时拼接，不写回 prompt 编辑区）。该开关标在本段上，表示「把我的尾帧传给下一段」。
     // 注意：唯一有效键名是 tailFrameContinuation；不要再引入 tailFrameEnabled 之类的别名。
     tailFrameContinuation?: boolean;
+    tailFrameAnchor?: { storageKey: string; sourceSegmentId?: string; capturedAt?: number };
     motionContextNoiseEnabled?: boolean;
     motionContextNoiseAlpha?: number;
     motionContextNoiseAlphaEnd?: number;

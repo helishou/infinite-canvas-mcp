@@ -17,6 +17,27 @@ source_contract_spec.loader.exec_module(source_contract)
 
 
 class SubjectPromptV2ProjectionTest(unittest.TestCase):
+    def test_background_music_is_opt_in_and_cannot_leak_from_old_segment_text(self):
+        from canvas_subject_prompt_v2 import effective_non_diegetic_music
+        score = "Low taiko pulses and guqin tremolo."
+        segment = {"id": "C1", "mode": "T2VA", "shot_ids": ["S1"], "start_frame": 0, "end_frame": 24, "generation_clip_duration": 1, "references": [],
+                   "overall_soundscape": "Wind and footsteps.", "non_diegetic_music": score}
+        source = {"fps_num": 24, "fps_den": 1, "shots": [{"id": "S1", "start_frame": 0, "end_frame": 24,
+                  "duration_frames": 24, "visual": "A woman walks forward.", "camera": {"framing": "MS"},
+                  "subject_usages": [], "dialogues": []}], "subject_registry": []}
+        original = deepcopy(segment)
+        for enabled in [None, False, "true", 1]:
+            with self.subTest(enabled=enabled):
+                production = {**source, **({"background_music_enabled": enabled} if enabled is not None else {})}
+                self.assertEqual(effective_non_diegetic_music(production, segment), "N/A")
+                prompt = compile_prompt_v2(production, segment, draft=True)
+                self.assertIn("non_diegetic_music:\nN/A", prompt)
+                self.assertNotIn(score, prompt)
+                self.assertIn("Wind and footsteps.", prompt)
+        enabled = {**source, "background_music_enabled": True}
+        self.assertIn("non_diegetic_music:\n" + score, compile_prompt_v2(enabled, segment, draft=True))
+        self.assertEqual(segment, original)
+
     def test_retention_excludes_voice_only_shots_without_renumbering_visual_scope(self):
         from canvas_subject_prompt_v2 import _subject_retention_scope
         shots = [{"id": sid, "subject_usages": [{"subjectId": "P", "presentation": presentation}]}

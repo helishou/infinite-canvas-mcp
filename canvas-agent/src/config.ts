@@ -13,6 +13,9 @@ export const CONFIG_DIR = process.env.INFINITE_CANVAS_AGENT_CONFIG_DIR
 export const CONFIG_FILE = path.join(CONFIG_DIR, "canvas-agent.json");
 export const VERSION = readPackageVersion();
 export const AGENT_PROMPT = fs.readFileSync(new URL("../agent-instructions.md", import.meta.url), "utf8");
+const INSTRUCTIONS_DIR = fileURLToPath(new URL("../instructions/", import.meta.url));
+const INSTRUCTION_MODULES = ["director-delegation.md", "production-authoring.md", "canvas-operations.md"];
+export const AGENT_PROMPT_FULL = AGENT_PROMPT + "\n\n" + INSTRUCTION_MODULES.map(name => fs.readFileSync(path.join(INSTRUCTIONS_DIR, name), "utf8")).join("\n\n");
 const initializedWorkspaces = new Set<string>();
 
 export type SiteWorkspaceConfig = { workspacePath: string; activeThreadId?: string; pinnedThreadIds?: string[] };
@@ -87,6 +90,9 @@ function initializeWorkspace(workspacePath: string, refreshSkills = false) {
     const bundle = fileURLToPath(new URL("./bundled-skills/canvas-video-production-sop/", import.meta.url));
     const developmentSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", ".agents", "skills", "canvas-video-production-sop");
     syncBundledProductionSkills(workspacePath, fs.existsSync(bundle) ? bundle : developmentSource);
+    const targetInstructions = path.join(workspacePath, "instructions");
+    fs.mkdirSync(targetInstructions, { recursive: true });
+    for (const name of INSTRUCTION_MODULES) fs.copyFileSync(path.join(INSTRUCTIONS_DIR, name), path.join(targetInstructions, name));
     initializedWorkspaces.add(workspacePath);
 }
 

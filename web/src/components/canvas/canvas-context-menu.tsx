@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { BetweenHorizontalStart, ClipboardCopy, GalleryHorizontalEnd, GalleryHorizontal, Group, Images, Languages, Plus, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -71,13 +72,13 @@ export function CanvasNodeContextMenu({
         return () => window.removeEventListener("pointerdown", close);
     }, [onClose]);
 
-    return (
+    return createPortal(
         <div
             ref={menuRef}
             role="menu"
             aria-label={t("canvas.nodeActions.all")}
             data-canvas-shortcuts-ignore
-            className="fixed z-[80] min-w-44 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border py-1 shadow-2xl"
+            className="fixed z-[1100] min-w-44 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border py-1 shadow-2xl"
             style={{ ...position, maxHeight: "calc(100dvh - 16px)", background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
@@ -113,7 +114,8 @@ export function CanvasNodeContextMenu({
             {canDelete ? <MenuSection label={t("canvas.nodeActions.groups.danger")}>
                 <MenuButton icon={<Trash2 className="size-4" />} label={t("canvas.controls.delete")} onClick={onDelete} danger />
             </MenuSection> : null}
-        </div>
+        </div>,
+        document.body,
     );
 }
 

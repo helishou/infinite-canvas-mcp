@@ -208,7 +208,7 @@ export class EpisodeProductionRunner {
         const selectedUnits = [...requested.keys()].map(unitId => units.find(unit => unit.id === unitId)).filter((unit): unit is ProductionLayoutUnit => Boolean(unit));
         canvasOps.push(...productionSceneCreationOperations(
             project, current.draft, plan, this.service.ownerIdentity(id), [...sceneIds],
-            object(this.stores.settings.get(H3_DEFAULTS_KEY)),
+            object(this.stores.settings.get(H3_DEFAULTS_KEY)), current.published,
         ));
         const assetTitleFor = (assetId: string) => assetTitle(director.source, assetId);
         for (const target of effectiveTargetIds) {

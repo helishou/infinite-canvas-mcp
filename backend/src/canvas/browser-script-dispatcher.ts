@@ -56,6 +56,7 @@ export class CanvasBrowserScriptDispatcher {
             this.update(task.id, { status: "failed", error: messageOf(error) });
             throw error;
         }
+        if (input.mode === "text") this.text.beginExternalLog(task);
         this.publish(task, "task.created");
         return { taskId: task.id, executor };
     }
@@ -119,6 +120,7 @@ export class CanvasBrowserScriptDispatcher {
             normalized = { media };
         }
         const completed = this.update(id, { status: "succeeded", progress: 1, result: { ...recordOf(task.result), ...normalized }, error: null });
+        if (input.mode === "text") this.text.completeExternalLog(id, normalizeTexts(normalized.texts));
         this.claims.delete(id);
         this.stores.tasks.addEvent(id, "result", normalized);
         return completed;
@@ -187,7 +189,9 @@ export class CanvasBrowserScriptDispatcher {
         }
         const input = task.input as BrowserScriptTaskInput;
         const executor = task.executor === "browser-provider" ? "browser-provider" : "browser-script";
-        const result = this.start({ ...input, ...(input.loopOutput ? { nodeId: input.sourceNodeId, imageIds: undefined } : {}), idempotencyKey: undefined, clientTaskId: `canvas-browser-retry-${crypto.randomUUID()}` }, input.script, executor);
+        // 插件只在首次提交时自行登记日志；任务中心重试时由 Backend 为新任务补一条记录。
+        const { generationLogHandled: _generationLogHandled, ...params } = input.params || {};
+        const result = this.start({ ...input, params, ...(input.loopOutput ? { nodeId: input.sourceNodeId, imageIds: undefined } : {}), idempotencyKey: undefined, clientTaskId: `canvas-browser-retry-${crypto.randomUUID()}` }, input.script, executor);
         const retried = this.stores.tasks.get(result.taskId);
         if (!retried) throw new Error("浏览器模型重试任务创建失败");
         this.stores.tasks.addEvent(retried.id, "retry", { parentTaskId: task.id });

@@ -63,12 +63,13 @@ test("global continuation edits target every formal outgoing boundary and keep t
         { id: "manual", tailFrameContinuation: false, motionContextEnabled: false },
     ];
     const result = formalContinuationBoundaryUpdates(segments, { tailFrameContinuation: true });
+    // 三项续接开关互斥：显式编辑任一项时同事务写全另两项的关闭值，避免缺省把它们重新打开。
     assert.deepEqual(result.boundaries, [
-        { segmentId: "a", tailFrameContinuation: true, motionContextEnabled: false },
-        { segmentId: "b", tailFrameContinuation: true, motionContextEnabled: false },
+        { segmentId: "a", tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false },
+        { segmentId: "b", tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false },
     ]);
     assert.deepEqual(result.projectedValues, [
         ...result.boundaries,
-        { segmentId: "c", tailFrameContinuation: false, motionContextEnabled: false },
+        { segmentId: "c", tailFrameContinuation: false, motionContextEnabled: false, videoContinuation: false },
     ]);
 });

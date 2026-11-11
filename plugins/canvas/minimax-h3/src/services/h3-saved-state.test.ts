@@ -35,7 +35,7 @@ test("explicit edit target wins over a changed selection and leaves unedited sav
     patchSelectedSegment(ctx, { selectedSegmentId: "b" }, { tailFrameContinuation: true });
     const saved = JSON.parse(JSON.stringify(metadata)).segments;
     assert.deepEqual(saved[0], first);
-    assert.deepEqual(saved[1], { ...second, tailFrameContinuation: true, motionContextEnabled: false, h3ParameterOverrides: ["tailFrameContinuation", "motionContextEnabled"] });
+    assert.deepEqual(saved[1], { ...second, tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false, h3ParameterOverrides: ["tailFrameContinuation", "motionContextEnabled"] });
     const params = resolveH3Runtime(saved[1], {}, metadata, { videoSteps: 12 }).params;
     assert.equal(params.steps, 12);
     assert.equal(params.motionContextEnabled, false);

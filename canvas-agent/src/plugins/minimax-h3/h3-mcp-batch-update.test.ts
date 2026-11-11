@@ -14,12 +14,20 @@ function fixture() {
         })) },
     }] };
     const calls: any[] = [];
+    const posts: Array<{ path: string; body: any }> = [];
     const commands = new Map<string, any>();
     let reads = 0;
     let beforeCommit: (() => void) | undefined;
     const context: any = {
         getCanvasProject: async () => { reads++; return structuredClone(project); },
         backend: {
+            // 制作台只读路由：画布 owner 与草案 revision。
+            get: async (path: string) => {
+                if (path.includes("/production-context")) return { ok: true, context: { owner: { kind: "episode", id: "ep-1" } } };
+                if (path.includes("/production?view=summary")) return { ok: true, production: { revision: 11 } };
+                throw new Error(`unexpected GET ${path}`);
+            },
+            post: async (path: string, body: any) => { posts.push({ path, body }); return { ok: true, production: { revision: 12 } }; },
             checkMcpCommandReceipt: async (operationId: string, identity: any) => {
                 const command = commands.get(operationId);
                 if (command && JSON.stringify(command.request) !== JSON.stringify(identity.request)) throw Object.assign(new Error("operationId 已用于不同请求"), { code: "OPERATION_ID_REUSED" });
@@ -62,7 +70,7 @@ function fixture() {
     const run = async (updates: unknown, extra: Record<string, unknown> = {}) => {
         return handler({ projectId: project.id, nodeId: "h3-batch", updates, expectedRevision: project.revision, operationId: "batch-operation", ...extra }, context);
     };
-    return { project, calls, run, reads: () => reads, race: (fn: () => void) => { beforeCommit = fn; } };
+    return { project, calls, posts, run, reads: () => reads, race: (fn: () => void) => { beforeCommit = fn; } };
 }
 
 const updates = () => Array.from({ length: 6 }, (_, i) => ({ segmentId: `s${i + 1}`, patch: { title: `new-${i + 1}`, duration: 7 } }));
@@ -186,4 +194,29 @@ test("long prompts are hashed from committed values, not echoed into the respons
     assert.equal(result.items[0].fieldSummaries.prompt.sha256, createHash("sha256").update(JSON.stringify(prompt)).digest("hex"));
     assert.ok(Buffer.byteLength(JSON.stringify(result)) < 4096);
     assert.equal(f.project.nodes[0].metadata.segments[0].prompt, prompt);
+});
+
+test("正式制作 Clip 允许改续接开关，正文与编译身份仍由源稿投影", async () => {
+    const f = fixture();
+    const formal = f.project.nodes[0].metadata.segments[0];
+    formal.productionClipProjection = { targetId: "clip-formal-1", inputHash: "compiled" };
+    f.project.nodes[0].metadata.segments[1].productionClipProjection = { targetId: "clip-formal-2", inputHash: "compiled" };
+    // 画布与制作台两侧都能改续接：正式 Clip 的尾帧/Motion Context/视频续写在画布侧放行。
+    const saved = await f.run([{ segmentId: "s1", patch: { tailFrameContinuation: true, motionContextEnabled: false, videoContinuation: false } }], { operationId: "formal-continuation" });
+    assert.equal(saved.count, 1);
+    assert.equal(f.project.nodes[0].metadata.segments[0].tailFrameContinuation, true);
+    assert.equal(f.project.nodes[0].metadata.segments[0].motionContextEnabled, false);
+    // 画布改完同步写回制作台相邻 boundary，避免两侧显示与后续编译来回覆盖。
+    assert.deepEqual(f.posts.at(-1)?.path, "/drama/episodes/ep-1/production/ops");
+    assert.equal(f.posts.at(-1)?.body.expectedRevision, 11);
+    assert.deepEqual(f.posts.at(-1)?.body.ops, [{ type: "set_director_boundary", boundary: {
+        from: "clip-formal-1", to: "clip-formal-2", tailFrame: true, motionContext: false, videoContinuation: false, reason: "由 H3 Clip 设置保存续段衔接" } }]);
+    assert.deepEqual(saved.continuationBoundary.boundaries, [{ from: "clip-formal-1", to: "clip-formal-2", tailFrame: true, motionContext: false, videoContinuation: false }]);
+    // 正文、参考与编译身份仍由源稿投影，画布侧直接改继续被拒（更早的字段校验也会先拦下）。
+    const before = structuredClone(f.project);
+    await assert.rejects(() => f.run([{ segmentId: "s1", patch: { prompt: "An empty hall." } }], { operationId: "formal-prompt" }), /FORMAL_CLIP_OWNED/);
+    for (const patch of [{ directorSourceHash: "forged" }, { storyboardInput: {} }]) {
+        await assert.rejects(() => f.run([{ segmentId: "s1", patch }], { operationId: `formal-${Object.keys(patch)[0]}` }), /FORMAL_CLIP_OWNED|INVALID_CLIP_FIELD/);
+    }
+    assert.deepEqual(f.project, before);
 });

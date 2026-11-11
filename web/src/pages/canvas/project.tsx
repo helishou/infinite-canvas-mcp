@@ -6661,7 +6661,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
 
     return (
         <main data-canvas-project-id={projectId} data-canvas-active={active} className="relative flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
-            <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onInsertAsset={handleAssetInsert} />
+            <CanvasSidePanel onSelectionChange={selectCanvasNodes} projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onNodeContextMenu={handleNodeContextMenu} onInsertAsset={handleAssetInsert} />
             <section className="canvas-workspace-column relative min-w-0 flex-1 overflow-hidden">
                 {missingTarget && <p role="status" className="absolute left-4 top-14 z-20 rounded bg-background px-3 py-2 text-xs text-muted-foreground">{t("director.canvasOverlay.targetMissing")}</p>}
                 <CanvasTopBar
