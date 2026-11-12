@@ -1,17 +1,24 @@
-import type { Asset, BackendDatabase } from "../db.js";
+import type { Asset, BackendDatabase, CanvasProject } from "../db.js";
+import { iterateRawProjects } from "../stores/canvas-project-storage.js";
 
 // 资产的剧目归属只在写入时确定：画布还没绑定剧目（先做素材、之后才建剧目并把画布绑成分集）时
 // 拿不到 dramaId，之后没有任何回填，资产页就会一直显示「未归属剧目」。
 // 这里按画布与剧目的既有关系补齐，且只在证据唯一时归属；有冲突或没有信号一律保持未归属，交给用户判断。
 const kinds = new Set(["text", "image", "video", "audio", "character", "scene"]);
 
-type EpisodeCanvas = { canvasId: string; dramaId: string; blob: string };
+type EpisodeCanvas = { canvasId: string; dramaId: string; project: CanvasProject | undefined };
 
 function episodeCanvases(db: BackendDatabase): EpisodeCanvas[] {
-    const rows = db.db.prepare(`SELECT e.canvas_id AS canvasId, e.drama_id AS dramaId, p.data_json AS blob
+    const rows = db.db.prepare(`SELECT e.canvas_id AS canvasId, e.drama_id AS dramaId
         FROM drama_episodes e JOIN canvas_projects p ON p.id = e.canvas_id
-        WHERE e.canvas_id IS NOT NULL`).all() as Array<{ canvasId: string; dramaId: string; blob: string | null }>;
-    return rows.map((row) => ({ canvasId: String(row.canvasId), dramaId: String(row.dramaId), blob: String(row.blob || "") }));
+        WHERE e.canvas_id IS NOT NULL`).all() as Array<{ canvasId: string; dramaId: string }>;
+    const episodeRows = rows.map(row => ({ canvasId: String(row.canvasId), dramaId: String(row.dramaId), project: undefined as CanvasProject | undefined }));
+    const needed = new Map(episodeRows.map(row => [row.canvasId, row]));
+    for (const project of iterateRawProjects(db.db) as Iterable<CanvasProject>) {
+        const row = needed.get(project.id);
+        if (row) row.project = project;
+    }
+    return episodeRows;
 }
 
 /**
@@ -27,9 +34,9 @@ export function attributableAssetsForCanvas(db: BackendDatabase, canvasId: strin
     return db.listAssetRecords().filter((asset) => {
         if (asset.dramaId || asset.metadata?.sharedAssetSource || !kinds.has(asset.kind)) return false;
         const storageKey = typeof asset.data?.storageKey === "string" ? asset.data.storageKey : "";
-        if (storageKey && others.some((canvas) => canvas.blob.includes(storageKey))) return false;
+        if (storageKey && others.some((canvas) => JSON.stringify(canvas.project).includes(storageKey))) return false;
         if (asset.metadata?.projectId === canvasId) return true;
-        return Boolean(storageKey) && owner.blob.includes(storageKey);
+        return Boolean(storageKey) && JSON.stringify(owner.project).includes(storageKey);
     });
 }
 

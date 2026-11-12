@@ -23,6 +23,22 @@ export function workflowAspectOption(field: WorkflowField, current: unknown, rou
     return sizeOption || (options.includes(String(field.default ?? "")) ? String(field.default) : options[0]);
 }
 
+/**
+ * 工作流若把 width / height 直接映射到节点输入，这两个字段就是最终像素尺寸。
+ * 返回可直接写入画布 metadata.size 的 WxH；缺一项或值非法时返回 undefined。
+ */
+export function workflowDimensionSize(fields: WorkflowField[], values: Record<string, unknown> | undefined) {
+    const dimension = (input: "width" | "height") => {
+        const field = fields.find((item) => item.input === input);
+        if (!field) return undefined;
+        const value = Number(values?.[field.id] ?? field.default);
+        return Number.isFinite(value) && value > 0 ? Math.round(value) : undefined;
+    };
+    const width = dimension("width");
+    const height = dimension("height");
+    return width && height ? `${width}x${height}` : undefined;
+}
+
 /** 重复挂载/渲染时保留已存参数，只有实际切换工作流才重置。 */
 export function reconcileWorkflowParams(
     current: Record<string, unknown> | undefined,

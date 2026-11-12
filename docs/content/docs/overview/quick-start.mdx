@@ -7,6 +7,20 @@ description: Run Infinite Canvas in a few steps
 
 Normal use requires the Backend and the `web/` frontend. The Backend integrates Agent and MCP endpoints; the separate Canvas Agent on port 17371 is a compatibility proxy for older clients.
 
+## Prerequisites
+
+For native use, prefer **Node.js 24 LTS**; **22.x from 22.16.0** is also supported. Do not use 23.x. Backend relies on transaction-state APIs in built-in `node:sqlite`. Install Git and Corepack, then install all workspaces from the root with the pinned **pnpm 12.12.1**. No separate database service is needed.
+
+```bash
+node --version
+corepack --version
+corepack pnpm --version
+```
+
+If Corepack is absent, run `npm install --global corepack` and reopen your terminal. Repository scripts invoke Corepack, so installing only a global pnpm is insufficient. Commands here use `corepack pnpm` directly; `corepack enable` is unnecessary.
+
+Basic canvas use needs no Python, GPU or Codex login. Video tools need FFmpeg/FFprobe; Acheng compilation needs Python 3.10+, Git and an activated runtime; local generation needs your ComfyUI/models; sidebar chat needs the Codex CLI version declared by the shared package. See [Docker Deployment](/docs/overview/docker) for image dependencies.
+
 ## Run locally
 
 ```bash
@@ -35,19 +49,52 @@ Use source mode or the full Compose deployment for the base stack; configure mod
 
 ## Installation and startup troubleshooting
 
-- For slow downloads, use an HTTPS shallow clone, or download the source ZIP from GitHub's Code menu if Git history is unnecessary. The project does not switch to third-party mirrors automatically.
-- Use `corepack pnpm` for repository commands so Corepack selects pnpm 12.12.1 from the root `package.json`; if Corepack is unavailable, install that pinned pnpm version. Node must be version 22.13 or newer.
+- For slow downloads, use an HTTPS shallow clone, or download the basic source ZIP from GitHub. ZIP archives exclude submodules; director runtimes still need Git setup. The project does not switch to third-party mirrors automatically.
+- Use `corepack pnpm` for repository commands so Corepack selects pnpm 12.12.1 from the root `package.json`; if Corepack is unavailable, install Corepack as described above. Use Node 22.x from 22.16.0 or prefer 24 LTS.
 - The repository maintains one workspace lockfile. From the repository root, run `corepack pnpm install --frozen-lockfile`; do not install from an individual workspace or create a second lockfile.
 - If `canvas-agent/dist/...` is missing, run `corepack pnpm --filter @basketikun/canvas-agent run build` or use the root startup commands. A failed build is not a Backend connection error.
 - If `safe-delete state lock timeout` comes from host-injected `NODE_OPTIONS`, investigate the host injection and Vite cache-cleanup conflict. Startup scripts preserve `NODE_OPTIONS` and do not automatically disable deletion guards or other host protections.
 - Codex CLI is optional. For sidebar Codex chat, run `npm install -g @openai/codex@0.160.0` and sign in. Canvas, MCP, and local ComfyUI can skip this installation. The model picker uses the catalog returned by the Codex app-server that Canvas Agent actually starts.
 - Shot-cut detection on a video node runs `backend/workers/detect_video_scenes.py` from Backend and needs `scenedetect-headless` from `backend/workers/requirements-video-shot-detection.txt`. Install it into the Python that Backend uses (`python -m pip install -r backend/workers/requirements-video-shot-detection.txt`), or point `SCENEDETECT_PYTHON` at an interpreter that has it. Without it the endpoint returns 503. Docker images already include it.
 
+## Optional Python environments
+
+These steps apply only to Python features. Reuse an existing environment when suitable; do not reinstall Python/ComfyUI for basic canvas use or overwrite an existing `backend/venv`.
+
+If a new environment is needed, create it from the repository root and invoke its interpreter directly, without activating shell scripts:
+
+```powershell
+# Windows; skip creation when reusing an environment
+py -3 -m venv backend/venv
+# Install only features you use; these requirement lists can also be installed separately
+backend/venv/Scripts/python.exe -m pip install -r backend/workers/requirements-video-shot-detection.txt -r backend/workers/requirements-style-transfer.txt
+```
+
+```bash
+# Linux/macOS; skip creation when reusing an environment
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/workers/requirements-video-shot-detection.txt -r backend/workers/requirements-style-transfer.txt
+```
+
+Shot detection and style transfer prefer explicit `SCENEDETECT_PYTHON` / `STYLE_TRANSFER_PYTHON`, then `backend/venv`, then system Python. Acheng uses a separate `ACHENG_PYTHON`; set it to an **absolute path to an existing interpreter**. Otherwise it discovers system Python rather than automatically selecting `backend/venv`.
+
+Add FFmpeg/FFprobe to the Backend process PATH, or set `FFMPEG_PATH` / `FFPROBE_PATH`. Check `ffmpeg -version` and `ffprobe -version` in the terminal that starts Backend. The H3 Motion Context main path uses Node/sharp/FFmpeg and does not need the old Python worker's dependencies.
+
+Initialize the Git submodule and validate/activate the cloned Acheng commit:
+
+```bash
+git submodule update --init -- .agents/skills/acheng-director
+corepack pnpm run acheng:update -- --local
+corepack pnpm run acheng:status
+```
+
+`acheng:update -- --local` validates and activates a runtime; run it while generation, chat and compilation are idle. JSON compilation/auditing uses the standard library; install the submodule's `requirements.txt` only for YAML input or PNG tooling. Runtimes default to `.canvas-runtime`; back up the actual directory if using `INFINITE_CANVAS_ACHENG_HOME`.
+
 ## Data and upgrades
 
 The default Backend directory is `~/.infinite-canvas/`, but runtime configuration can change data and media locations. Check the actual `/data-dir` response and configuration; back up original media alongside the SQLite media index.
 
-Before migrating an existing older SQLite database, the Backend creates and integrity-checks a `runtime.sqlite.pre-schema-*.sqlite` snapshot. Backup failure blocks migration. Newer or invalid schema versions are refused; deleting the database is not a recovery method. Snapshots exclude media and do not replace full backups. Preserve browser pending edits and conflict drafts. This protection covers SQLite schema upgrades, not automatic recovery of every historical format.
+Before migrating an existing older SQLite database, the Backend creates and integrity-checks a `runtime.sqlite.pre-schema-*.sqlite` snapshot. Backup failure blocks migration. Newer or invalid schema versions are refused; deleting the database is not a recovery method. Snapshots exclude media and do not replace full backups. Preserve browser pending edits and conflict drafts. Storage schema is 53 with a minimum direct-upgrade baseline of 52. Older databases/backups must first use the previous Backend to reach 52. After new writes, repair forward instead of overwriting edits with an old backup.
 
 ## LAN access
 

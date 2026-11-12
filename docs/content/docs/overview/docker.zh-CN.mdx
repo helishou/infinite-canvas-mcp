@@ -9,7 +9,7 @@ description: 自托管前端、Backend、持久数据与可选制作能力
 
 ## 启动完整服务
 
-需要 Docker Engine/Desktop 与 Docker Compose v2；旧兼容入口的 include 需要 Compose 2.20+。
+宿主只需 Git、Docker Engine/Desktop 与 Docker Compose v2，不需要先装 Node、pnpm、Python 或 FFmpeg；旧兼容入口的 include 需要 Compose 2.20+。
 
 ```bash
 git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
@@ -62,7 +62,7 @@ Compose 自动读取根 `.env`；原生 Node 启动不会自动读取它，需�
 | /data/codex | 可选 Codex 登录与会话 |
 | /data/acheng-runtime | 项目固定的 Acheng 运行版本与激活记录 |
 
-`stop`、普通 `down`、容器重建都保留卷。`down --volumes` 会删除数据，不用于升级。升级前停止 Backend 并备份整个卷；SQLite 迁移快照仅覆盖数据库，不能替代媒体和工作空间备份。浏览器未确认编辑与冲突草稿也须保留。继续使用相同 Compose 项目名与卷，避免误连一套空数据。
+`stop`、普通 `down`、容器重建都保留卷。`down --volumes` 会删除数据，不用于升级。升级前等待任务、Agent 回合及编译空闲，正常停止 Backend 并备份整个卷；SQLite 迁移快照仅覆盖数据库，不能替代媒体和工作空间备份。当前 schema 53 仅直接接受 schema 52；更早备份先用上一版 Backend 升级到 52。浏览器未确认编辑与冲突草稿也须保留。继续使用相同 Compose 项目名与卷，避免误连一套空数据。
 
 ```bash
 git pull
@@ -74,6 +74,16 @@ docker compose up -d --build
 ## 可选模型、H3 和导演引擎
 
 Backend 镜像包含 Node、FFmpeg/FFprobe、Python 3、Pillow 与 Git，不包含 GPU 模型或 ComfyUI。基础画布、素材保存、任务 API 与外部 MCP 无需 Codex 登录。
+
+| 能力 / 依赖 | 当前镜像 |
+| --- | --- |
+| Node 与 workspace 生产依赖 | 构建时安装，运行时直接启动 Backend dist |
+| FFmpeg / FFprobe、Python 3、Pillow、Git | 基础 Backend 镜像已安装 |
+| 视频镜头检测 | 已按 `requirements-video-shot-detection.txt` 安装 |
+| 图像风格迁移 worker | Dockerfile 未单独按风格迁移清单安装/验收；启用时自定义镜像补齐 NumPy/OpenCV，并保证 worker 临时目录可写 |
+| Codex CLI | 仅 `backend-codex` target 包含；仍需部署者自行登录 |
+| Acheng 运行包、ComfyUI、GPU 模型 | 按需另行准备；容器不会继承宿主已安装的环境或账号 |
+
 
 - API 渠道在网页设置中配置自己的地址、Key 和模型；Key 保存于 Backend SQLite，实际调用位置依执行器而定。自定义浏览器脚本需要网页在线。
 - 宿主 ComfyUI 可使用 host.docker.internal；Compose 为 Linux 也配置了 host-gateway。ComfyUI 需监听容器能访问的接口并允许该连接；宿主的 loopback 服务不保证能从容器访问。另一台机器用实际 IP/域名，同网络容器可使用服务名。
@@ -112,7 +122,9 @@ corepack pnpm --filter @helishou/infinite-canvas-backend run start
 | INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | 自行选择的数据/媒体位置 |
 | INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent 工作空间与可选 Codex 状态位置 |
 | INFINITE_CANVAS_ACHENG_HOME | 项目专属 Acheng 运行时目录；默认位于仓库的 .canvas-runtime |
-| FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | 可选执行程序路径；否则从 PATH 查找 |
+| FFMPEG_PATH / FFPROBE_PATH | 可选媒体工具路径；否则从 PATH 查找 |
+| ACHENG_PYTHON | 现有 Python 解释器的绝对路径；未设置时自动发现系统 Python |
+| SCENEDETECT_PYTHON / STYLE_TRANSFER_PYTHON | 可选 worker 解释器；原生部署也可复用 backend/venv |
 
 环境变量中的网络设置优先于本地网络设置，容器需通过部署配置调整。静态网页可在 config.js 中设置公开的 `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };`，由自己的代理将该前缀转发到 Backend。密钥在连接设置填写。
 

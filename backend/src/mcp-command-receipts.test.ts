@@ -6,8 +6,6 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { BackendDatabase, type Asset } from "./db.js";
 import { compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
-import { DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
-import { historicalDatabase } from "./test-helpers/historical-database.js";
 
 function asset(id: string, title: string, folderId: string | null = null): Asset {
   const now = "2026-01-01T00:00:00.000Z";
@@ -89,38 +87,6 @@ test("prepared translation commands retain restart state and can be selected wit
     assert.deepEqual(db.getMcpCommandReceipt("translation-pending")?.receipt, { translationStatus: "retry_required", lastError: "resume after restart" });
     assert.deepEqual(db.getMcpCommandReceipt("translation-pending")?.payload?.resumeRequest, request);
   } finally { db.close(); }
-});
-
-test("v20 database applies MCP receipts and subsequent migrations with one verified backup", t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-command-migration-"));
-  const file = path.join(directory, "runtime.sqlite");
-  const seed = historicalDatabase(t, file, 20);
-  seed.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)")
-    .run("preserved", JSON.stringify({ id: "preserved", title: "Before receipts", nodes: [], connections: [] }), "2026-01-01");
-  seed.close();
-  let db: BackendDatabase | undefined;
-  try {
-    db = new BackendDatabase(file);
-    assert.equal((db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number }).version, DATABASE_SCHEMA_VERSION);
-    assert.equal(db.getCanvasProject("preserved")?.title, "Before receipts");
-    assert.ok(db.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_command_receipts'").get());
-    assert.ok(db.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='episode_production_batches'").get());
-    const backups = fs.readdirSync(directory).filter(name => name.includes(`pre-schema-v20-to-v${DATABASE_SCHEMA_VERSION}`));
-    assert.equal(backups.length, 1);
-    for (const backup of backups) {
-      const copy = new DatabaseSync(path.join(directory, backup), { readOnly: true });
-      try {
-        assert.equal((copy.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check, "ok");
-        assert.equal(copy.prepare("SELECT MAX(version) version FROM schema_migrations").get()?.version, 20);
-        assert.equal(copy.prepare("SELECT 1 FROM sqlite_master WHERE name='mcp_command_receipts'").get(), undefined);
-        assert.equal(copy.prepare("SELECT 1 FROM canvas_projects WHERE id='preserved'").get()?.["1"], 1);
-      }
-      finally { copy.close(); }
-    }
-  } finally {
-    db?.close();
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
 });
 
 test("asset pagination filters before paging, uses stable order, and treats LIKE metacharacters literally", () => {

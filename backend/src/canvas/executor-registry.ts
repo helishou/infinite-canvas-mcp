@@ -5,6 +5,7 @@ export type CanvasExecutorId =
   | "comfy-workflow"
   | "runninghub-workflow"
   | "h3"
+  | "local-style-transfer"
   | "plugin";
 
 export type CanvasModelDeclaration = {
@@ -42,6 +43,13 @@ const modelRegistry: CanvasModelDeclaration[] = [
     inputRoles: ["prompt", "image"],
     executor: "builtin-comfy",
     matches: (model) => /^flux2-klein$/i.test(model),
+  },
+  {
+    id: "local-style-transfer",
+    modes: ["image"],
+    inputRoles: ["image"],
+    executor: "local-style-transfer",
+    matches: (model) => /^local-style-transfer$/i.test(model),
   },
   {
     id: "moyou-自动色阶",

@@ -9,7 +9,7 @@ The root Compose configuration builds a Web gateway and Backend from this reposi
 
 ## Start the full stack
 
-Use Docker Engine/Desktop and Compose v2. The legacy include entrypoint requires Compose 2.20+.
+The host needs Git, Docker Engine/Desktop and Compose v2, without installing Node, pnpm, Python or FFmpeg locally. The legacy include entrypoint requires Compose 2.20+.
 
 ```bash
 git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
@@ -62,7 +62,7 @@ The canvas-data named volume mounts at /data; its actual name includes the Compo
 | /data/codex | Optional Codex authentication and sessions |
 | /data/acheng-runtime | Project-pinned Acheng runtime versions and activation state |
 
-Stopping, normal down and container recreation preserve this volume. down --volumes deletes data and is not an upgrade command. Stop the Backend and back up the entire volume before upgrading. SQLite migration snapshots exclude media and workspaces. Preserve browser pending edits and conflict drafts too. Keep the same Compose project name and volume to avoid selecting a new empty dataset.
+Stopping, normal down and container recreation preserve this volume. down --volumes deletes data and is not an upgrade command. Before upgrading, wait until tasks, Agent turns and compilation are idle, stop Backend normally, and back up the entire volume. SQLite migration snapshots exclude media and workspaces. Schema 53 directly upgrades only schema 52; older backups must first use the previous Backend to reach 52. Preserve browser pending edits and conflict drafts too. Keep the same Compose project name and volume to avoid selecting a new empty dataset.
 
 ```bash
 git pull
@@ -74,6 +74,16 @@ With an explicit native INFINITE_CANVAS_DATA_DIR, media defaults to its runtime-
 ## Optional models, H3 and the director engine
 
 The Backend image includes Node, FFmpeg/FFprobe, Python 3, Pillow, Git and no GPU models or ComfyUI. Basic canvas, assets, task APIs and external MCP do not require Codex login.
+
+| Capability / dependency | Current image |
+| --- | --- |
+| Node and workspace production dependencies | Installed during build; runtime starts Backend dist |
+| FFmpeg / FFprobe, Python 3, Pillow, Git | Included in the base Backend image |
+| Video shot detection | Installed from requirements-video-shot-detection.txt |
+| Image style-transfer worker | Not separately installed/accepted from its requirements list in Dockerfile; use a custom image with NumPy/OpenCV and a writable worker scratch directory |
+| Codex CLI | Only in backend-codex; deployment-specific login is still required |
+| Acheng runtime, ComfyUI, GPU models | Prepare separately; containers do not inherit host environments or accounts |
+
 
 - Configure API channels with your own URL, key and model in the Web settings. Keys live in Backend SQLite; the executor determines where calls run. Browser scripts require an open page.
 - Host ComfyUI may use host.docker.internal; Compose also sets host-gateway for Linux. ComfyUI must listen on an interface reachable from the container and allow that connection. A host loopback service is not guaranteed reachable. Use an actual IP/domain for another machine or a service name for containers on the same network.
@@ -112,7 +122,9 @@ The build includes the local official-plugin registry. For another Backend, set 
 | INFINITE_CANVAS_DATA_DIR / INFINITE_CANVAS_MEDIA_DIR | Data and media locations |
 | INFINITE_CANVAS_AGENT_CONFIG_DIR / CODEX_HOME | Agent workspace and optional Codex state |
 | INFINITE_CANVAS_ACHENG_HOME | Project-specific Acheng runtime directory; defaults to .canvas-runtime in the repository |
-| FFMPEG_PATH / FFPROBE_PATH / ACHENG_PYTHON | Optional executable paths; otherwise resolve from PATH |
+| FFMPEG_PATH / FFPROBE_PATH | Optional media executable paths; otherwise resolve from PATH |
+| ACHENG_PYTHON | Absolute path to an existing Python interpreter; otherwise discover system Python |
+| SCENEDETECT_PYTHON / STYLE_TRANSFER_PYTHON | Optional worker interpreters; native deployments can also reuse backend/venv |
 
 Deployment network variables override local network settings. Configure containers through deployment settings. A static frontend can set public config.js to `window.__RUNTIME_CONFIG__ = { BACKEND_URL: "/api" };` and proxy that prefix to Backend. Enter the key in connection settings.
 

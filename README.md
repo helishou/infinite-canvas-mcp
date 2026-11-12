@@ -40,11 +40,90 @@
 
 H3 和导演制作是可选能力：需要相应模型、ComfyUI 自定义节点或 Acheng 引擎。基础画布编辑与素材管理无需 GPU、模型 Key 或 Codex 登录。
 
+## 依赖与部署方式
+
+本项目按**单机工作台**部署：Web 提供界面，Backend 统一保存 SQLite、媒体、配置与任务，并提供 Agent 和 MCP。无需另装 PostgreSQL、MySQL、Redis 或 SQLite 服务。
+
+| 场景 | 选择 |
+| --- | --- |
+| 本机使用，尤其已有 Windows ComfyUI / 模型环境 | 原生运行，复用现有模型服务和文件目录 |
+| 想少装系统依赖，或在自己的服务器上运行 | Docker Compose，一次启动前端网关与 Backend |
+| 修改源码、调试插件 | `corepack pnpm run dev`，带源码监听与空闲保护重载 |
+| 只发布静态网页 | 仍须另外提供 Backend；静态站本身不保存业务数据 |
+
+### 原生运行的必需依赖
+
+| 依赖 | 要求与用途 |
+| --- | --- |
+| Node.js | 建议 **24 LTS**；兼容 **22.16.0+ 的 22.x**，不使用 23.x。Backend 使用内置 `node:sqlite` 的事务状态 API |
+| Corepack + pnpm | 项目固定 **pnpm 12.12.1**，统一用 `corepack pnpm`；所有 workspace 在根目录一次安装 |
+| Git | 获取源码、初始化 Git 子模块；Acheng 版本管理也使用 Git |
+| 浏览器 | 运行画布界面；基础编辑不需要 GPU、模型 Key 或 Codex 登录 |
+
+Node 下限依据是 [`DatabaseSync.isTransaction`](https://nodejs.org/download/release/v22.17.0/docs/api/sqlite.html#databaseistransaction)。前端、Backend、共享 Agent 与插件 SDK 的 JavaScript 依赖均由锁文件安装，不逐包手工安装，也不混用 npm/yarn 生成另一份锁文件。
+
+### 按功能安装的可选依赖
+
+| 要使用的能力 | 额外准备 |
+| --- | --- |
+| API 文字/图片/音频/视频生成 | 可访问的模型服务、渠道地址、Key 与模型；本机无需 GPU |
+| 媒体规格核验、视频裁剪/拼接、H3 Motion Context | **FFmpeg 与 FFprobe**；加入 PATH，或指定 `FFMPEG_PATH`、`FFPROBE_PATH` |
+| 本地 ComfyUI / H3 生成 | 独立运行的 ComfyUI、对应自定义节点、模型和 GPU 环境；本项目不代装 CUDA 或模型 |
+| Acheng 导演编译 | **Python 3.10+**、Git 与已激活的 Acheng 运行包；JSON 编译/审计使用 Python 标准库 |
+| 视频镜头切分检测 | Python + [镜头检测依赖清单](backend/workers/requirements-video-shot-detection.txt)（固定 `scenedetect-headless`） |
+| 图片风格迁移 worker | Python + [风格迁移依赖清单](backend/workers/requirements-style-transfer.txt)（NumPy、OpenCV headless） |
+| 侧边栏 Codex 对话 | **`@openai/codex@0.160.0`**，安装后登录；基础画布与外部 MCP 不要求安装 |
+
+已有可用 Python 或 ComfyUI 环境可以复用，按功能指定解释器，无需重装整套环境。Python 安装示例、解释器选择及 Docker 已包含的依赖见[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx#可选-python-环境)。
+
 ## 快速开始
 
-### Docker：前端、Backend 与持久数据一起部署
+### 方式一：本机原生运行
 
-需要 Docker Engine/Desktop 与 Docker Compose v2。以下命令从本仓库源码构建，不依赖维护者的电脑或上游发布镜像：
+先安装上表的 Node.js 与 Git，并检查 Corepack：
+
+```bash
+node --version
+corepack --version
+```
+
+如果系统没有 Corepack，先执行 `npm install --global corepack`，再重新打开终端。以下命令始终使用 `corepack pnpm`，无需额外启用全局 pnpm shim。
+
+```bash
+git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
+cd infinite-canvas-mcp
+corepack pnpm --version
+corepack pnpm install --frozen-lockfile
+corepack pnpm run dev
+```
+
+打开 **`http://localhost:3001`**。根命令先构建官方插件和共享 Agent，再启动 Backend（17370）与 Web（3001）。基础运行到这里即可；模型、Python 与 Codex 按需配置。
+
+首次连接时，在「连接与协作」中填写 `http://127.0.0.1:17370` 与 Backend 密钥。默认数据目录的密钥可在自己的终端读取：
+
+```bash
+node -e "const p=require('node:path'),f=require('node:fs');console.log(JSON.parse(f.readFileSync(p.join(require('node:os').homedir(),'.infinite-canvas','backend.json'),'utf8')).token)"
+```
+
+如果指定了其他数据目录，请读取实际目录的 `backend.json`。不要把密钥写进 README、截图或分享日志。
+
+**日常制作希望源码保存不触发 Backend 重载**，可在首次安装后用两个终端，均从仓库根目录运行：
+
+```bash
+# 终端 1：构建并启动稳定 Backend；先等待原 Backend 空闲并正常停止
+corepack pnpm run start:backend
+```
+
+```bash
+# 终端 2：启动 Web
+corepack pnpm run dev:web
+```
+
+`start:backend` 消费构建产物并关闭源码监听；更新代码后需重新走启动流程。`dev` 使用源码监听并等待业务空闲才重载。默认 Backend 已集成 `/agent`、`/mcp`，不需要另外启动 17371 Agent；`dev:services` 仅在需要旧客户端代理时使用。Windows 的 `dev:local` 会清理旧服务，不作为日常探活命令。
+
+### 方式二：Docker Compose
+
+宿主机需要 **Docker Engine/Desktop、Compose v2 与 Git**；Node、FFmpeg、Python 等由镜像准备，不要求先装进宿主机。Compose 不包含 ComfyUI、GPU 模型或 Codex 登录状态。
 
 ```bash
 git clone --depth 1 --recurse-submodules https://github.com/helishou/infinite-canvas-mcp.git
@@ -53,42 +132,40 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Windows PowerShell 用 `Copy-Item .env.example .env` 代替 `cp`。打开 `http://localhost:3000`，在「连接与协作」中填写后台地址 `http://localhost:3000/api` 和连接密钥。首次启动会自动生成密钥，可在自己终端执行以下命令读取；密钥不会注入网页配置：
+PowerShell 用 `Copy-Item .env.example .env` 代替 `cp`。打开 **`http://localhost:3000`**，后台地址填写 **`http://localhost:3000/api`**。读取首次自动生成的连接密钥：
 
 ```bash
 docker compose exec backend node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync("/data/backend/backend.json","utf8")).token)'
 ```
 
-默认只绑定本机端口；同源网关代理 API、媒体、SSE、WebSocket 和 MCP。命名卷保存 SQLite、原始媒体、Agent 工作空间、可选 Codex 状态与项目 Acheng 运行版本。停止或重建容器保留该卷；删除卷会删除数据。部署到局域网/服务器时，在 `.env` 配置 `APP_BIND_ADDRESS`、`APP_PORT` 与完整 `APP_ORIGIN`，详见[Docker 部署](docs/content/docs/overview/docker.zh-CN.mdx)。
+默认只开放本机网页端口；同源网关代理 API、媒体、SSE、WebSocket 和 MCP。命名卷保存数据库、媒体和工作空间，容器重建保留数据。**不要用 `docker compose down --volumes` 升级，它会删除数据卷。** 局域网、宿主 ComfyUI 挂载、可选 Codex 镜像与备份步骤见[Docker 部署](docs/content/docs/overview/docker.zh-CN.mdx)。
 
-### 本地源码开发
+### 启动后检查
 
-需要 Node.js 22.5+（建议 Node 22/24 LTS）与 npm：
+| 运行方式 | 网页 | 健康检查 | 外部 MCP |
+| --- | --- | --- | --- |
+| 原生 | `http://localhost:3001` | `http://127.0.0.1:17370/health` | `http://127.0.0.1:17370/mcp` |
+| Docker | `http://localhost:3000` | `http://localhost:3000/api/health` | `http://localhost:3000/api/mcp` |
 
-```bash
-corepack pnpm install --frozen-lockfile
-corepack pnpm run dev
-```
-
-访问 `http://localhost:3001`。根命令从源码构建官方插件和共享的 `canvas-agent/dist`，再启动 Backend（17370）和 Web（3001），不清理已有服务。Backend 已集成 `/agent` 和 `/mcp`；17371 只用于可选旧客户端代理，使用 `corepack pnpm run dev:services`。`dev:services` 和 `dev:local` 会核对源码、依赖配置与产物内容，复用未变化的构建，变化或缺失时自动重建。Backend 开发命令在源码变化后等待业务空闲再重载；Windows 的 `dev:local` 会清理旧服务，不能当作探活命令。
-
-日常制作可在 Backend 空闲并停止原 Backend 后，运行 `corepack pnpm run start:backend`。该命令构建共享 Agent 与 Backend，再通过常驻入口运行 Backend 构建产物；源码保存和后续构建不会触发自动重载，更新时重新执行启动流程。前端可继续使用已有网页，或另开终端运行 `corepack pnpm run dev:web`。数据目录和连接配置沿用现有设置。
-
-侧边栏 Codex 对话需自行安装 `@openai/codex@0.160.0` 并登录；基础画布和外部 MCP 可跳过。原生部署的监听、数据目录、密钥和来源可以通过环境变量配置，见[部署说明](docs/content/docs/overview/docker.zh-CN.mdx)与[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx)。
+健康接口应返回 JSON。外部 MCP 使用 Streamable HTTP 与同一个 Backend 的 Bearer 密钥。Docker 可用 `docker compose ps`、`docker compose logs --tail=100 backend` 排查启动；首次构建与已有大库升级应等待完成后连接。
 
 ## 连接模型与可选制作能力
 
 - **API 模型**：在设置中添加渠道地址、Key 与模型。渠道 Key 保存在 Backend SQLite，实际调用位置取决于执行器；自定义浏览器脚本需要网页保持打开。
 - **ComfyUI**：独立安装模型、节点和工作流，再配置 Backend 能访问的服务地址。Docker 中的 `127.0.0.1` 指向容器；宿主服务可使用 `host.docker.internal`，其他机器使用其实际网络地址。
 - **MiniMax H3**：模型、LoRA、VAE、TRT/DLSS 与自定义节点以自己的 ComfyUI 能力为准；本地潜变量续跑需要 Backend 能访问同一安装目录。视频工具与 Motion Context 需要 FFmpeg/FFprobe，Backend 镜像已包含它们。
-- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。`.agents/skills/acheng-director` 是指向 `helishou/acheng-director-skill` 的 Git 子模块，可在该目录直接开发、提交和推送。运行版本与激活记录由画布项目管理，默认保存在仓库忽略目录 `.canvas-runtime`，不依赖用户级 `CODEX_HOME`；可用 `INFINITE_CANVAS_ACHENG_HOME` 指定项目专属持久目录。已有克隆先运行 `git submodule update --init -- .agents/skills/acheng-director`；提交修改后运行 `corepack pnpm run acheng:update -- --local` 校验并启用当前提交，`corepack pnpm run acheng:update` 获取远端更新，`corepack pnpm run acheng:rollback` 仅回退运行包。Docker 的对应命令和可选 Codex 镜像见部署说明。
+- **Acheng Director**：七模块覆盖剧情、资产、表演/动作、视效、镜头、模型提示词与连续性。源代码由 Git 子模块提供，首次使用按[快速开始](docs/content/docs/overview/quick-start.zh-CN.mdx#可选-python-环境)校验并激活运行包，再用 `corepack pnpm run acheng:status` 检查。运行版本默认保存在 `.canvas-runtime`，可通过 `INFINITE_CANVAS_ACHENG_HOME` 指定持久目录；运行包与 Codex 登录目录分开管理。
 - **插件**：Markdown、SVG、HTML、3D 全景等通过节点插件扩展，开发方式见[插件 SDK](plugins/canvas/README.md)。
 
 ## 数据与部署边界
 
 Backend 的 SQLite 与媒体目录是业务数据的权威，WebDAV 是可选同步副本。原生部署默认使用 `~/.infinite-canvas`，也可显式指定数据/媒体目录。浏览器保存的未确认编辑与冲突草稿也是用户数据。
 
-升级已有旧版 SQLite 前，Backend 会生成并校验迁移快照；遇到比代码更新的数据库版本会拒绝打开。快照不包含媒体和浏览器草稿，升级前仍需备份完整数据。显式切换数据目录不会自动搬迁旧资料。
+升级前先等待生成任务、Agent 回合和编译结束，正常停止 Backend，并备份实际数据目录、独立媒体目录及 Acheng 运行目录。不要只复制正在写入的 `runtime.sqlite`；SQLite WAL 也可能包含已提交编辑。浏览器未确认编辑与冲突草稿需要保留。
+
+当前存储版本为 **schema 53**，支持从 **52** 直接升级；更早的库或备份先由上一版 Backend 升到 52。支持的迁移会先生成并校验一致性快照；无法识别或比代码更新的版本拒绝打开。迁移快照不包含媒体，不能代替完整备份；已有新编辑后不能直接恢复旧备份覆盖。切换数据目录不会自动搬迁资料。详细布局与容量维护见[存储说明](docs/canvas-storage-capacity.md)。
+
+原生启动不会自动读取根目录 `.env`；该文件供 Compose 使用。原生环境变量需在 Shell 或服务管理器里设置。只需使用默认数据目录时，无需创建 `.env`。
 
 项目采用共享 Backend 密钥，持有密钥的可信协作者可以访问整个后台。它目前没有独立账号、租户或按项目权限隔离；服务器部署需自行提供 HTTPS 和访问控制。仅部署静态前端（Vercel/Render 或 Docker 的 `frontend` target）仍需连接可访问的 Backend。
 
@@ -121,7 +198,7 @@ Backend 的 SQLite 与媒体目录是业务数据的权威，WebDAV 是可选同
 
 ## 开源协议
 
-本仓库按 [MIT License](LICENSE) 发布。该许可文件保留了上游版权声明；基于上游代码及其衍生部分的使用、分发和修改，请遵守许可条款并保留所需版权与许可声明。
+本项目主体代码按 [MIT License](LICENSE) 发布，并保留上游版权声明。随附第三方组件适用各自许可：本地风格迁移的 ImageF 算法模块使用 [PolyForm Noncommercial 1.0.0](backend/workers/style_transfer/LICENSE.txt)，附带模型另有许可；详见[来源与许可说明](backend/workers/style_transfer/VENDORING.txt)及[第三方声明](backend/workers/style_transfer/THIRD_PARTY_NOTICES.txt)。分发时须保留各组件的版权、许可和 Required Notice，不能将第三方部分一概视为 MIT。
 
 ## Star History
 

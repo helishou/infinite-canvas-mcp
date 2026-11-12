@@ -294,6 +294,7 @@ const subjectPictureBindingSchema = z.object({
         z.object({ mode: z.literal("selected_result"), resultId: id }).strict(),
     ]),
     provides: z.array(id).min(1), retain: z.array(z.string()), exclude: z.array(z.string()),
+    purpose: z.string().optional(),
     applicableState: z.record(id, z.string()).default({}), defaultFor: z.array(id).default([]),
 }).strict();
 const subjectEntrySchema = z.object({

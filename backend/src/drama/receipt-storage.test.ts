@@ -1,25 +1,20 @@
 import assert from "node:assert/strict";
+import { gzipSync } from "node:zlib";
 import test from "node:test";
 import { decodeReceipt, encodeReceipt, receiptBytes } from "./receipt-storage.js";
 
-test("receipt storage reads legacy TEXT and gzip BLOB with exact JSON round-trip", () => {
-    const value = {
-        unicode: "暴雨夜·沈砚😀",
-        nested: { keys: ["workflow", "artifacts"], count: 42 },
-        repeated: "画布回执".repeat(20_000),
-    };
+test("receipt codec writes Brotli envelope and reads only current BLOB", () => {
+    const value = { draft: { source: { title: "中文" } }, published: null };
+    const encoded = encodeReceipt(value);
+    assert.equal(Buffer.from(encoded).subarray(0, 5).toString("ascii"), "ICBR1");
+    assert.deepEqual(decodeReceipt(encoded), value);
     const legacyText = JSON.stringify(value);
-    const compressed = encodeReceipt(value);
-    assert.ok(compressed instanceof Uint8Array);
-    assert.ok(compressed.byteLength < Buffer.byteLength(legacyText, "utf8") / 10);
-    assert.deepEqual(decodeReceipt(legacyText), value);
-    assert.deepEqual(decodeReceipt(compressed), value);
-    assert.equal(receiptBytes(legacyText), Buffer.byteLength(legacyText, "utf8"));
-    assert.equal(receiptBytes(compressed), compressed.byteLength);
+    assert.throws(() => decodeReceipt(legacyText), /Unsupported receipt storage type/);
+    assert.throws(() => decodeReceipt(gzipSync(Buffer.from(legacyText))), /Unsupported compressed JSON storage format/);
+    assert.equal(receiptBytes(encoded), encoded.byteLength);
 });
 
-test("receipt storage rejects unsupported/corrupt payloads rather than silently falling back", () => {
-    assert.throws(() => decodeReceipt(123 as never), /存储类型不受支持/);
-    assert.throws(() => decodeReceipt("not-json"), SyntaxError);
-    assert.throws(() => decodeReceipt(new Uint8Array([1, 2, 3])), /incorrect header check|unknown compression method|unexpected end/i);
+test("receipt codec rejects corrupt and unknown BLOBs without exposing payload", () => {
+    assert.throws(() => decodeReceipt(Buffer.from("unknown payload")), { message: "Unsupported compressed JSON storage format" });
+    assert.throws(() => decodeReceipt("not json"), { message: "Unsupported receipt storage type" });
 });

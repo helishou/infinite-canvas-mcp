@@ -12,7 +12,8 @@
 import { DatabaseSync } from "node:sqlite";
 import crypto from "node:crypto";
 
-import { decodeReceipt } from "../drama/receipt-storage.js";
+import { decodeStoredJson } from "../json-storage.js";
+import { iterateRawProjects } from "../stores/canvas-project-storage.js";
 
 // ─── 类型 ───
 
@@ -176,8 +177,8 @@ function jsonColumns(db: DatabaseSync, table: string): string[] {
 }
 
 /**
- * 回执/快照列可能是 gzip BLOB（`encodeReceipt` 的写入形态）或历史明文 TEXT。
- * 只认 TEXT 会让压缩后的行从保护扫描里静默消失——实测把 `production_preparations`
+ * 回执/快照列使用当前 Brotli BLOB 或通用 JSON TEXT。
+ * 只认 TEXT 会让Brotli 压缩后的行从保护扫描里静默消失——实测把 `production_preparations`
  * 压缩后 `referenced-by-preparation` 直接归零，被这些回执引用的任务于是变成可删。
  * 因此两种形态都必须解析；解析不出来按「无法证明无引用」处理（调用方保留）。
  */
@@ -186,8 +187,7 @@ function parseJsonColumn(value: unknown): unknown {
         try { return JSON.parse(value); } catch { return undefined; }
     }
     if (value instanceof Uint8Array) {
-        try { return decodeReceipt(value); } catch { /* 不是 gzip，继续按明文试 */ }
-        try { return JSON.parse(Buffer.from(value).toString("utf8")); } catch { return undefined; }
+        try { return decodeStoredJson(value); } catch { return undefined; }
     }
     return undefined;
 }
@@ -210,28 +210,31 @@ export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig)
     for (const row of db.prepare("SELECT id FROM generation_logs").all() as Array<{ id: string }>) logIds.add(row.id);
 
     // 2. 读取任务基础信息
-    type RawTask = { id: string; kind: string; status: string; created_at: string; updated_at: string; params_json: string };
+    type RawTask = { id: string; kind: string; status: string; created_at: string; updated_at: string; params_json: unknown };
     const rawTasks: RawTask[] = db.prepare(
         "SELECT id, kind, status, created_at, updated_at, params_json FROM tasks"
     ).all() as RawTask[];
 
     const tasks = new Map<string, TaskInfo>();
     const anomalies: RetentionReport["anomalies"] = [];
+    const invalidParamsTaskIds = new Set<string>();
     for (const row of rawTasks) {
         let parentTaskId: string | null = null;
         let boundLogId: string | null = null;
-        let params: Record<string, unknown> = {};
-        try {
-            params = JSON.parse(row.params_json) as Record<string, unknown>;
-        } catch {
+        const decoded = parseJsonColumn(row.params_json);
+        const params = decoded && typeof decoded === "object" && !Array.isArray(decoded)
+            ? decoded as Record<string, unknown>
+            : undefined;
+        if (!params) {
             anomalies.push({ type: "unparseable-json", detail: `tasks.params_json 无法解析`, taskId: row.id });
+            invalidParamsTaskIds.add(row.id);
         }
-        const p = params.parentTaskId;
+        const p = params?.parentTaskId;
         if (typeof p === "string" && p) {
             parentTaskId = p;
             if (!taskIds.has(p)) anomalies.push({ type: "integrity-anomaly", detail: `父任务 ${p} 不存在`, taskId: row.id });
         }
-        const cb = params.canvasBinding as Record<string, unknown> | undefined;
+        const cb = params?.canvasBinding as Record<string, unknown> | undefined;
         if (cb && typeof cb.generationLogId === "string" && cb.generationLogId) {
             boundLogId = cb.generationLogId;
             if (!logIds.has(boundLogId)) anomalies.push({ type: "integrity-anomaly", detail: `绑定日志 ${boundLogId} 不存在`, taskId: row.id });
@@ -269,6 +272,10 @@ export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig)
         if (!reasonMap.has(key)) reasonMap.set(key, new Set());
         reasonMap.get(key)!.add(reason);
     };
+    for (const id of invalidParamsTaskIds) {
+        protectedTasks.add(id);
+        addReason(id, "unparseable-json");
+    }
 
     // 4a. production_task_bindings（所有状态）
     if (tableExists(db, "production_task_bindings")) {
@@ -280,9 +287,8 @@ export function evaluateRetention(db: DatabaseSync, config: HistoryPolicyConfig)
 
     // 4b. canvas_projects.data_json → 节点 metadata 中的 task ID
     const existingNodeIds = new Set<string>();
-    for (const row of db.prepare("SELECT data_json FROM canvas_projects").all() as Array<{ data_json: string }>) {
-        let data: { nodes?: Array<{ id?: string; metadata?: Record<string, unknown> }> };
-        try { data = JSON.parse(row.data_json); } catch { continue; }
+    for (const rawProject of iterateRawProjects(db)) {
+        const data = rawProject as { nodes?: Array<{ id?: string; metadata?: Record<string, unknown> }> };
         for (const node of data.nodes ?? []) {
             if (node.id) existingNodeIds.add(node.id);
             const meta = node.metadata ?? {};

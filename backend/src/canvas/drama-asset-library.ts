@@ -9,6 +9,7 @@ import { directorHash, withoutDirectorProjection } from "../drama/director.js";
 import { sharedSubjectPictureMedia } from "../drama/shared-subject-picture.js";
 import { sharedAssetClipInputOperations } from "../drama/clip-inputs.js";
 import { decodeStoredJson } from "../json-storage.js";
+import { iterateRawProjects, readRawProject } from "../stores/canvas-project-storage.js";
 import type { EpisodeProductionData } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionNodePosition } from "../drama/production-layout-geometry.js";
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
@@ -30,8 +31,7 @@ const nodes = (project: CanvasProject | null) => (project?.nodes || []) as Asset
 const sharedProductionNodeKinds = new Set(["character", "scene", "prop"]);
 const sharedNodeAssetId = (dramaId: string, nodeId: string) => `shared-${crypto.createHash("sha256").update(`${dramaId}\0${nodeId}`).digest("hex").slice(0, 24)}`;
 export function rawProject(db: BackendDatabase, id: string): CanvasProject | null {
-    const row = db.db.prepare("SELECT data_json FROM canvas_projects WHERE id=?").get(id) as { data_json: string } | undefined;
-    return row ? JSON.parse(row.data_json) : null;
+    return readRawProject(db.db, id) as CanvasProject | null;
 }
 export function rawAsset(db: BackendDatabase, id: string): Asset | null {
     return db.getAssetRecord(id);
@@ -163,11 +163,22 @@ export function resolveProjectAssets(db: BackendDatabase, project: CanvasProject
 }
 export function stripProjectAssets(project: CanvasProject): CanvasProject { return { ...project, nodes: nodes(project).map(stripSharedAssetContent) }; }
 export function assetConsumers(db: BackendDatabase, source: SharedAssetSource) {
-    return db.db.prepare(`SELECT p.id AS projectId, COALESCE(json_extract(p.data_json,'$.title'),p.id) AS title, json_extract(n.value,'$.id') AS nodeId
-        FROM canvas_projects p, json_each(p.data_json,'$.nodes') n
-        WHERE (json_extract(n.value,'$.metadata.sharedAssetReference.assetId')=? AND json_extract(n.value,'$.metadata.sharedAssetReference.dramaId')=?)
-           OR (json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceProjectId')=? AND json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceNodeId')=?)`)
+    const hasNodeRows = Boolean(db.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_nodes'").get());
+    if (hasNodeRows) return db.db.prepare(`SELECT p.id AS projectId, COALESCE(json_extract(p.data_json,'$.title'),p.id) AS title, n.node_id AS nodeId
+        FROM canvas_projects p JOIN canvas_nodes n ON n.project_id=p.id
+        WHERE (json_extract(n.node_json,'$.metadata.sharedAssetReference.assetId')=? AND json_extract(n.node_json,'$.metadata.sharedAssetReference.dramaId')=?)
+           OR (json_extract(n.node_json,'$.metadata.sharedAssetOrigin.sourceProjectId')=? AND json_extract(n.node_json,'$.metadata.sharedAssetOrigin.sourceNodeId')=?)`)
         .all(source.assetId, source.dramaId, source.sourceProjectId, source.sourceNodeId) as { projectId: string; title: string; nodeId: string }[];
+    const consumers: { projectId: string; title: string; nodeId: string }[] = [];
+    for (const project of iterateRawProjects(db.db) as Iterable<CanvasProject>) for (const node of nodes(project)) {
+        const reference = node.metadata?.sharedAssetReference as SharedAssetReference | undefined;
+        const origin = node.metadata?.sharedAssetOrigin as { sourceProjectId?: string; sourceNodeId?: string } | undefined;
+        if (reference?.assetId === source.assetId && reference.dramaId === source.dramaId
+            || origin?.sourceProjectId === source.sourceProjectId && origin.sourceNodeId === source.sourceNodeId) {
+            consumers.push({ projectId: project.id, title: String(project.title || project.id), nodeId: node.id });
+        }
+    }
+    return consumers;
 }
 function assertUnused(db: BackendDatabase, source: SharedAssetSource) {
     const consumers = assetConsumers(db, source);
@@ -181,9 +192,7 @@ function containsExactValue(value: unknown, expected: string): boolean {
 }
 /** Current source references, excluding append-only receipts/history that intentionally retain old asset IDs. */
 function hasCurrentAssetIdReference(db: BackendDatabase, assetId: string): boolean {
-    for (const row of db.db.prepare("SELECT data_json FROM canvas_projects").all() as Array<{ data_json: unknown }>) {
-        try { if (containsExactValue(decodeStoredJson(row.data_json), assetId)) return true; } catch { return true; }
-    }
+    for (const project of iterateRawProjects(db.db) as Iterable<CanvasProject>) try { if (containsExactValue(project, assetId)) return true; } catch { return true; }
     for (const row of db.db.prepare("SELECT draft_json,published_json FROM episode_productions").all() as Array<{ draft_json: unknown; published_json: unknown }>) {
         for (const data of [row.draft_json, row.published_json]) {
             if (data == null) continue;
@@ -318,8 +327,9 @@ function syncSharedProductionOwners(db: BackendDatabase, source: SharedAssetSour
     const updates: Array<{ entityId: string; revision: number; reason?: "shared_asset_sync" }> = [];
     const clipOperations = new Map<string, CanvasOperation[]>();
     const version = `shared:${crypto.createHash("sha256").update(JSON.stringify(sharedAssetFields(node.type).map(field => [field, assetField(node, field)]))).digest("hex")}`;
+    const hasArchivedAt = (db.db.prepare("PRAGMA table_info(episode_productions)").all() as Array<{ name: string }>).some(column => column.name === "archived_at");
     for (const episode of db.listDramaEpisodes(source.dramaId)) {
-        const row = db.db.prepare("SELECT revision,draft_json,archived_at FROM episode_productions WHERE episode_id=?").get(episode.id) as { revision: number; draft_json: string; archived_at: string | null } | undefined;
+        const row = db.db.prepare(`SELECT revision,draft_json,${hasArchivedAt ? "archived_at" : "NULL AS archived_at"} FROM episode_productions WHERE episode_id=?`).get(episode.id) as { revision: number; draft_json: string; archived_at: string | null } | undefined;
         if (!row || row.archived_at) continue; // Archived episodes are frozen: shared-library updates no longer flow into them.
         const draft = JSON.parse(row.draft_json) as EpisodeProductionData, director = draft.director;
         if (!director) continue;
@@ -607,36 +617,4 @@ export function deleteDramaAsset(db: BackendDatabase, id: string): number {
     } catch (error) { db.db.exec("ROLLBACK"); throw error; }
     for (const commit of commits) db.notifyCanvasCommit(commit);
     return 1;
-}
-export function migrateDramaAssets(db: BackendDatabase) {
-    const commits: CanvasCommit[] = [];
-    for (const asset of db.listAssetRecords()) {
-        if (!asset.dramaId || !db.isDramaProject(asset.dramaId) || !kinds.has(asset.kind) || sourceOf(asset)) continue;
-        const legacyVersionId = String(asset.metadata?.versionId || asset.metadata?.approvedId || "");
-        if (asset.source === "production-shared" && legacyVersionId) {
-            const approved = db.db.prepare("SELECT source_project_id, source_node_id FROM drama_asset_versions WHERE id=? AND drama_id=?").get(legacyVersionId, asset.dramaId) as { source_project_id: string; source_node_id: string } | undefined;
-            if (!approved || approved.source_project_id !== asset.metadata.sourceProjectId || approved.source_node_id !== asset.metadata.sourceNodeId) throw new Error("存量共享批准资产来源无法核验，迁移已回滚");
-            const node = nodes(rawProject(db, approved.source_project_id)).find(n => n.id === approved.source_node_id);
-            if (!node) throw new Error("存量共享批准资产节点不存在，迁移已回滚");
-            db.upsertAssetRecord({ ...asset, kind: ["character", "scene"].includes(node.type) ? node.type : "image", data: {}, coverUrl: "", metadata: { ...asset.metadata, sharedAssetSource: { dramaId: asset.dramaId, assetId: asset.id, sourceProjectId: approved.source_project_id, sourceNodeId: approved.source_node_id } } });
-            continue;
-        }
-        const projects = db.listCanvasProjects();
-        const originMatches = projects.flatMap(p => nodes(p).filter(n => n.id === asset.metadata?.nodeId && (!asset.metadata?.projectId || asset.metadata.projectId === p.id)).map(n => ({ projectId: p.id, node: n })));
-        const candidates = projects.flatMap(p => nodes(p).filter(n => {
-            if (n.type !== asset.kind || n.metadata?.sharedAssetOrigin || n.metadata?.productionAssetId) return false;
-            return n.metadata?.characterAssetId === asset.id || originMatches.length === 1 && originMatches[0].projectId === p.id && originMatches[0].node.id === n.id;
-        }).map(n => ({ projectId: p.id, node: n })));
-        const sharedId = db.listCanvasFolders().find(f => f.id === asset.dramaId)?.sharedAssetCanvasId;
-        const canonical = candidates.find(c => c.projectId === sharedId);
-        writeDramaAsset(db, asset, { withinTransaction: true, deferredCommits: commits, ...(canonical ? { canvasSource: { projectId: canonical.projectId, nodeId: canonical.node.id } } : {}) });
-        const source = sourceOf(db.getAssetRecord(asset.id))!;
-        const canonicalNode = nodes(rawProject(db, source.sourceProjectId)).find(n => n.id === source.sourceNodeId)!;
-        for (const c of candidates) {
-            if (db.getDramaEpisodeByCanvasId(c.projectId)?.dramaId !== asset.dramaId || c.projectId === source.sourceProjectId) continue;
-            const edits: SharedAssetReference["edits"] = {};
-            for (const f of sharedAssetFields(c.node.type)) if (!sameAssetValue(assetField(c.node, f), assetField(canonicalNode, f))) { const v = assetField(c.node, f); edits[f] = { base: assetField(canonicalNode, f), ...(v === undefined ? { deleted: true } : { value: v }) }; }
-            db.applyCanvasProjectOperations(c.projectId, undefined, [{ type: "update_node", id: c.node.id, metadata: { sharedAssetReference: { ...source, ...(Object.keys(edits).length ? { edits } : {}) } } }], { runtimeWrite: true, withinTransaction: true, deferredCommits: commits });
-        }
-    }
 }

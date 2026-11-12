@@ -9,8 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { BackendDatabase } from "../db.js";
-import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { createStores } from "../stores/index.js";
+import { readStoredProjectRows, writeStoredProjectDelta } from "../stores/canvas-project-storage.js";
 import { BackendEventBus } from "../events.js";
 import { EpisodeProductionService, legacySharedBindingIds } from "./production.js";
 import { EpisodeProductionRunner } from "./production-runner.js";
@@ -36,6 +36,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
 import { registerDramaProductionRoutes } from "../server/drama-production-routes.js";
+
+function replaceStoredProject(db: BackendDatabase, project: Record<string, unknown>) {
+    db.db.exec("BEGIN IMMEDIATE");
+    try {
+        const stored = readStoredProjectRows(db.db, String(project.id));
+        assert.ok(stored);
+        writeStoredProjectDelta(db.db, stored, project);
+        db.db.exec("COMMIT");
+    } catch (error) { db.db.exec("ROLLBACK"); throw error; }
+}
 
 function fixture(t: test.TestContext) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "production-canvas-"));
@@ -466,14 +476,16 @@ test("Clip storyboard edits replace formal Shots and immediately reproject H3 tr
     const saved = await f.episode.edit("ep", request);
     assert.deepEqual((saved.draft.director!.source.shots as any[]).map(shot => shot.id), ["s1", "s1b", "s2"]);
     const storedReceipt = f.db.db.prepare("SELECT receipt_json FROM episode_production_operations WHERE operation_id=?").get("clip-track-writeback") as { receipt_json: Uint8Array };
-    assert.ok(storedReceipt.receipt_json instanceof Uint8Array, "new operation receipts are stored as gzip BLOBs");
+    assert.ok(storedReceipt.receipt_json instanceof Uint8Array, "new operation receipts are stored as Brotli BLOBs");
     const decodedReceipt = decodeReceipt<any>(storedReceipt.receipt_json);
     assert.equal(decodedReceipt.revision, saved.revision);
     assert.deepEqual(decodedReceipt.draft.director, saved.draft.director);
     const replayed = await f.episode.edit("ep", request);
-    assert.equal(replayed.replayed, true, "idempotent edit replay must decode the new gzip BLOB");
+    assert.equal(replayed.replayed, true, "idempotent edit replay must decode the current Brotli BLOB");
     const legacyText = JSON.stringify(decodedReceipt);
     f.db.db.prepare("UPDATE episode_production_operations SET receipt_json=? WHERE operation_id=?").run(legacyText, "clip-track-writeback");
+    assert.throws(() => f.episode.operationReceipt("ep", "clip-track-writeback"), /Unsupported receipt storage type/);
+    f.db.db.prepare("UPDATE episode_production_operations SET receipt_json=? WHERE operation_id=?").run(storedReceipt.receipt_json, "clip-track-writeback");
     const replayReceipt = f.episode.operationReceipt("ep", "clip-track-writeback");
     assert.equal(replayReceipt?.revision, saved.revision);
     assert.deepEqual(replayReceipt?.draft.director?.source, saved.draft.director?.source);
@@ -1181,8 +1193,7 @@ test("preparing an existing empty scene materializes its canonical H3 node", asy
     const legacyProject = f.db.getCanvasProject(project.id)!;
     assert.ok((legacyProject.nodes as any[]).some(node => node.id === expectedNodeId), "the scene was created with its H3 node before it became a legacy repair target");
     assert.ok(!(legacyProject.nodes as any[]).some(node => node.id === expectedGroupId), "scene preparation no longer creates a wrapper group");
-    f.db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(
-        JSON.stringify({ ...legacyProject, nodes: (legacyProject.nodes as any[]).filter(node => node.id !== expectedNodeId && node.id !== expectedGroupId) }), project.id);
+    replaceStoredProject(f.db, { ...legacyProject, nodes: (legacyProject.nodes as any[]).filter(node => node.id !== expectedNodeId && node.id !== expectedGroupId) });
     const runner = new EpisodeProductionRunner(f.episode, f.stores, {} as CanvasGenerationService);
 
     await runner.prepareTargets("ep", saved.revision, ["scene:dawn"], "prepare-existing-empty-scene");
@@ -1730,30 +1741,6 @@ test("new Segment preparation rejects a scene-spanning clip until it is split", 
     await assert.rejects(() => runner.prepareTargets("ep", f.episode.get("ep").revision, ["segment:seg1"], "cross-scene-segment"), /跨越多个场次/);
     assert.equal(f.db.db.prepare("SELECT 1 FROM production_preparations WHERE operation_id=?").get("cross-scene-segment"), undefined);
     assert.ok(f.db.getCanvasProject(projectId));
-});
-
-
-test("version 23 installations gain layout plans, preparation receipts and native bindings without rewriting shared versions", async t => {
-    const f = fixture(t), sharedId = ensureProductionCanvas(f.db, "shared-assets", "drama").project.id;
-    const approved = await approve(f, sharedId, 1);
-
-    f.db.db.exec(`CREATE TABLE drama_asset_adoptions (
-        id TEXT PRIMARY KEY, approved_id TEXT NOT NULL, episode_id TEXT NOT NULL, target_asset_id TEXT NOT NULL,
-        expected_revision INTEGER NOT NULL, status TEXT NOT NULL, error TEXT, updated_at TEXT NOT NULL,
-        UNIQUE(approved_id, episode_id, target_asset_id));
-        DELETE FROM schema_migrations WHERE version>=24;
-        DROP TABLE production_preparations; DROP TABLE production_task_bindings;
-        ALTER TABLE drama_projects DROP COLUMN production_plan_json`);
-    const upgraded = new BackendDatabase(f.file);
-    try {
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-        assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_preparations'").get());
-        assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_task_bindings'").get());
-        assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE name='production_layout_plans'").get());
-        assert.equal(listApprovedSharedAssets(upgraded, "drama")[0].id, approved.id);
-        assert.equal(upgraded.listCanvasFolders().find(folder => folder.id === "drama")?.sharedAssetCanvasId, sharedId);
-        assert.ok(fs.readdirSync(f.directory).some(name => name.includes("pre-schema-v23-to-v" + DATABASE_SCHEMA_VERSION)));
-    } finally { upgraded.close(); }
 });
 
 

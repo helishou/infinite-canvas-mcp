@@ -3,7 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "./database-snapshots.js";
 
-export const DATABASE_SCHEMA_VERSION = 50;
+export const DATABASE_SCHEMA_VERSION = 53;
+export const MINIMUM_DATABASE_SCHEMA_VERSION = 52;
 
 /** 迁移快照用途族名：`runtime.sqlite.pre-schema-*`。 */
 export const MIGRATION_SNAPSHOT_FAMILY = "pre-schema";
@@ -16,8 +17,8 @@ export function prepareDatabaseUpgrade(file: string): string | undefined {
         const hasVersions = source.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
         const row = hasVersions ? source.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: unknown } : undefined;
         const version = row?.version ?? 0;
-        if (typeof version !== "number" || !Number.isInteger(version) || version < 0 || version > DATABASE_SCHEMA_VERSION) {
-            throw new Error(`Unsupported database schema version ${String(version)} (supported: ${DATABASE_SCHEMA_VERSION}). Refusing to modify existing data; use the matching application version.`);
+        if (typeof version !== "number" || !Number.isInteger(version) || version < MINIMUM_DATABASE_SCHEMA_VERSION || version > DATABASE_SCHEMA_VERSION) {
+            throw new Error(`Unsupported database schema version ${String(version)} (supported: ${MINIMUM_DATABASE_SCHEMA_VERSION}–${DATABASE_SCHEMA_VERSION}; older databases must first be upgraded with the previous Backend). Refusing to modify existing data; use the matching application version.`);
         }
         if (version === DATABASE_SCHEMA_VERSION) return;
         const backup = createDatabaseSnapshot(source, file, `${MIGRATION_SNAPSHOT_FAMILY}-v${version}-to-v${DATABASE_SCHEMA_VERSION}`);

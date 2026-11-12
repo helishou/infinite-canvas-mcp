@@ -7,6 +7,7 @@ import { BackendDatabase } from "../db.js";
 import { DatabaseSync } from "node:sqlite";
 import { reconstructCanvasHistory } from "../canvas/history-maintenance.js";
 import { applyCanvasProjectOperations } from "../canvas/project-ops.js";
+import { createStoredProject, readStoredProjectRows, readRawProject, writeStoredProjectDelta } from "../stores/canvas-project-storage.js";
 import {
     buildRebalancePlan,
     applyRebalancePlan,
@@ -33,8 +34,7 @@ function makeDb(t: TestContext): Fixture {
  *  用真实 applyCanvasProjectOperations 计算 current 状态，保证回放必然匹配。 */
 function makeHealthyProject(raw: DatabaseSync, projectId: string, nodes: Array<Record<string, unknown>>) {
     const base = { id: projectId, revision: 0, nodes: [], connections: [] };
-    raw.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)")
-        .run(projectId, JSON.stringify(base), "2025-01-01T00:00:00.000Z");
+    raw.exec("BEGIN"); createStoredProject(raw, base); raw.exec("COMMIT");
     raw.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, 0, ?)")
         .run(projectId, JSON.stringify(base));
     // 真实 add_node 操作：从空画布重放得到 current
@@ -52,7 +52,7 @@ function makeHealthyProject(raw: DatabaseSync, projectId: string, nodes: Array<R
     applyCanvasProjectOperations(replay, operations as never, { committedReplay: true });
     replay.revision = 1;
     replay.updatedAt = "2025-01-02T00:00:00.000Z";
-    raw.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(JSON.stringify(replay), projectId);
+    raw.exec("BEGIN"); writeStoredProjectDelta(raw, readStoredProjectRows(raw, projectId)!, replay); raw.exec("COMMIT");
     raw.prepare(
         "INSERT INTO canvas_operation_batches (operation_id, project_id, base_revision, revision, source_json, operations_json, results_json, created_at) VALUES (?, ?, 0, 1, '{}', ?, '{}', ?)"
     ).run(`op-${projectId}-1`, projectId, JSON.stringify(operations), "2025-01-02T00:00:00.000Z");
@@ -62,10 +62,9 @@ function makeHealthyProject(raw: DatabaseSync, projectId: string, nodes: Array<R
 
 /** 同 revision 篡改 data_json（加 ghost 节点）→ 回放不匹配。 */
 function corruptProject(raw: DatabaseSync, projectId: string, ghostId = "ghost-node") {
-    const row = raw.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(projectId) as { data_json: string };
-    const data = JSON.parse(row.data_json);
+    const data = readRawProject(raw, projectId)!;
     data.nodes.push({ id: ghostId, type: "video", metadata: {} });
-    raw.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = ?").run(JSON.stringify(data), projectId);
+    raw.exec("BEGIN"); writeStoredProjectDelta(raw, readStoredProjectRows(raw, projectId)!, data); raw.exec("COMMIT");
 }
 
 test("健康项目：diagnose 未 blocked，buildRebalancePlan 拒绝", (t: TestContext) => {
@@ -136,8 +135,7 @@ test("apply：回放不匹配项目 re-baseline 成功；旧 revision 不可恢�
     assert.equal(result.checkpointRevision, 1);
     assert.ok(fs.existsSync(result.backupFile));
 
-    const project = raw.prepare("SELECT data_json FROM canvas_projects WHERE id = 'p1'").get() as { data_json: string };
-    const data = JSON.parse(project.data_json);
+    const data = readRawProject(raw, "p1")!;
     assert.equal(data.revision, 1);
 
     assert.throws(() => reconstructCanvasHistory(raw, "p1", 0), /RECEIPT_UNAVAILABLE|没有可恢复/);

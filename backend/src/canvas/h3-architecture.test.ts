@@ -8,79 +8,12 @@ import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { canonicalizeH3References, registerH3ReferenceAssets } from "./project-ops.js";
 
-test("H3 旧引用迁移保留 Clip 语义并拆分冲突媒体", (t) => {
-    const base = path.resolve(process.env.INFINITE_CANVAS_DATA_DIR || os.tmpdir());
-    fs.mkdirSync(base, { recursive: true });
-    const directory = fs.mkdtempSync(path.join(base, "h3-migrate-"));
-    let migrated: BackendDatabase | undefined;
-    t.after(() => {
-        migrated?.close();
-        const resolved = path.resolve(directory);
-        if (resolved.startsWith(base + path.sep)) fs.rmSync(resolved, { recursive: true, force: true });
-    });
-    const file = path.join(directory, "runtime.sqlite");
-    const db = new BackendDatabase(file);
-    db.createCanvasProject({ id: "p", nodes: [], connections: [] });
-    const project = db.getCanvasProject("p")!;
-    project.nodes = [{ id: "h3", type: "minimax-h3", metadata: { segments: [
-        { id: "a", prompt: "a", refItems: [{ bindingId: "bind-a", assetId: "shared", name: "书房", type: "image", role: "scene", storageKey: "image:a" }] },
-        { id: "b", prompt: "b", referenceBindings: [], refItems: [{ bindingId: "bind-b", assetId: "shared", name: "角色服装", type: "image", role: "character_identity", subjectId: "hero", storageKey: "image:b" }] },
-        { id: "c", prompt: "c", refItems: [{ bindingId: "bind-c", assetId: "shared", name: "另一个书房用途", type: "image", role: "storyboard", storageKey: "image:a" }] },
-    ] } }] as typeof project.nodes;
-    db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
-    // A simulated v13 database must not retain newer empty tables or their role triggers.
-    for (const row of db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE '%canvas_productions%'").all() as Array<{ name: string }>) db.db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
-    for (const table of ["canvas_production_runs", "canvas_production_versions", "canvas_production_operations", "canvas_productions"]) db.db.exec(`DROP TABLE ${table}`);
-    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
-    db.close();
-
-    migrated = new BackendDatabase(file);
-    const saved = migrated.getCanvasProject("p")!;
-    const segments = (((saved.nodes as Array<Record<string, unknown>>)[0]).metadata as { segments: Array<Record<string, unknown>> }).segments;
-    const bindings = segments.map((segment) => (segment.referenceBindings as Array<Record<string, unknown>>)[0]);
-    assert.deepEqual(bindings.map((item) => item.label), ["书房", "角色服装", "另一个书房用途"]);
-    assert.deepEqual(bindings.map((item) => item.role), ["scene", "character_identity", "storyboard"]);
-    assert.equal(bindings[1].subjectId, "hero");
-    assert.notEqual(bindings[0].assetId, bindings[1].assetId);
-    assert.equal(bindings[0].assetId, bindings[2].assetId);
-    assert.ok(segments.every((segment) => !("refItems" in segment) && !("refs" in segment)));
-    assert.equal((saved.referenceCatalog as unknown[] | undefined)?.length, 2);
-    assert.equal((migrated.db.prepare("SELECT COUNT(*) AS n FROM h3_reference_legacy_archive").get() as { n: number }).n, 3);
-    assert.ok(fs.readdirSync(directory).some((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-") && fs.statSync(path.join(directory, name)).size > 0));
-});
-
-test("旧绑定与参考不一致时保留绑定真值并原样归档旧字段", (t) => {
-    const base = path.resolve(process.env.INFINITE_CANVAS_DATA_DIR || os.tmpdir());
-    fs.mkdirSync(base, { recursive: true });
-    const directory = fs.mkdtempSync(path.join(base, "h3-conflict-"));
-    let migrated: BackendDatabase | undefined;
-    t.after(() => {
-        migrated?.close();
-        if (path.resolve(directory).startsWith(base + path.sep)) fs.rmSync(directory, { recursive: true, force: true });
-    });
-    const file = path.join(directory, "runtime.sqlite");
-    const db = new BackendDatabase(file);
-    db.createCanvasProject({ id: "p", nodes: [], connections: [] });
-    const project = db.getCanvasProject("p")!;
+test("不一致的 H3 旧参考快照不能静默丢弃", () => {
     const legacyNode = { id: "h3", type: "minimax-h3", metadata: { segments: [{
         id: "clip", referenceBindings: [{ id: "known", assetId: "asset", label: "已登记", role: "scene", tags: [], enabled: true, usage: "reference" }],
         refItems: [{ bindingId: "known", assetId: "asset", storageKey: "image:a" }, { bindingId: "missing", assetId: "other", storageKey: "image:b" }],
     }] } };
     assert.throws(() => canonicalizeH3References(structuredClone(legacyNode)), /拒绝丢弃原数据/);
-    project.nodes = [legacyNode] as typeof project.nodes;
-    db.db.prepare("UPDATE canvas_projects SET data_json = ? WHERE id = 'p'").run(JSON.stringify(project));
-    for (const row of db.db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND sql LIKE '%canvas_productions%'").all() as Array<{ name: string }>) db.db.exec(`DROP TRIGGER "${row.name.replaceAll('"', '""')}"`);
-    for (const table of ["canvas_production_runs", "canvas_production_versions", "canvas_production_operations", "canvas_productions"]) db.db.exec(`DROP TABLE ${table}`);
-    db.db.prepare("DELETE FROM schema_migrations WHERE version >= 14").run();
-    db.close();
-    migrated = new BackendDatabase(file);
-    const saved = migrated.getCanvasProject("p")!;
-    const segment = (((saved.nodes as Array<Record<string, unknown>>)[0]).metadata as { segments: Array<Record<string, unknown>> }).segments[0];
-    assert.equal((segment.referenceBindings as unknown[]).length, 1);
-    assert.equal("refItems" in segment, false);
-    const archive = migrated.db.prepare("SELECT legacy_json FROM h3_reference_legacy_archive WHERE project_id = 'p' AND node_id = 'h3' AND segment_id = 'clip'").get() as { legacy_json: string };
-    assert.equal((JSON.parse(archive.legacy_json) as { refItems: unknown[] }).refItems.length, 2);
-    assert.ok(fs.readdirSync(directory).some((name) => name.startsWith("runtime.sqlite.pre-h3-v14-reference-archive-") && fs.statSync(path.join(directory, name)).size > 0));
 });
 
 test("关闭角色服装后前端重发旧 refItems 不应被当作丢弃原数据", (t) => {

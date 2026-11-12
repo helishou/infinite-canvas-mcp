@@ -1,0 +1,4 @@
+# 画布风格迁移 worker（backend/workers/style_transfer_worker.py）依赖。
+# backend/venv 已包含这两项；其他 Python 环境按此安装。
+numpy
+opencv-python-headless

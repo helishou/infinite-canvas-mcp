@@ -6,27 +6,7 @@ import { collaborationError } from "./collaboration.js";
 import { stripCanvasLocalViewState } from "./operation-authority.js";
 import { applyCanvasProjectOperations } from "./project-ops.js";
 import { decodeStoredJson, type StoredJson } from "../json-storage.js";
-
-/** Caller owns the migration transaction. Missing legacy hashes are reserved, never guessed. */
-export function migrateCanvasReceipts(db: DatabaseSync) {
-    const foreignKeyViolations = () => new Set((db.prepare("PRAGMA foreign_key_check").all() as Array<{ table: string; rowid: number | null; parent: string; fkid: number }>).map((row) => JSON.stringify([row.table, row.rowid, row.parent, row.fkid])));
-    const existingViolations = foreignKeyViolations();
-    const orphan = db.prepare("SELECT r.operation_id FROM canvas_command_receipts r LEFT JOIN canvas_operation_batches b ON b.operation_id = r.operation_id WHERE b.operation_id IS NULL LIMIT 1").get();
-    if (orphan) throw new Error("Cannot migrate an unowned canvas receipt; original data preserved");
-    db.exec(`CREATE TABLE canvas_command_receipts_next (
-        operation_id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL REFERENCES canvas_projects(id) ON DELETE CASCADE,
-        request_hash TEXT NOT NULL,
-        committed_revision INTEGER NOT NULL
-    );
-    INSERT INTO canvas_command_receipts_next
-        SELECT b.operation_id, b.project_id, COALESCE(r.request_hash, ''), b.revision
-        FROM canvas_operation_batches b LEFT JOIN canvas_command_receipts r ON r.operation_id = b.operation_id;
-    DROP TABLE canvas_command_receipts;
-    ALTER TABLE canvas_command_receipts_next RENAME TO canvas_command_receipts;
-    CREATE INDEX canvas_command_receipts_project ON canvas_command_receipts(project_id);`);
-    if ([...foreignKeyViolations()].some((violation) => !existingViolations.has(violation))) throw new Error("Canvas receipt migration introduced a foreign-key violation");
-}
+import { iterateRawProjects } from "../stores/canvas-project-storage.js";
 
 export function reconstructCanvasHistory(db: DatabaseSync, id: string, revision: number) {
     const checkpoint = db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id) as { revision: number; data_json: string } | undefined;
@@ -58,11 +38,12 @@ export function previewCanvasHistoryPrune(db: DatabaseSync, cutoff: string): Can
     if (!Number.isFinite(Date.parse(cutoff))) throw new Error("Invalid history cutoff");
     const version = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version;
     if (version !== DATABASE_SCHEMA_VERSION) throw new Error(`History maintenance requires schema ${DATABASE_SCHEMA_VERSION}; upgrade with the matching Backend first`);
-    const projects = db.prepare("SELECT id, data_json FROM canvas_projects ORDER BY id").all() as Array<{ id: string; data_json: string }>;
-    return projects.map(({ id, data_json }) => {
+    const plans: CanvasHistoryPrunePlan[] = [];
+    for (const project of iterateRawProjects(db)) {
+        const id = String(project.id), dataJson = JSON.stringify(project);
         const plan: CanvasHistoryPrunePlan = { projectId: id, currentRevision: 0, checkpointRevision: 0, throughRevision: 0, batchCount: 0 };
         try {
-            const current = stripCanvasLocalViewState(JSON.parse(data_json) as Record<string, unknown>);
+            const current = stripCanvasLocalViewState(JSON.parse(dataJson) as Record<string, unknown>);
             plan.currentRevision = Number(current.revision || 0);
             const checkpoint = db.prepare("SELECT revision FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id);
             if (!checkpoint) throw new Error("Missing history checkpoint");
@@ -81,8 +62,9 @@ export function previewCanvasHistoryPrune(db: DatabaseSync, cutoff: string): Can
             plan.blockedReason = error instanceof Error ? error.message : String(error);
             plan.batchCount = 0;
         }
-        return plan;
-    });
+        plans.push(plan);
+    }
+    return plans;
 }
 
 export function applyCanvasHistoryPrune(db: DatabaseSync, file: string, cutoff: string) {

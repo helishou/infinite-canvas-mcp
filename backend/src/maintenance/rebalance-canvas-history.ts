@@ -17,8 +17,9 @@ import { createDatabaseSnapshot, pruneDatabaseSnapshots } from "../database-snap
 import { previewCanvasHistoryPrune, reconstructCanvasHistory } from "../canvas/history-maintenance.js";
 import { stripCanvasLocalViewState } from "../canvas/operation-authority.js";
 import { storedJsonText } from "../json-storage.js";
+import { readRawProject, readStoredProjectRows } from "../stores/canvas-project-storage.js";
 
-export const REBALANCE_POLICY_VERSION = 1;
+export const REBALANCE_POLICY_VERSION = 2;
 
 /** 稳定诊断码：只有这些才允许 re-baseline，其他 blocked 原因一律拒绝。 */
 export const REBALANCE_ELIGIBLE_CODES = new Set([
@@ -62,9 +63,9 @@ export type RebalanceFingerprint = {
 };
 
 export function computeRebalanceFingerprint(db: DatabaseSync, projectId: string): RebalanceFingerprint {
-    const project = db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(projectId) as { data_json: string } | undefined;
-    if (!project) throw new Error(`Project not found: ${projectId}`);
-    const dataJson = project.data_json;
+    const projectRows = readStoredProjectRows(db, projectId);
+    if (!projectRows) throw new Error(`Project not found: ${projectId}`);
+    const dataJson = JSON.stringify(readRawProject(db, projectId));
 
     const checkpoint = db.prepare("SELECT revision, data_json FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(projectId) as { revision: number; data_json: string } | undefined;
 
@@ -79,6 +80,10 @@ export function computeRebalanceFingerprint(db: DatabaseSync, projectId: string)
     const hash = crypto.createHash("sha256");
     hash.update("dataJson\0");
     hash.update(dataJson, "utf8");
+    hash.update("\0orderedNodes\0");
+    for (const row of projectRows.nodeRows) hash.update(`${row.ordinal}\0${row.nodeId}\0${row.nodeJson}\0`);
+    hash.update("\0orderedConnections\0");
+    for (const row of projectRows.connectionRows) hash.update(`${row.ordinal}\0${row.connectionJson}\0`);
     hash.update("\0checkpoint\0");
     if (checkpoint) {
         hash.update(`present=1\0revision=${checkpoint.revision}\0`);
@@ -148,13 +153,13 @@ export function buildRebalancePlan(db: DatabaseSync, projectId: string): Rebalan
     const version = Number(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()?.v ?? 0);
     if (version !== DATABASE_SCHEMA_VERSION) throw new Error(`re-baseline requires schema ${DATABASE_SCHEMA_VERSION}; got ${version}`);
 
-    const project = db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(projectId) as { data_json: string } | undefined;
+    const project = readRawProject(db, projectId);
     if (!project) throw new Error(`Project not found: ${projectId}`);
 
     // 当前画布契约：可解析、ID 正确、revision 合法
     let current: Record<string, unknown>;
     try {
-        current = JSON.parse(project.data_json) as Record<string, unknown>;
+        current = project as Record<string, unknown>;
     } catch {
         throw new Error("当前 data_json 无法解析，拒绝 re-baseline");
     }

@@ -63,7 +63,7 @@ test("孤海注释 is omitted from previously imported API workflows during run 
     "56": { class_type: "孤海注释", inputs: {} },
     "1": { class_type: "SaveImage", inputs: {} },
   };
-  const executor = new WorkflowExecutor({} as never, { create: () => ({ id: "task" }) } as never, {} as never);
+  const executor = new WorkflowExecutor({ localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }) } as never, { create: () => ({ id: "task" }) } as never, {} as never);
   const prepare = executor as unknown as { prepareRun: (...args: unknown[]) => Promise<{ prepared: Record<string, unknown> }> };
   const result = await prepare.prepareRun(source, { title: "test", fields: [] }, {}, "client", "http://localhost:8188", undefined, undefined, undefined, undefined, undefined);
   assert.deepEqual(result.prepared, { "1": source["1"] });
@@ -88,7 +88,7 @@ test("previously imported API workflow removes notes during actual run preparati
     "1": { class_type: "SaveImage", inputs: {} },
   };
   assert.deepEqual(convertComfyWorkflowToApi(source), { "1": source["1"] });
-  const executor = new WorkflowExecutor({} as never, { create: () => ({ id: "task" }) } as never, {} as never);
+  const executor = new WorkflowExecutor({ localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }) } as never, { create: () => ({ id: "task" }) } as never, {} as never);
   const prepare = executor as unknown as { prepareRun: (...args: unknown[]) => Promise<{ prepared: Record<string, unknown> }> };
   const result = await prepare.prepareRun(source, { title: "test", fields: [] }, {}, "client", "http://localhost:8188", undefined, undefined, undefined, undefined, undefined);
   assert.deepEqual(result.prepared, { "1": source["1"] });

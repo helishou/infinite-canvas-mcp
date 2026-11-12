@@ -3,6 +3,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { DB_FILE } from "../config.js";
+import { readRawProject } from "../stores/canvas-project-storage.js";
+import { iterateRawProjects } from "../stores/canvas-project-storage.js";
 
 // 共享素材库的资产记录（assets 表，带 metadata.sharedAssetSource）如果其源画布
 // （sharedAssetSource.sourceProjectId）或源节点（sourceNodeId）已不存在，则记录悬空。
@@ -28,10 +30,10 @@ interface PlanRow {
 }
 
 function projectNodes(db: DatabaseSync, projectId: string): Array<{ id: string }> | null {
-    const row = db.prepare("SELECT data_json FROM canvas_projects WHERE id = ?").get(projectId) as { data_json?: string } | undefined;
-    if (!row?.data_json) return null;
+    const raw = readRawProject(db, projectId);
+    if (!raw) return null;
     try {
-        const project = JSON.parse(row.data_json) as { nodes?: Array<{ id?: string }> };
+        const project = raw as { nodes?: Array<{ id?: string }> };
         return (project.nodes || []).filter((n): n is { id: string } => Boolean(n && n.id));
     } catch {
         return null;
@@ -64,11 +66,13 @@ try {
         const dangling = !projectExists || !nodeExists;
         const alreadyMissing = meta.sharedAssetMissing === true;
         // 与 runtime 的 assetConsumers 同一口径：sharedAssetReference（assetId+dramaId）或 sharedAssetOrigin（源画布+节点）。
-        const consumers = dangling ? Number((reader.prepare(
-            `SELECT COUNT(*) AS c FROM canvas_projects p, json_each(p.data_json,'$.nodes') n
-             WHERE (json_extract(n.value,'$.metadata.sharedAssetReference.assetId')=? AND json_extract(n.value,'$.metadata.sharedAssetReference.dramaId')=?)
-                OR (json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceProjectId')=? AND json_extract(n.value,'$.metadata.sharedAssetOrigin.sourceNodeId')=?)`,
-        ).get(source.assetId || "", source.dramaId || "", source.sourceProjectId, source.sourceNodeId) as { c: number }).c) : 0;
+        let consumers = 0;
+        if (dangling) for (const project of iterateRawProjects(reader)) for (const node of (project.nodes as Array<{ metadata?: Record<string, any> }> | undefined) ?? []) {
+            const reference = node.metadata?.sharedAssetReference;
+            const origin = node.metadata?.sharedAssetOrigin;
+            if ((reference?.assetId === source.assetId && reference?.dramaId === source.dramaId)
+                || (origin?.sourceProjectId === source.sourceProjectId && origin?.sourceNodeId === source.sourceNodeId)) consumers++;
+        }
 
         if (dangling && purge && !consumers) {
             plan.push({ id: row.id, kind: row.kind, title: row.title, sourceProjectId: source.sourceProjectId, sourceNodeId: source.sourceNodeId, action: "purge", reason: projectExists ? "source_node_missing" : "source_project_missing" });

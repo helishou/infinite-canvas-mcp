@@ -4,6 +4,7 @@ import { BackendDatabase } from "../db.js";
 import { CONFIG_FILE, DB_FILE, DEFAULT_PORT } from "../config.js";
 import { createDatabaseSnapshot } from "../database-snapshots.js";
 import { reconcileSharedAssetConsumers } from "../canvas/drama-asset-library.js";
+import { readRawProject } from "../stores/canvas-project-storage.js";
 
 type SharedSourceRow = { sourceProjectId: string; sourceNodeId: string; assetId: string; dramaId: string };
 type EpisodePlan = { episodeId: string; canvasId: string; pictureBindings: number; h3Segments: number; unresolvedBindings: string[] };
@@ -44,8 +45,8 @@ function inspect(db: DatabaseSync, source: SharedSourceRow): EpisodePlan[] {
         const plans = rows(director?.source?.asset_plan);
         const matchedPlans = plans.filter(plan => plan.sharedSource?.sourceProjectId === source.sourceProjectId && plan.sharedSource?.sourceNodeId === source.sourceNodeId);
         if (!matchedPlans.length) continue;
-        const projectRow = episode.canvasId ? db.prepare("SELECT data_json FROM canvas_projects WHERE id=?").get(episode.canvasId) as { data_json?: string } | undefined : undefined;
-        const nodes = rows(parse(projectRow?.data_json).nodes);
+        const project = episode.canvasId ? readRawProject(db, episode.canvasId) : null;
+        const nodes = rows(project?.nodes);
         const linkedNodeIds = new Set(nodes.filter(node => {
             const reference = node.metadata?.sharedAssetReference, origin = node.metadata?.sharedAssetOrigin;
             return reference?.sourceProjectId === source.sourceProjectId && reference?.sourceNodeId === source.sourceNodeId

@@ -8,7 +8,8 @@
 - 路由负责入参、鉴权和响应，业务复用既有 service/store。MCP、网页与后台任务共享逻辑，不各造一套任务、节点位置或结果回填。
 - Backend 消费 `@basketikun/canvas-agent` 的导出契约。修改共享 schema/operation/reference 逻辑时检查生产者、校验、持久化、广播与读取端，不只改一个类型声明。
 - 查询在存储层做项目过滤和分页，不先截断固定数量再在内存中过滤并宣称结果完整。
-- 任务 `input_json` 与画布历史 `operations_json/results_json` 支持旧 TEXT 和 gzip BLOB，读写统一使用 `json-storage.ts`。任务输入的 SQL JSON 查询经 `stored_json_text` 解码；历史回放、维护指纹及脱敏不能把 BLOB 直接转字符串。格式变化更新 schema 版本，历史行不在启动时批量重写。
+- 活动画布的项目头、节点和连线分表保存；完整原始快照沿 `stores/canvas-project-storage.ts` 读取，业务投影仍由原有 service 负责。维护扫描及内容指纹必须包含有序节点与连线，不能把 `canvas_projects.data_json` 项目头当作完整画布。当前读写只支持拆表布局，不在业务路径探测或回退到整图 JSON。
+- 任务输入/参数、生成日志参数、画布操作历史使用当前 TEXT/Brotli，制作回执写 Brotli BLOB；通用 JSON 沿 `json-storage.ts`，回执沿 `receipt-storage.ts`。SQL JSON 查询先经 `stored_json_text` 解码，引用保护、历史指纹和脱敏不能把 BLOB 直接转字符串。格式变化更新 schema 版本；最低升级基线为 schema 52，更早库先用上一版完成升级。52→53 在已验证备份后事务内一次性收敛 gzip 和旧回执，解码旧格式仅留在迁移/离线维护边界；正常读写拒绝旧 gzip。后续容量维护沿统一 repack 入口，不保留会重新写入旧编码的命令。
 
 ## 数据、媒体与执行
 

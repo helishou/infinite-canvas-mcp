@@ -10,6 +10,7 @@ import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
 import { pickImageSource } from "@/lib/image-thumbnail";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useBackendStore } from "@/stores/use-backend-store";
@@ -25,6 +26,7 @@ import { getPluginNodeView } from "@/stores/canvas/plugin-node-view";
 import { orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupLayout } from "@/lib/canvas/ordered-group";
 import { canvasNodeImage, hasRenderableCanvasImage } from "@/lib/canvas/canvas-image-renderability";
 import { SmartImageHistoryActions } from "./smart-image-history-actions";
+import { fitImageNodeSize, IMAGE_NODE_MIN_SIDE, isAspectLockedImageNode } from "@/lib/canvas/canvas-node-size";
 import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
 import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 import { useCanvasNodeLivePreview, type CanvasNodeLivePreview } from "@/services/canvas-node-live-preview";
@@ -483,7 +485,8 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
     if (dragPreviewPosition && props.previewPosition !== dragPreviewPosition) resolvedProps = { ...resolvedProps, previewPosition: dragPreviewPosition };
     if (resizePreviewBounds && resolvedProps.previewBounds !== resizePreviewBounds) resolvedProps = { ...resolvedProps, previewBounds: resizePreviewBounds };
     const isSmartImageNode = props.data.type === CanvasNodeType.Config && props.data.metadata?.smart === true && (props.data.metadata?.generationMode || "image") === "image";
-    const isAspectLockedImage = isSmartImageNode || (props.data.type === CanvasNodeType.Image && !props.data.metadata?.freeResize);
+    const isAspectLockedImage = isAspectLockedImageNode(props.data);
+    const defaultNodeSize = isSmartImageNode ? NODE_DEFAULT_SIZE[CanvasNodeType.Config] : NODE_DEFAULT_SIZE[CanvasNodeType.Image];
     const adaptiveImageSize = isAspectLockedImage ? imageNaturalSize(props.data) : null;
     const adaptiveImageWidth = adaptiveImageSize?.width;
     const adaptiveImageHeight = adaptiveImageSize?.height;
@@ -498,9 +501,17 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
         if (autoFitImageRef.current === key) return;
         autoFitImageRef.current = key;
 
-        const scale = Math.min(props.data.width / adaptiveImageWidth, props.data.height / adaptiveImageHeight);
-        const width = adaptiveImageWidth * scale;
-        const height = adaptiveImageHeight * scale;
+        const size = fitImageNodeSize({
+            width: props.data.width,
+            height: props.data.height,
+            mediaWidth: adaptiveImageWidth,
+            mediaHeight: adaptiveImageHeight,
+            defaultWidth: defaultNodeSize.width,
+            defaultHeight: defaultNodeSize.height,
+            userSized: props.data.metadata?.userSized === true,
+        });
+        if (!size) return;
+        const { width, height } = size;
         if (Math.abs(width - props.data.width) < 0.5 && Math.abs(height - props.data.height) < 0.5) return;
         props.onResizeEnd(props.data.id, {
             width,
@@ -510,7 +521,7 @@ export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem
                 y: props.data.position.y + (props.data.height - height) / 2,
             },
         });
-    }, [adaptiveImageHeight, adaptiveImageWidth, productionLayoutManaged, props.data.height, props.data.id, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
+    }, [adaptiveImageHeight, adaptiveImageWidth, defaultNodeSize.height, defaultNodeSize.width, productionLayoutManaged, props.data.height, props.data.id, props.data.metadata?.userSized, props.data.position.x, props.data.position.y, props.data.width, props.onResizeEnd]);
     const screenShortSide = Math.min(resolvedProps.data.width, resolvedProps.data.height) * resolvedProps.scale;
     const detailModeRef = useRef(screenShortSide > NODE_OVERVIEW_MODE_ENTER_SCREEN_SIZE);
     if (screenShortSide >= NODE_DETAIL_MODE_ENTER_SCREEN_SIZE) detailModeRef.current = true;
@@ -635,7 +646,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const isSmartGenerationNode = data.type === CanvasNodeType.Config && data.metadata?.smart === true;
     const smartMode = isSmartGenerationNode ? data.metadata?.generationMode || "image" : undefined;
     const isSmartImageNode = isSmartGenerationNode && smartMode === "image";
-    const isAspectLockedImage = isSmartImageNode || (data.type === CanvasNodeType.Image && !data.metadata?.freeResize);
+    const isAspectLockedImage = isAspectLockedImageNode(data);
     const hasTextContent = (data.type === CanvasNodeType.Text || (isSmartGenerationNode && smartMode === "text")) && Boolean(data.metadata?.content?.trim());
     const hasImageContent = (data.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")) && Boolean(data.metadata?.content || data.metadata?.images?.length);
     const hasVideoContent = (data.type === CanvasNodeType.Video || (isSmartGenerationNode && smartMode === "video")) && Boolean(data.metadata?.content);
@@ -775,10 +786,10 @@ export const CanvasNode = React.memo(function CanvasNode({
 
             const dx = (event.clientX - resizeRef.current.startX) / scale;
             const dy = (event.clientY - resizeRef.current.startY) / scale;
-            // 竖向裁剪图经常接近尺寸下限，图片节点和智能图片节点都允许缩到 120px；其他节点保留原有可读性下限。
+            // 竖向裁剪图经常接近尺寸下限，图片节点和智能图片节点都允许缩到 IMAGE_NODE_MIN_SIDE；其他节点保留原有可读性下限。
             const isImageResize = data.type === CanvasNodeType.Image || isSmartImageNode;
-            const minWidth = isImageResize ? 120 : 220;
-            const minHeight = isImageResize ? 120 : 160;
+            const minWidth = isImageResize ? IMAGE_NODE_MIN_SIDE : 220;
+            const minHeight = isImageResize ? IMAGE_NODE_MIN_SIDE : 160;
             const startRight = resizeRef.current.startLeft + resizeRef.current.startWidth;
             const startBottom = resizeRef.current.startTop + resizeRef.current.startHeight;
             const fromLeft = resizeRef.current.corner.includes("left");

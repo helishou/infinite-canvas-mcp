@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { schema52Database } from "./test-helpers/schema52-database.js";
+import { DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
 import { BackendDatabase } from "./db.js";
 import { decodeStoredJson, encodeStoredJson, storedJsonText } from "./json-storage.js";
 import { reconstructCanvasHistory, previewCanvasHistoryPrune } from "./canvas/history-maintenance.js";
@@ -54,10 +56,10 @@ test("compressed task inputs survive restart, SQL filters, summaries, usage, ret
     assert.deepEqual(summaries[0].input, { projectId: "p" });
     assert.deepEqual(summaries[0].outputs, [{ storageKey: "image:result" }]);
     assert.deepEqual(f.db.listCanvasTaskModelUsage().map(row => ({ ...row })), [{ model: "image-model", channelId: "channel", count: 2 }]);
-    // 大 params 经 updateTask 压缩成 gzip BLOB 后，统计与摘要投影仍须按存储格式解码，不能抛 malformed JSON。
+    // 大 params 从创建时压缩，统计、更新与摘要投影都沿共享存储解码。
     const largeParams = { model: "image-model", channelId: "params-channel", parentTaskId: "parent-1", snapshot: prompt };
     const compressedParams = f.db.createTask("compressed-params", "canvas-image", { projectId: "p" }, largeParams);
-    assert.equal(f.db.db.prepare("SELECT typeof(params_json) AS type FROM tasks WHERE id='compressed-params'").get()?.type, "text");
+    assert.equal(f.db.db.prepare("SELECT typeof(params_json) AS type FROM tasks WHERE id='compressed-params'").get()?.type, "blob");
     f.db.updateTask(compressedParams.id, { status: "running" });
     assert.equal(f.db.db.prepare("SELECT typeof(params_json) AS type FROM tasks WHERE id='compressed-params'").get()?.type, "blob");
     assert.deepEqual(
@@ -113,15 +115,16 @@ test("mixed compressed and TEXT canvas history preserves delta replay, idempoten
     assert.ok(previewCanvasHistoryPrune(f.db.db, "2099-01-01T00:00:00.000Z")[0].blockedReason);
 });
 
-test("format upgrade backs up v49 and leaves existing task inputs as TEXT", t => {
-    const f = fixture(t);
+test("format upgrade backs up v52 and preserves existing task inputs", t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "canvas-v49-input-"));
+    const file = path.join(directory, "runtime.sqlite");
+    const legacy = schema52Database(file);
     const input = { projectId: "p", prompt };
-    f.db.createTask("old", "canvas-image", input, {});
-    f.db.db.prepare("UPDATE tasks SET input_json=? WHERE id='old'").run(JSON.stringify(input));
-    f.db.db.exec("DELETE FROM schema_migrations WHERE version=50");
-    f.reopen();
-    assert.deepEqual(f.db.getTask("old")?.input, input);
-    assert.equal(f.db.db.prepare("SELECT typeof(input_json) AS type FROM tasks WHERE id='old'").get()?.type, "text");
-    const backups = fs.readdirSync(path.dirname(f.file)).filter(name => name.includes("pre-schema-v49-to-v50"));
-    assert.equal(backups.length, 1);
+    const now = new Date().toISOString();
+    legacy.prepare("INSERT INTO tasks(id,kind,status,progress,input_json,params_json,result_json,error,created_at,updated_at) VALUES(?,?,'queued',0,?,'{}',NULL,NULL,?,?)").run("old", "canvas-image", JSON.stringify(input), now, now);
+    legacy.close();
+    const db = new BackendDatabase(file);
+    t.after(() => { db.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+    assert.deepEqual(db.getTask("old")?.input, input);
+    assert.equal(fs.readdirSync(directory).filter(name => name.includes(`pre-schema-v52-to-v${DATABASE_SCHEMA_VERSION}`)).length, 1);
 });

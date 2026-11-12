@@ -4,6 +4,7 @@ export const CanvasNodeAngleDialog = lazy(() => import("@/components/canvas/canv
 export const CanvasNodeCropDialog = lazy(() => import("@/components/canvas/canvas-node-crop-dialog").then((module) => ({ default: module.CanvasNodeCropDialog })));
 export const CanvasNodeMaskEditDialog = lazy(() => import("@/components/canvas/canvas-node-mask-edit-dialog").then((module) => ({ default: module.CanvasNodeMaskEditDialog })));
 export const CanvasNodeSplitDialog = lazy(() => import("@/components/canvas/canvas-node-split-dialog").then((module) => ({ default: module.CanvasNodeSplitDialog })));
+export const CanvasNodeStyleTransferDialog = lazy(() => import("@/components/canvas/canvas-node-style-transfer-dialog").then((module) => ({ default: module.CanvasNodeStyleTransferDialog })));
 export const CanvasNodeResizeDialog = lazy(() => import("@/components/canvas/canvas-node-resize-dialog").then((module) => ({ default: module.CanvasNodeResizeDialog })));
 export const CanvasPluginManagerModal = lazy(() => import("@/components/canvas/canvas-plugin-manager-modal").then((module) => ({ default: module.CanvasPluginManagerModal })));
 export const CanvasGenerationLogDialog = lazy(() => import("@/components/canvas/canvas-generation-log-dialog").then((module) => ({ default: module.CanvasGenerationLogDialog })));

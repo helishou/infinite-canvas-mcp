@@ -22,7 +22,8 @@ import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { BackendDatabase } from "../db.js";
 import { DB_FILE } from "../config.js";
-import { decodeReceipt } from "../drama/receipt-storage.js";
+import { storedJsonText } from "../json-storage.js";
+import { iterateRawProjects } from "../stores/canvas-project-storage.js";
 
 const args = process.argv.slice(2);
 const positional = args.filter((arg) => !arg.startsWith("--"));
@@ -36,15 +37,21 @@ const THREAD_PREFIX = "agent.llm.thread:";
 const INDEX_KEY = "agent.llm.index";
 const cutoffMs = Date.now() - keepDays * 86_400_000;
 
-/** 扫描业务侧 JSON 列，收集仍被引用的线程 id。明文与 gzip BLOB 两种形态都要认。 */
+/** 扫描业务侧 JSON 列，收集仍被引用的线程 id。读取当前 TEXT/Brotli JSON。 */
 function referencedThreadIds(db: DatabaseSync): Map<string, string> {
     const referenced = new Map<string, string>();
     const targets: Array<{ table: string; column: string }> = [];
-    for (const table of ["episode_productions", "canvas_productions", "drama_projects", "canvas_projects"]) {
+    for (const table of ["episode_productions", "canvas_productions", "drama_projects"]) {
         const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
         if (!exists) continue;
         for (const column of db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string; type: string }>) {
             if (column.type === "TEXT" && (column.name.endsWith("_json") || column.name === "data_json")) targets.push({ table, column: column.name });
+        }
+    }
+    for (const project of iterateRawProjects(db)) {
+        const text = JSON.stringify(project);
+        for (const match of text.matchAll(/llm-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g)) {
+            if (!referenced.has(match[0])) referenced.set(match[0], "canvas_projects");
         }
     }
     for (const { table, column } of targets) {
@@ -54,7 +61,7 @@ function referencedThreadIds(db: DatabaseSync): Map<string, string> {
             let text: string;
             if (typeof raw === "string") text = raw;
             else if (raw instanceof Uint8Array) {
-                try { text = JSON.stringify(decodeReceipt(raw)); } catch { text = Buffer.from(raw).toString("utf8"); }
+                text = storedJsonText(raw);
             } else continue;
             for (const match of text.matchAll(/llm-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g)) {
                 if (!referenced.has(match[0])) referenced.set(match[0], `${table}.${column}`);

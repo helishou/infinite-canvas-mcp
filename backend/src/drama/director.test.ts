@@ -21,8 +21,6 @@ import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generatio
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import express from "express";
 import { registerDramaProductionRoutes } from "../server/drama-production-routes.js";
-import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
-import { historicalDatabase } from "../test-helpers/historical-database.js";
 
 function fixture(t: test.TestContext) {
     const dir = mkdtempSync(join(tmpdir(), "acheng-canvas-"));
@@ -584,39 +582,6 @@ test("project scope supports independent assets and linked views share the same 
     assert.equal(result.published!.director!.sourceHash, d.sourceHash);
     assert.equal(canvas.get("independent").publishedVersion, 1);
     assert.equal(db.getDramaEpisode("independent"), null);
-});
-
-for (const previousVersion of [16, 21] as const) test(`version ${previousVersion} upgrades with a verified backup and preserves production history`, t => {
-    const dir = mkdtempSync(join(tmpdir(), "director-migration-")), file = join(dir, "db.sqlite");
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const seed = historicalDatabase(t, file, previousVersion);
-    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('d','Drama','2026-01-01')").run();
-    seed.prepare("INSERT INTO drama_projects (folder_id,outline,updated_at) VALUES ('d','Original outline','2026-01-01')").run();
-    seed.prepare("INSERT INTO drama_episodes (id,drama_id,episode_number,title,created_at,updated_at) VALUES ('ep','d',1,'Episode','2026-01-01','2026-01-01')").run();
-    const snapshot = JSON.stringify({ ...emptyEpisodeProduction(), scenes: [{ id: "original-scene", heading: "Original scene", location: "Room", timeOfDay: "Night", blocks: [{ id: "original-text", kind: "action", text: "Keep this complete published production" }] }] });
-    seed.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES ('ep',7,?,?,2,'2026-01-01')").run(snapshot, snapshot);
-    seed.prepare("INSERT INTO episode_production_versions (episode_id,version,stage,snapshot_json,impact_json,created_at) VALUES ('ep',2,'director',?,'{}','2026-01-01')").run(snapshot);
-    seed.close();
-    const upgraded = new BackendDatabase(file);
-    try {
-        assert.equal(upgraded.getDramaEpisode("ep")?.title, "Episode");
-        assert.equal(upgraded.db.prepare("SELECT MAX(version) version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-        for (const table of ["canvas_productions", "canvas_production_runs", "canvas_production_batches", "episode_production_batches"]) {
-            assert.ok(upgraded.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
-        }
-        assert.deepEqual({ ...upgraded.db.prepare("SELECT revision,draft_json,published_json,published_version FROM episode_productions WHERE episode_id='ep'").get() },
-            { revision: 7, draft_json: snapshot, published_json: snapshot, published_version: 2 });
-        assert.equal(upgraded.db.prepare("SELECT snapshot_json FROM episode_production_versions WHERE episode_id='ep' AND version=2").get()?.snapshot_json, snapshot);
-        const backups = readdirSync(dir).filter(name => name.includes(`pre-schema-v${previousVersion}-to-v${DATABASE_SCHEMA_VERSION}-`));
-        assert.equal(backups.length, 1);
-        const backup = new DatabaseSync(join(dir, backups[0]), { readOnly: true });
-        try {
-            assert.equal(backup.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok");
-            assert.equal(backup.prepare("SELECT MAX(version) version FROM schema_migrations").get()?.version, previousVersion);
-            assert.equal(backup.prepare("SELECT 1 FROM sqlite_master WHERE name='episode_production_batches'").get(), undefined);
-            assert.equal(backup.prepare("SELECT published_json FROM episode_productions WHERE episode_id='ep'").get()?.published_json, snapshot);
-        } finally { backup.close(); }
-    } finally { upgraded.close(); }
 });
 
 test("Motion Context group submits one bounded task and standalone next Clip remains separate", async t => {

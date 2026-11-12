@@ -14,8 +14,10 @@ function withoutH3LocalViewFields(value: unknown) {
 }
 
 /** 新建/导入边界同样剥离个人视图，避免旧客户端把窗口状态写进共享项目种子。 */
-export function stripCanvasLocalViewState<T extends Record<string, unknown>>(input: T): T {
-    const project = structuredClone(input) as T & { nodes?: unknown[] };
+export function stripCanvasLocalViewState<T extends Record<string, unknown>>(input: T, options?: { clone?: boolean }): T {
+    // Fresh SQLite reads already own their graph. External create/import callers
+    // keep the default detached-copy contract.
+    const project = (options?.clone === false ? input : structuredClone(input)) as T & { nodes?: unknown[] };
     if (!Array.isArray(project.nodes)) return project;
     project.nodes = project.nodes.map((value) => {
         const node = recordOf(value);

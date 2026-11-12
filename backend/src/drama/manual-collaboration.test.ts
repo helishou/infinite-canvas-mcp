@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BackendDatabase } from '../db.js';
-import { DATABASE_SCHEMA_VERSION } from '../database-upgrade.js';
 import { createStores } from '../stores/index.js';
 import { BackendEventBus } from '../events.js';
 import { EpisodeProductionService } from './production.js';
@@ -201,22 +200,6 @@ test('production H3 work shares one process-wide lane across run owners', async 
     });
     await Promise.all([execute(firstRunner), execute(secondRunner)]);
     assert.equal(maxActive, 1);
-});
-
-test('migration adds nullable frozen snapshots, backs up persisted databases, and preserves old batches', t => {
-    const f = fixture(t, true);
-    assert.equal(f.db.db.prepare('SELECT MAX(version) as version FROM schema_migrations').get()!.version, DATABASE_SCHEMA_VERSION);
-    for (const table of ['episode_production_batches', 'canvas_production_batches', 'scene_production_batches']) {
-        assert.ok(f.db.db.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === 'execution_snapshot_json'));
-    }
-    const legacy = f.db.db.prepare("INSERT INTO episode_production_batches (run_id,episode_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at) VALUES ('old','ep','old','old',1,0,'paused','[]','{}','{}','[]','now','now')"); legacy.run();
-    assert.equal(f.service.getBatch('ep', 'old')?.executionSnapshot, null);
-    for (const table of ['episode_production_batches', 'canvas_production_batches', 'scene_production_batches']) {
-        f.db.db.exec(`ALTER TABLE ${table} DROP COLUMN execution_snapshot_json`);
-    }
-    f.db.db.exec('DELETE FROM schema_migrations WHERE version>=33');
-    const reopened = new BackendDatabase(f.file); reopened.close();
-    assert.ok(fs.readdirSync(f.directory).some(name => name.includes(`pre-schema-v32-to-v${DATABASE_SCHEMA_VERSION}`)));
 });
 
 test('field adoption is read-only in preflight and applies only selected director fields', async t => {

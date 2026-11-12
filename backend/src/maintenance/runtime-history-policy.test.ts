@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
 import { encodeReceipt } from "../drama/receipt-storage.js";
+import { compressStoredJsonText } from "../json-storage.js";
 import { evaluateRetention, type HistoryPolicyConfig } from "./runtime-history-policy.js";
+import { createStoredProject } from "../stores/canvas-project-storage.js";
 
 const OLD = "2020-01-01T00:00:00.000Z";
 const RECENT = "2025-01-01T00:00:00.000Z";
@@ -30,6 +32,12 @@ function makeTask(db: BackendDatabase, id: string, status: string, at = OLD, par
     ).run(id, "h3", status, JSON.stringify(params), at, at);
 }
 
+function makeTaskWithStoredParams(db: BackendDatabase, id: string, stored: string | Uint8Array) {
+    db.db.prepare(
+        "INSERT INTO tasks (id, kind, status, progress, input_json, params_json, created_at, updated_at) VALUES (?, 'h3', 'succeeded', 0, '{}', ?, ?, ?)"
+    ).run(id, stored, OLD, OLD);
+}
+
 function makeLog(db: BackendDatabase, id: string, projectId: string, status: string, at = OLD, extra: Partial<Record<string, string | null>> = {}) {
     db.db.prepare(
         "INSERT INTO generation_logs (id, project_id, node_id, segment_id, status, platform, started_at, finished_at, created_at, updated_at, runtime_task_id, params_json) VALUES (?, ?, ?, ?, ?, 'comfyui', ?, ?, ?, ?, ?, ?)"
@@ -37,8 +45,9 @@ function makeLog(db: BackendDatabase, id: string, projectId: string, status: str
 }
 
 function makeProject(db: BackendDatabase, id: string, nodes: Array<Record<string, unknown>>) {
-    db.db.prepare("INSERT INTO canvas_projects (id, data_json, updated_at) VALUES (?, ?, ?)")
-        .run(id, JSON.stringify({ id, revision: 1, nodes, connections: [] }), NOW);
+    db.db.exec("BEGIN");
+    try { createStoredProject(db.db, { id, revision: 1, nodes, connections: [] }); db.db.exec("COMMIT"); }
+    catch (error) { db.db.exec("ROLLBACK"); throw error; }
 }
 
 const baseConfig: HistoryPolicyConfig = { now: NOW, taskSucceededDays: 30, taskFailedDays: 90, taskCancelledDays: 30, logSuccessDays: 60, logFailedDays: 180, logCancelledDays: 60 };
@@ -109,7 +118,7 @@ test("正式制作 receipt_json 中的任务/日志 ID 保留", (t: TestContext)
     assert.ok(isProtected(report, "log", "l-prod"), "receipt_json 引用的日志必须保留");
 });
 
-test("压缩成 gzip BLOB 的回执仍参与保护扫描", (t: TestContext) => {
+test("压缩成 Brotli BLOB 的回执仍参与保护扫描", (t: TestContext) => {
     const db = makeDb(t);
     makeTask(db, "t-blob", "succeeded", OLD);
     makeLog(db, "l-blob", "p1", "success", OLD);
@@ -126,6 +135,51 @@ test("压缩成 gzip BLOB 的回执仍参与保护扫描", (t: TestContext) => {
     const report = evaluateRetention(db.db, baseConfig);
     assert.ok(isProtected(report, "task", "t-blob"), "BLOB 回执引用的任务必须保留");
     assert.ok(isProtected(report, "log", "l-blob"), "BLOB 回执引用的日志必须保留");
+});
+
+test("task params 的 TEXT 与 ICBR1 都保留父任务和绑定日志所属任务族", (t: TestContext) => {
+    const db = makeDb(t);
+    const nodes: Array<Record<string, unknown>> = [];
+    const encodings: Array<[string, (json: string) => string | Uint8Array]> = [
+        ["text", json => json],
+        ["icbr1", json => compressStoredJsonText(json)],
+    ];
+    for (const [encoding, encode] of encodings) {
+        const parentId = `parent-${encoding}`;
+        const childId = `child-${encoding}`;
+        const logId = `log-${encoding}`;
+        const nodeId = `node-${encoding}`;
+        makeTask(db, parentId, "succeeded", OLD, {});
+        makeTaskWithStoredParams(db, childId, encode(JSON.stringify({ parentTaskId: parentId, canvasBinding: { generationLogId: logId } })));
+        makeLog(db, logId, "p1", "success", OLD, { nodeId });
+        nodes.push({ id: nodeId, type: "video", metadata: {} });
+    }
+    makeProject(db, "p1", nodes);
+
+    const report = evaluateRetention(db.db, baseConfig);
+    for (const [encoding] of encodings) {
+        const parentId = `parent-${encoding}`;
+        const childId = `child-${encoding}`;
+        const logId = `log-${encoding}`;
+        assert.ok(isProtected(report, "task", childId), `${encoding} child must be protected through its bound log`);
+        assert.ok(isProtected(report, "task", parentId), `${encoding} child must protect its parent family member`);
+        assert.ok(isProtected(report, "log", logId), `${encoding} bound log must be protected by its current canvas node`);
+        assert.ok(report.taskCandidates.find(task => task.id === childId)!.familyIds.includes(parentId));
+        assert.ok(report.taskCandidates.find(task => task.id === childId)!.logIds.includes(logId));
+    }
+});
+
+test("损坏或非对象 task params 报异常并保留任务", (t: TestContext) => {
+    const db = makeDb(t);
+    makeTaskWithStoredParams(db, "t-corrupt-params", Buffer.from("ICBR1not-valid", "utf8"));
+    makeTaskWithStoredParams(db, "t-array-params", JSON.stringify(["parent-id"]));
+
+    const report = evaluateRetention(db.db, baseConfig);
+    for (const id of ["t-corrupt-params", "t-array-params"]) {
+        assert.ok(isProtected(report, "task", id), `${id} must remain protected when params cannot be inspected`);
+        assert.ok(report.anomalies.some(anomaly => anomaly.type === "unparseable-json" && anomaly.taskId === id));
+        assert.ok(report.taskCandidates.find(task => task.id === id)!.reasons.includes("unparseable-json"));
+    }
 });
 
 test("多级父子 + 循环关联：保护正确传播且遍历终止", (t: TestContext) => {

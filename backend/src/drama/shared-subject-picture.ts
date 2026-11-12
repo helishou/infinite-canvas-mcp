@@ -10,6 +10,7 @@ type SharedSubjectPictureBinding = {
     provides: string[];
     retain: string[];
     exclude: string[];
+    purpose?: string;
     applicableState: Record<string, string>;
     defaultFor: string[];
 };

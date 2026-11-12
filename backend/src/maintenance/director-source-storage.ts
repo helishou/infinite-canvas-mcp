@@ -5,6 +5,7 @@ import { DB_FILE } from "../config.js";
 import { BackendDatabase } from "../db.js";
 import { EpisodeProductionService } from "../drama/production.js";
 import { pruneDatabaseSnapshots, createDatabaseSnapshot } from "../database-snapshots.js";
+import { readRawProject } from "../stores/canvas-project-storage.js";
 
 type Args = { apply: boolean; kind?: "episode" | "canvas"; id?: string; expectedRevision?: number; operationId?: string; sourceFile?: string };
 function parseArgs(values: string[]): Args {
@@ -43,8 +44,7 @@ function inspectReadOnly(file: string) {
     try {
         const schemaVersion = Number((db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as any)?.version || 0);
         const owners: Array<{ kind: string; id: string; revision: number; format: string; draftFields: string[]; publishedFields: string[]; canvasId?: string | null; segmentAssociations?: Array<{ targetId: string; status: string; matches: Array<{ nodeId: string; segmentId: string }> }> }> = [];
-        const canvasRows = db.prepare("SELECT id, data_json FROM canvas_projects").all() as Array<{ id: string; data_json: string }>;
-        const canvases = new Map(canvasRows.map(row => [row.id, JSON.parse(row.data_json)]));
+        const canvases = new Map<string, Record<string, unknown> | null>();
         for (const [kind, table, key] of [["episode", "episode_productions", "episode_id"], ["canvas", "canvas_productions", "project_id"]]) {
             const rows = (kind === "episode"
                 ? db.prepare(`SELECT p.${key} AS id, p.revision, p.draft_json, p.published_json, e.canvas_id AS canvas_id FROM ${table} p LEFT JOIN drama_episodes e ON e.id=p.episode_id`).all()
@@ -57,6 +57,7 @@ function inspectReadOnly(file: string) {
                 const published = row.published_json ? JSON.parse(row.published_json) : null;
                 const publishedFields = published ? ["scenes", "shots", "clipGroups"].filter(field => Object.hasOwn(published, field)) : [];
                 const ownerId = String(row.id), canvasId = row.canvas_id ? String(row.canvas_id) : null;
+                if (canvasId && !canvases.has(canvasId)) canvases.set(canvasId, readRawProject(db, canvasId));
                 const nodes = (canvasId && canvases.get(canvasId)?.nodes || []) as Array<Record<string, any>>;
                 const segmentAssociations = v2 ? (Array.isArray(draft.director.source.segments) ? draft.director.source.segments : []).map((segment: any) => {
                     const matches = nodes.flatMap(node => {

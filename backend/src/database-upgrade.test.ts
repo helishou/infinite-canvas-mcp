@@ -97,3 +97,11 @@ test("repeated upgrade attempts keep a bounded number of verified snapshots", (t
         try { assert.equal(copy.prepare("PRAGMA integrity_check").get()?.integrity_check, "ok"); } finally { copy.close(); }
     }
 });
+
+for (const version of [0, 13, 38, 50, 51]) test(`pre-baseline schema ${version} is refused before backup or writes`, t => {
+    const { file, directory } = fixture(t, version);
+    const bytes = fs.readFileSync(file);
+    assert.throws(() => new BackendDatabase(file), /older databases must first be upgraded/);
+    assert.deepEqual(fs.readFileSync(file), bytes);
+    assert.deepEqual(fs.readdirSync(directory), ["runtime.sqlite"]);
+});

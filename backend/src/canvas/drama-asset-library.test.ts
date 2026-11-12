@@ -6,7 +6,6 @@ import path from "node:path";
 import { BackendDatabase, type Asset } from "../db.js";
 import { rawProject, reconcileSharedAssetConsumers, sourceOf } from "./drama-asset-library.js";
 import { ensureProductionCanvas } from "../drama/production-canvas.js";
-import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
 import { startServer } from "../server.js";
 import { registerBackendMcpHttpRoutes } from "../mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -298,7 +297,7 @@ test("formal scripts and pinned approved references remain protected from generi
     try {
         for (const metadata of [{ productionScriptId: "script-owner" }, { sharedAssetOrigin: { approvedId: "approved-version" } }]) {
             db.applyCanvasProjectOperations("a", undefined, [{ type: "update_node", id: "character", metadata, metadataDelete: ["productionScriptId", "sharedAssetOrigin"].filter(key => !(key in metadata)) }], { runtimeWrite: true });
-            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|共享引用请沿正式采用入口/);
+            assert.throws(() => db.upsertAsset(asset, { canvasSource: { projectId: "a", nodeId: "character" } }), /正式剧本|共享引用请在本集主体图片选择器中切换来源节点/);
             assert.equal(db.getAsset(asset.id), null);
             assert.equal(db.listCanvasProjects().length, 2);
         }
@@ -372,35 +371,6 @@ test("direct library edits merge only changed fields and reject real content con
         assert.throws(() => db.upsertAsset({ ...saved, title: "本地名字" }, { assetBase: base }), /相同字段已变化/);
         assert.equal(db.listAssetsPage({ keyword: "改描述" }).total, 1);
     } finally { db.close(); }
-});
-
-test("v38 migration backs up, reuses known shared nodes and preserves local differences and unknown identities", () => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shared-library-migration-"));
-    const file = path.join(directory, "runtime.sqlite");
-    let db = new BackendDatabase(file);
-    try {
-        db.upsertCanvasFolder({ id: "drama", name: "剧目", isDrama: true, createdAt: "now" });
-        const shared = ensureProductionCanvas(db, "shared-assets", "drama");
-        db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "existing", nodeType: "text", title: "源稿", position: { x: 89, y: 99 }, metadata: { content: "共享文本" } }]);
-        const record = { id: "legacy", kind: "text", dramaId: "drama", title: "源稿", data: { content: "共享文本" }, metadata: { projectId: shared.project.id, nodeId: "existing" }, tags: [], coverUrl: "", folderId: null, note: null, source: "Canvas", createdAt: "now", updatedAt: "now" } as Asset;
-        db.upsertAssetRecord(record);
-        db.createCanvasProject({ id: "episode-canvas", nodes: [{ id: "character", type: "character", title: "旧角色", metadata: { characterAssetId: "char", characterDescription: "本地差异", characterImages: [{ url: "/media/local" }] } }, { id: "unknown", type: "text", title: "源稿", metadata: { content: "不能按名称合并" } }], connections: [] });
-        db.upsertDramaEpisode({ id: "ep", dramaId: "drama", episodeNumber: 1, title: "分集", synopsis: "", fullPlot: "", canvasId: "episode-canvas", createdAt: "now", updatedAt: "now" });
-        db.upsertAssetRecord({ ...record, id: "char", kind: "character", title: "角色", metadata: {}, data: { description: "共享描述", images: [{ url: "/media/shared" }] } });
-        db.db.exec("DELETE FROM schema_migrations WHERE version>=38; DROP TABLE shared_library_receipts");
-        db.close();
-        db = new BackendDatabase(file);
-        assert.ok(fs.readdirSync(directory).some(name => name.includes(`pre-schema-v37-to-v${DATABASE_SCHEMA_VERSION}-`)));
-        assert.equal(sourceOf(db.getAsset("legacy"))!.sourceNodeId, "existing");
-        assert.equal((db.getCanvasProject(shared.project.id)!.nodes as any[]).filter(n => n.type === "text").length, 1);
-        const local = (db.getCanvasProject("episode-canvas")!.nodes as any[])[0];
-        assert.equal(local.metadata.characterDescription, "本地差异");
-        assert.ok(local.metadata.sharedAssetReference.edits);
-        assert.equal((db.getCanvasProject("episode-canvas")!.nodes as any[])[1].metadata.sharedAssetReference, undefined);
-        const snapshot = JSON.stringify(db.listCanvasProjects());
-        db.close(); db = new BackendDatabase(file);
-        assert.equal(JSON.stringify(db.listCanvasProjects()), snapshot);
-    } finally { db.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("HTTP and MCP share identity, compact replay receipts, reference reads and deletion protection", async t => {

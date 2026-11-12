@@ -42,6 +42,7 @@ import type {
 } from "./stores/types.js";
 import { BackendEventBus, type CanvasEventSource } from "./events.js";
 import type { CanvasOperation } from "./canvas/project-ops.js";
+import type { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
 import { readWorkflowLivePreview } from "./workflows/live-preview.js";
@@ -87,6 +88,15 @@ export type ServerDeps = {
   resolveH3Confirmation?: (id: string, action: H3ConfirmationAction) => RuntimeTask;
   prepareAiConfig?: (config: unknown) => unknown | Promise<unknown>;
 };
+
+/**
+ * 网页实时选区（presence）来源，由 index.ts 在 CanvasRealtimeHub 创建后注入。
+ * view=selection 读取时合并它，使网页上直接点选的节点也能被工具读到。
+ */
+let selectionRealtime: Pick<CanvasRealtimeHub, "participants"> | undefined;
+export function setSelectionRealtime(realtime: Pick<CanvasRealtimeHub, "participants"> | undefined) {
+  selectionRealtime = realtime;
+}
 
 /** 启动总后台 HTTP 服务，返回 Express app（listen 由 index.ts 负责）。 */
 export function startServer(
@@ -582,9 +592,26 @@ export function startServer(
       if (connections !== undefined && connections !== "true" && connections !== "false") return void res.status(400).json({ ok: false, error: "includeConnections 必须为 true/false" });
       const input: StateInput = { nodeIds, ...(projection !== undefined ? { projection: projection as StateInput["projection"] } : {}), ...(connections !== undefined ? { includeConnections: connections === "true" } : {}) };
       validateCanvasStateInput(input);
-      const project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds, req.query.view === "selection", { includeConnections: input.includeConnections ?? projection === undefined });
+      const includeConnections = input.includeConnections ?? projection === undefined;
+      let project: Record<string, unknown> | null;
+      if (req.query.view === "selection") {
+        // 合并持久化选区（select_nodes 协作操作写入）与网页实时选区（presence）。
+        // 否则用户在网页上直接点选的节点只存在于实时协作状态，工具读取不到。
+        const persisted = db.getCanvasProjectNodeSnapshot(req.params.id, [], true, { includeConnections });
+        if (!persisted) return void res.status(404).json({ ok: false, error: "画布不存在" });
+        const persistedIds = (persisted.nodes as Array<{ id: string }>).map(node => String(node.id));
+        const realtimeIds = selectionRealtime
+          ? [...new Set((selectionRealtime.participants(req.params.id) as Array<{ selectedNodeIds?: unknown }>).flatMap(peer => Array.isArray(peer.selectedNodeIds) ? (peer.selectedNodeIds as unknown[]).map(String) : []))]
+          : [];
+        const effectiveIds = [...new Set([...persistedIds, ...realtimeIds])];
+        project = effectiveIds.length
+          ? db.getCanvasProjectNodeSnapshot(req.params.id, effectiveIds, false, { includeConnections })
+          : persisted;
+      } else {
+        project = db.getCanvasProjectNodeSnapshot(req.params.id, nodeIds, false, { includeConnections });
+      }
       if (!project) return void res.status(404).json({ ok: false, error: "画布不存在" });
-      if (req.query.view === "selection") input.nodeIds = (project.nodes as Array<{ id: string }>).map(node => node.id);
+      input.nodeIds = (project.nodes as Array<{ id: string }>).map(node => String(node.id));
       return void res.json({ ok: true, project: projection !== undefined || connections !== undefined ? summarizeCanvasState(project, input) : project });
     }
     if (req.query.view === "index") {

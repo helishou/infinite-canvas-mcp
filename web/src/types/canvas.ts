@@ -160,6 +160,8 @@ export type CanvasNodeMetadata = {
     naturalWidth?: number;
     naturalHeight?: number;
     freeResize?: boolean;
+    /** 用户手动拖拽过尺寸；换图自动适配只沿用当前面积，不再回到默认体量。 */
+    userSized?: boolean;
     images?: CanvasNodeImage[];
     primaryImageId?: string;
     /** Reference selection is independent of browsing and generation settings. */

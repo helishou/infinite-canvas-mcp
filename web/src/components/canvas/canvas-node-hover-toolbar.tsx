@@ -40,6 +40,7 @@ type CanvasNodeHoverToolbarProps = {
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
     onStitch?: (node: CanvasNodeData) => void;
+    onStyleTransfer?: (node: CanvasNodeData) => void;
     onResizeImage: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAutoLevels: (node: CanvasNodeData) => void;
@@ -101,6 +102,7 @@ export function CanvasNodeHoverToolbar({
     onCrop,
     onSplit,
     onStitch,
+    onStyleTransfer,
     onResizeImage,
     onSuperResolve,
     onAutoLevels,
@@ -200,7 +202,7 @@ export function CanvasNodeHoverToolbar({
         }
         copyText(prompt, t("common.promptCopied"));
     };
-    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onMaskEdit, onCrop, onSplit, onStitch: onStitch || (() => {}), onResizeImage, onSuperResolve, onAutoLevels, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
+    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onMaskEdit, onCrop, onSplit, onStitch: onStitch || (() => {}), onStyleTransfer: onStyleTransfer || (() => {}), onResizeImage, onSuperResolve, onAutoLevels, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
 
     function openImageToolSettings() {
         onKeep(activeNode.id);

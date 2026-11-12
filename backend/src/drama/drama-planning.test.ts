@@ -4,10 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackendDatabase } from "../db.js";
-import { DATABASE_SCHEMA_VERSION } from "../database-upgrade.js";
-import { historicalDatabase } from "../test-helpers/historical-database.js";
 import { EpisodeProductionService } from "./production.js";
-import { dramaProductionPlanSchema, emptyEpisodeProduction, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
+import { dramaProductionPlanSchema, productionImageModel } from "@basketikun/canvas-agent/drama/production-contract";
 
 test("confirmed category models persist, seed new production, and leave existing settings intact", t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-planning-"));
@@ -37,58 +35,4 @@ test("confirmed category models persist, seed new production, and leave existing
     const renamed = db.upsertCanvasFolder({ id: saved.id, name: "Renamed", createdAt: saved.createdAt, isDrama: true, outline: "Story" });
     assert.equal(db.listCanvasFolders()[0].productionPlan?.imageModelsByKind.scene, "scene-model");
     assert.equal(Object.hasOwn(renamed, "expectedPlanningUpdatedAt"), false);
-});
-
-test("v40 migrates episode and standalone canvas defaults to none while preserving published snapshots and waiting runs", t => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-review-policy-v40-"));
-    const file = path.join(directory, "db.sqlite");
-    let db: BackendDatabase | undefined;
-    t.after(() => { db?.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-    const seed = historicalDatabase(t, file, 39);
-    const manualPlan = dramaProductionPlanSchema.parse({ imageModel: "", imageModelsByKind: {}, h3Model: "", confirmedOutline: "Story", confirmedAt: "2026-01-01T00:00:00.000Z",
-        reviewPolicy: { mode: "manual", shared: "manual", scene: "manual" } });
-    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('drama','Drama','2026-01-01')").run();
-    seed.prepare("INSERT INTO drama_projects (folder_id,outline,production_plan_json,updated_at) VALUES ('drama','Story',?,'2026-01-01')").run(JSON.stringify(manualPlan));
-    seed.prepare("INSERT INTO drama_episodes (id,drama_id,episode_number,title,created_at,updated_at) VALUES ('episode','drama',1,'Episode','2026-01-01','2026-01-01')").run();
-    seed.prepare("INSERT INTO canvas_projects (id,data_json,updated_at) VALUES ('standalone-canvas',?,'2026-01-01')")
-        .run(JSON.stringify({ id: "standalone-canvas", title: "Standalone", nodes: [], connections: [] }));
-    const draft = emptyEpisodeProduction();
-    draft.settings.reviewPolicy = manualPlan.reviewPolicy!;
-    const publishedEpisode = JSON.stringify(draft), publishedCanvas = JSON.stringify(draft);
-    seed.prepare("INSERT INTO episode_productions (episode_id,draft_json,published_json,updated_at) VALUES ('episode',?,?,'2026-01-01')").run(publishedEpisode, publishedEpisode);
-    seed.prepare("INSERT INTO canvas_productions (project_id,draft_json,published_json,updated_at) VALUES ('standalone-canvas',?,?,'2026-01-01')").run(publishedCanvas, publishedCanvas);
-    seed.prepare(`INSERT INTO canvas_production_batches
-        (run_id,project_id,idempotency_key,request_hash,version,source_revision,status,targets_json,plan_json,settings_json,submitted_json,created_at,updated_at)
-        VALUES ('waiting-review','standalone-canvas','waiting-review','fixture',1,1,'awaiting_review','[]','{}','{}','[]','now','now')`).run();
-    seed.close();
-
-    db = new BackendDatabase(file);
-    const migratedService = new EpisodeProductionService(db, undefined, directory, false, () => {});
-    const migratedCanvasService = new EpisodeProductionService(db, undefined, directory, true, () => {});
-    assert.equal(migratedService.get("episode").draft.settings.reviewPolicy.mode, "none");
-    assert.equal(migratedCanvasService.get("standalone-canvas").draft.settings.reviewPolicy.mode, "none");
-    assert.equal(db.listCanvasFolders()[0].productionPlan?.reviewPolicy?.mode, "none");
-    assert.equal(db.db.prepare("SELECT published_json FROM episode_productions WHERE episode_id=?").get("episode")?.published_json, publishedEpisode);
-    assert.equal(db.db.prepare("SELECT published_json FROM canvas_productions WHERE project_id=?").get("standalone-canvas")?.published_json, publishedCanvas);
-    assert.equal(db.db.prepare("SELECT status FROM canvas_production_batches WHERE run_id=?").get("waiting-review")?.status, "awaiting_review");
-    assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-    assert.equal(fs.readdirSync(directory).filter(name => name.includes(`.pre-schema-v39-to-v${DATABASE_SCHEMA_VERSION}-`)).length, 1);
-});
-
-test("a v24 database upgrades to the current schema, snapshots first and preserves existing outlines", t => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "drama-plan-upgrade-"));
-    t.after(() => { assert.equal(path.dirname(directory), os.tmpdir()); fs.rmSync(directory, { recursive: true, force: true }); });
-    const file = path.join(directory, "db.sqlite");
-    const seed = historicalDatabase(t, file, 24);
-    seed.prepare("INSERT INTO canvas_folders (id,name,created_at) VALUES ('drama','Drama','2026-01-01')").run();
-    seed.prepare("INSERT INTO drama_projects (folder_id,outline,updated_at) VALUES ('drama','Preserved','2026-01-01')").run();
-    seed.close();
-    const db = new BackendDatabase(file);
-    try {
-        assert.equal(db.listCanvasFolders()[0].outline, "Preserved");
-        assert.equal(db.listCanvasFolders()[0].productionPlan, undefined);
-        assert.equal(db.db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version, DATABASE_SCHEMA_VERSION);
-        assert.equal((db.db.prepare("PRAGMA table_info(drama_projects)").all() as Array<Record<string, unknown>>).some(column => column.name === "production_plan_json"), true);
-        assert.equal(fs.readdirSync(directory).filter(name => name.includes(`.pre-schema-v24-to-v${DATABASE_SCHEMA_VERSION}-`)).length, 1);
-    } finally { db.close(); }
 });

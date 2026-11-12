@@ -30,6 +30,7 @@ import {
   type CanvasExecutorId,
 } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { StyleTransferRunner, type StyleTransferParams } from "./style-transfer.js";
 import { commandFingerprint } from "./collaboration.js";
 import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "./generation-settings.js";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
@@ -107,6 +108,7 @@ type DispatcherHooks = {
  */
 export class CanvasImageDispatcher {
   private readonly childTasks = new Map<string, Set<string>>();
+  private readonly styleTransfer = new StyleTransferRunner();
   constructor(
     private readonly config: ResolvedConfig,
     private readonly stores: Stores,
@@ -603,6 +605,11 @@ export class CanvasImageDispatcher {
       this.directImage.supports(model),
     );
     if (executor === "direct-image") return { executor, input: normalized };
+    if (executor === "local-style-transfer") {
+      if (executionImageInputs(input).length !== 2)
+        throw new Error("风格迁移需要两张图：第一张是要处理的目标图，第二张是风格参考图");
+      return { executor, input: normalized };
+    }
 
     const preset = builtinPreset(model);
     if (executor === "builtin-comfy" && preset) {
@@ -629,6 +636,8 @@ export class CanvasImageDispatcher {
     plan = { ...plan, input: this.prepareFrozenReferences(plan.input) };
     if (plan.executor === "direct-image")
       return this.dispatchDirect(plan.input, taskId);
+    if (plan.executor === "local-style-transfer")
+      return this.dispatchStyleTransfer(plan.input, taskId);
     const count = Math.max(1, Math.min(4, Math.floor(plan.input.count || 1)));
     // 保持网页原有批量并发语义，但所有子任务归属同一父任务，取消覆盖整批。
     const results = await Promise.allSettled(Array.from({ length: count }, async (_, index) => {
@@ -694,6 +703,54 @@ export class CanvasImageDispatcher {
     }
   }
 
+  /** 本地风格迁移：references[0] 是目标图，references[1] 是风格参考图；不依赖 prompt。 */
+  private async dispatchStyleTransfer(
+    input: CanvasImageGenerationInput,
+    taskId: string,
+  ) {
+    const references = executionImageInputs(input);
+    if (references.length !== 2)
+      throw new Error("风格迁移需要两张图：第一张是要处理的目标图，第二张是风格参考图");
+    const [target, style] = await Promise.all(
+      references.map(async (reference) =>
+        this.materializeReference(await this.modelReference(reference, taskId)),
+      ),
+    );
+    const childTaskId = `style-child-${taskId}`;
+    this.assertNotCancelled(taskId);
+    this.trackChild(taskId, childTaskId);
+    try {
+      const params = (input.params || {}) as StyleTransferParams;
+      const output = await this.styleTransfer.run(childTaskId, style.filePath, target.filePath, params);
+      const stored = this.stores.media.store(output.data, {
+        name: "style-transfer.png",
+        mimeType: "image/png",
+        category: "output",
+      });
+      this.stores.tasks.addEvent(taskId, "style_transfer", {
+        kind: params.kind || "auto",
+        strength: Number.isFinite(params.strength) ? params.strength : 1,
+        keepBlack: Boolean(params.keepBlack),
+        bgFollow: Boolean(params.bgFollow),
+        log: output.log.slice(0, 4000),
+      });
+      return {
+        taskId,
+        media: [{
+          url: this.stores.media.url(stored),
+          storageKey: stored.storageKey,
+          mimeType: "image/png",
+          filename: "style-transfer.png",
+          bytes: output.data.length,
+          width: output.width,
+          height: output.height,
+        }],
+      };
+    } finally {
+      this.untrackChild(taskId, childTaskId);
+    }
+  }
+
   cancel(id: string) {
     const childIds = [...(this.childTasks.get(id) || [])];
     for (const childId of childIds) {
@@ -711,6 +768,11 @@ export class CanvasImageDispatcher {
         this.comfy.cancel(childId);
       } catch {
         /* 子任务可能已经结束 */
+      }
+      try {
+        this.styleTransfer.cancel(childId);
+      } catch {
+        /* 进程可能已经结束 */
       }
       try {
         // RunningHub 子任务是远端任务，必须显式取消，否则云端仍会跑完并计费。

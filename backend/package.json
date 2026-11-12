@@ -28,6 +28,9 @@
     "prune-agent-threads": "tsx src/maintenance/prune-agent-threads.ts",
     "migrate-agent-thread-attachments": "tsx src/maintenance/migrate-agent-thread-attachments.ts",
     "audit-media-references": "tsx src/maintenance/audit-media-references.ts",
+    "audit-canvas-storage": "tsx src/maintenance/audit-canvas-storage.ts",
+    "repack-json-storage": "tsx src/maintenance/repack-json-storage.ts",
+    "benchmark-canvas-storage": "tsx src/maintenance/canvas-storage-benchmark.ts",
     "deduplicate-media-paths": "tsx src/maintenance/deduplicate-media-paths.ts",
     "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
     "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
@@ -37,8 +40,6 @@
     "director-source-storage": "tsx src/maintenance/director-source-storage.ts",
     "media-and-compilation-storage": "tsx src/maintenance/media-and-compilation-storage.ts",
     "prune-production-receipts": "tsx src/maintenance/prune-production-receipts.ts",
-    "compress-production-receipts": "tsx src/maintenance/compress-production-receipts.ts",
-    "compress-snapshot-json": "tsx src/maintenance/compress-snapshot-json.ts",
     "sync-episode-demand": "tsx src/maintenance/sync-episode-demand.ts",
     "test": "node ../scripts/test.mjs",
     "start": "node dist/index.js",
@@ -63,6 +64,6 @@
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=22.5"
+    "node": "^22.16.0 || >=24.0.0"
   }
 }

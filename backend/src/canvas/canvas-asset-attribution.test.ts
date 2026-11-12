@@ -83,3 +83,17 @@ test("画布与剧目不匹配时不改写任何资产", () => {
         assert.equal(db.getAssetRecord("saved-from-a")!.dramaId, null);
     } finally { db.close(); }
 });
+
+test("归属判定读取规范化存储中的连接数据", () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const now = new Date().toISOString();
+        db.upsertCanvasFolder({ id: "drama", name: "drama", isDrama: true, createdAt: now });
+        db.createCanvasProject({ id: "canvas", nodes: [], connections: [{ id: "connection", media: { storageKey: "audio:connection-only" } }] });
+        db.upsertDramaEpisode({ id: "episode", dramaId: "drama", episodeNumber: 1, title: "episode", synopsis: "", fullPlot: "", canvasId: "canvas", createdAt: now, updatedAt: now });
+        const asset: Asset = { id: "connection-asset", kind: "audio", title: "connection-asset", coverUrl: "", tags: [], folderId: null, dramaId: null, note: null,
+            source: "Canvas", metadata: {}, data: { storageKey: "audio:connection-only" }, createdAt: now, updatedAt: now } as Asset;
+        db.upsertAssetRecord(asset);
+        assert.deepEqual(attributableAssetsForCanvas(db, "canvas", "drama").map(item => item.id), ["connection-asset"]);
+    } finally { db.close(); }
+});

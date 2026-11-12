@@ -28,6 +28,8 @@ web/public/plugins
 **/venv/
 **/.venv/
 backend/venv
+# 风格迁移 worker 的运行时 scratch（每次任务后清理）
+backend/workers/.style-transfer-tmp/
 
 # python 字节码缓存（import 自动生成，不入库）
 **/__pycache__/

@@ -7,6 +7,20 @@ description: 用最少步骤把无限画布跑起来
 
 日常运行需要 Backend 与 `web/` 前端。Backend 已集成 Agent 与 MCP；独立 Canvas Agent 的 17371 地址只用于旧客户端兼容。
 
+## 依赖准备
+
+原生运行建议使用 **Node.js 24 LTS**，也支持 **22.16.0+ 的 22.x**，不使用 23.x；Backend 依赖内置 `node:sqlite` 的事务状态 API。安装 Git、Corepack 后，从根目录用固定的 **pnpm 12.12.1** 安装所有 workspace，不需要独立数据库服务。
+
+```bash
+node --version
+corepack --version
+corepack pnpm --version
+```
+
+如果没有 `corepack`，先运行 `npm install --global corepack` 并重新打开终端。仓库脚本会调用 Corepack，仅安装一个全局 pnpm 不能替代它。本文命令使用 `corepack pnpm`，无需 `corepack enable`。
+
+基础画布无需 Python、GPU 或 Codex 登录。按功能准备：视频工具需要 FFmpeg/FFprobe；Acheng 编译需要 Python 3.10+、Git 和激活的运行包；本地生成需要自己的 ComfyUI/模型；侧边栏对话需要与共享包匹配的 Codex CLI。Docker 镜像内依赖见 [Docker 部署](/zh-CN/docs/overview/docker)。
+
 ## 本地启动
 
 ```bash
@@ -39,19 +53,52 @@ http://localhost:3001
 
 ## 安装与启动排障
 
-- 下载慢时先使用 HTTPS 浅克隆；不需要 Git 历史时也可从 GitHub 的 Code 菜单下载源码 ZIP。项目不自动切换第三方镜像。
-- 仓库命令使用 `corepack pnpm`，由 Corepack 按根目录 `package.json` 固定到 pnpm 12.12.1；如果没有 Corepack，请安装此固定版本的 pnpm。Node 版本至少为 22.13。
+- 下载慢时先使用 HTTPS 浅克隆；基础源码也可从 GitHub 下载 ZIP，但 ZIP 不含 Git 子模块；导演运行包仍需另行用 Git 准备。项目不自动切换第三方镜像。
+- 仓库命令使用 `corepack pnpm`，由 Corepack 按根目录 `package.json` 固定到 pnpm 12.12.1；若 Corepack 不可用，先按上文安装 Corepack。Node 下限为 22.16.0（22.x），建议 24 LTS。
 - 本仓库只维护一份 workspace 锁文件；从仓库根目录运行 `corepack pnpm install --frozen-lockfile`，不要在单个 workspace 内安装或生成另一套锁文件。
 - `canvas-agent/dist/...` 缺失时先运行 `corepack pnpm --filter @basketikun/canvas-agent run build`，或改用根目录的启动命令。不要把构建失败当作后端连接问题。
 - `safe-delete state lock timeout` 若来自宿主注入的 `NODE_OPTIONS`，应在该运行环境中排查注入与 Vite 缓存清理的冲突。项目启动脚本保留 `NODE_OPTIONS`，不自动移除删除守卫或其他宿主保护。
 - Codex CLI 不再是强制安装项。需要侧边栏 Codex 对话时执行 `npm install -g @openai/codex@0.160.0` 并登录；仅画布、MCP、本地 ComfyUI 可跳过。模型下拉框使用 Canvas Agent 实际启动的 Codex app-server 返回的目录。
 - 视频节点的「镜头切分检测」由 Backend 调用 `backend/workers/detect_video_scenes.py`，依赖 `backend/workers/requirements-video-shot-detection.txt` 中的 `scenedetect-headless`。本地需先装进 Backend 使用的 Python（`python -m pip install -r backend/workers/requirements-video-shot-detection.txt`），或用 `SCENEDETECT_PYTHON` 指向已安装该包的解释器；缺失时该接口返回 503。Docker 镜像已内置。
 
+## 可选 Python 环境
+
+这些步骤仅用于需要 Python 的功能；已有环境可以直接复用。不要为基础画布重装 Python 或 ComfyUI，也不要覆盖已有 `backend/venv`。
+
+需要新环境时，在仓库根目录创建，直接调用其中的 Python，无需激活脚本：
+
+```powershell
+# Windows；已有可用环境时跳过创建
+py -3 -m venv backend/venv
+# 仅装要使用的功能；两份清单也可以分别安装
+backend/venv/Scripts/python.exe -m pip install -r backend/workers/requirements-video-shot-detection.txt -r backend/workers/requirements-style-transfer.txt
+```
+
+```bash
+# Linux/macOS；已有可用环境时跳过创建
+python3 -m venv backend/venv
+backend/venv/bin/python -m pip install -r backend/workers/requirements-video-shot-detection.txt -r backend/workers/requirements-style-transfer.txt
+```
+
+镜头检测与风格迁移优先使用各自显式环境变量 `SCENEDETECT_PYTHON` / `STYLE_TRANSFER_PYTHON`，其次使用 `backend/venv`，最后查找系统 Python。Acheng 使用独立的 `ACHENG_PYTHON`，配置时必须填**现有解释器的绝对路径**；不设置时会自动发现系统 Python，不会自动选中 `backend/venv`。
+
+FFmpeg/FFprobe 加入 Backend 所在进程的 PATH，或用 `FFMPEG_PATH` / `FFPROBE_PATH` 指向可执行文件。可在启动 Backend 的同一终端执行 `ffmpeg -version`、`ffprobe -version` 检查。H3 Motion Context 主链已由 Node/sharp/FFmpeg 实现，不要求为它额外安装旧 Python 脚本依赖。
+
+初始化 Acheng 时先检查 Git 子模块，再校验激活本次克隆的提交：
+
+```bash
+git submodule update --init -- .agents/skills/acheng-director
+corepack pnpm run acheng:update -- --local
+corepack pnpm run acheng:status
+```
+
+`acheng:update -- --local` 会校验并激活运行包，应在生成/对话/编译空闲时执行。纯 JSON 编译与审计使用标准库；需要 YAML 输入或 PNG 工具时，再按子模块的 `requirements.txt` 安装。运行包默认位于 `.canvas-runtime`，使用 `INFINITE_CANVAS_ACHENG_HOME` 时备份实际目录。
+
 ## 数据与升级
 
 Backend 默认使用 `~/.infinite-canvas/`，但数据和媒体目录可通过运行配置改变，以实际 `/data-dir` 和配置为准。SQLite 记录媒体索引，原始媒体文件需要一并备份。
 
-已有旧版 SQLite 数据库在迁移前生成 `runtime.sqlite.pre-schema-*.sqlite` 快照并校验完整性；备份失败会阻止迁移。较新或无效 schema 版本会拒绝打开，不能用删库解决。迁移快照不含媒体，也不替代完整数据备份；浏览器未确认编辑和冲突草稿须保留。该保护覆盖 SQLite schema 升级，不承诺所有历史格式都可自动恢复。
+已有旧版 SQLite 数据库在迁移前生成 `runtime.sqlite.pre-schema-*.sqlite` 快照并校验完整性；备份失败会阻止迁移。较新或无效 schema 版本会拒绝打开，不能用删库解决。迁移快照不含媒体，也不替代完整数据备份；浏览器未确认编辑和冲突草稿须保留。当前存储 schema 为 53，最低直接升级基线为 52；更早库或备份先用上一版 Backend 升到 52，不能直接跳过。已有新写入后应向前修复，不用旧备份覆盖编辑。
 
 ## 局域网访问
 

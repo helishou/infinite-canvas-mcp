@@ -10,7 +10,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { modelScenarioUnsupported, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
-import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption } from "@/lib/canvas/canvas-workflow-params";
+import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption, workflowDimensionSize } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
     config: AiConfig;
@@ -133,7 +133,12 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
     const aspectField = customFields.find((field) => field.input === "aspect_ratio" && field.type === "dropdown");
     const routedParams = aspectField ? resolveModelWorkflowParams(config, config.model, referenceCount) : {};
     const selectedAspect = aspectField ? workflowAspectOption(aspectField, comfyParams?.[aspectField.id], routedParams[aspectField.id], activeSize) : undefined;
-    const displayedSize = selectedAspect?.match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") || imageSizeLabel(activeSize);
+    // 工作流暴露真实 width / height 时，它们才是最终像素尺寸（面板也隐藏了标准尺寸项）；
+    // 按钮和提交请求都跟随这两个字段，而不是节点上可能残留的旧尺寸。
+    const workflowSize = workflowDimensionSize(customFields, comfyParams);
+    const displayedSize = workflowSize
+        ? imageSizeLabel(workflowSize)
+        : selectedAspect?.match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") || imageSizeLabel(activeSize);
     // 隐藏标准项的唯一依据是「本次真的要渲染工作流参数」。之前只判断渠道是不是 comfyui，
     // 于是取不到工作流字段时标准项也被一起藏掉，面板只剩透明背景和张数。
     const showsWorkflowParams = customFields.length > 0;
@@ -158,9 +163,14 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
         const routedParams = resolveModelWorkflowParams(config, config.model, referenceCount);
         const currentParams = comfyParamsRef.current;
         const next = reconcileWorkflowParams(currentParams, customFields, routedParams, workflowChanged, activeSize);
-        if (next && next !== currentParams) {
+        if (!next) return;
+        // 节点上残留的尺寸（如创建时的 9:16）与工作流 width/height 不一致时，
+        // 提交会按 metadata.size 生成目标尺寸并被后端判为冲突；这里按字段值自愈。
+        const nextSize = workflowDimensionSize(customFields, next);
+        const sizeChanged = Boolean(nextSize && activeSize !== "auto" && nextSize !== activeSize);
+        if (next !== currentParams || sizeChanged) {
             comfyParamsRef.current = next;
-            onComfyParamsChange(next);
+            onComfyParamsChange(next, sizeChanged ? nextSize : undefined);
         }
     }, [comfyParams, customFields, onComfyParamsChange, workflowDetail, workflowName, config, referenceCount]);
 
@@ -181,8 +191,11 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
                 onCustomFieldChange={onComfyParamsChange ? (id, value) => {
                     const next = { ...(comfyParamsRef.current || {}), [id]: value };
                     comfyParamsRef.current = next;
-                    const ratio = id === aspectField?.id ? String(value).match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") : undefined;
-                    onComfyParamsChange(next, ratio);
+                    // width / height 是真实像素输入，改完立即同步画布尺寸；
+                    // 有这两项时 aspect_ratio 不再代表输出尺寸，不能再拿它覆盖。
+                    const dimensionSize = workflowDimensionSize(customFields, next);
+                    const ratio = dimensionSize ? undefined : id === aspectField?.id ? String(value).match(/^\s*(\d+\s*:\s*\d+)/)?.[1].replace(/\s/g, "") : undefined;
+                    onComfyParamsChange(next, dimensionSize || ratio);
                     if (ratio) updateConfig("size", ratio);
                 } : undefined}
                 hideStandardImageOptions={hideStandardImageOptions}

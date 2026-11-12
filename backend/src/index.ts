@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 
 import { DATA_DIR, loadConfig, saveConfig, ensureDataDirs } from "./config.js";
 import { BackendDatabase } from "./db.js";
-import { registerBackendErrorHandler, startServer } from "./server.js";
+import { registerBackendErrorHandler, setSelectionRealtime, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import { ComfyUiBackend } from "./comfyui/bridge.js";
@@ -300,6 +300,7 @@ async function startBackendHttpServer() {
   runtime.agent = agent;
   app.use("/agent", agent.app);
   const canvasRealtime = new CanvasRealtimeHub(config, db, events);
+  setSelectionRealtime(canvasRealtime);
   const mcpHttp = registerBackendMcpHttpRoutes(
     app,
     config,

@@ -6,18 +6,18 @@
  * 保护不到它们），清理后就留下悬空引用。调用方现在会在读不到文件时报「媒体文件丢失」，
  * 但**悬空引用本身需要一个可随时复核的口径**，这就是本 CLI。
  *
- * 扫描范围：所有表的 text 列（`like '%runtime-media%'`）+ 所有 blob 列（尝试 gunzip
- * 后搜索，回执就是 gzip BLOB），逐条 stat。永不删除、永不改写任何行。
+ * 扫描范围：所有表的 text 列（`like '%runtime-media%'`）+ 所有 blob 列（按当前列格式解码后搜索），逐条 stat。永不删除、永不改写任何行。
  *
  * 用法：
  *   node --import tsx src/maintenance/audit-media-references.ts
  *   node --import tsx src/maintenance/audit-media-references.ts --json
  */
 import fs from "node:fs";
+import { gunzipSync } from "node:zlib";
 import path from "node:path";
-import zlib from "node:zlib";
 import { BackendDatabase } from "../db.js";
 import { DB_FILE, MEDIA_DIR } from "../config.js";
+import { storedJsonText } from "../json-storage.js";
 
 if (!fs.existsSync(DB_FILE)) throw new Error("数据库不存在，拒绝创建空库进行维护: " + DB_FILE);
 
@@ -53,9 +53,13 @@ try {
                 if (row.kind === "text") { scanned.textCells++; text = String(row.value); }
                 else {
                     scanned.blobCells++;
-                    // node:sqlite 的 BLOB 是 Uint8Array（不是 Buffer）：先按字节取，别退化成 "1,2,3…" 的字符串。
-                    const buffer = row.value instanceof Uint8Array ? Buffer.from(row.value) : Buffer.from(String(row.value));
-                    try { text = zlib.gunzipSync(buffer).toString("utf8"); } catch { scanned.blobSkipped++; continue; }
+                    // Generic JSON uses ICBR1. Compilation/report *_gzip columns have their own current codec.
+                    const stored = row.value instanceof Uint8Array ? row.value : Buffer.from(String(row.value));
+                    try {
+                        const dedicatedGzip = (table === "production_compilation_jobs" && ["job_gzip", "packet_gzip"].includes(column.name)) ||
+                            (table === "production_continuity_reports" && ["report_gzip", "result_gzip"].includes(column.name));
+                        text = dedicatedGzip ? gunzipSync(stored).toString("utf8") : storedJsonText(stored);
+                    } catch { scanned.blobSkipped++; continue; }
                 }
                 if (!text.includes("runtime-media")) continue;
                 for (const file of pathsIn(text)) {

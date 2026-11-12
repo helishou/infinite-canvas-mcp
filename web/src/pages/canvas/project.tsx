@@ -51,7 +51,7 @@ import { canvasNodeImage, canvasNodePrimaryImage } from "@/lib/canvas/canvas-ima
 import { canvasNodeDownloadPlan } from "@/lib/canvas/canvas-media-download";
 import { convertImageNodeToProp as convertImageToPropNode } from "@/lib/canvas/prop-node-conversion";
 import { arrangeGroupMembers, computeFlowLayout } from "@/lib/canvas/canvas-agent-ops";
-import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { fitImageNodeSize, fitNodeSize, isAspectLockedImageNode } from "@/lib/canvas/canvas-node-size";
 import { retainCharacterPrimaryIndex } from "@/lib/canvas/character-primary";
 import { findCanvasCompareReference } from "@/lib/canvas/image-compare-reference";
 import { needsViewportCull, normalizeViewportTransform, viewportRenderPadding } from "@/lib/canvas/canvas-viewport";
@@ -66,6 +66,7 @@ import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
+import type { CanvasImageStyleTransferParams } from "@/components/canvas/canvas-node-style-transfer-dialog";
 import type { CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
@@ -99,7 +100,7 @@ import { useCanvasDragFrame } from "@/pages/canvas/hooks/use-canvas-drag-frame";
 import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
-import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, referenceUrl, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findFreeNodePosition, placementObstacles, NODE_PLACEMENT_GAP } from "@/lib/canvas/canvas-node-placement";
 import { findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection } from "@/lib/canvas/canvas-node-geometry";
 import { arrangeOrderedGroupMembers, inheritOrderedGroupOutputs, orderedGroupColumnCount, orderedGroupDisplaySlots, orderedGroupDraggedCenter, orderedGroupDropTarget, orderedGroupLayout, orderedGroupResizeLayout, orderedGroupSlots, transferOrderedGroupH3References } from "@/lib/canvas/ordered-group";
@@ -140,6 +141,7 @@ import {
     CanvasNodeMaskEditDialog,
     CanvasNodePromptPanel,
     CanvasNodeSplitDialog,
+    CanvasNodeStyleTransferDialog,
     CanvasNodeResizeDialog,
     CanvasPluginManagerModal,
     CanvasVideoCompareModal,
@@ -627,6 +629,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [stitchSourceNodeId, setStitchSourceNodeId] = useState<string | null>(null);
+    const [styleTransferSourceNodeId, setStyleTransferSourceNodeId] = useState<string | null>(null);
+    const [styleTransferPair, setStyleTransferPair] = useState<{ target: CanvasNodeData; style: CanvasNodeData; targetUrl: string; styleUrl: string } | null>(null);
     const [stitchPreview, setStitchPreview] = useState<{ source: CanvasNodeData; target: CanvasNodeData; sourceUrl: string; targetUrl: string; direction: "horizontal" | "vertical"; reversed: boolean } | null>(null);
     const [stitchPreviewDataUrl, setStitchPreviewDataUrl] = useState("");
     const [stitchingImages, setStitchingImages] = useState(false);
@@ -671,6 +675,20 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         setStitchSourceNodeId(null);
         if (sourceId) setSelectedNodeIds(new Set([sourceId]));
     }, [setSelectedNodeIds, stitchSourceNodeId]);
+
+    const beginStyleTransfer = useCallback((node: CanvasNodeData) => {
+        if (!canvasNodeImage(node)) return;
+        setStyleTransferPair(null);
+        setStyleTransferSourceNodeId(node.id);
+        setDialogNodeId(null);
+        setSelectedNodeIds(new Set([node.id]));
+    }, [setSelectedNodeIds]);
+
+    const exitStyleTransferSelection = useCallback(() => {
+        const sourceId = styleTransferSourceNodeId;
+        setStyleTransferSourceNodeId(null);
+        if (sourceId) setSelectedNodeIds(new Set([sourceId]));
+    }, [setSelectedNodeIds, styleTransferSourceNodeId]);
 
     const nodesRef = useRef(nodes);
     const orderedGroupCollageBusyRef = useRef(new Set<string>());
@@ -1489,7 +1507,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         // 轻量概览节点不会消费配置输入或 @ 参考资源；密集画布中只为即将挂载完整内容的节点计算它们。
         if (viewport.k >= 0.24 && !denseOverviewMode) return visibleNodes;
         // 拖动/缩放期间预览坐标来自瞬态订阅源，保守保留完整输入计算，避免状态切换时丢面板内容。
-        if (isNodeDragging || isNodeResizing || refPickActive || characterImagePickerActive || stitchSourceNodeId) return visibleNodes;
+        if (isNodeDragging || isNodeResizing || refPickActive || characterImagePickerActive || stitchSourceNodeId || styleTransferSourceNodeId) return visibleNodes;
 
         const detailIds = new Set<string>();
         if (singleSelectedNodeId) detailIds.add(singleSelectedNodeId);
@@ -1504,6 +1522,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         activeNodeId,
         characterImagePickerActive,
         stitchSourceNodeId,
+        styleTransferSourceNodeId,
         connectingParams?.nodeId,
         denseOverviewMode,
         dialogNodeId,
@@ -3576,13 +3595,23 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const handleNodeResizeEnd = useCallback(
         (nodeId: string, boundsOverride?: CanvasResizePreviewBounds) => {
             const previewBounds = boundsOverride || resizePreviewBoundsRef.current.get(nodeId);
+            // 只有用户拖拽（没有自动适配传入的 bounds）才把尺寸记为用户选择；
+            // 换图自动适配也会调用这里，不能反过来覆盖这个标记。
+            const manualResize = !boundsOverride;
             if (previewBounds) {
                 setNodes((prev) => {
                     const resizedNode = prev.find((node) => node.id === nodeId);
-                    if (!resizedNode?.metadata?.orderedGroup || resizedNode.type !== CanvasNodeType.Group) return prev.map((node) => (node.id === nodeId ? { ...node, ...previewBounds } : node));
+                    if (!resizedNode) return prev;
+                    const markUserSized = manualResize && !resizedNode.metadata?.userSized && isAspectLockedImageNode(resizedNode);
+                    const withPreviewBounds = (node: CanvasNodeData) => ({
+                        ...node,
+                        ...previewBounds,
+                        ...(markUserSized ? { metadata: { ...node.metadata, userSized: true } } : {}),
+                    });
+                    if (!resizedNode.metadata?.orderedGroup || resizedNode.type !== CanvasNodeType.Group) return prev.map((node) => (node.id === nodeId ? withPreviewBounds(node) : node));
                     const memberBounds = orderedGroupResizeLayout(resizedNode, previewBounds, prev);
                     return prev.map((node) => {
-                        if (node.id === nodeId) return { ...node, ...previewBounds };
+                        if (node.id === nodeId) return withPreviewBounds(node);
                         const bounds = memberBounds.get(node.id);
                         return bounds ? { ...node, ...bounds } : node;
                     });
@@ -3658,9 +3687,17 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 const preserveNodeSize = node.metadata?.freeResize || (node.type === CanvasNodeType.Config && node.metadata?.smart);
                 const naturalWidth = image.naturalWidth || node.metadata?.naturalWidth || node.width;
                 const naturalHeight = image.naturalHeight || node.metadata?.naturalHeight || node.height;
-                const size = preserveNodeSize
-                    ? { width: node.width, height: node.height }
-                    : fitNodeSize(naturalWidth, naturalHeight, imageConfig.width, imageConfig.height);
+                // 与换图自动适配共用同一套规则：默认尺寸内接，其余按面积换形，手动缩放过就只沿用当前面积。
+                const fitted = preserveNodeSize ? null : fitImageNodeSize({
+                    width: node.width,
+                    height: node.height,
+                    mediaWidth: naturalWidth,
+                    mediaHeight: naturalHeight,
+                    defaultWidth: imageConfig.width,
+                    defaultHeight: imageConfig.height,
+                    userSized: node.metadata?.userSized === true,
+                });
+                const size = fitted || { width: node.width, height: node.height };
                 return {
                     ...node,
                     position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 },
@@ -4398,6 +4435,26 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                 }
                 return;
             }
+            if (styleTransferSourceNodeId) {
+                if (sourceNodeId === styleTransferSourceNodeId) return;
+                const target = nodesRef.current.find((node) => node.id === styleTransferSourceNodeId);
+                const style = nodesRef.current.find((node) => node.id === sourceNodeId);
+                const targetImage = target ? canvasNodeImage(target) : null;
+                const styleImage = style ? canvasNodeImage(style) : null;
+                if (!target || !style || !targetImage || !styleImage) return;
+                try {
+                    const [targetUrl, styleUrl] = await Promise.all([
+                        resolveImageUrl(targetImage.storageKey, targetImage.content || ""),
+                        resolveImageUrl(styleImage.storageKey, styleImage.content || ""),
+                    ]);
+                    if (!targetUrl || !styleUrl) throw new Error(t("common.imageReadFailed"));
+                    setStyleTransferPair({ target, style, targetUrl, styleUrl });
+                    setStyleTransferSourceNodeId(null);
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : t("common.imageReadFailed"));
+                }
+                return;
+            }
             if (pendingVideoComparison) {
                 if (!compareCandidateIds.has(sourceNodeId)) return;
                 setVideoComparison({ ...pendingVideoComparison, initialSelectedIds: [sourceNodeId] });
@@ -4430,7 +4487,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
             selectNodeReference(sourceNodeId);
         },
-        [characterImagePickerActive, compareCandidateIds, message, pendingVideoComparison, pluginReferencePickNodeId, propImagePickerActive, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectPropCanvasImage, selectSceneCanvasImage, stitchSourceNodeId, t],
+        [characterImagePickerActive, compareCandidateIds, message, pendingVideoComparison, pluginReferencePickNodeId, propImagePickerActive, sceneImagePickerActive, selectCharacterCanvasImage, selectNodeReference, selectPropCanvasImage, selectSceneCanvasImage, stitchSourceNodeId, styleTransferSourceNodeId, t],
     );
 
     useEffect(() => {
@@ -4444,6 +4501,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         window.addEventListener("keydown", exit, true);
         return () => window.removeEventListener("keydown", exit, true);
     }, [exitImageStitchSelection, stitchSourceNodeId]);
+
+    useEffect(() => {
+        if (!styleTransferSourceNodeId) return;
+        const exit = (event: KeyboardEvent) => {
+            if (!activeRef.current || event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            exitStyleTransferSelection();
+        };
+        window.addEventListener("keydown", exit, true);
+        return () => window.removeEventListener("keydown", exit, true);
+    }, [exitStyleTransferSelection, styleTransferSourceNodeId]);
 
     useEffect(() => {
         if (!stitchPreview) {
@@ -5150,6 +5219,79 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             }
         },
         [effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, openConfigDialog, projectId, startGenerationRequest, t, updateProject],
+    );
+
+    const generateStyleTransferNode = useCallback(
+        async (target: CanvasNodeData, style: CanvasNodeData, params: CanvasImageStyleTransferParams) => {
+            const targetImage = canvasNodePrimaryImage(target);
+            const styleImage = canvasNodePrimaryImage(style);
+            if (!targetImage || !styleImage) return;
+            const childId = nanoid();
+            const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const imageId = nanoid();
+            const references = [
+                { id: target.id, name: `${target.title || target.id}.png`, type: targetImage.mimeType || "image/png", dataUrl: targetImage.content, storageKey: targetImage.storageKey },
+                { id: style.id, name: `${style.title || style.id}.png`, type: styleImage.mimeType || "image/png", dataUrl: styleImage.content, storageKey: styleImage.storageKey },
+            ];
+            setStyleTransferPair(null);
+            setRunningNodeId(childId);
+            const nextNodes: CanvasNodeData[] = [
+                ...nodesRef.current,
+                {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.projectPage.styleTransferNodeTitle", { name: target.title || t("assets.kinds.image") }),
+                    position: { x: target.position.x + target.width + 96, y: target.position.y },
+                    width: imageConfig.width,
+                    height: imageConfig.height,
+                    metadata: {
+                        prompt: "",
+                        status: NODE_STATUS_IDLE,
+                        images: [{ id: imageId, status: NODE_STATUS_IDLE, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }],
+                        generationType: "edit",
+                        model: "local-style-transfer",
+                        count: 1,
+                        references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
+                        referenceIds: [target.id, style.id],
+                    },
+                },
+            ];
+            const nextConnections = [...connectionsRef.current, { id: nanoid(), fromNodeId: target.id, toNodeId: childId }, { id: nanoid(), fromNodeId: style.id, toNodeId: childId }];
+            nodesRef.current = nextNodes;
+            connectionsRef.current = nextConnections;
+            setNodes(nextNodes);
+            setConnections(nextConnections);
+            updateProject(projectId, { nodes: nextNodes, connections: nextConnections });
+            setSelectedNodeIds(new Set([childId]));
+            setDialogNodeId(childId);
+            const controller = startGenerationRequest(childId, target.id, childId);
+            try {
+                await flushCanvasProjectBeforeGeneration(projectId);
+                await runCanvasImageTask(
+                    {
+                        mode: "image",
+                        model: "local-style-transfer",
+                        prompt: "",
+                        referenceNodeIds: [target.id, style.id],
+                        count: 1,
+                        imageIds: [imageId],
+                        params: { strength: params.strength, kind: params.kind, keepBlack: params.keepBlack, bgFollow: params.bgFollow },
+                        clientTaskId: crypto.randomUUID(),
+                        projectId,
+                        nodeId: childId,
+                        sourceNodeId: target.id,
+                    },
+                    controller.signal,
+                );
+            } catch (error) {
+                if (isGenerationCanceled(error)) return;
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+            } finally {
+                finishGenerationRequest(childId, controller);
+                setRunningNodeId(null);
+            }
+        },
+        [finishGenerationRequest, flushCanvasProjectBeforeGeneration, message, projectId, startGenerationRequest, t, updateProject],
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
@@ -6738,9 +6880,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         ) : null
                     }
                     onCanvasMouseDown={(event) => {
-                        if (!refPickActive && !characterImagePickerActive && !stitchSourceNodeId) handleCanvasMouseDown(event);
+                        if (!refPickActive && !characterImagePickerActive && !stitchSourceNodeId && !styleTransferSourceNodeId) handleCanvasMouseDown(event);
                     }}
-                    onCanvasDeselect={refPickActive || characterImagePickerActive || stitchSourceNodeId ? undefined : deselectCanvas}
+                    onCanvasDeselect={refPickActive || characterImagePickerActive || stitchSourceNodeId || styleTransferSourceNodeId ? undefined : deselectCanvas}
                     onContextMenu={preventCanvasContextMenu}
                     onDrop={handleDrop}
                 >
@@ -6797,7 +6939,11 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                 isConnecting={Boolean(connectingParams)}
                                 isConnectionSource={connectingParams?.nodeId === node.id}
                                 referenceSelectionState={
-                                    stitchSourceNodeId
+                                    styleTransferSourceNodeId
+                                        ? node.id === styleTransferSourceNodeId
+                                            ? "target"
+                                            : canvasNodeImage(node) ? "available" : "disabled"
+                                        : stitchSourceNodeId
                                         ? node.id === stitchSourceNodeId
                                             ? "target"
                                             : canvasNodeImage(node) ? "available" : "disabled"
@@ -6942,6 +7088,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     ) : null}
                 {connectingParams && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" onClick={cancelPendingConnectionCreate}>{t("canvasChrome.connecting", { name: nodeById.get(connectingParams.nodeId)?.title || connectingParams.nodeId })}<span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
                     {stitchSourceNodeId && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitImageStitchSelection}>{t("canvas.projectPage.stitchSelectHint")}<span className="max-w-40 truncate">{nodeById.get(stitchSourceNodeId)?.title}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
+                    {styleTransferSourceNodeId && <button type="button" data-canvas-transient-tool className="canvas-mode-notice" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }} onClick={exitStyleTransferSelection}>{t("canvas.projectPage.styleTransferSelectHint")}<span className="max-w-40 truncate">{nodeById.get(styleTransferSourceNodeId)?.title}</span><span className="shrink-0 underline">{t("canvasChrome.exitMode")}</span></button>}
                 <CanvasRealtimePresenceLayer projectId={projectId} nodeById={nodeById} viewport={viewport} />
 
                 <CanvasNodeHoverToolbar
@@ -6978,6 +7125,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onStitch={beginImageStitch}
+                    onStyleTransfer={beginStyleTransfer}
                     onResizeImage={(node) => setResizeNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAutoLevels={(node) => void autoLevelsImageNode(node)}
@@ -7116,6 +7264,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     </Modal>
 
                     {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog key="angle" dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
+
+                    {styleTransferPair ? <CanvasNodeStyleTransferDialog key="style-transfer" targetUrl={styleTransferPair.targetUrl} styleUrl={styleTransferPair.styleUrl} open onClose={() => setStyleTransferPair(null)} onConfirm={(params) => void generateStyleTransferNode(styleTransferPair.target, styleTransferPair.style, params)} /> : null}
 
                     {characterEditNodeId ? <CharacterNodeEditModal
                         key="character-edit"

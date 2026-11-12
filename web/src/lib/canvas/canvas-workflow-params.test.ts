@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { reconcileWorkflowParams, workflowAspectOption } from "./canvas-workflow-params";
+import { reconcileWorkflowParams, workflowAspectOption, workflowDimensionSize } from "./canvas-workflow-params";
 import type { WorkflowField } from "@/services/api/workflows";
 
 const fields: WorkflowField[] = [{ id: "steps", node: "1", input: "steps", name: "步数", type: "number", default: 20 }];
@@ -33,4 +33,21 @@ test("canvas 16:9 size reaches a workflow aspect_ratio field without overriding 
     const chosen = { [aspect.id]: "1:1 (Square)" };
     assert.equal(reconcileWorkflowParams(chosen, [aspect], {}, false, "16:9"), chosen);
     assert.deepEqual(reconcileWorkflowParams(undefined, [aspect], { [aspect.id]: "1:1 (Square)" }, false, "16:9"), chosen);
+});
+
+test("workflow width/height fields define the canvas size", () => {
+    const dimensionFields: WorkflowField[] = [
+        { id: "width", node: "301", input: "width", name: "宽", type: "number", default: 1920 },
+        { id: "height", node: "301", input: "height", name: "高", type: "number", default: 1024 },
+    ];
+    assert.equal(workflowDimensionSize(dimensionFields, undefined), "1920x1024");
+    assert.equal(workflowDimensionSize(dimensionFields, { width: 1024, height: 1824 }), "1024x1824");
+    assert.equal(workflowDimensionSize(dimensionFields, { width: 2048 }), "2048x1024");
+    // 参数由字段默认值铺开时，画布尺寸也要跟着落成同一组像素，而不是保留节点上的旧尺寸。
+    const reconciled = reconcileWorkflowParams(undefined, dimensionFields, {}, false, "1024x1824");
+    assert.equal(workflowDimensionSize(dimensionFields, reconciled), "1920x1024");
+    // 只有宽或只有高、值非法、字段不映射 width/height 时不接管画布尺寸。
+    assert.equal(workflowDimensionSize(dimensionFields.slice(0, 1), {}), undefined);
+    assert.equal(workflowDimensionSize(dimensionFields, { width: 0, height: 1024 }), undefined);
+    assert.equal(workflowDimensionSize([{ ...dimensionFields[0], id: "custom_width", input: "custom_width" }], { custom_width: 2048 }), undefined);
 });

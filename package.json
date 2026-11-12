@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "private": true,
     "packageManager": "pnpm@12.12.1",
-    "engines": { "node": ">=22.13.0" },
+    "engines": { "node": "^22.16.0 || >=24.0.0" },
     "scripts": {
         "test": "corepack pnpm --filter @helishou/infinite-canvas-backend run test && corepack pnpm --filter @basketikun/canvas-agent run test && corepack pnpm --filter infinite-canvas run test",
         "postinstall": "node scripts/patch-rc-portal.mjs",

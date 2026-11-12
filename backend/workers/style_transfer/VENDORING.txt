@@ -1,0 +1,8 @@
+Vendored from ImageF v4.9.1 (https://github.com/FXiaoai/ImageF), tools/ 目录的
+「只还原风格」算法模块（mj_style_only 及其依赖）、两个 ONNX 模型与语言文件。
+代码未修改；style_transfer_worker.py 是本项目新增的 JSON 桥接入口。
+
+许可：PolyForm Noncommercial License 1.0.0（见 LICENSE.txt / LICENSE.zh-CN.txt）。
+仅限非商业用途；分发时必须保留 LICENSE 与全部 "Required Notice:" 行（老F 署名）。
+模型各自许可见 face_detection_yunet_LICENSE.txt、depth_anything_v2_LICENSE.txt /
+depth_anything_v2_NOTICE.txt；第三方声明见 THIRD_PARTY_NOTICES.txt。
