@@ -73,6 +73,7 @@ import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch
 import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
 import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
+import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";
 
 const logger = createLogger("backend");
 
@@ -281,6 +282,7 @@ export function startServer(
   registerConnectionRoutes(app, config, stores.settings);
   registerLocalModelProxyRoutes(app);
   registerCameraLibraryRoutes(app);
+  registerAchengSkillsRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =

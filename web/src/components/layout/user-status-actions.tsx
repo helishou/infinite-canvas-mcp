@@ -46,6 +46,29 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     );
     const themeButton = <AnimatedThemeToggler theme={theme} onThemeChange={setTheme} className={naturalIconClass} style={iconStyle} aria-label={themeLabel} title={themeLabel} />;
 
+    if (variant === "canvas") {
+        return (
+            <div className="flex flex-col gap-1" data-canvas-shortcuts-ignore>
+                {onOpenPlugins || onOpenShortcuts ? <div className="flex items-center justify-end gap-1 px-1">
+                    {onOpenPlugins ? <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}><Puzzle className="size-4" /></button> : null}
+                    {onOpenShortcuts ? <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenShortcuts} aria-label={t("topNav.shortcuts")} title={t("topNav.shortcuts")}><Keyboard className="size-4" /></button> : null}
+                </div> : null}
+                <div className="flex items-center justify-between gap-3 px-2 py-1">
+                    <span className="text-xs text-muted-foreground">{t("workspaceNavigation.appearance")}</span>
+                    <div className="flex items-center">{languageButton}{themeButton}</div>
+                </div>
+                {showConfig ? <button type="button" className={popoverRowClass} onClick={() => openConfigDialog(false)}><Settings2 className="size-4" />{t("workspaceNavigation.settings")}</button> : null}
+                <Link to="/config" className={popoverRowClass}><Settings2 className="size-4" />{t("workspaceNavigation.allSettings")}</Link>
+                <Link to="/diagnostics/mcp" className={popoverRowClass}><Activity className="size-4" />{t("workspaceNavigation.diagnostics")}</Link>
+                <a href={DOCS_URL} target="_blank" rel="noopener noreferrer" className={popoverRowClass}><BookOpen className="size-4" />{t("topNav.docs")}</a>
+                <div className="mt-1 flex items-center justify-between border-t border-border px-2 pt-1">
+                    <VersionReleaseModal className="rounded-md py-1 text-xs text-muted-foreground transition-colors hover:text-foreground" />
+                    <GitHubLink href={CANVAS_GITHUB_URL} className={naturalIconClass} />
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
             {onOpenPlugins ? (

@@ -382,6 +382,30 @@ function directorStageReadiness(director?: DirectorProduction): DirectorStageRea
     return { draftInitialized: true, scriptBlocks, explicitShotCues, structuredShots, assetCards, segments, compileGate, compileBlockers, authoringGaps, nextAction };
 }
 
+/**
+ * 制作阶段前置：Clip 生成是唯一烧钱又难返工的动作，只在这一层硬拦；
+ * 资产图与关键帧只给提示，不拦流程。阶段游标缺失时一律放行（老项目不因未初始化被卡）。
+ */
+const PRODUCTION_STAGE_LABELS: Record<string, string> = {
+    script: "①剧情设计", assets: "②资产准备", spatial: "③站位与色彩基准", shots: "④镜头设计", keyframes: "⑤分镜关键帧", clips: "⑥Clip 视频",
+};
+const PRODUCTION_STAGE_REQUIREMENTS: Record<"asset" | "keyframe" | "segment", readonly string[]> = {
+    asset: ["script"],
+    keyframe: ["script", "shots"],
+    segment: ["script", "assets", "shots", "keyframes"],
+};
+
+export function productionStageGaps(stage: unknown, kind: "asset" | "keyframe" | "segment"): { blockers: string[]; warnings: string[] } {
+    const value = stage && typeof stage === "object" && !Array.isArray(stage) ? stage as Record<string, unknown> : null;
+    const current = typeof value?.current === "string" ? value.current : "";
+    if (!value || !current) return { blockers: [], warnings: [] };
+    const done = new Set((Array.isArray(value.done) ? value.done : []).filter((item): item is string => typeof item === "string"));
+    const missing = (PRODUCTION_STAGE_REQUIREMENTS[kind] || []).filter(item => !done.has(item) && item !== current);
+    if (!missing.length) return { blockers: [], warnings: [] };
+    const text = `阶段未推进：当前在 ${PRODUCTION_STAGE_LABELS[current] || current}，本目标需要先完成 ${missing.map(item => PRODUCTION_STAGE_LABELS[item] || item).join("、")}。确需越序时用 set_settings 把对应阶段写进 done 并在 note 写明理由。`;
+    return kind === "segment" ? { blockers: [text], warnings: [] } : { blockers: [], warnings: [text] };
+}
+
 export class ProductionConflictError extends Error {
     constructor(readonly current: ProductionRecord) { super("制作稿版本已变化，请核对当前版本后重试"); }
 }
@@ -2403,16 +2427,20 @@ export class EpisodeProductionService {
                 const segmentId = id.startsWith("segment:") ? id.slice("segment:".length) : "";
                 const compilationBlockers = segmentId ? previous?.blockers.filter(message => message.includes("需要由当前激活 Acheng 引擎重新编译") || message.includes("完整编译提示词")) || [] : [];
                 const canvasBlockers = checked.blockedTargets.filter(target => target.targetId === id).map(target => target.message);
+                const stageGaps = productionStageGaps(data.settings.productionStage, id.startsWith("segment:") ? "segment" : id.startsWith("frame:") ? "keyframe" : "asset");
                 const blockers = [...new Set([
                     ...referenceModeBlockers,
                     ...compilationBlockers,
                     ...canvasBlockers,
                     ...mediaBlockers,
+                    ...stageGaps.blockers,
                     ...(dependencyBlocked.has(id) ? [`请先生成前置目标：${dependencyBlocked.get(id)!.join(", ")}`] : []),
                 ])];
-                const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0 && referenceModeBlockers.length === 0 && compilationBlockers.length === 0;
+                const targetReady = ready.has(id) && !dependencyBlocked.has(id) && mediaBlockers.length === 0 && referenceModeBlockers.length === 0 && compilationBlockers.length === 0 && stageGaps.blockers.length === 0;
                 return { ...(previous || { id, targetId: id.slice(id.indexOf(":") + 1), kind: id.startsWith("segment:") ? "segment" as const : id.startsWith("frame:") ? "keyframe" as const : "asset" as const, title: id }),
-                    status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers, notice: "使用当前已保存内容" };
+                    status: targetReady ? previous?.status === "complete" ? "complete" as const : "ready" as const : "blocked" as const, blockers,
+                    warnings: [...new Set([...(previous?.warnings || []), ...stageGaps.warnings])],
+                    notice: "使用当前已保存内容" };
             })];
             const next = targets.find(target => target.status === "ready") || targets.find(target => target.status === "blocked");
             return { ...baseline, targets, canvasId: checked.canvasId, canvasRevision: checked.canvasRevision,

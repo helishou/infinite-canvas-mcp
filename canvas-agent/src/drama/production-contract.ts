@@ -263,6 +263,8 @@ export const productionCompileSchema = z.object({
     // use its saved draft; a caller-provided snapshot is never authoritative.
     director: directorProductionSchema.optional().describe("已废弃并忽略；编译始终使用 Backend 已保存的正式制作稿。"),
     scope: productionCompilationScopeSchema.optional(),
+    /** 编译成功后由 Backend 作业立即应用该 preparedId；调用方无需再拿 preparedId 调 apply。 */
+    apply: z.boolean().optional().describe("true 时编译成功后自动应用；轮询 production_get_compilation 的 applyStatus 直到 applied 或 failed"),
 }).strict();
 /** Execution requests require a stable identity so callers can recover queued work after a lost response. */
 export const productionCompileSubmissionSchema = productionCompileSchema.extend({ operationId: id });
@@ -671,6 +673,9 @@ export const clipGroupSchema = z.object({
     selectedResult: z.object({ generationLogId: id, taskId: id, sourceVersion: z.number().int().min(1), sourceHash: hash, sourceNodeId: id.optional() }).optional(),
 });
 
+export const productionStageNames = ["script", "assets", "spatial", "shots", "keyframes", "clips"] as const;
+export type ProductionStageName = (typeof productionStageNames)[number];
+
 export const productionSettingsSchema = z.object({
     /** Explicit opt-in; absent legacy settings compile without background music. */
     backgroundMusicEnabled: z.boolean().optional().describe("Off by default. Enable only when the user explicitly requests background scoring; otherwise compile non_diegetic_music as N/A."),
@@ -688,6 +693,13 @@ export const productionSettingsSchema = z.object({
     // Retain legacy budgets when reading old drafts; execution no longer uses them.
     imageQuota: z.number().int().min(0).nullable().optional(),
     h3Quota: z.number().int().min(0).nullable().optional(),
+    /** 制作阶段游标：开工前先读，推进时用 set_settings 写回。缺失表示尚未初始化（老项目不被拦截）。 */
+    productionStage: z.object({
+        current: z.enum(productionStageNames).describe("当前阶段；开工报告以它为准，不从上下文推断。"),
+        done: z.array(z.enum(productionStageNames)).default([]).describe("已完成阶段，按实际发生顺序追加。"),
+        note: z.string().trim().max(400).optional().describe("越序跳过或回退的理由；按序推进时省略。"),
+        updatedAt: z.string().max(64).optional(),
+    }).optional(),
 });
 
 export const dramaProductionPlanSchema = z.object({

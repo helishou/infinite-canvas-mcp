@@ -803,7 +803,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
           : name === "production_diagnose_bindings" ? await backend.get(`${base}/bindings`)
           : name === "production_apply_compilation" ? await backend.post(`${base}/apply-compilation`, { preparedId: input.preparedId })
           : name === "production_translate_compiled_prompts" ? await backend.post(`${base}/translate-compiled-prompts`, { expectedRevision: input.expectedRevision, operationId: input.operationId, targetIds: input.targetIds })
-          : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director, scope: input.scope });
+          : await backend.post(`${base}/compile`, { operationId: input.operationId, expectedRevision: input.expectedRevision, director: input.director, scope: input.scope, ...(input.apply ? { apply: true } : {}) });
         return void res.json({ ok: true, result });
       }
       return void res.json({

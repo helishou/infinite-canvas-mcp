@@ -8,7 +8,21 @@ import { directorModules, directorProductionSchema, productionOperationSchema, c
 import { productionOperationContract, schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch, ref2vaPromptDiagnostics, continuityBoundaryDiagnostics } from "../drama/production-validation.js";
 
 const canvasRepositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const defaultAchengHome = () => path.resolve(process.env.INFINITE_CANVAS_ACHENG_HOME || path.join(canvasRepositoryRoot, ".canvas-runtime"));
+export function defaultAchengHome(repositoryRoot = canvasRepositoryRoot): string {
+    if (process.env.INFINITE_CANVAS_ACHENG_HOME) return path.resolve(process.env.INFINITE_CANVAS_ACHENG_HOME);
+    // Git worktrees have separate checkouts but share one common git directory.
+    // Keep the managed runtime beside that common repository so every worktree
+    // resolves the same active runtime instead of looking in its own checkout.
+    try {
+        const commonGitDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+            cwd: repositoryRoot, encoding: "utf8", windowsHide: true,
+        }).trim();
+        if (commonGitDir) return path.join(path.dirname(path.resolve(commonGitDir)), ".canvas-runtime");
+    } catch {
+        // Source archives and non-Git deployments retain the repository-local default.
+    }
+    return path.join(repositoryRoot, ".canvas-runtime");
+}
 
 let discoveredPython: string | undefined;
 let discoveredPythonLauncher: string[] | undefined;
@@ -206,12 +220,19 @@ const execFileAsync = (file: string, args: string[], options: ExecFileSyncOption
     const { input, ...execOptions } = options;
     const effectiveOptions = input === undefined ? execOptions : { ...execOptions, stdio: ["pipe", "pipe", "pipe"] as const };
     return new Promise((resolve, reject) => {
+        let stdinError: Error | undefined;
         const child = execFile(file, args, effectiveOptions, (error, stdout, stderr) => {
             if (error) {
                 Object.assign(error, { stdout: stdout || "", stderr: stderr || "" });
                 reject(error);
+            } else if (stdinError) {
+                Object.assign(stdinError, { stdout: stdout || "", stderr: stderr || "" });
+                reject(stdinError);
             } else resolve(String(stdout || ""));
         });
+        // A child that exits before reading all input closes this pipe. Wait for
+        // its exit callback so its actual failure and stderr reach the caller.
+        child.stdin?.on("error", error => { stdinError = error; });
         if (input !== undefined) child.stdin?.end(input as string | Buffer);
         else child.stdin?.end();
     });
@@ -640,6 +661,9 @@ export function getProductionContract(
     if (!operationType && !moduleId && !includeDetails.requests && !includeDetails.patchFields && !includeDetails.sourceContract) {
         const operationTypes = productionOperationSchema.options.map(option => option.shape.type.value);
         const runtime = resolveAchengEngine();
+        const registryPath = path.join(runtime.path, "data", "module-registry.json");
+        const moduleRegistry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+        const availableModuleIds = directorModules.filter(id => moduleRegistry.modules.some((module: any) => module.id === id && module.enabled !== false));
         return {
             queryGuide: {
                 purpose: "按需读取当前激活 Acheng 引擎的制作合同。省略查询范围时只返回本指南。",
@@ -656,7 +680,7 @@ export function getProductionContract(
                     { operationType: "patch_director_source", includePatchFields: true },
                 ],
                 availableOperationTypes: operationTypes,
-                availableModuleIds: directorModules,
+                availableModuleIds,
             },
             engine: { runtimeId: runtime.runtimeId, commit: runtime.commit, patchVersion: runtime.patchVersion, version: runtime.version },
             ...(runtimeId ? { notice: "runtimeId is deprecated and does not select a compiler; this contract uses the locally active Acheng runtime." } : {}),
@@ -667,6 +691,7 @@ export function getProductionContract(
     const moduleRegistry = JSON.parse(fs.readFileSync(moduleRegistryPath, "utf8"));
     const moduleRow = moduleId ? moduleRegistry.modules.find((item: any) => item.id === moduleId) : undefined;
     if (moduleId && !moduleRow) throw new Error(`Active Acheng runtime does not define module ${moduleId}`);
+    if (moduleId && moduleRow.enabled === false) throw new Error(`Acheng module is disabled in the active runtime: ${moduleId}`);
     const modulePaths = moduleRow ? [...new Set([moduleRow.entry, ...moduleRow.reads] as string[])] : [];
     const moduleFile = includeDetails.moduleFile;
     if (moduleFile && !modulePaths.includes(moduleFile)) throw new Error(`Unknown module file for ${moduleId}: ${moduleFile}`);

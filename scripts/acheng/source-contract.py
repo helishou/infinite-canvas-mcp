@@ -6,14 +6,16 @@ from pathlib import Path
 from fractions import Fraction
 import importlib.util
 
-continuity_path = Path(__file__).with_name("continuity_v2.py")
-if not continuity_path.is_file():
-    repository = Path(__file__).resolve().parents[2]
-    continuity_path = repository / ".agents/skills/acheng-director/scripts/continuity_v2.py"
-continuity_spec = importlib.util.spec_from_file_location("continuity_v2", continuity_path)
-continuity_module = importlib.util.module_from_spec(continuity_spec)
-sys.modules["continuity_v2"] = continuity_module
-continuity_spec.loader.exec_module(continuity_module)
+continuity_module = sys.modules.get("continuity_v2")
+if continuity_module is None:
+    continuity_path = Path(__file__).with_name("continuity_v2.py")
+    if not continuity_path.is_file():
+        repository = Path(__file__).resolve().parents[2]
+        continuity_path = repository / ".agents/skills/acheng-director/scripts/continuity_v2.py"
+    continuity_spec = importlib.util.spec_from_file_location("continuity_v2", continuity_path)
+    continuity_module = importlib.util.module_from_spec(continuity_spec)
+    sys.modules["continuity_v2"] = continuity_module
+    continuity_spec.loader.exec_module(continuity_module)
 def audit_continuity_v2(source, target_ids=None):
     if (source.get("prompt_assembly") or {}).get("version") == 2:
         from canvas_subject_prompt_v2 import audit_subject_continuity

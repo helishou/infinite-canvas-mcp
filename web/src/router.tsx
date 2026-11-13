@@ -27,6 +27,7 @@ const VideoPage = lazy(() => import("@/pages/video"));
 const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
+const SkillsPage = lazy(() => import("@/pages/skills"));
 
 const pageFallback = <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">加载中…</div>;
 
@@ -73,6 +74,7 @@ export const appRoutes = [
     { path: "/video", element: lazyPage(VideoPage) },
     { path: "/assets", element: lazyPage(AssetsPage) },
     { path: "/prompts", element: lazyPage(PromptsPage) },
+    { path: "/skills", element: lazyPage(SkillsPage) },
     { path: "/canvas", element: lazyPage(CanvasPage) },
     { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
     { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },

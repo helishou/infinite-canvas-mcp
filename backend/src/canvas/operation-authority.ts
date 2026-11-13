@@ -1,4 +1,5 @@
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { withFieldEntry } from "@basketikun/canvas-agent/drama/field-authority";
 import { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "@basketikun/canvas-agent/schemas";
 import { CANVAS_ACTIVE_TASK_NODE_FIELDS, H3_LOCAL_VIEW_FIELDS, H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { isH3CanvasNode, type CanvasOperation } from "./project-ops.js";
@@ -117,10 +118,10 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
         throw collaborationError("PRODUCTION_CLIP_MEMBERSHIP_OWNED", "制作绑定的 Clip 列表由制作台维护，不能从画布独立新增、删除或重排");
     }
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
-        if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", "制作投影摘要由 Backend 管理");
+        if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", withFieldEntry("productionClipProjection", "制作投影摘要由 Backend 管理"));
         if (!previous.productionClipProjection) return;
         // 创作字段允许手动编辑；保留原编译摘要作为基线，重新投影时检测并保留人工修改。
-        for (const field of ["directorEngine", "directorSourceHash"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", `字段 ${field} 由 Backend 维护，不能直接修改编译身份`);
+        for (const field of ["directorEngine", "directorSourceHash"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", withFieldEntry(field, `字段 ${field} 由 Backend 维护，不能直接修改编译身份`));
     };
     const preserveSegments = (incoming: unknown) => {
         if (!Array.isArray(incoming)) return;

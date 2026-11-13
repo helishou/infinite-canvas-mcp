@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 
 import type { ToolName } from "./schemas.js";
 import { canvasNodeDefaultSize } from "./node-sizes.js";
-import { nextCanvasFlowAnchor, nextCanvasX } from "./tools.js";
+import { nextCanvasFlowAnchor, nextCanvasNodePosition } from "./tools.js";
 import type { CanvasNode, CanvasNodeType, CanvasSnapshot } from "./types.js";
 
 export type CanvasToolRequest = { name: "canvas_apply_ops"; input: Record<string, unknown> };
@@ -22,11 +22,14 @@ export function buildCanvasToolRequest(name: ToolName, input: Record<string, unk
         const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
         // 显式尺寸优先；省略时按该类型的默认规格落地，不再让 Backend 兜底成 320×240。
         const size = canvasNodeDefaultSize(data.nodeType);
-        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(state), y: data.y ?? 0 }, width: data.width ?? size.width, height: data.height ?? size.height, metadata: data.metadata }]);
+        const width = data.width ?? size.width, height = data.height ?? size.height;
+        const position = nextCanvasNodePosition(state, { width, height });
+        return applyOps([{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? position.x, y: data.y ?? position.y }, width, height, metadata: data.metadata }]);
     }
     if (name === "canvas_create_config_node") {
-        const x = Number(input.x ?? nextCanvasX(state));
-        const y = Number(input.y ?? 0);
+        const placement = nextCanvasNodePosition(state, canvasNodeDefaultSize("config"));
+        const x = Number(input.x ?? placement.x);
+        const y = Number(input.y ?? placement.y);
         const configId = String(input.id || `config-${crypto.randomUUID()}`);
         const mode = generationMode(input.mode);
         const prompt = String(input.prompt || "");

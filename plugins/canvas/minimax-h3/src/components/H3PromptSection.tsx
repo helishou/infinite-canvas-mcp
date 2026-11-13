@@ -737,8 +737,6 @@ export function H3PromptSection({
       if (request === promptCompileRequest.current) setPromptCompileBusy(false);
     }
   };
-  const modeConfig = H3_PROMPT_MODE_CONFIG[promptMode];
-  const toolBlocks = modeConfig.tools as Record<string, string>;
   const storyboardSection = promptMode === "ref2va" ? "detailed_description" : "integrated_multimodal_description";
   const [storyboardMode, setStoryboardMode] = useState(false);
   const [storyboardShots, setStoryboardShots] = useState<StoryboardShot[]>([]);
@@ -775,7 +773,6 @@ export function H3PromptSection({
   const storyboardPromptGenerationRef = useRef(false);
   const subjectDefinitionsRef = useRef<H3SubjectDefinition[]>([]);
   subjectDefinitionsRef.current = subjectDefinitions;
-  const [helpOpen, setHelpOpen] = useState(false);
   const [referenceCatalog, setReferenceCatalog] = useState<CanvasReferenceAsset[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -1633,7 +1630,6 @@ export function H3PromptSection({
     }
   };
 
-  const insertAtCursor = (text: string) => editorRef.current?.insert(text, { prefixNewline: true });
 
   const editorReferences = useMemo(() => {
     if (promptMode === "t2v") return [];
@@ -1895,69 +1891,36 @@ export function H3PromptSection({
       </details> : null}
       {promptReverseSyncError ? <div className="minimax-prompt-reference-error" role="alert">反向同步未完成：{promptReverseSyncError}</div> : null}
       {promptCompileError ? <div className="minimax-prompt-reference-error" role="alert">编译 Prompt 未完成：{promptCompileError}</div> : null}
-      {!storyboardMode ? <div key="prompt-modes" className="minimax-prompt-modes">
-        <span className="minimax-prompt-mode-tools">
-        {Object.keys(toolBlocks).map((label) => (
-          <button
-            type="button"
-            key={label}
-            onClick={() => insertAtCursor(toolBlocks[label])}
-          >
-            {label}
-          </button>
-        ))}
-        </span>
-        <button
-          type="button"
-          className="minimax-prompt-help"
-          title="提示词结构说明"
-          aria-expanded={helpOpen}
-          onClick={() => setHelpOpen((open) => !open)}
+      {!storyboardMode && enhancement?.error ? (
+        <span
+          key="enhance-error"
+          role="alert"
+          title="点击复制错误信息到剪贴板"
+          onClick={() => {
+            const text = `增强失败：${enhancement.error}`;
+            const fallback = () => {
+              const ta = document.createElement("textarea");
+              ta.value = text;
+              ta.style.position = "fixed";
+              ta.style.opacity = "0";
+              document.body.appendChild(ta);
+              ta.select();
+              try { document.execCommand("copy"); } catch { /* ignore */ }
+              document.body.removeChild(ta);
+            };
+            if (navigator.clipboard?.writeText) {
+              navigator.clipboard.writeText(text).catch(fallback);
+            } else {
+              fallback();
+            }
+            setCopiedError(true);
+            window.setTimeout(() => setCopiedError(false), 1500);
+          }}
+          style={{ cursor: "pointer", userSelect: "none" }}
         >
-          说明
-        </button>
-      </div> : null}
-      {!storyboardMode && helpOpen ? <div key="prompt-help" className="minimax-prompt-help-panel" role="note">
-        <b>{modeConfig.title}</b>
-        <span>字段：{modeConfig.fields}</span>
-        <span>{modeConfig.refs}</span>
-      </div> : null}
-      {!storyboardMode ? <small key="prompt-syntax" className="minimax-prompt-syntax">
-        <code key="subject">&lt;Subject N&gt; 指认主体（独立编号）</code>{" "}
-        <code key="picture">&lt;Picture P&gt; 指认第 P 张参考图</code>{" "}
-        <code key="video">&lt;Video V&gt; 指认第 V 段参考视频</code>{" "}
-        <code key="audio">&lt;Audio A&gt; 指认第 A 段参考音频</code>
-        {enhancement?.error ? (
-          <span
-            key="enhance-error"
-            role="alert"
-            title="点击复制错误信息到剪贴板"
-            onClick={() => {
-              const text = `增强失败：${enhancement.error}`;
-              const fallback = () => {
-                const ta = document.createElement("textarea");
-                ta.value = text;
-                ta.style.position = "fixed";
-                ta.style.opacity = "0";
-                document.body.appendChild(ta);
-                ta.select();
-                try { document.execCommand("copy"); } catch { /* ignore */ }
-                document.body.removeChild(ta);
-              };
-              if (navigator.clipboard?.writeText) {
-                navigator.clipboard.writeText(text).catch(fallback);
-              } else {
-                fallback();
-              }
-              setCopiedError(true);
-              window.setTimeout(() => setCopiedError(false), 1500);
-            }}
-            style={{ cursor: "pointer", userSelect: "none" }}
-          >
-            {copiedError ? "已复制到剪贴板" : `增强失败：${enhancement.error}`}
-          </span>
-        ) : null}
-      </small> : null}
+          {copiedError ? "已复制到剪贴板" : `增强失败：${enhancement.error}`}
+        </span>
+      ) : null}
       {!storyboardMode && (suggestionState.error || suggestionState.pending) ? <div role="status" className="minimax-prompt-help-panel">
         {suggestionState.error || "候选正在保存"}{suggestionState.pending ? "；未确认结果已保留为本地草稿" : ""}
         <button type="button" onClick={() => void suggestions.refresh(true).catch(() => {})}>重新同步候选</button>

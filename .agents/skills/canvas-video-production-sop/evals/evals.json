@@ -84,6 +84,54 @@
       "prompt": "把这段重新设计一版，之前的太像了，但台词一个字不许改。",
       "expected_output": "区分改稿与重设计：保留用户逐字台词与数值，只重设计镜头。动笔前不打开上一版分镜文件，先填反雷同六轴写进对话回复让用户过目；交付时附与上一版差异表和逐拍一字不差率。",
       "files": []
+    },
+    {
+      "id": 15,
+      "prompt": "第 2 段开头两人正反打，反打那个机位要拍老周背后那面墙，但我的场景母图只有一个角度，那面墙长什么样根本没图。帮我定了直接排节点。",
+      "expected_output": "不越轴硬拍。先说明母图只覆盖一个视角，越轴会拍到无依据的那面墙；给出按成本排序的选项：保持同一 180° 半圆的正反打、做同场景的反向补充母图（标注同一空间、不改建筑）、或用空间简图只表达方位遮挡；实在补不出就报缺口并停在用户决定，不虚构陈设也不承诺排节点生成。",
+      "files": []
+    },
+    {
+      "id": 16,
+      "prompt": "这段最后是两人贴脸的特写，尾帧完全没有空间关系，那下一段怎么接位置？",
+      "expected_output": "先判本段是否有任意一帧四项全过（全员在画内或相对位置可辨、能看出左右、关键地标在画内、朝向视线可读）；有就取该帧作人工位置截图并命名 <场>-<段>-<镜>位置.png 挂到下一 Clip 的 keyframes，写明只锁位置朝向遮挡不锁身份造型；没有就说明整段特写是合法状态，省略锚点、靠下一 Clip 首镜显式写左右加场景地图撑住，不虚构素材名也不硬凑图。",
+      "files": []
+    },
+    {
+      "id": 17,
+      "prompt": "S02 别做关键帧了，直接把三个 Clip 建好准备生成。",
+      "expected_output": "先读 settings.productionStage 报出当前阶段；指出 keyframes 未完成属于越序，Clip 目标在 readiness 里是硬拦（唯一烧钱动作），给出两条路：补关键帧按序推进，或用 set_settings 把 keyframes 记入 done 并在 note 写明依据（如纯环境空镜复用场景图）。不直接建节点、不承诺可提交生成。",
+      "files": []
+    },
+    {
+      "id": 18,
+      "prompt": "接着上次做，S02 弄到哪了？",
+      "expected_output": "读 production_get 的 settings.productionStage 与 readiness，按机器状态报出当前阶段、done 列表、未完成目标；不靠聊天上下文或旧摘要推断顺序。阶段缺失时说明尚未初始化并按实际缺项补写一次，不因缺失卡住工作。",
+      "files": []
+    },
+    {
+      "id": 19,
+      "prompt": "写 S15 这镜：慕璃站在供桌旁跟村长对峙，喊他抬头。",
+      "expected_output": "位置全部落结构化字段，不进正文。画内左右用 characters[].position（[x,y] 归一化 0–1，两人镜如 [0.35,0.55] / [0.7,0.55]），编译时会渲染成 normalized screen anchor；不要用文字在 visual 里描述左右，那只是描写、不产生锚点。朝向（面向村长）、分区（供桌右侧地面，不写“供桌旁”）、接触面（双脚着地）、动线（如需位移）、视线锚点登记为 ledger fact，并补齐三处：facts 带 value_descriptions、initial/events 给出基线与变化、该镜 subject_usages[].continuityFactIds 勾选。不勾不投影；value_descriptions 缺当前值会 continue，账本登记了也一个字不出。requirements 的 hold/change 只做断言。正文只写动作、一阶变化与可见尾态。分区名只能取自该镜场景 scene_registry 的 space／landmarks／entrances／prompt_description——这条靠文案、没有机器校验，要人工确认。写完跑 spatial-lint：MISSING_SHOT_STATE_BASELINE / VAGUE_STATE_VALUE / UNSOURCED_PARTITION / NO_STRUCTURED_SCREEN_POSITION 四条都不该留。",
+      "files": []
+    },
+    {
+      "id": 20,
+      "prompt": "第二集成片我看完了，有几点不太对，我说你改。",
+      "expected_output": "先按成片回看清单七类逐 Clip 勾一遍再汇总（身份/站位与空间/景别与构图/台词与时长/物理与道具/声音与 delivery/连续性与尾态），把问题按必改与可改分批、每条绑 segmentId/shotId 记入 .agentproblem/问题记录.md；回看期间只登记不动源稿，汇总完给用户确认再一次性提交返修，避免逐轮返工。",
+      "files": []
+    },
+    {
+      "id": 21,
+      "prompt": "S02 这场我写完了，帮我看看镜头节奏行不行。",
+      "expected_output": "跑 scripts/acheng/framing-balance.py 报景别分布（按 EWS/WS/FS/MS/MCU/CU/ECU 计数与占比）；按告警线判定：MS>40%、近景合计<20%、无 EWS/WS/FS、单景别>50%、某段≥3 镜全同景别。告警只作提示不阻断，说明建议改哪几镜而不是整体改小景别；若项目未声明 storyboard_policy.version 1 则先说明 framing 缺省、分布检查不适用。",
+      "files": []
+    },
+    {
+      "id": 22,
+      "prompt": "这 18 段都改完了，帮我编译并落地到画布，别让我一个个点。",
+      "expected_output": "用 production_compile({apply:true}) 一次走到落地：编译成功由 Backend 作业自动应用，只沿原 operationId 轮询 applyStatus；pending 继续等、applied 即落地、failed 读 application 诊断。不要拿 preparedId 去多次调用 apply，也不要在 404 时换 operationId 重发（同 ID 重发才幂等）。落地后核对 segment.productionClipProjection.promptHash 与产物 sha256。",
+      "files": []
     }
   ]
 }

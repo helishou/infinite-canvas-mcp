@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runAchengPython } from '@basketikun/canvas-agent/skills/acheng';
+import { defaultAchengHome, runAchengPython } from '@basketikun/canvas-agent/skills/acheng';
 
 export const UPSTREAM = 'https://github.com/helishou/acheng-director-skill.git';
 const scripts = path.dirname(fileURLToPath(import.meta.url));
@@ -87,7 +87,7 @@ export function runtimePatchVersion(upstream) {
 export class AchengEngine {
   constructor(home, upstream = UPSTREAM, repository = projectRoot, sourceDirectory = process.env.ACHENG_SOURCE) {
     this.repository = path.resolve(repository);
-    this.home = path.resolve(home || process.env.INFINITE_CANVAS_ACHENG_HOME || path.join(this.repository, '.canvas-runtime')); this.upstream = upstream;
+    this.home = path.resolve(home || defaultAchengHome(this.repository)); this.upstream = upstream;
     this.projectSkill = path.join(this.repository, '.agents', 'skills', 'acheng-director');
     this.base = path.join(this.home, 'skill-runtimes', 'acheng-director');
     this.source = sourceDirectory ? path.resolve(sourceDirectory) : this.projectSkill;
@@ -194,6 +194,8 @@ export class AchengEngine {
       if (!upstreamFixed) runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'compat.py'), directory], directory);
       runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'verify.py'), directory], directory);
       runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'model-contract.test.py'), directory], directory);
+      runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'framing-balance.test.py'), directory], directory);
+      runPython(['-B', '-X', 'utf8', path.join(scripts, 'acheng', 'spatial-lint.test.py'), directory], directory);
       runPython(['-B', '-X', 'utf8', 'scripts/validate_director_contract.py'], directory);
       applyRuntimeSkillOverlay(directory);
       const version = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8').match(/version:\s*"([^"]+)"/)?.[1] || 'unknown';

@@ -206,6 +206,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
     };
     const save = async () => {
         if (framingMissing) return void message.error(t("director.atomic.framingRequired"));
+        if (dirty && legacyMovement) return void message.error(t("director.atomic.cameraMovementLegacyRequired"));
 
         if (editorialReasonMissing) return void message.error(t("director.atomic.editorialReasonRequired"));
         if (!Number.isInteger(value.duration_frames) || value.duration_frames < 1) return void message.error(t("director.workspace.durationFramesInvalid"));
@@ -296,7 +297,7 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
                     notFoundContent={movementUnavailable ? t("director.atomic.cameraMovementUnavailable") : undefined}
                     onChange={selection => selectMovement(selection)}
                 />
-                {legacyMovement && <span className="text-[11px] text-amber-600">{t("director.atomic.cameraMovementLegacyHint")}</span>}
+                {legacyMovement && <span role="alert" className="text-[11px] text-amber-600">{dirty ? t("director.atomic.cameraMovementLegacyRequired") : t("director.atomic.cameraMovementLegacyHint")}</span>}
             </label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.cameraPath")}</span><Input.TextArea value={String(value.camera.path || "")} autoSize={{ minRows: 2, maxRows: 5 }} disabled={disabled} onChange={event => camera({ path: event.target.value })} /></label>
             <label className="grid gap-1.5 text-xs text-muted-foreground"><span>{t("director.atomic.angle")}</span><Input value={String(value.camera.angle || "")} disabled={disabled} onChange={event => camera({ angle: event.target.value })} /></label>

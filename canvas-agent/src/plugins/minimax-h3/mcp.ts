@@ -12,6 +12,7 @@ import { aspectRatioOf, buildStoryboardAsset, findStoryboardAsset, listStoryboar
 import { isReferenceNameEcho } from "./prompt-rules.js";
 import { createHash, randomUUID } from "node:crypto";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "../../canvas/runtime-fields.js";
+import { protectedClipFields, withFieldEntry } from "../../drama/field-authority.js";
 import { H3_LIST_MODELS_TOOL, H3_GET_CLIP_TOOL, H3_GET_CLIP_RUNTIME_TOOL, H3_UPDATE_CLIPS_TOOL, H3_PREPARE_CLIP_UPDATES_TOOL, H3_DISCARD_CLIP_UPDATES_TOOL, H3_PREPARE_CLIP_TOOL } from "./batch-update-tool.js";
 import { buildNarrativeEditPatch, H3_MAX_EDIT_PREVIEWS, projectNarrativeFields, type H3EditSummary } from "./narrative-edits.js";
 import { readPreparedSource, assertPreparedInvariants, selectCompactUpdate, addPreparedPatchPreviews, type PreparedH3Plan } from "./prepared-updates.js";
@@ -90,7 +91,8 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
         // 续接配置（尾帧参考 / Motion Context / 视频续写）是正式 Clip 允许人工编辑的字段：
         // 画布与制作台两侧都能改，重新编译时按三方合并保留人工值（见 mergeDirectorInput）。
         // 编译身份、正文、参考与分镜仍由源稿投影，继续拒绝在画布直接改。
-        if (target.productionClipProjection && ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "storyboardShots", "storyboardInput"].some(key => Object.hasOwn(patch, key))) throw new Error("FORMAL_CLIP_OWNED: 请修改编译前源稿后重新编译");
+        const projectedField = target.productionClipProjection ? protectedClipFields().find(key => Object.hasOwn(patch, key)) : undefined;
+        if (projectedField) throw new Error(withFieldEntry(projectedField, `FORMAL_CLIP_OWNED: 正式 Clip 的 ${projectedField} 由编译投影维护`));
         assertH3ClipPatch(project, target, patch, true);
         operations.push({ type: "update_h3_segment", nodeId: node.id, segmentId, patch });
         entries.push({ segmentId, segmentIndex, updatedFields: Object.keys(patch), ...(edited ? { editSummary: edited.summary } : {}) });

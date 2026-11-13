@@ -1,5 +1,7 @@
 # 短片制作进度
 
+> 本表是人可读视图，**不是状态源**。当前阶段以制作稿的 `settings.productionStage` 为准（读 `production_get`，写 `set_settings`），规则见[制作阶段与推进顺序](../references/production-stage-order.md)。两边冲突时以 settings 为准并回填本表，不要手改出第二份状态。
+
 项目 ID：
 项目名：
 制作目录：

@@ -84,7 +84,7 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
     router.post<Record<string, string>>(`${base}/compile`, (req, res) => {
         try {
             const input = productionCompileSubmissionSchema.parse(req.body);
-            res.json({ ok: true, compilation: compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, undefined, input.scope) });
+            res.json({ ok: true, compilation: compilations.enqueue(req.params.episodeId, base, input.operationId, input.expectedRevision, undefined, input.scope, input.apply === true) });
         } catch (error) { handle(res, error); }
     });
     for (const action of ["start", "resume", "pause", "review"] as const) router.post<Record<string, string>>(`${base}/scene-work/${action}`, async (req, res) => {

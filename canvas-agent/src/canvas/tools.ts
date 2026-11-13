@@ -37,6 +37,39 @@ export function nextCanvasX(state: CanvasSnapshot | null, anchorId?: string) {
     return nodes.length ? Math.max(...nodes.map((node) => safePosition(node).x + nodeWidth(node))) + 80 : 0;
 }
 
+/** MCP 单节点默认落在选中节点附近；无选区时从画布内容左上区域开始，避免不断追加到最右端。 */
+export function nextCanvasNodePosition(state: CanvasSnapshot | null, size: { width: number; height: number }) {
+    const nodes = state?.nodes || [];
+    const selected = nodes.find((node) => state?.selectedNodeIds?.includes(node.id));
+    const desired = selected
+        ? { x: safePosition(selected).x + nodeWidth(selected) + 80, y: safePosition(selected).y }
+        : nodes.length
+            ? { x: Math.min(...nodes.map((node) => safePosition(node).x)), y: Math.min(...nodes.map((node) => safePosition(node).y)) }
+            : { x: 0, y: 0 };
+    const gap = 48;
+    const stepX = Math.max(1, size.width) + gap;
+    const stepY = Math.max(1, size.height) + gap;
+    const collides = (x: number, y: number) => nodes.some((node) => {
+        const position = safePosition(node), width = nodeWidth(node), height = nodeHeight(node);
+        return x < position.x + width + gap && x + size.width + gap > position.x
+            && y < position.y + height + gap && y + size.height + gap > position.y;
+    });
+    if (!collides(desired.x, desired.y)) return desired;
+    for (let ring = 1; ring <= 32; ring++) {
+        const cells: Array<{ dx: number; dy: number }> = [];
+        for (let dx = -ring; dx <= ring; dx++) cells.push({ dx, dy: -ring }, { dx, dy: ring });
+        for (let dy = -ring + 1; dy < ring; dy++) cells.push({ dx: -ring, dy }, { dx: ring, dy });
+        cells.sort((a, b) => (a.dx * a.dx + a.dy * a.dy) - (b.dx * b.dx + b.dy * b.dy)
+            || ((a.dx > 0 && a.dy === 0 ? 0 : a.dx === 0 && a.dy > 0 ? 1 : a.dx < 0 && a.dy === 0 ? 2 : a.dx === 0 && a.dy < 0 ? 3 : 4)
+                - (b.dx > 0 && b.dy === 0 ? 0 : b.dx === 0 && b.dy > 0 ? 1 : b.dx < 0 && b.dy === 0 ? 2 : b.dx === 0 && b.dy < 0 ? 3 : 4)));
+        for (const cell of cells) {
+            const position = { x: desired.x + cell.dx * stepX, y: desired.y + cell.dy * stepY };
+            if (!collides(position.x, position.y)) return position;
+        }
+    }
+    return { x: Math.max(desired.x, ...nodes.map((node) => safePosition(node).x + nodeWidth(node) + gap)), y: desired.y };
+}
+
 /** 计算新节点的默认起点（x + y）。传 anchorId 时新节点贴在 anchor 同行右侧、y 与 anchor 对齐，
  * 没有 anchor 时 x 走 nextCanvasX、y 用 0。 */
 export function nextCanvasAnchor(state: CanvasSnapshot | null, anchorId?: string): { x: number; y: number } {

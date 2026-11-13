@@ -165,6 +165,10 @@ test("storyboard image mode is an explicit production and drama-plan setting", (
     assert.equal(productionSettingsSchema.safeParse({ mode: "manual", imageModel: "", h3Model: "", storyboardImageMode: "sometimes" }).success, false);
     assert.equal(dramaProductionPlanSchema.parse({ storyboardImageMode: "skip" }).storyboardImageMode, "skip");
     assert.equal(productionEditSchema.safeParse({ operationId: "storyboard-mode", expectedRevision: 0, ops: [{ type: "set_settings", patch: { storyboardImageMode: "generate" } }] }).success, true);
+    // 制作阶段游标：合法阶段写入放行，未知阶段被拒，缺省表示未初始化（老项目不受影响）。
+    assert.equal(productionEditSchema.safeParse({ operationId: "stage-set", expectedRevision: 0, ops: [{ type: "set_settings", patch: { productionStage: { current: "shots", done: ["script", "assets"], note: "复用已有场景图" } } }] }).success, true);
+    assert.equal(productionEditSchema.safeParse({ operationId: "stage-bad", expectedRevision: 0, ops: [{ type: "set_settings", patch: { productionStage: { current: "editing", done: [] } } }] }).success, false);
+    assert.equal(productionEditSchema.safeParse({ operationId: "stage-none", expectedRevision: 0, ops: [{ type: "set_settings", patch: { parallelScenes: true } }] }).success, true);
 });
 
 test("new word policy accepts 2901 and 6500 words without truncation, while the historical policy retains its ceiling", () => {

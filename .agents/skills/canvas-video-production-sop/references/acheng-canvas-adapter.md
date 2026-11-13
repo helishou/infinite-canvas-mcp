@@ -4,7 +4,7 @@
 
 ## 加载与版本
 
-Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.agents/skills/acheng-director`。Skill 规定创作方法；`compile_assets.py`、`compile_h3.py` 及校验脚本是把制作源稿转换成提示词产物的可执行工具，不是另一个导演 Agent 或模型。开始或恢复制作、读取合同以及新发起编译或校验时，使用本机 `skill-runtimes/acheng-director/active.json` 当前激活的版本。上游通过 `npm run acheng:update` 手动更新；激活新版不自动重编项目。每次编译请求创建时记录上游 commit、patchVersion、runtimeId、Skill version，该请求的预检、编译与回执使用同一版本；版本切换只影响后续请求。历史产物保留实际编译版本，局部编译不改写无关产物或已提交任务。版本缺失或兼容检查失败时停止，不退回旧画布流程。
+Acheng Director 本身就是 Skill，完整上游文件和模块位于项目 `.agents/skills/acheng-director`。Skill 规定创作方法；`compile_assets.py`、`compile_h3.py` 及校验脚本是把制作源稿转换成提示词产物的可执行工具，不是另一个导演 Agent 或模型。开始或恢复制作、读取合同以及新发起编译或校验时，使用本机 `skill-runtimes/acheng-director/active.json` 当前激活的版本。默认运行时位于 Git 主工作区的 `.canvas-runtime`，因此同一仓库的 linked worktree 共用一个激活版本；需要部署到其他位置时用 `INFINITE_CANVAS_ACHENG_HOME` 显式指定。上游通过 `npm run acheng:update` 手动更新；激活新版不自动重编项目。每次编译请求创建时记录上游 commit、patchVersion、runtimeId、Skill version，该请求的预检、编译与回执使用同一版本；版本切换只影响后续请求。历史产物保留实际编译版本，局部编译不改写无关产物或已提交任务。版本缺失或兼容检查失败时停止，不退回旧画布流程。
 
 版本更新、子模块和离线工具见[维护参考](acheng-canvas-maintenance.md)，普通制作不执行更新命令。
 

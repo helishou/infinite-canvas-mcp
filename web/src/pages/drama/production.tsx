@@ -20,6 +20,7 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { useWorkbenchCanvas, useCanvasHost } from "@/lib/canvas/canvas-host";
 import { WorkbenchCanvas } from "./workbench-canvas";
+import { ProductionProgressBar } from "./production-progress-bar";
 import { productionCanvasNodes, type ProductionCanvasSnapshot } from "./production-canvas-nodes";
 import { readShotFormDraft, shotFormChanges, shotDraftSourceChanged } from "./subject-shot-draft";
 import { startSingleFlightPoller } from "@/lib/single-flight-poll";
@@ -2437,6 +2438,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
             </>}
         </section>
       </div>
+      <ProductionProgressBar stage={production.draft.settings.productionStage ?? null} targets={readiness?.targets} busy={busy} />
     </div>
   </main>;
 }

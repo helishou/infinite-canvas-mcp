@@ -35,7 +35,7 @@ export function compilationInputsUnchanged(
 }
 type Compiler = typeof compileAchengDirector;
 type MaterialItem = { digest: string; file: string };
-type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; requestFingerprint?: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; referenceDigests?: Record<string, string>; scope?: CompilationScope; scopeHash?: string; compilerInputFingerprint?: string; reusedFromOperationId?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; timingsMs?: Record<string, number>; createdAt: string };
+type CompilationJob = { operationId: string; owner: string; id: string; expectedRevision: number; requestHash: string; requestFingerprint?: string; baselineHash: string; preparedId: string; director: DirectorProduction; references: Record<string, string>; referenceDigests?: Record<string, string>; scope?: CompilationScope; scopeHash?: string; compilerInputFingerprint?: string; reusedFromOperationId?: string; status: "queued" | "running" | "succeeded" | "blocked" | "failed" | "interrupted"; diagnostics: any[]; result?: any; continuityReceipt?: any; application?: any; applyOnSuccess?: boolean; applyStatus?: "pending" | "applied" | "failed"; timingsMs?: Record<string, number>; createdAt: string };
 /**
  * 编译并发：一次编辑会为每个受影响 Clip 排一个编译任务，串行 3 路时 18 段要排 6 轮。
  * 编译跑在独立 worker 线程里（CPU 密集，主线程不受影响），按核数放开到 6 路；
@@ -539,6 +539,8 @@ export class ProductionCompilationService {
         } : undefined;
         const nextAction = job.status === "queued" || job.status === "running"
             ? { action: "wait", tool: "production_get_compilation", input: { kind, id, operationId }, message: "沿原 operationId 查询；不要换 ID 重提。" }
+            : job.applyOnSuccess && job.applyStatus === "pending" ? { action: "wait", tool: "production_get_compilation", input: { kind, id, operationId }, message: "编译成功，Backend 正在自动应用；继续沿原 operationId 查 applyStatus，不要自行调用 apply。" }
+            : job.applyOnSuccess && job.applyStatus === "failed" ? { action: "correct_source", tool: "production_compile", input: { kind, id }, message: "编译成功但自动应用失败；按 application 诊断修依赖后重新编译，不要对同一 preparedId 重试。" }
             : job.status === "succeeded" ? { action: application ? "read_run" : "review", tool: application ? "production_get_compilation" : "production_apply_compilation", input: { kind, id, ...(application ? { operationId } : { preparedId: job.preparedId }) }, message: application ? "编译已应用，读取原应用回执。" : "编译成功，应用 preparedId。" }
             : blocking?.nextAction || { action: "correct_source", message: "读取本次诊断并定位原因；确认输入或故障条件改变后再提交。" };
         const hasCompileNotice = job.diagnostics.length > 0;
@@ -547,7 +549,8 @@ export class ProductionCompilationService {
             ...(job.compilerInputFingerprint ? { compilerInputFingerprint: job.compilerInputFingerprint } : {}),
             ...(job.reusedFromOperationId ? { reused: true, reusedFromOperationId: job.reusedFromOperationId } : {}),
             ...((blockingDiagnostic || statusDiagnostic) ? { blockingDiagnostic: blockingDiagnostic || statusDiagnostic } : {}), nextAction,
-            ...(job.status === "succeeded" ? { preparedId: job.preparedId } : {}), ...(job.continuityReceipt ? { continuityReceipt: job.continuityReceipt } : {}), application, mediaSubmitted: false };
+            ...(job.status === "succeeded" ? { preparedId: job.preparedId } : {}), ...(job.continuityReceipt ? { continuityReceipt: job.continuityReceipt } : {}),
+            ...(job.applyStatus ? { applyStatus: job.applyStatus } : {}), application, mediaSubmitted: false };
         if (view === "status") return { ...base, diagnosticCount: diagnostics.length, targetCount: job.result?.targets?.length || 0 };
         const items = view === "diagnostics" ? diagnostics : job.result?.targets || [];
         if (!count) throw new Error("查询编译列表必须指定 pageSize");
@@ -583,7 +586,7 @@ export class ProductionCompilationService {
         }));
     }
 
-    enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope) {
+    enqueue(id: string, owner: string, operationId: string, expectedRevision: number, candidate?: DirectorProduction, scope?: CompilationScope, applyOnSuccess = false) {
         const started = performance.now();
         const requestFingerprint = hash({ id, owner, expectedRevision, candidate: candidate ?? null, scope: scope ?? null });
         const prior = this.loadJob(operationId, owner);
@@ -613,7 +616,9 @@ export class ProductionCompilationService {
         const preparedId = crypto.randomUUID();
         const job: CompilationJob = { operationId, owner, id, expectedRevision: snapshotRevision, requestHash, requestFingerprint,
             baselineHash: hash(current.draft.director), preparedId, director: structuredClone(director), references: {}, referenceDigests, scope,
-            status: "queued", diagnostics: compileInputDiagnostics, timingsMs: { enqueuePrepareMs: performance.now() - started }, createdAt: new Date().toISOString() };
+            status: "queued", diagnostics: compileInputDiagnostics,
+            ...(applyOnSuccess ? { applyOnSuccess: true } : {}),
+            timingsMs: { enqueuePrepareMs: performance.now() - started }, createdAt: new Date().toISOString() };
         this.saveJob(job); this.scheduleJob(job);
         return this.getCompilation(id, owner, operationId);
     }
@@ -909,6 +914,12 @@ export class ProductionCompilationService {
                 const unusable = unusableCompilerResultDiagnostic(compiled.exitCode, compiled.director?.artifacts, job.scope, compiled.diagnostics);
                 if (unusable) job.diagnostics.push(unusable);
                 job.status = hasFatalCompilationError(job.diagnostics) || Boolean(unusable) ? "blocked" : "succeeded";
+                // 编译成功后由本作业直接应用，调用方不必再拿 preparedId 调 apply：
+                // 少一次往返就少一个被并发写入挤掉 expectedRevision 的窗口。
+                if (job.status === "succeeded" && job.applyOnSuccess) {
+                    job.applyStatus = "pending";
+                    await this.applyAfterCompile(job);
+                }
             } catch (error) {
                 const superseded = this.cancelledJobs.has(key) || (error as any)?.code === "COMPILATION_SUPERSEDED";
                 const errorCode = String((error as any)?.code || "");
@@ -1045,6 +1056,32 @@ export class ProductionCompilationService {
             targets: packet.director.artifacts.map((artifact: any) => ({ id: artifact.id, targetId: artifact.targetId, kind: artifact.kind,
                 status: artifact.status, sha256: artifact.sha256, references: artifact.references, diagnostics: artifact.receipt.diagnostics })),
             mediaSubmitted: false };
+    }
+
+    /**
+     * 编译成功后的自动应用。失败只改 applyStatus，不回退 status：
+     * 编译成功是既成事实，把 status 改掉会让画布上已成立的可应用结论消失。
+     */
+    private async applyAfterCompile(job: CompilationJob) {
+        try {
+            // 至少一个目标 ready 才应用；不能用首条代表全部（部分成功是合法状态）。
+            // 直接读内存 job：此刻 DB 里的回执还没带 result，绕一圈 getCompilation 会读到空 targets。
+            const items = (job.result?.targets || []) as Array<{ targetId?: string; status?: string }>;
+            if (!items.some(item => item.status === "ready")) {
+                job.applyStatus = "failed";
+                job.application = { status: "failed", code: "CLIP_COMPILATION_NOT_READY",
+                    targetId: items[0]?.targetId, message: "编译成功但没有可应用的 ready 目标；按该目标诊断补齐后重新编译。" };
+                return;
+            }
+            job.application = await this.apply(job.id, job.owner, job.preparedId);
+            job.applyStatus = "applied";
+        } catch (error) {
+            job.applyStatus = "failed";
+            job.application = { status: "failed",
+                code: String((error as any)?.code || "COMPILATION_APPLY_FAILED"),
+                message: error instanceof Error ? error.message : String(error),
+                ...(Array.isArray((error as any)?.diagnostics) ? { diagnostics: (error as any).diagnostics } : {}) };
+        }
     }
 
     async apply(id: string, owner: string, preparedId: string) {

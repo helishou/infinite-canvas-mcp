@@ -107,6 +107,9 @@ export default {
         episodesUnavailable: "分集信息待加载",
     },
     workspaceNavigation: workspaceNavigationZhCN,
+    achengSkillManager: {
+        title: "Acheng 技能广场", description: "管理项目维护的 Acheng Director 主技能、创作模块与画布适配模块。", search: "搜索项目技能", refresh: "刷新", loading: "正在读取项目技能…", count: "{{count}} 个项目技能", source: "来源：", noMatch: "没有匹配的技能", empty: "项目内尚未找到 Acheng Skill", enabled: "已启用", disabled: "已禁用", running: "运行中", stopped: "已停用", edit: "编辑说明", editFile: "编辑文件", cancelEdit: "取消编辑", discard: "放弃修改", save: "保存", done: "完成", saved: "技能文件已保存", enableSuccess: "技能已启用", disableSuccess: "技能已禁用", loadFailed: "读取项目技能失败", fileLoadFailed: "读取技能文件失败", saveFailed: "保存技能文件失败", toggleFailed: "更新技能状态失败", outsidePath: "这个链接指向项目技能目录之外的文件", linkFailed: "打开引用文件失败",
+    },
     sceneProduction: {
         artifactAdoption: "产物 {{hash}} 已写入修订 {{revision}}",
         continueAdvice: "继续完成建议",
@@ -586,7 +589,7 @@ export default {
             heading: "场次标题", location: "地点", timeOfDay: "时间", action: "动作", dialogue: "对白", speaker: "说话人", addBlock: "增加动作或对白",
             shotTitle: "镜头标题", visual: "画面与表演", camera: "机位与运动", openingState: "起始状态", endingState: "结束状态", sound: "声音", assets: "引用画布资产", framePolicy: { new: "新关键帧", reuse: "复用关键帧", none: "无需关键帧" },
             conflict: "制作稿已在别处更新", conflictDetail: "服务器已到修订 {{number}}。当前编辑仍在窗口中；核对后再重新提交。", reload: "读取服务器版本",
-            saveState: { saved: "已保存", dirty: "有未保存修改", unknown: "提交结果未知", rejected: "提交未保存" }, saveStateDirtyDetail: "{{count}} 处修改还没写入源稿", draftNotReady: "本机草稿尚未准备好，请稍后提交", compileUnsavedDrafts: "有尚未保存的前端编辑。编译读取 Backend 已保存的正式制作稿；请先保存这些改动，再编译。当前输入仍保留。", resolvePending: "上一条“{{action}}”提交（{{status}}）。请先在页面顶部的提交卡片恢复原回执或核对服务器，再进行新操作。", commandInProgress: "当前制作操作正在进行，请等待完成后再提交。", pendingCommandEdit: "修改制作稿", pendingCommandPublish: "发布{{stage}}制作稿", pendingCommandRestore: "恢复历史版本 v{{version}}", pendingCommandPrepare: "准备目标：{{targets}}", pendingCommandArrange: "调整场次：{{scene}}", pendingOperation: "修改 {{operation}}", pendingOperationTarget: "{{action}} · {{target}}", pendingStatusUnknown: "回执待确认", pendingStatusRejected: "已被服务器拒绝", pendingMoreOperations: "；另有 {{count}} 项操作", pendingDetails: "提交标识",
+            saveState: { saved: "已保存", dirty: "有未保存修改", unknown: "提交结果未知", rejected: "提交未保存" }, progress: { title: "制作进度", notInitialized: "尚未初始化阶段", ready: "就绪 {{ready}}/{{total}}", blocked: "待办 {{pending}}", review: "待审 {{review}}", busy: "处理中", note: "越序：{{note}}", stage: { script: "剧情", assets: "资产", spatial: "站位", shots: "镜头", keyframes: "关键帧", clips: "剪辑" } }, saveStateDirtyDetail: "{{count}} 处修改还没写入源稿", draftNotReady: "本机草稿尚未准备好，请稍后提交", compileUnsavedDrafts: "有尚未保存的前端编辑。编译读取 Backend 已保存的正式制作稿；请先保存这些改动，再编译。当前输入仍保留。", resolvePending: "上一条“{{action}}”提交（{{status}}）。请先在页面顶部的提交卡片恢复原回执或核对服务器，再进行新操作。", commandInProgress: "当前制作操作正在进行，请等待完成后再提交。", pendingCommandEdit: "修改制作稿", pendingCommandPublish: "发布{{stage}}制作稿", pendingCommandRestore: "恢复历史版本 v{{version}}", pendingCommandPrepare: "准备目标：{{targets}}", pendingCommandArrange: "调整场次：{{scene}}", pendingOperation: "修改 {{operation}}", pendingOperationTarget: "{{action}} · {{target}}", pendingStatusUnknown: "回执待确认", pendingStatusRejected: "已被服务器拒绝", pendingMoreOperations: "；另有 {{count}} 项操作", pendingDetails: "提交标识",
             receiptUnknown: "上一条提交尚未取得回执，原请求已保留", commandRejected: "上一条提交被拒绝，编辑草稿已保留",
             commandRejectedEditable: "本次提交未保存，编辑已保留。修正后可直接再次提交。",
             commandUnsupported: "当前环境不支持这项操作，编辑已保留。请在支持此操作的环境继续。",
@@ -1115,7 +1118,7 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
             cameraLibraryCategory: { basic: "基础运镜", classic: "经典影视运镜", advanced_static_subject: "进阶运镜 · 人物固定", moving_subject: "带主体位移", film_grammar: "经典电影镜头", film_grammar_continued: "经典电影镜头 · 续", fast: "快速镜头", practical: "实用镜头语法" },
             cameraLibraryOther: "其它镜头", cameraMovementPlaceholder: "从镜头库选择运镜方式", cameraMovementLegacy: "当前自定义值（不在镜头库）",
             cameraMovementLegacyHint: "旧稿手填的运镜方式已保留；从镜头库重新选择后会写入标准名称并绑定 Previs ID。",
-            cameraMovementUnavailable: "镜头库未就绪，暂时无法选择运镜方式",
+            cameraMovementUnavailable: "镜头库未就绪，暂时无法选择运镜方式", cameraMovementLegacyRequired: "这是旧格式镜头。保存修改前，请从镜头库重新选择运镜方式。",
         },
         "title": "画布项目",
         "open": "进入制作",
