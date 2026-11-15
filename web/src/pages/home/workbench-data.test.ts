@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { collectOutputs, outputMedia, projectCover, retainProjectCovers, taskDestination } from "./workbench-data";
+import { CREATIVE_LAUNCH_LIMIT, CREATIVE_LAUNCH_STORAGE_KEY, collectOutputs, launchStatus, launchTextResults, nextCreativeLaunches, outputMedia, projectCover, pruneCreativeLaunches, readCreativeLaunches, retainProjectCovers, taskDestination, writeCreativeLaunches, type CreativeLaunch } from "./workbench-data";
 import type { BackendGenerationLog } from "../../services/backend-api";
 import type { CanvasProject } from "../../stores/canvas/use-canvas-store";
 
@@ -63,7 +63,7 @@ test("task navigation preserves project ownership, including deleted projects", 
     const ids = new Set(["p/one"]);
     assert.equal(taskDestination({ id: "existing", status: "succeeded", progress: 1, projectId: "p/one" }, ids), "/canvas/p%2Fone");
     assert.equal(taskDestination({ id: "deleted", status: "succeeded", progress: 1, projectId: "deleted", input: { scope: "image" } }, ids), null);
-    assert.equal(taskDestination({ id: "workbench", status: "succeeded", progress: 1, input: { scope: "video" } }, ids), "/video");
+    assert.equal(taskDestination({ id: "workbench", status: "succeeded", progress: 1, input: { scope: "video" } }, ids), "/?mode=video");
 });
 
 test("covers use the selected character image and never old image-mode results on a video node", () => {
@@ -81,4 +81,70 @@ test("retired ordinary folders cannot supply canvas previews, while canvas media
     project.nodes = [{ type: "image", metadata: { images: [{ id: "own", status: "success", storageKey: "image:canvas" }] } }] as CanvasProject["nodes"];
     assert.equal(projectCover(project, [], oldFolder)?.storageKey, "image:canvas");
     assert.equal(oldFolder.coverStorageKey, "image:folder-cover", "legacy metadata remains untouched");
+});
+
+function launch(patch: Partial<CreativeLaunch> & Pick<CreativeLaunch, "taskId">): CreativeLaunch {
+    return { projectId: `project-${patch.taskId}`, nodeId: "node", mode: "image", prompt: "a cat", model: "local-comfyui::2.1", createdAt: "2026-11-15T10:00:00.000Z", params: {}, ...patch };
+}
+
+function memoryStorage(initial?: string) {
+    const map = new Map<string, string>();
+    if (initial !== undefined) map.set(CREATIVE_LAUNCH_STORAGE_KEY, initial);
+    return {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => { map.set(key, value); },
+    };
+}
+
+test("launch feed keeps the newest submissions, dedupes retries and caps the list", () => {
+    const base = launch({ taskId: "t1" });
+    let list = nextCreativeLaunches([], base);
+    list = nextCreativeLaunches(list, launch({ taskId: "t2" }));
+    list = nextCreativeLaunches(list, { ...base, prompt: "updated" });
+    assert.deepEqual(list.map(item => item.taskId), ["t1", "t2"]);
+    assert.equal(list[0].prompt, "updated");
+    for (let index = 0; index < CREATIVE_LAUNCH_LIMIT + 2; index++) list = nextCreativeLaunches(list, launch({ taskId: `extra-${index}` }));
+    assert.equal(list.length, CREATIVE_LAUNCH_LIMIT);
+    assert.equal(list[0].taskId, `extra-${CREATIVE_LAUNCH_LIMIT + 1}`);
+});
+
+test("launch feed persists across reloads but drops stale or corrupted entries", () => {
+    const now = Date.parse("2026-11-15T12:00:00.000Z");
+    const fresh = launch({ taskId: "fresh", createdAt: "2026-11-15T10:00:00.000Z" });
+    const stale = launch({ taskId: "stale", createdAt: "2026-11-13T10:00:00.000Z" });
+    assert.deepEqual(pruneCreativeLaunches([fresh, stale], now), [fresh]);
+    assert.deepEqual(pruneCreativeLaunches([launch({ taskId: "bad-date", createdAt: "not-a-date" })], now), []);
+
+    const storage = memoryStorage();
+    writeCreativeLaunches(storage, [fresh, stale]);
+    assert.deepEqual(readCreativeLaunches(storage, now), [fresh]);
+    assert.deepEqual(readCreativeLaunches(memoryStorage("{corrupted"), now), []);
+    assert.deepEqual(readCreativeLaunches(memoryStorage('{"taskId":"x"}'), now), []);
+    const badMode = { ...fresh, taskId: "bad-mode", mode: "hologram" as CreativeLaunch["mode"] };
+    assert.deepEqual(readCreativeLaunches(memoryStorage(JSON.stringify([fresh, { taskId: "" }, null, 42, badMode])), now), [fresh]);
+    const many = Array.from({ length: CREATIVE_LAUNCH_LIMIT + 3 }, (_, index) => launch({ taskId: `many-${index}` }));
+    writeCreativeLaunches(storage, many);
+    assert.equal(readCreativeLaunches(storage, now).length, CREATIVE_LAUNCH_LIMIT);
+    assert.deepEqual(readCreativeLaunches(undefined, now), []);
+    const throwing = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+    assert.deepEqual(readCreativeLaunches(throwing, now), []);
+    writeCreativeLaunches(throwing, [fresh]);
+});
+
+test("launch status falls back to generation logs when the task left the recent list", () => {
+    assert.equal(launchStatus({ id: "t", status: "running", progress: 0.4 }, []), "running");
+    assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "success" })]), "succeeded");
+    assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "failed" })]), "failed");
+    assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "cancelled" })]), "cancelled");
+    assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "running" })]), "queued");
+    assert.equal(launchStatus(undefined, []), "queued");
+});
+
+test("text results prefer the task payload and only read completed text outputs", () => {
+    const task = { id: "t", status: "succeeded" as const, progress: 1, result: { texts: [{ content: "from task" }, { content: "  " }] } };
+    const logs = [generationLog({ id: "l", status: "success", outputs: [{ mimeType: "text/plain", content: "from log" }, { mimeType: "image/png", storageKey: "image:x" }] })];
+    assert.deepEqual(launchTextResults(task, logs), ["from task"]);
+    assert.deepEqual(launchTextResults(undefined, logs), ["from log"]);
+    assert.deepEqual(launchTextResults(undefined, [generationLog({ id: "l", status: "failed", outputs: [{ type: "text/plain", content: "partial" }] })]), []);
+    assert.deepEqual(launchTextResults(undefined, []), []);
 });

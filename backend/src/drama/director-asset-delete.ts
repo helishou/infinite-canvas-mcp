@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { canonicalProduction, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { normalizeAssetCard } from "@basketikun/canvas-agent/drama/asset-card-contract";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 
 type Row = Record<string, any>;
@@ -103,7 +104,11 @@ function stripRemovedPictureBindingIds(source: Record<string, any>, removed: Set
 export function createManualDirectorAsset(director: DirectorProduction, operation: Extract<ProductionOperation, { type: "create_manual_director_asset" }>, owner: { kind: "episode" | "canvas"; id: string }): void {
     const source = director.source as Record<string, any>;
     const plan = { ...structuredClone(operation.assetPlan), created_by: "manual" } as Row;
-    const card = structuredClone({ ...operation.assetCard }) as Row;
+    // 图片路由、配方、模式和生成状态由卡片自身推导，调用方不需要（也不能）手填；
+    // 内容字段（seven_steps/transaction）缺了会在编译预检里按卡报出，而不是等到编译器抛出
+    // "IM2 alias routing missing" 这种无法归因的错误。
+    const normalized = normalizeAssetCard(structuredClone({ ...operation.assetCard }) as Row);
+    const card = normalized.card;
     const id = String(plan.id || "").trim();
     const kind = String(plan.kind || "");
     if (!id || !["character", "scene", "prop"].includes(kind) || plan.status !== "planned") throw new Error("MANUAL_ASSET_INVALID: assetPlan must be a planned character, scene or prop with a stable ID");
@@ -228,4 +233,44 @@ export function deleteDirectorAsset(director: DirectorProduction, assetId: strin
     director.artifacts = director.artifacts.map(artifact => currentCompilationArtifact(director, artifact) ? artifact : { ...artifact, status: "stale" as const });
     director.executionAuthorized = false;
     if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
+}
+
+export type DirectorAssetPromptIssue = {
+    code: "prompt_reference_dangling";
+    severity: "warning";
+    assetId: string;
+    targetId: string;
+    tokens: string[];
+    message: string;
+};
+
+/**
+ * 删除资产前的只读预检：找出「正式产物正文仍带 <Picture N> 等逻辑编号，且该产物引用了这份资产」的段。
+ * 只报告、不阻断、不改任何数据；deleteDirectorAsset 的签名与行为保持不变。
+ * 阶段一切换阻断前，由上层在删除前调用本函数把 issues 带进回执 / 诊断。
+ */
+export function scanDirectorAssetPromptReferences(director: DirectorProduction, assetId: string): DirectorAssetPromptIssue[] {
+    const id = String(assetId || "").trim();
+    if (!id) return [];
+    const issues: DirectorAssetPromptIssue[] = [];
+    for (const artifact of director.artifacts || []) {
+        const item = artifact as Row;
+        const references = rows(item.references);
+        const matched = references.some((reference) =>
+            [reference.assetId, reference.asset_id, reference.bindingId, reference.binding_id, reference.nodeId, reference.node_id, reference.storageKey, reference.storage_key]
+                .some((value) => typeof value === "string" && value === id));
+        if (!matched) continue;
+        const tokens = [...new Set([...String(item.prompt || "").matchAll(/<(?:Picture|Video|Audio)\s+\d+>/giu)].map((match) => match[0]))];
+        if (!tokens.length) continue;
+        const targetId = String(item.targetId || item.target_id || "");
+        issues.push({
+            code: "prompt_reference_dangling",
+            severity: "warning",
+            assetId: id,
+            targetId,
+            tokens,
+            message: `删除资产 ${id} 前请核对 ${targetId || "该产物"} 的提示词：正文仍引用 ${tokens.join("、")}，且该产物引用了此资产；只读提示，不阻断删除`,
+        });
+    }
+    return issues;
 }

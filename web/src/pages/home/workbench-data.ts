@@ -71,12 +71,179 @@ export function projectCover(project: CanvasProject, outputs: WorkbenchOutput[],
     return null;
 }
 
+export type CreativeLaunch = {
+    taskId: string;
+    projectId: string;
+    nodeId: string;
+    mode: "image" | "video" | "text" | "audio";
+    prompt: string;
+    model: string;
+    createdAt: string;
+    params: { count?: number; size?: string; seconds?: string; resolution?: string };
+};
+
+export type CreativeConversation = {
+    id: string;
+    title: string;
+    createdAt: string;
+    updatedAt: string;
+    /** 会话内多轮共享生成上下文：第一条提交创建的画布，后续提交追加节点到同一张画布。 */
+    canvasId?: string;
+    launches: CreativeLaunch[];
+};
+
+export const CREATIVE_LAUNCH_LIMIT = 6;
+export const CREATIVE_LAUNCH_STORAGE_KEY = "home-creative-launches";
+export const CREATIVE_CONVERSATION_STORAGE_KEY = "home-creative-conversations";
+const CREATIVE_LAUNCH_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function nextCreativeLaunches(current: readonly CreativeLaunch[], launch: CreativeLaunch): CreativeLaunch[] {
+    return [launch, ...current.filter(item => item.taskId !== launch.taskId)].slice(0, CREATIVE_LAUNCH_LIMIT);
+}
+
+export function pruneCreativeLaunches(list: readonly CreativeLaunch[], now: number): CreativeLaunch[] {
+    return list.filter(item => {
+        const created = Date.parse(item.createdAt);
+        return Number.isFinite(created) && now - created < CREATIVE_LAUNCH_TTL_MS;
+    });
+}
+
+function isCreativeLaunch(value: unknown): value is CreativeLaunch {
+    if (!value || typeof value !== "object") return false;
+    const item = value as Record<string, unknown>;
+    return typeof item.taskId === "string" && item.taskId.length > 0
+        && typeof item.projectId === "string" && item.projectId.length > 0
+        && typeof item.nodeId === "string"
+        && typeof item.prompt === "string"
+        && typeof item.model === "string"
+        && typeof item.createdAt === "string"
+        && ["image", "video", "text", "audio"].includes(item.mode as string)
+        && (item.params === undefined || (typeof item.params === "object" && item.params !== null));
+}
+
+export function readCreativeLaunches(storage: Pick<Storage, "getItem"> | undefined, now: number): CreativeLaunch[] {
+    try {
+        const raw = storage?.getItem(CREATIVE_LAUNCH_STORAGE_KEY);
+        if (!raw) return [];
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return pruneCreativeLaunches(parsed.filter(isCreativeLaunch), now).slice(0, CREATIVE_LAUNCH_LIMIT);
+    } catch {
+        return [];
+    }
+}
+
+export function writeCreativeLaunches(storage: Pick<Storage, "setItem"> | undefined, list: readonly CreativeLaunch[]): void {
+    try {
+        storage?.setItem(CREATIVE_LAUNCH_STORAGE_KEY, JSON.stringify(list));
+    } catch {
+        // 持久化失败不影响本次会话内的动态展示。
+    }
+}
+
+/** 会话数量上限：与影策一致按最近保留，旧会话随 TTL 自然淘汰。 */
+export const CREATIVE_CONVERSATION_LIMIT = 20;
+
+function conversationTitle(launches: readonly CreativeLaunch[]): string {
+    return launches[0]?.prompt.trim().slice(0, 24) || "对话";
+}
+
+/** 旧 launches 列表迁移成一个会话，避免升级后历史凭空消失。 */
+export function migrateLaunchesToConversation(launches: readonly CreativeLaunch[]): CreativeConversation[] {
+    if (!launches.length) return [];
+    const sorted = [...launches].reverse();
+    return [{
+        id: "migrated",
+        title: conversationTitle(sorted),
+        createdAt: sorted[0].createdAt,
+        updatedAt: sorted[sorted.length - 1].createdAt,
+        launches: sorted,
+    }];
+}
+
+export function readCreativeConversations(storage: Pick<Storage, "getItem"> | undefined, now: number): CreativeConversation[] {
+    try {
+        const raw = storage?.getItem(CREATIVE_CONVERSATION_STORAGE_KEY);
+        if (!raw) return migrateLaunchesToConversation(readCreativeLaunches(storage, now));
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .filter((item): item is CreativeConversation => {
+                const conversation = item as Record<string, unknown>;
+                return !!conversation && typeof conversation.id === "string" && Array.isArray(conversation.launches);
+            })
+            .map(conversation => ({
+                ...conversation,
+                title: typeof conversation.title === "string" && conversation.title.trim() ? conversation.title : conversationTitle(conversation.launches),
+                createdAt: typeof conversation.createdAt === "string" ? conversation.createdAt : conversation.launches[0]?.createdAt || "",
+                updatedAt: typeof conversation.updatedAt === "string" ? conversation.updatedAt : conversation.launches[0]?.createdAt || "",
+                launches: pruneCreativeLaunches(conversation.launches.filter(isCreativeLaunch), now).slice(0, CREATIVE_LAUNCH_LIMIT),
+            }))
+            .filter(conversation => conversation.launches.length > 0)
+            .slice(0, CREATIVE_CONVERSATION_LIMIT);
+    } catch {
+        return [];
+    }
+}
+
+export function writeCreativeConversations(storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined, list: readonly CreativeConversation[]): void {
+    try {
+        storage?.setItem(CREATIVE_CONVERSATION_STORAGE_KEY, JSON.stringify(list));
+        // 迁移完成后旧键即可退役，避免两份数据漂移。
+        storage?.removeItem(CREATIVE_LAUNCH_STORAGE_KEY);
+    } catch {
+        // 持久化失败不影响本次会话内的动态展示。
+    }
+}
+
+export function appendConversationLaunch(conversations: readonly CreativeConversation[], activeId: string, launch: CreativeLaunch): CreativeConversation[] {
+    const next = conversations.map(conversation => conversation.id !== activeId ? conversation : {
+        ...conversation,
+        canvasId: conversation.canvasId || launch.projectId,
+        updatedAt: launch.createdAt,
+        title: conversation.launches.length ? conversation.title : conversationTitle([launch]),
+        launches: [launch, ...conversation.launches].slice(0, CREATIVE_LAUNCH_LIMIT),
+    });
+    return next.slice(0, CREATIVE_CONVERSATION_LIMIT);
+}
+
+export function pruneConversations(conversations: readonly CreativeConversation[], now: number): CreativeConversation[] {
+    return conversations
+        .map(conversation => ({ ...conversation, launches: pruneCreativeLaunches(conversation.launches, now) }))
+        .filter(conversation => conversation.launches.length > 0);
+}
+
+export function nextConversationId(): string {
+    return `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 任务可能已滑出最近任务列表：此时用该画布的生成日志兜底判定状态。 */
+export function launchStatus(task: BackendRuntimeTask | undefined, logs: BackendGenerationLog[]): BackendRuntimeTask["status"] {
+    if (task) return task.status;
+    if (logs.some(log => log.status === "success")) return "succeeded";
+    if (logs.some(log => log.status === "failed")) return "failed";
+    if (logs.some(log => log.status === "cancelled")) return "cancelled";
+    return "queued";
+}
+
+export function launchTextResults(task: BackendRuntimeTask | undefined, logs: BackendGenerationLog[]): string[] {
+    const fromTask = (task?.result?.texts || []).map(item => item.content).filter(content => typeof content === "string" && content.trim());
+    if (fromTask.length) return fromTask;
+    return logs.flatMap(log => log.status === "success"
+        ? log.outputs.flatMap(output => {
+            const type = String(output.mimeType || output.type || "").toLowerCase();
+            const content = output.content;
+            return type.startsWith("text/") && typeof content === "string" && content.trim() ? [content] : [];
+        })
+        : []);
+}
+
 export function taskDestination(task: BackendRuntimeTask, projectIds: Set<string>): string | null {
     const projectId = task.projectId || (typeof task.input?.projectId === "string" ? task.input.projectId : "");
     if (projectIds.has(projectId)) return `/canvas/${encodeURIComponent(projectId)}`;
     // A deleted canvas must never send users into another project or an unrelated studio.
     if (projectId && !projectId.startsWith("__")) return null;
     const scope = task.input?.scope;
-    if (scope === "image" || scope === "video") return `/${scope}`;
+    if (scope === "image" || scope === "video") return `/?mode=${scope}`;
     return null;
 }

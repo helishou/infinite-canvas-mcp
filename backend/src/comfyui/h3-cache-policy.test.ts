@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ComfyUiBackend, buildNativeNanFengV15Workflow, type ComfyUiDeps } from "./bridge.js";
+import { ComfyUiBackend, buildNativeNanFengV15Workflow, type ComfyUiDeps } from "@basketikun/media-engine/comfyui/bridge";
 import type { RuntimeTask } from "../db.js";
 
 for (const scenario of [
@@ -15,7 +15,7 @@ for (const scenario of [
         const terminal = new Promise<void>((resolve) => { complete = resolve; });
         const deps = {
             settings: { get: () => "" }, media: {},
-            tasks: { get: () => task, create: () => task, update: (_id: string, patch: object) => Object.assign(task, patch), addEvent: () => {} },
+            tasks: { get: () => task, create: () => task, update: (_id: string, patch: object) => Object.assign(task, patch), addEvent: () => {}, events: () => [] },
             onTaskTerminal: () => complete(),
         } as unknown as ComfyUiDeps;
         const bridge = new ComfyUiBackend(deps, "http://comfy.test");

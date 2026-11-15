@@ -150,3 +150,19 @@ test("a missing incoming continuity boundary remains a warning at compile prefli
     assert.deepEqual(missing[0].blockingActions, []);
     assert.equal(result.compileReady, true, JSON.stringify(result.diagnostics));
 });
+
+test("an asset card without the IM2 route blocks preflight by name instead of crashing the compiler later", async () => {
+    const source = styleSource();
+    const card = source.asset_cards[0];
+    const id = String(card.id);
+    for (const field of ["target_skill", "source_repository"]) delete card[field];
+    const result = await preflightCompilationDirector(director(source));
+    const issue = result.diagnostics.find(item => item.code === "ASSET_CARD_CONTRACT" && item.targetId === id) as any;
+    assert.ok(issue, JSON.stringify(result.diagnostics));
+    assert.equal(issue.severity, "error");
+    assert.match(issue.message, /IM2 图片路由/);
+    assert.equal(result.compileReady, false);
+    // The same card with its route restored is compilable, so the block is exactly the missing routing.
+    const repaired = styleSource();
+    assert.equal((await preflightCompilationDirector(director(repaired))).compileReady, true);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildExpandedNanFengV10Workflow } from "./bridge.js";
+import { buildExpandedNanFengV10Workflow } from "@basketikun/media-engine/comfyui/bridge";
 
 /**
  * 连续生成模式（keepModelCache）的条件缓存契约。

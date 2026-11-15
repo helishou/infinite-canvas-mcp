@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { selectOutputNodes } from "./executor.js";
-import { selectRunningHubResults } from "../runtime/runninghub.js";
+import { selectOutputNodes } from "@basketikun/media-engine/workflows/executor";
+import { selectRunningHubResults } from "@basketikun/media-engine/runtime/runninghub";
 
 // ComfyUI history.outputs 的形状：节点 ID → 该节点产物。
 const outputs = {

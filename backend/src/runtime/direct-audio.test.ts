@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
-import { DirectAudioBackend } from "./direct-audio.js";
+import { DirectAudioBackend } from "@basketikun/media-engine/runtime/direct-audio";
 
 test("直连音频由 Backend 归档，重复幂等键不会再次请求 provider", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");
@@ -11,7 +11,7 @@ test("直连音频由 Backend 归档，重复幂等键不会再次请求 provide
     stores.settings.set("ai.config", { channels: [{ id: "cloud", kind: "api", baseUrl: "http://127.0.0.1:8000", apiKey: "key", apiFormat: "openai", models: [{ name: "gpt-4o-mini-tts", capability: "audio" }] }] });
     let calls = 0;
     t.mock.method(globalThis, "fetch", async (_url: any) => { calls++; return new Response(Buffer.from("audio"), { status: 200, headers: { "content-type": "audio/mpeg" } }); });
-    const backend = new DirectAudioBackend({ url: "http://127.0.0.1:17370" } as never, stores.settings, stores.tasks, stores.media);
+    const backend = new DirectAudioBackend(stores.settings, stores.tasks, stores.media);
     backend.run({ model: "cloud::gpt-4o-mini-tts", prompt: "测试语音", voice: "alloy", format: "mp3", speed: "1" }, "audio-1");
     for (let index = 0; index < 20 && ["queued", "running"].includes(db.getTask("audio-1")!.status); index++) await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(db.getTask("audio-1")!.status, "succeeded");

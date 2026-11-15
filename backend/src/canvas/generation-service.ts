@@ -4,8 +4,8 @@ import { inputHash } from '../drama/canvas-inputs.js';
 import type { CanvasGenerationCommand, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import type { RunningHubBackend } from "../runtime/runninghub.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
@@ -307,7 +307,9 @@ export class CanvasGenerationService {
         const audioReference = Array.isArray(command.audioReferences) ? recordOf(command.audioReferences[0]) : {};
         const storageKey = String(audioReference.storageKey || "");
         const referenceAudio = storageKey ? this.stores.media.meta(storageKey)?.filePath : String(audioReference.path || "");
-        if (isComfy && !referenceAudio) throw new Error("IndexTTS 2.5 需要连接一条已保存的参考音频");
+        // Drama3 用已保存的音色 session，不需要参考音频；IndexTTS 走克隆，必须给参考音频
+        const needsReferenceAudio = !/drama3/i.test(String(command.model || ""));
+        if (isComfy && needsReferenceAudio && !referenceAudio) throw new Error("IndexTTS 2.5 需要连接一条已保存的参考音频");
         const result = this.audio.start({
             projectId: command.projectId,
             nodeId: command.nodeId,

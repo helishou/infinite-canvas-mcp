@@ -4,6 +4,7 @@ import { AudioLines, Columns2, Download, Ellipsis, FolderPlus, Image as ImageIco
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { placeProductionCard } from "./canvas-toolbar-placement";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { useCopyText } from "@/hooks/use-copy-text";
@@ -281,12 +282,30 @@ export function CanvasNodeHoverToolbar({
         closeImageToolSettings();
     };
 
-    if (productionActions) return <div ref={productionToolbarRef} data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-1 rounded-lg border p-2 text-sm shadow-lg" style={{ left: Math.min(Math.max(16, left - 160), Math.max(16, (canvasSize?.width || window.innerWidth) - 336)), top: Math.min(Math.max(72, top - productionToolbarHeight - 24), Math.max(72, (canvasSize?.height || window.innerHeight) - productionToolbarHeight - 16)), width: Math.min(320, (canvasSize?.width || window.innerWidth) - 32), background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
-        <span className="w-full truncate px-2 text-sm font-medium" title={node.title}>{node.title || node.type}</span>
-        {productionStatus && <span data-production-node-status className="w-full px-2 pb-1 text-xs" style={{ color: theme.node.muted }}>{productionStatus}</span>}
-        {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-2 py-1.5 hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
-        <Dropdown trigger={["click"]} menu={{ items: dropdownTools.map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.loading ? <LoaderCircle className="size-4 animate-spin" /> : tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-1 rounded px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
+    if (productionActions) {
+        // 旧实现固定「居中放在节点上方 + 夹到 72px」，节点靠上或很高时卡片会直接盖住节点内容，
+        // 也会压到相邻片段。现在交给 placeProductionCard 优先放到节点外侧，四边都放不下才退让。
+        const canvasWidth = canvasSize?.width || window.innerWidth;
+        const canvasHeight = canvasSize?.height || window.innerHeight;
+        const cardWidth = Math.min(280, canvasWidth - 32);
+        const cardHeight = productionToolbarHeight || 44;
+        const { left: cardLeft, top: cardTop } = placeProductionCard({
+            node: {
+                left: viewport.x + node.position.x * viewport.k,
+                top: viewport.y + node.position.y * viewport.k,
+                width: node.width * viewport.k,
+                height: node.height * viewport.k,
+            },
+            card: { width: cardWidth, height: cardHeight },
+            canvas: { width: canvasWidth, height: canvasHeight },
+        });
+        return <div ref={productionToolbarRef} data-production-node-actions className="absolute z-[70] flex flex-wrap items-center gap-0.5 rounded-lg border p-1 text-sm shadow-lg" style={{ left: cardLeft, top: cardTop, width: cardWidth, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }} onMouseDown={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}>
+        <span className="max-w-[132px] truncate px-1.5 text-xs font-medium" title={node.title}>{node.title || node.type}</span>
+        {productionStatus && <span data-production-node-status className="px-1 text-[11px]" style={{ color: theme.node.muted }}>{productionStatus}</span>}
+        {productionActions.map(action => <button key={action.id} type="button" disabled={action.disabled} className="rounded px-1.5 py-1 text-xs hover:bg-black/5 disabled:cursor-default disabled:opacity-40 dark:hover:bg-white/10" aria-label={action.title} onClick={action.onClick}>{action.label}</button>)}
+        <Dropdown trigger={["click"]} menu={{ items: dropdownTools.map(tool => ({ key: tool.id, label: tool.label || tool.title, icon: tool.loading ? <LoaderCircle className="size-4 animate-spin" /> : tool.icon, danger: tool.danger, disabled: "disabled" in tool && tool.disabled === true, onClick: tool.onClick })) }}><button type="button" aria-label={t("productionCanvas.moreNodeActions")} className="inline-flex items-center gap-0.5 rounded px-1.5 py-1 text-xs hover:bg-black/5 dark:hover:bg-white/10">{t("productionCanvas.more")}<Ellipsis className="size-4" /></button></Dropdown>
     </div>;
+    }
 
     return (
         <>

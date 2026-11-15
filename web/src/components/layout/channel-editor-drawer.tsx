@@ -56,7 +56,8 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
         const baseUrl = !draft.baseUrl.trim() || draft.baseUrl.trim() === defaultBaseUrlForApiFormat(draft.apiFormat) ? defaultBaseUrlForApiFormat(apiFormat) : draft.baseUrl;
         patch({ apiFormat, baseUrl });
     };
-    const isCodex = draft.kind === "codex-cli";
+    /** Codex 与 Hermes 都是原生引擎渠道：不需要 baseUrl/apiKey，模型只能是文本。 */
+    const isCodex = draft.kind === "codex-cli" || draft.kind === "hermes";
 
     const applySelection = (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
@@ -101,9 +102,9 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                 </label>}
                 <label className="block">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.kind")}</span>
-                    <Select aria-label={t("config.channelEditor.kind")} disabled={lockKind} className="w-full" value={draft.kind || "api"} options={[{ label: t("config.channelEditor.apiKind"), value: "api" }, { label: t("config.channelEditor.localKind"), value: "local" }, { label: "Codex CLI", value: "codex-cli" }]} onChange={(kind) => patch({ kind })} />
+                    <Select aria-label={t("config.channelEditor.kind")} disabled={lockKind} className="w-full" value={draft.kind || "api"} options={[{ label: t("config.channelEditor.apiKind"), value: "api" }, { label: t("config.channelEditor.localKind"), value: "local" }, { label: "Codex CLI", value: "codex-cli" }, { label: "Hermes", value: "hermes" }]} onChange={(kind) => patch({ kind })} />
                 </label>
-                {isCodex && <p className="text-sm text-muted-foreground md:col-span-2">{t("config.channelEditor.codexHint")}</p>}
+                {isCodex && <p className="text-sm text-muted-foreground md:col-span-2">{draft.kind === "hermes" ? "Hermes 渠道：模型名直接写 Hermes 的 modelId，形如 opencode-go:deepseek-v4.1-flash。对话由本机 hermes acp 执行，工具、技能、记忆都在 Hermes 侧。" : t("config.channelEditor.codexHint")}</p>}
                 {!isCodex && <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>
                     <Input value={draft.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} placeholder="https://api.example.com" />

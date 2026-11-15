@@ -90,6 +90,16 @@ export function useWorkbenchData() {
             running = false,
             pending = false,
             needsSettings = true;
+        let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        const ACTIVE_STATUSES = new Set(["queued", "running", "awaiting_confirmation"]);
+        // SSE 事件是主刷新通道；休眠唤醒 / HMR / 后端重载都可能丢事件导致状态卡在「运行中」，
+        // 因此用轮询兜底：有进行中的任务时 4s 一轮，空闲时 30s 一轮做对账。
+        const schedulePoll = (tasks: BackendRuntimeTask[]) => {
+            window.clearTimeout(pollTimer);
+            if (disposed) return;
+            const hasActive = tasks.some((task) => ACTIVE_STATUSES.has(task.status));
+            pollTimer = setTimeout(() => { void load(); }, hasActive ? 4000 : 30000);
+        };
         const load = async () => {
             if (running) {
                 pending = true;
@@ -112,8 +122,13 @@ export function useWorkbenchData() {
                     setLogs(logResult.value.logs || []);
                     setHasMore((logResult.value.logs || []).length === logCount);
                 } else if (!isBackendAvailabilityError(logResult.reason)) failed.push("logs");
-                if (taskResult.status === "fulfilled") setTasks(taskResult.value.tasks || []);
-                else if (!isBackendAvailabilityError(taskResult.reason)) failed.push("tasks");
+                if (taskResult.status === "fulfilled") {
+                    setTasks(taskResult.value.tasks || []);
+                    schedulePoll(taskResult.value.tasks || []);
+                } else {
+                    if (!isBackendAvailabilityError(taskResult.reason)) failed.push("tasks");
+                    schedulePoll([]);
+                }
                 if (settingsResult.status === "fulfilled" && settingsResult.value) {
                     setSettings(settingsResult.value.settings || {});
                     setSettingsReady(true);
@@ -143,6 +158,7 @@ export function useWorkbenchData() {
         window.addEventListener("backend-retry", onReconnect);
         return () => {
             disposed = true;
+            window.clearTimeout(pollTimer);
             window.removeEventListener("backend-event", onEvent);
             window.removeEventListener("backend-connected", onReconnect);
             window.removeEventListener("backend-retry", onReconnect);

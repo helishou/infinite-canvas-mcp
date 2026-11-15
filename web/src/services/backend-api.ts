@@ -306,6 +306,16 @@ export function createBackendDramaEpisode(dramaId: string, input: { episodeNumbe
     return request<{ ok: boolean; episode?: DramaEpisode }>("POST", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`, input);
 }
 
+/** 大纲单步生成：只拿候选文本，写入仍走剧目规划保存。 */
+export function requestDramaOutlineProposal(dramaId: string, input: { step: string; model?: string; instruction?: string }) {
+    return request<{ ok: boolean; step: string; text: string; model: string; error?: string }>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/outline-proposal`, input);
+}
+
+/** 单集剧本大纲（分场）生成：同样只回候选文本，写入走 updateBackendDramaEpisode。 */
+export function requestEpisodeScriptProposal(episodeId: string, input: { model?: string; instruction?: string }) {
+    return request<{ ok: boolean; episodeId: string; text: string; model: string; error?: string }>("POST", `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`, input);
+}
+
 export function updateBackendDramaEpisode(episodeId: string, patch: Partial<Pick<DramaEpisode, "episodeNumber" | "title" | "synopsis" | "fullPlot" | "canvasId">>) {
     return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("PATCH", `/drama/episodes/${encodeURIComponent(episodeId)}`, patch);
 }
@@ -373,6 +383,8 @@ export type ProductionCompilationStatus = {
     operationId: string; status: "queued" | "running" | "succeeded" | "blocked" | "interrupted" | "failed"; verdict: "passed" | "passed_with_warnings" | "blocked";
     expectedRevision: number; sourceHash: string; engineRuntimeId?: string; compilerHash?: string; preparedId?: string; diagnosticCount?: number; targetCount?: number; reused?: boolean;
     blockingDiagnostic?: { code: string; path?: string; targetId?: string; shotId?: string; message: string };
+    /** 编译完成后的下一步提示；preparedId 实测藏在 nextAction.input 里（顶层字段可能不填）。 */
+    nextAction?: { action: string; tool: string; input: Record<string, unknown>; message: string };
     application?: { revision?: number; sourceHash?: string; operationId?: string; replayed?: boolean; referenceSync?: Array<{ targetId: string; status: string; referenceCount?: number }> };
     mediaSubmitted: false;
 };

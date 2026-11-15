@@ -14,8 +14,8 @@ const base = argOf("--base", "http://localhost:3001").replace(/\/$/, "");
 const outFile = argOf("--out", "");
 const viewport = { width: Number(argOf("--width", "1440")), height: Number(argOf("--height", "900")) };
 
-// 方案覆盖的 10 条主路由 + 两个遗留入口。
-const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/image", "/video", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
+// 方案覆盖的主路由（快速生成入口已并入首页，/image、/video 仅保留重定向）。
+const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
 
 const browser = await chromium.launch();
 const root = await browser.newContext({ viewport });

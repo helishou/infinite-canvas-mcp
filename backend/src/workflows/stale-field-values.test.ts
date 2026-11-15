@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { migrateStaleFieldValues, applyWorkflowFieldDefaults } from "./executor.js";
+import { migrateStaleFieldValues, applyWorkflowFieldDefaults } from "@basketikun/media-engine/workflows/executor";
 import type { WorkflowField } from "../db.js";
 
 /**

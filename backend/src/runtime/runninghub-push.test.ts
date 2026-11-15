@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 
-import { RunningHubBackend } from "./runninghub.js";
-import { localGraphOf } from "./runninghub.js";
+import { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
+import { localGraphOf } from "@basketikun/media-engine/runtime/runninghub";
 import type { SettingStore, TaskStore } from "../stores/types.js";
 
 /** 全部用例都不触网：替换全局 fetch，记录请求并把平台响应喂回去。 */

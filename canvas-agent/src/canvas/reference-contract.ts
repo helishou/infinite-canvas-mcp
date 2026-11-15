@@ -3,6 +3,7 @@ export { productionImageInput, type ProductionImageInput, type ProductionImageRe
 export { characterImageKey, resolveCharacterImageKeys, characterReferenceUpdates, h3CharacterSourceFromNode, syncH3CharacterGroupSource, type CharacterImageSelection, type H3CharacterSource } from "./character-image-selection.js";
 
 import { applyReferenceOrder, orderReferencesForSubmission, remapPictureTags } from "./storyboard-reference-order.js";
+import { buildLabelMap, labelMapHash, validateReferenceIdentity, type ReferenceLabelMap } from "./reference-identity.js";
 
 export const REFERENCE_ROLES = [
     "character_identity", "character_turnaround", "scene", "blocking", "storyboard",
@@ -70,6 +71,9 @@ export type ReferenceCompilation = {
     references: CompiledReference[];
     issues: ReferenceIssue[];
     migratedLegacyRefs: boolean;
+    /** 逻辑编号 → 稳定身份。可选以保持历史调用方与 fixture 兼容；编译期始终产出。 */
+    labelMap?: ReferenceLabelMap;
+    labelMapHash?: string;
 };
 
 export function normalizeReferenceRole(value: unknown, fallback: ReferenceRole = "other"): ReferenceRole {
@@ -329,7 +333,11 @@ export function compileReferenceSubmission(project: Record<string, unknown>, seg
     const promptWithBoundSubjects = bindLiteralSubjectsToPictures(compiledPrompt, references, bySubjectId);
     const promptWithBoundOutfits = bindOutfitReferenceDetails(promptWithBoundSubjects, project, segment, references, bySubjectId);
     validateLimits(segment, semanticPrompt, references, issues);
-    return { semanticPrompt, compiledPrompt: promptWithBoundOutfits, bindings, references, issues, migratedLegacyRefs };
+    // 逻辑编号 ↔ 稳定身份：只读校验，只追加 warning，不改正文、不阻断生成。
+    // assertReferenceCompilation 只过滤 severity==="error"，issues 由 h3_get_clip_references 原样透传。
+    const labelMap = buildLabelMap(references);
+    issues.push(...validateReferenceIdentity(semanticPrompt, labelMap));
+    return { semanticPrompt, compiledPrompt: promptWithBoundOutfits, bindings, references, issues, migratedLegacyRefs, labelMap, labelMapHash: labelMapHash(labelMap) };
 }
 
 function promptUsesSubmissionPictureOrder(

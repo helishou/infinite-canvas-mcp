@@ -474,6 +474,13 @@ export function isPlanMessage(message: AgentChatItem) {
     return message.role === "tool" && objectField(message.detail, "kind") === "todo";
 }
 
+export type { AgentPlanFlow } from "./agent-plan-flow";
+
+/**
+ * 「总流程」用的待办清单：解析与状态归类都在 agent-plan-flow，组件只负责渲染。
+ */
+export { planFlowOf as planFlow } from "./agent-plan-flow";
+
 export function normalizeText(value: unknown) {
     if (typeof value === "string") return value.trim();
     if (value instanceof Error) return value.message;

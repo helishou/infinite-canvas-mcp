@@ -1,0 +1,128 @@
+/**
+ * H3 节点基础默认值（BASE_H3_NODE_METADATA）与画幅常量。
+ * 来源：canvas-agent `src/plugins/minimax-h3/node-factory.ts`，逐字复制。
+ * 引擎用它当参数归一化的最后兜底层，不共享代码。
+ */
+const defaultPrompt = "保持原视频的动作、镜头和环境，替换主体角色，动作连贯，人物外观稳定。";
+export { H3_VIDEO_MEGAPIXELS, H3_VIDEO_RATIOS, h3VideoDimensions, h3OriginalVideoDimensions, h3AspectRatioOption } from "./video-settings.js";
+const defaultH3Model = "H3\\DasiwaMinimaxH3_dasiwaREF2VAHybridV1.safetensors";
+
+/** H3 节点的单一基础默认值来源；前端节点定义与 MCP 创建节点共用。 */
+export const BASE_H3_NODE_METADATA: Record<string, unknown> = {
+    content: "", prompt: defaultPrompt, status: "idle", duration: "8", aspectRatio: "16:9",
+    videoSteps: 8, denoise: 1, modelName: defaultH3Model, minimaxBaseModel: defaultH3Model,
+    motionContextEnabled: false, tailFrameContinuation: false, motionContextNoiseEnabled: false,
+    smartStoryboardCount: 3, smartStoryboardMode: "ref2va", smartStoryboardSkill: "regular_storyboard",
+    textEncoder: "qwen3vl_32b_minimax_h3_fp8.safetensors",
+    videoVae: "H3\\minimax_h3_video_vae_fp16.safetensors",
+    audioVae: "H3\\minimax_h3_audio_vae_fp32.safetensors",
+    textEncoderType: "minimax", textEncoderDevice: "default", precision: "default",
+    sageAttention: "H3专用Sage加速", megapixels: 0.4, refImageSize: "match", referenceLongEdge: 1920,
+    sampler: "res_multistep", scheduler: "simple", allowCompile: false,
+    slaBlockSize: "64", slaBackend: "comfy_kitchen", slaSparsity: 0.9, slaMinSequence: 4096, slaDenseLastSteps: 1,
+    slaProtectAudio: true, slaDisableFp16Accum: true, slaStabilizeMotion: true,
+    rtxResizeMode: "倍数缩放", rtxQuality: "ULTRA", realtimePreviewEnabled: true,
+    realtimePreviewLongEdge: 512, realtimePreviewFrames: 12, realtimePreviewFps: 8, realtimePreviewJpegQuality: 75,
+    uniBlockSwapBlocks: 1, h3FirstSteps: 6, h3SecondSteps: 4, latentUpscaleMegapixels: 1, latentUpscaleAlign: 2,
+    // Random mode owns the effective seed at submit time; zero is only a
+    // legacy placeholder and must not be shown as the value being submitted.
+    latentUpscalePrecision: "bf16", seed: undefined, noiseSeed: undefined, noiseSeedMode: "random", constantTriggerWord: "",
+    noDub: true, noCaption: true, audioMode: "native", audioDenoiseStrength: 1, addSourceAsReference: false,
+    strictPromptTags: true, referenceVideoPolicy: "official_2_to_15s", latentUpscaleEnabled: false,
+    slaEnabled: false, uniBlockSwapEnabled: false, rtxEnabled: false, mergedWorkflow: false, lockAudio: false, audioDrive: false,
+    combatLoraWeight: 0, cinematicLoraWeight: 0, runtimeReserveEnabled: false, reservedVramGb: 0.6, faceRefineEnabled: false,
+    // 默认不保留跨任务模型缓存：H3 全套权重常驻 host 时约占 38 GB 提交（pinned 池 ram*0.4），
+    // 空转期间代价高于下一段的冷启动。连续多段作业由用户在面板显式开启。
+    loraSlots: [{ name: "", strength: 1, enabled: false }], keepModelCache: false,
+};
+
+const NODE_LEVEL_KEYS = [
+    "aspectRatio", "videoSteps", "denoise", "modelName", "minimaxBaseModel",
+    "motionContextEnabled", "motionContextNoiseEnabled", "smartStoryboardCount", "smartStoryboardMode", "smartStoryboardSkill",
+];
+
+/** H3 工作台各模块区域的布局键：与画布手柄拖拽写入的 metadata minimax* 键一一对应。 */
+export const H3_LAYOUT_PANE_KEYS = ["minimaxPreviewH", "minimaxPreviewW", "minimaxPromptW", "minimaxTimelineH", "minimaxRefLaneH"] as const;
+
+/** H3 节点类型（含历史别名和插件名形式）。 */
+export function isH3NodeType(type: unknown): boolean {
+    return /^(?:minimax|smart-minimax)/i.test(String(type || ""));
+}
+
+export type H3LayoutSnapshot = { width?: number; height?: number; panes: Record<string, number> };
+
+const positiveInt = (value: unknown) => {
+    const parsed = Math.round(Number(value));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+};
+
+/** 解析「设为默认参数」保存的布局快照；非有限正数一律丢弃，避免脏值污染新建节点。 */
+export function readH3Layout(source: unknown): H3LayoutSnapshot {
+    const record = source && typeof source === "object" && !Array.isArray(source) ? source as Record<string, unknown> : {};
+    const rawPanes = record.panes && typeof record.panes === "object" && !Array.isArray(record.panes) ? record.panes as Record<string, unknown> : {};
+    const panes: Record<string, number> = {};
+    for (const key of H3_LAYOUT_PANE_KEYS) {
+        const value = positiveInt(rawPanes[key]);
+        if (value !== undefined) panes[key] = value;
+    }
+    const width = positiveInt(record.width);
+    const height = positiveInt(record.height);
+    return { ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), panes };
+}
+
+/** 按“节点显式值 > 保存默认值 > 基础默认值”创建完整 H3 metadata。 */
+export function createH3NodeMetadata(stored: Record<string, unknown> = {}, metadata: Record<string, unknown> = {}, panes: Record<string, number> = {}) {
+    const storedParams = { ...stored };
+    // Continuation is an authored adjacent boundary, never a saved creation default.
+    delete storedParams.motionContextEnabled;
+    delete storedParams.tailFrameContinuation;
+    // layout 是随默认参数一起保存的布局快照：只有各模块区域宽高进节点 metadata，
+    // 节点自身宽高由创建入口消费（前端 defaultLayoutSize / MCP width/height），不留在 metadata 里。
+    const layout = readH3Layout(storedParams.layout);
+    delete storedParams.layout;
+    const nodePanes = { ...layout.panes, ...panes };
+    const nodeLevel = Object.fromEntries(NODE_LEVEL_KEYS.filter((key) => key in storedParams).map((key) => [key, storedParams[key]]));
+    const existingSegments = Array.isArray(metadata.segments) ? metadata.segments as Array<Record<string, unknown>> : [];
+    const existing = existingSegments[0] || {};
+    const initialSegment = {
+        ...BASE_H3_NODE_METADATA,
+        ...storedParams,
+        ...nodePanes,
+        ...existing,
+        id: String(existing.id || "segment-1"),
+        prompt: existing.prompt ?? metadata.prompt ?? defaultPrompt,
+        duration: existing.duration ?? BASE_H3_NODE_METADATA.duration,
+        taskMode: existing.taskMode ?? "ref2va",
+        // A new boundary carries the preceding Clip's last frame by default.
+        // An authored first storyboard frame already anchors this Clip's opening.
+        tailFrameContinuation: Object.hasOwn(existing, "tailFrameContinuation") ? existing.tailFrameContinuation
+            : !hasExplicitOpeningStoryboard(existing) && existing.motionContextEnabled !== true,
+        status: existing.status ?? "idle",
+    };
+    return {
+        ...BASE_H3_NODE_METADATA,
+        ...nodeLevel,
+        ...nodePanes,
+        ...storedParams,
+        ...metadata,
+        // `minimaxBaseModel` is the legacy fallback the runner reads when a Clip has no
+        // model of its own. BASE ships one hard-coded checkpoint, so a saved default that
+        // changes only `modelName` used to leave the node pointing at a model that may not
+        // exist on this machine. Keep the pair consistent unless both were given.
+        ...(("minimaxBaseModel" in metadata || "minimaxBaseModel" in storedParams) ? {} : {
+            minimaxBaseModel: (metadata.modelName ?? storedParams.modelName ?? BASE_H3_NODE_METADATA.modelName),
+        }),
+        segments: [initialSegment],
+    };
+}
+
+function hasExplicitOpeningStoryboard(segment: Record<string, unknown>) {
+    const shots = Array.isArray(segment.storyboardShots) ? segment.storyboardShots as Array<Record<string, unknown>> : [];
+    const firstBindingId = String(shots[0]?.referenceBindingId || "");
+    const references = Array.isArray(segment.referenceBindings) ? segment.referenceBindings as Array<Record<string, unknown>> : [];
+    const first = references.find(reference => String(reference.id || reference.bindingId || "") === firstBindingId);
+    if (first) return first.enabled !== false && (first.mediaType || first.type || "image") === "image" && first.role === "storyboard";
+    const mode = String(segment.taskMode || segment.mode || "").toLowerCase();
+    return ["i2v", "i2va", "fl2v", "fl2va"].includes(mode)
+        && references.some(reference => reference.enabled !== false && (reference.mediaType || reference.type || "image") === "image");
+}

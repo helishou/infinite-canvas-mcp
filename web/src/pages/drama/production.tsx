@@ -2,9 +2,11 @@ import { productionEntities } from "@basketikun/canvas-agent/drama/production-co
 import { matchesProductionAssetNode } from "./production-asset-identity";
 import { withH3ParameterEdits } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { useQuery } from "@tanstack/react-query";
+import { translateCompiledH3Prompts } from "@/services/api/translation";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Alert, App, Button, Input, Select, Tag } from "antd";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
+import { WorkspaceViewSwitcher } from "@/components/production/workspace-view-switcher";
 import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { useTranslation } from "react-i18next";
@@ -14,6 +16,9 @@ import { diagnosticBlocksAction, isSubjectPromptAssembly, productionSceneEntries
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
+import { productionSubtitleTracks } from "@/lib/production-subtitles";
+import { buildCalibrationBindings, calibrateSubtitleTracks, clearSubtitleCalibration, readSubtitleCalibration, writeSubtitleCalibration, type SubtitleCalibration } from "@/lib/subtitle-calibration";
+import { runSubtitleTranscribe } from "@/services/api/subtitle-transcribe";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
@@ -45,7 +50,7 @@ import {
 } from "@/services/backend-api";
 import { DirectorPanel, type DirectorWorkspace } from "./director-panel";
 import { type CanvasAssetEditPayload } from "./canvas-asset-edit-modal";
-import { DramaManagePanel } from "./manage-panel";
+import { SeriesWorkspaceBody } from "./series-workspace-body";
 import "./production.css";
 import { registerProductionPromptEditor, registerProductionStoryboardEditor, registerProductionBoundaryEditor, registerProductionClipMembershipEditor, sourceSegmentForCanvasClip, buildDirectorClipStoryboardOperation } from "@/lib/canvas/production-editing";
 import { dramaWorkbenchEpisode, dramaWorkbenchPath } from "./workbench-entry";
@@ -301,6 +306,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   }), [sourceDrafts, production?.draft.director]);
   const [busy, setBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [calibration, setCalibration] = useState<SubtitleCalibration | null>(null);
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibrationProgress, setCalibrationProgress] = useState(0);
+  const calibrationAbortRef = useRef<AbortController | null>(null);
   const [loadError, setLoadError] = useState("");
   const backendReadFailed = useRef(false);
   const [agentError, setAgentError] = useState("");
@@ -323,8 +332,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const [compileNotice, setCompileNotice] = useState("");
   const [compileDiagnostics, setCompileDiagnostics] = useState<ProductionCompilationDiagnostic[]>([]);
   const [compileTargets, setCompileTargets] = useState<{ sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }>();
-  const [autoTranslateCompilation, setAutoTranslateCompilation] = useState<{ id: string; targetIds: string[] } | null>(null);
   const startingRunRef = useRef(false);
+  const preparingClipRef = useRef(false);
+  const [preparingClip, setPreparingClip] = useState(false);
   const handledAgentResultRef = useRef("");
   const setAgentState = useAgentStore(state => state.setAgentState);
   const agentTaskResult = useAgentStore(state => state.scopedTaskResult);
@@ -483,6 +493,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   useEffect(() => {
     if (embedded && owner) useProductionWorkspaceStore.getState().setRecoveryPending(productionOwner.id, Boolean(pendingCommand || pendingRunStart || remoteRevision !== null));
   }, [embedded, owner, productionOwner.id, pendingCommand, pendingRunStart, remoteRevision]);
+  // A calibration is only valid for the exact sourceHash it was produced from; recompiling drops it.
+  useEffect(() => {
+    const hash = String(production?.draft.director?.sourceHash || "");
+    setCalibration(hash && canvasId ? readSubtitleCalibration(canvasId, hash) : null);
+  }, [canvasId, production?.draft.director?.sourceHash]);
 
   useEffect(() => {
     if (seriesOnly) return;
@@ -661,11 +676,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           setCompileError(pendingCommandMessage(pendingCommandRef.current));
           return;
         }
-        if (dirtySourceDraftKeys.length || briefDraft !== String(production.draft.director.source.brief || "")) {
-          // 编译使用 Backend 已保存源稿；未保存的前端编辑在编译时直接丢弃（无本机草稿兜底）。
-          setBriefDraft(String(production.draft.director.source.brief || ""));
-          setSourceDrafts({});
-        }
+        // Compilation consumes the saved Backend source. Keep local edits intact,
+        // including drafts for other Clips while updating the selected Clip.
         // Compile the canvas state the user just saved through this page, not a stale
         // Backend projection. Recovery keeps the original frozen operation unchanged.
         if (canvasId) await flushCanvasProjectBeforeGeneration(canvasId);
@@ -718,11 +730,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         ? await fetchProductionCompilation(target, pending.operationId, "targets", { pageSize: 100 }) : undefined;
       const compilationTargets = (targetResponse?.compilation.items || []) as Array<ProductionCompilationDiagnostic & { status?: string }>;
       const targetItems = compilationTargets.filter((item): item is ProductionCompilationDiagnostic & { targetId: string; status: string } => Boolean(item.targetId && item.status));
-      const queueCompiledPromptTranslation = () => {
-        const clipIds = new Set(productionSegments(compileSource).map(segment => String(segment.id || "")));
-        const targetIds = targetItems.filter(item => item.status === "ready" && clipIds.has(String(item.targetId))).map(item => String(item.targetId));
-        if (targetIds.length) setAutoTranslateCompilation({ id: nanoid(), targetIds });
-      };
       const notReadyTargetIds = targetItems.filter(item => item.status !== "ready").map(item => item.targetId);
       const touchedCompileScopeIds = new Set([...(pending.scope?.targetIds || []).map(String), ...targetItems.map(item => String(item.targetId))]);
       const engineRuntimeId = status.engineRuntimeId ?? compileSource.draft.director?.engine.runtimeId;
@@ -862,7 +869,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         skipProductionRefreshRevision.current = status.application.revision;
         setCompileNotice(completionNotice());
         await refreshCompilationProjection();
-        queueCompiledPromptTranslation();
         return;
       }
       if (status.status === "succeeded" && status.verdict !== "blocked" && status.preparedId) {
@@ -873,7 +879,6 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         await persistPendingCompilation(null);
         setCompileNotice(completionNotice());
         await refreshCompilationProjection();
-        queueCompiledPromptTranslation();
         return;
       }
       if (["succeeded", "blocked", "interrupted", "failed"].includes(status.status)) await persistPendingCompilation(null);
@@ -1153,7 +1158,16 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       })();
     };
     window.addEventListener("production-workspace-command", receive);
-    return () => window.removeEventListener("production-workspace-command", receive);
+    // 同一套能力注册给 store：画布页的「准备节点」目录按钮通过它执行，避免两处各写一套。
+    useProductionWorkspaceStore.getState().setCommandRunner(async (command) => {
+      // command 是 sendCommand 命令的子集（prepare / arrange / edit），原样透传即可。
+      await sendCommand({ ...command, operationId: nanoid(), expectedRevision: production.revision, status: "unknown" });
+      await refreshRemote();
+    });
+    return () => {
+      window.removeEventListener("production-workspace-command", receive);
+      useProductionWorkspaceStore.getState().setCommandRunner(null);
+    };
   }, [embedded, workspace, owner?.kind, owner?.id, production, draftKey, busy, refreshRemote, message, t]);
 
   useEffect(() => {
@@ -1428,7 +1442,8 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     setReadiness(previous => previous && previous.revision > ready.readiness.revision ? previous : ready.readiness);
   };
 
-  const startRun = async (targets: string[], scope: "selected" | "all_ready" = "selected") => {
+  const startRun = async (targets: string[], scope: "selected" | "all_ready" = "selected", productionSnapshot = production) => {
+    const production = productionSnapshot;
     if (!production || !targets.length) return;
     if (startingRunRef.current) return;
     if (pendingRunStartRef.current) return void message.warning(t("director.workspace.runReceiptUnknown"));
@@ -1491,7 +1506,43 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     finally { startingRunRef.current = false; }
   };
 
-  const generateClip = (clipId: string) => { void startRun([`segment:${clipId}`]); };
+  const generateClip = async (clipId: string) => {
+    if (!canvasId || preparingClipRef.current || startingRunRef.current || pendingRunStartRef.current) return;
+    preparingClipRef.current = true;
+    setPreparingClip(true);
+    try {
+      await flushCanvasProjectBeforeGeneration(canvasId);
+      const [saved, canvas] = await Promise.all([fetchEpisodeProduction(target), fetchBackendProject(canvasId)]);
+      const director = saved.production.draft.director;
+      if (!director) throw new Error(t("director.workspace.engineUnavailable"));
+      const clip = productionSegments(saved.production).find(item => String(item.id) === clipId);
+      if (!clip) throw new Error(t("director.atomic.clipNodeUnboundReason"));
+      if (clip.locked === true) throw new Error(t("director.atomic.clipLocked"));
+      const scopeIds = new Set([clipId, ...segmentShotIds(clip)]);
+      if (briefDraft !== String(director.source.brief || "") || dirtySourceDraftKeys.some(key => key.split(":").slice(1).some(part => scopeIds.has(part)))) throw new Error(t("productionHub.follow.saveEditsFirst"));
+      const matches = productionSegmentRuntimeMatches(canvas.project.nodes as any, clipId, productionContext?.owner);
+      if (matches.length !== 1) throw new Error(t("director.atomic.clipNodeUnboundReason"));
+      const match = matches[0];
+      if (["queued", "running", "awaiting_confirmation"].includes(String(match.segment.status))) throw new Error(t("director.atomic.editClipRunning"));
+      const artifact = director.artifacts.find(item => item.kind === "h3" && item.targetId === clipId);
+      const currentPrompt = String(match.segment.prompt || "");
+      // Only translate the unmodified compiler output. An existing translation or
+      // manual canvas prompt remains the user's current execution input.
+      let translatedPrompt: string | undefined;
+      if (artifact?.prompt?.trim() && currentPrompt === artifact.prompt) {
+        const [translated] = await translateCompiledH3Prompts([{ id: clipId, text: artifact.prompt }]);
+        if (translated.translatedText !== currentPrompt) translatedPrompt = translated.translatedText;
+      }
+      const latest = (await fetchEpisodeProduction(target)).production;
+      if (latest.draft.director?.sourceHash !== director.sourceHash) throw new Error(t("director.atomic.editClipSourceChanged"));
+      if (translatedPrompt) await applyTranslatedCompiledPrompts([{
+          targetId: clipId, nodeId: match.node.id, segmentId: String(match.segment.id),
+          sourcePrompt: artifact!.prompt!, expectedCanvasPrompt: currentPrompt, translatedPrompt,
+        }]);
+      await startRun([`segment:${clipId}`], "selected", latest);
+    } catch (error) { fail(error); }
+    finally { preparingClipRef.current = false; setPreparingClip(false); }
+  };
 
   const recoverRunStart = async () => {
     const request = pendingRunStartRef.current;
@@ -1730,6 +1781,19 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     if (!saved && lockOnly && skipProductionRefreshRevision.current === expectedRefreshRevision) skipProductionRefreshRevision.current = null;
     return saved;
   };
+  /** 批量 Clip 锁定专用：所有补丁都是 lockOnly，一次 edit 提交，避免逐段提交撞 expectedRevision。 */
+  const patchSources = async (patches: Array<{ entity: "segment"; id: string; patch: Record<string, unknown> }>) => {
+    if (!patches.length) return true;
+    const lockOnly = patches.every(({ patch }) => Object.keys(patch).length > 0 && Object.keys(patch).every(key => key === "locked" || key === "preLockNoiseSeedMode"));
+    // 内部调用方恒为锁定补丁；一旦混入其它字段，宁可拒绝也不静默跳过 clipRefreshOps。
+    if (!lockOnly) return false;
+    const expectedRefreshRevision = production ? production.revision + 1 : null;
+    if (expectedRefreshRevision !== null) skipProductionRefreshRevision.current = expectedRefreshRevision;
+    const ops: ProductionOperation[] = patches.map(({ entity, id, patch }) => ({ type: "patch_director_source", entity, id, patch }));
+    const saved = await edit(ops);
+    if (!saved && skipProductionRefreshRevision.current === expectedRefreshRevision) skipProductionRefreshRevision.current = null;
+    return saved;
+  };
   const editCanvasClip = async (nodeId: string, segmentId: string, patch: Record<string, unknown>, refreshProduction = true) => {
     if (!canvasId) return false;
     try {
@@ -1742,6 +1806,34 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       }) });
       await flushCanvasProjectBeforeGeneration(canvasId);
       if (refreshProduction) await refreshRemote(); return true;
+    } catch (error) { fail(error); return false; }
+  };
+  /** 批量画布 H3 参数写入：一次 updateProject + 一次 flush，避免逐段保存产生 N 次往返。 */
+  const editCanvasClips = async (edits: Array<{ nodeId: string; segmentId: string; patch: Record<string, unknown> }>, refreshProduction = false) => {
+    if (!canvasId) return false;
+    if (!edits.length) return true;
+    try {
+      const project = await ensureCanvasProjectLoaded(canvasId);
+      const byNode = new Map<string, Map<string, Record<string, unknown>>>();
+      for (const edit of edits) {
+        const key = String(edit.nodeId);
+        const segments = byNode.get(key) || new Map<string, Record<string, unknown>>();
+        segments.set(String(edit.segmentId), edit.patch);
+        byNode.set(key, segments);
+      }
+      useCanvasStore.getState().updateProject(canvasId, { nodes: project.nodes.map(node => {
+        const patches = byNode.get(String(node.id));
+        if (!patches) return node;
+        const metadata = node.metadata as Record<string, unknown>;
+        const segments = (metadata.segments as Record<string, unknown>[] || []).map(segment => {
+          const patch = patches.get(String(segment.id));
+          return patch ? { ...segment, ...withH3ParameterEdits(segment, patch) } : segment;
+        });
+        return { ...node, metadata: { ...metadata, segments } as typeof node.metadata };
+      }) });
+      await flushCanvasProjectBeforeGeneration(canvasId);
+      if (refreshProduction) await refreshRemote();
+      return true;
     } catch (error) { fail(error); return false; }
   };
   const applyTranslatedCompiledPrompts = async (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => {
@@ -2070,12 +2162,50 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
     } catch (error) { fail(error); return false; }
     finally { setBusy(false); }
   };
+  /** Calibrate subtitle timing against the real generated video audio; never writes director.source. */
+  const calibrateSubtitles = async (clips: Array<{ segmentId: string; storageKey: string }>) => {
+    const director = production?.draft.director;
+    if (!director || !clips.length || calibrating) return;
+    const sourceHash = String(director.sourceHash || "");
+    if (!sourceHash) { message.warning(t("director.workspace.calibrationMissingSource")); return; }
+    const controller = new AbortController();
+    calibrationAbortRef.current = controller;
+    setCalibrating(true);
+    setCalibrationProgress(0);
+    try {
+      const result = await runSubtitleTranscribe({
+        storageKeys: clips.map(clip => clip.storageKey),
+        clientTaskId: `subtitle-calibration-${canvasId}-${sourceHash}-${Date.now()}`,
+      }, controller.signal, setCalibrationProgress);
+      const bindings = buildCalibrationBindings(director.source, clips);
+      const { tracks, report } = calibrateSubtitleTracks(productionSubtitleTracks(director.source), result.transcripts, bindings);
+      const next: SubtitleCalibration = {
+        version: 1, sourceHash, createdAt: new Date().toISOString(),
+        model: result.model, language: result.language, tracks, report,
+      };
+      setCalibration(next);
+      writeSubtitleCalibration(canvasId, sourceHash, next);
+      if (!report.calibrated) message.warning(t("director.workspace.calibrationNoMatch"));
+      else message.success(t("director.workspace.calibrationDone", { calibrated: report.calibrated, total: report.totalCues }));
+    } catch (error) {
+      if (!controller.signal.aborted) fail(error);
+    } finally {
+      calibrationAbortRef.current = null;
+      setCalibrating(false);
+    }
+  };
+  const cancelCalibration = () => calibrationAbortRef.current?.abort();
+  const dropCalibration = () => {
+    setCalibration(null);
+    clearSubtitleCalibration(canvasId);
+  };
+
   const exportBundle = async (includeGeneratedMedia: boolean) => {
     if (!production || !readiness) return;
     setExporting(true);
     try {
       const owner = productionOwner;
-      const bundle = await exportAchengDeliveryBundle({ owner, title, projectId: canvasId, production, readiness, canvasNodes, includeGeneratedMedia });
+      const bundle = await exportAchengDeliveryBundle({ owner, title, projectId: canvasId, production, readiness, canvasNodes, includeGeneratedMedia, calibration });
       const url = URL.createObjectURL(bundle);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -2231,9 +2361,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
         <div className="mx-auto max-w-[1440px]">
           <ProductionWorkspaceBreadcrumb items={[{ id: "projects", label: t("director.workspaceHierarchy.projects"), onSelect: () => navigate("/projects") }, { id: `drama:${series.id}`, label: seriesTitle }]} />
           <div className="mb-7 flex flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-medium tracking-tight sm:text-[26px]">{seriesTitle}</h1><p className="mt-2 text-xs text-muted-foreground">{t(episodesUnavailable ? "director.atomic.episodesUnavailable" : "director.atomic.emptyDrama")}</p></div></div>
-          {!episodesUnavailable && <div className="grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8">
+          {!episodesUnavailable && <div className="min-w-0">
+            {/* 这一屏的导航是横向 Tab（horizontal），不能再塞进 220px 左栏：四个入口放不下会溢出成
+                一条横向滚动条，右半边还空着，看着像坏了。横排占满整行、正文放下面才是对的。 */}
             <ProductionWorkspaceNavigation groups={seriesNav} selectedId={`series:${currentView}`} horizontal onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
-            <section className="min-w-0"><DramaManagePanel navigationTitleVisible dramaId={series.id} view={currentView} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /></section>
+            <section className="mt-5 min-w-0"><SeriesWorkspaceBody navigationTitleVisible dramaId={series.id} view={currentView} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /></section>
           </div>}
         </div>
       </main>;
@@ -2303,6 +2435,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} data-director-workspace data-production-workspace-shell={!embedded || undefined} data-shot-workspace-shell={!embedded && workspace === "shots" || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-5 text-foreground sm:px-6 lg:px-10 lg:py-7"}>
       {loadError && <div className="mx-auto w-full max-w-[1440px]"><Alert className="mb-5" type="warning" showIcon message={t("director.loadFailed")} description={loadError} /></div>}
       {notice && <div className="mx-auto w-full max-w-[1440px]">{notice}</div>}
+      <WorkspaceViewSwitcher mode={canvasHost?.visible ? "canvas" : "production"} onSelect={next => { if (next === "canvas") void openWorkspaceCanvas(); else canvasHost?.collapse?.(); }} />
     <div className="mx-auto max-w-[1440px]">
       <ProductionWorkspaceBreadcrumb items={breadcrumbs} />
       {!embedded && <div data-production-workspace-heading className="mb-7 flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
@@ -2329,7 +2462,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
             navigate(`${next.pathname}${next.search}`);
           } catch (error) { message.error(error instanceof Error ? error.message : String(error)); }
         }} />}</div>
-        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto"><Tag data-production-save-state={saveState} color={saveState === "saved" ? undefined : saveState === "dirty" ? "orange" : "red"} title={saveStateDetail}>{t(`drama.production.saveState.${saveState}`)}</Tag>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}{canvasId && <Button icon={<ExternalLink className="size-4" />} onClick={() => void openWorkspaceCanvas()}>{t(canvasHost?.hasCanvas ? "director.canvasOverlay.expand" : "drama.production.openCanvas")}</Button>}</div>
+        <div className="flex w-full flex-wrap items-center gap-3 sm:w-auto"><Tag data-production-save-state={saveState} color={saveState === "saved" ? undefined : saveState === "dirty" ? "orange" : "red"} title={saveStateDetail}>{t(`drama.production.saveState.${saveState}`)}</Tag>{production.publishedVersion > 0 && <Tag>{t("director.studio.published", { number: production.publishedVersion })}</Tag>}</div>
       </div>}
       {agentError && <Alert className="mb-4" type="warning" showIcon message={agentError} closable onClose={() => setAgentError("")} />}
       {production.storageFormat === "v2-projection-migration-required" && <Alert className="mb-4" type="warning" showIcon message={t("director.generation.sourceStorageMigration")} />}
@@ -2340,7 +2473,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
         <ProductionWorkspaceNavigation groups={navigationGroupsWithSeriesSubtabs} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
         <section data-production-workspace-content={!embedded || undefined} aria-label={workspaceLabel} className="min-w-0">
-          {workspace === "series" && series ? <DramaManagePanel navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
+          {workspace === "series" && series ? <SeriesWorkspaceBody navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
             {embedded && workspace === "assets" && <p className="mb-5 text-xs leading-5 text-muted-foreground" data-production-asset-scope={scope}>{t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`)}</p>}
             {embedded && workspace === "assets" && (!/^(asset|frame):/.test(routeTarget) || productionContext?.role === "shared-assets") && <SharedAssetsPicker />}
             <DirectorPanel
@@ -2350,7 +2483,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               canvasNodes={canvasNodes} sharedCanvasNodes={sharedCanvasNodes?.nodes} sharedCanvasId={sharedCanvasNodes?.id} versions={versions} busy={busy || readOnly} readOnly={readOnly} onArchive={productionOwner.kind === "episode" ? archiveProduction : undefined} canvasId={canvasId} canvasRole={productionContext?.role || (projectId ? "ordinary" : "episode")} focusTarget={routeTarget}
               sourceDrafts={sourceDrafts} onSourceDraftChange={setSourceDraft}
               briefDraft={briefDraft} onBriefDraftChange={setBriefDraft}
-              onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onAdoptDirectorFields={adoptDirectorFields} onPatch={patchSource} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={bindAsset}
+              onBrief={saveBrief} onEditCanvasClip={editCanvasClip} onEditCanvasClips={editCanvasClips} onPatch={patchSource} onPatchMany={patchSources} onAdoptDirectorFields={adoptDirectorFields} onAdoptClipStyle={adoptClipStyle} onRegroup={regroupSegment} onWorkflow={setWorkflow} onSettings={patch => void edit([{ type: 'set_settings', patch }])} onBindAsset={bindAsset}
               onSplitScene={productionOwner.kind === "episode" ? operation => edit([operation]) : undefined}
               onPrepareEntities={async () => {
                 if (!production.draft.director || busy || pendingCommandRef.current) return;
@@ -2415,7 +2548,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               onOpenSharedAsset={(assetId, title) => void openSharedAsset(assetId, title).catch(fail)} onPromoteExistingSharedAsset={(assetId, title) => void promoteExistingSharedAsset(assetId, title).catch(fail)}
               onBoundary={setBoundary} onH3Boundary={setH3Boundary} onPublish={() => void publish()} onSaveContinuity={saveContinuity} onCheckContinuity={checkContinuity} onContinuitySnapshot={changeContinuitySnapshot}
               onReplace={value => void replaceDirector(value)} onAskDirector={askDirectorWithFeedback} onNavigate={navigateWorkspace}
-              onCompile={(sceneId, targetId, targetIds) => void runProductionCompile(sceneId, targetId, targetIds)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} autoTranslateCompilation={autoTranslateCompilation} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
+              onCompile={(sceneId, targetId, targetIds) => void runProductionCompile(sceneId, targetId, targetIds)} onApplyTranslatedPrompts={applyTranslatedCompiledPrompts} compileBusy={compiling} compilePending={Boolean(pendingCompilation)} compileError={compileError} compileNotice={compileNotice} compileDiagnostics={compileDiagnostics} compileTargets={compileTargets}
               onLocateTarget={(kind, id) => {
                 if (kind === "shot") { navigateWorkspace("shots", { kind, id }); return; }
                  const runtime = kind === "segment" ? clipRuntime(id) : undefined;
@@ -2431,8 +2564,10 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
               }}
               onAnswerDecision={answerDecision}
               onExport={exportBundle} exporting={exporting}
+              calibration={calibration} calibrating={calibrating} calibrationProgress={calibrationProgress}
+              onCalibrateSubtitles={clips => void calibrateSubtitles(clips)} onCancelCalibration={cancelCalibration} onClearCalibration={dropCalibration}
               onStart={(targets, scope) => void startRun(targets, scope)} onGenerateClip={productionOwner.kind === "scene" ? undefined : generateClip} onDeleteClip={deleteClip} onPause={runId => void pauseRun(runId)} onResume={runId => void resumeRun(runId)} onRetire={retireRun}
-              runStartPending={Boolean(pendingRunStart)} activeTargetIds={activeTargetIds}
+              runStartPending={Boolean(pendingRunStart) || preparingClip} activeTargetIds={activeTargetIds}
               onRestore={restoreVersion} onSceneCommand={sendSceneCommand} sceneCommandPending={Boolean(pendingCommand || pendingRunStart)} onRefresh={() => void load(() => true, true).catch(fail)}
             />
             </>}

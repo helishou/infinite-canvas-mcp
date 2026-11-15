@@ -3,7 +3,7 @@ import test from "node:test";
 import path from "node:path";
 import os from "node:os";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { ComfyUiBackend, type ComfyUiDeps } from "./bridge.js";
+import { ComfyUiBackend, type ComfyUiDeps } from "@basketikun/media-engine/comfyui/bridge";
 
 test("LoRA catalog discovers nested local files while ComfyUI is offline and rescans changes", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "h3-lora-catalog-"));

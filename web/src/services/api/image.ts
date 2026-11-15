@@ -1071,6 +1071,11 @@ export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKe
 }
 
 export async function fetchChannelModels(channel: ModelChannel) {
+    if (channel.kind === "hermes") {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ data?: string[] }>("GET", "/agent/codex/models?source=hermes-catalog");
+        return (response.data || []).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    }
     if (channel.kind === "codex-cli") {
         const { request } = await import("@/services/backend-api");
         const response = await request<{ data?: Array<{ model: string; hidden?: boolean }> }>("GET", "/agent/codex/models?source=codex");

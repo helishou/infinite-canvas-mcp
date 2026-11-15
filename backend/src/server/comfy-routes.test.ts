@@ -3,7 +3,7 @@ import test from "node:test";
 import type { AddressInfo } from "node:net";
 import express from "express";
 
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { Stores } from "../stores/types.js";
 import type { ResolvedConfig } from "../config.js";
 import { registerComfyRoutes } from "./comfy-routes.js";

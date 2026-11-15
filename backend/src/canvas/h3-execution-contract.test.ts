@@ -4,9 +4,9 @@ import { BackendDatabase } from '../db.js';
 import { createStores } from '../stores/index.js';
 import { BackendEventBus } from '../events.js';
 import { CanvasH3Runner } from './h3-runner.js';
-import { resolveH3Runtime, estimateH3Dimensions, h3StoryboardIssues } from './h3-params.js';
-import { assertH3WorkflowContract, compareH3MediaSpecification } from './h3-execution-contract.js';
-import { resolveNanFengWorkflowParams } from '../comfyui/bridge.js';
+import { resolveH3Runtime, estimateH3Dimensions, h3StoryboardIssues } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { assertH3WorkflowContract, compareH3MediaSpecification } from '@basketikun/media-engine/canvas/h3-execution-contract';
+import { resolveNanFengWorkflowParams } from '@basketikun/media-engine/comfyui/bridge';
 
 function fixture(t: test.TestContext, manualClip: Record<string, unknown> = {}) {
     const db = new BackendDatabase(':memory:');
@@ -171,7 +171,7 @@ test('one grid step of deviation is a specification mismatch, not a rounding tol
 });
 
 test('展开流合同沿释放屏障核对名字，并且仍然能抓到真实偏差', async () => {
-    const { buildExpandedNanFengV10Workflow } = await import('../comfyui/bridge.js');
+    const { buildExpandedNanFengV10Workflow } = await import('@basketikun/media-engine/comfyui/bridge');
     const expected = {
         modelName: 'H3/model.safetensors', textEncoder: 'te.safetensors', videoVae: 'H3/video.safetensors', audioVae: 'audio.safetensors',
         aspectRatio: '16:9', megapixels: 0.4, sampler: 'er_sde', scheduler: 'simple', latentUpscaleEnabled: false,
@@ -300,7 +300,7 @@ test("自选视频模型忽略保存的 H3 续写与二采开关，也不进入�
 });
 
 test('确认阶段的展开流合同：快照承载的字段不再误报，sigma 真偏差依旧拦得住', async () => {
-    const { buildExpandedNanFengV10Workflow, splitH3Confirmation } = await import('../comfyui/bridge.js');
+    const { buildExpandedNanFengV10Workflow, splitH3Confirmation } = await import('@basketikun/media-engine/comfyui/bridge');
     const sigma = '0.9, 0.85, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0';
     const expected = {
         modelName: 'H3/model.safetensors', textEncoder: 'te.safetensors', videoVae: 'H3/video.safetensors', audioVae: 'audio.safetensors',
@@ -329,7 +329,7 @@ test('确认阶段的展开流合同：快照承载的字段不再误报，sigma
 });
 
 test('媒体核验拿不到 ffprobe 时记为 unverified，不能把已产出的成片判成失败', async () => {
-    const { inspectH3Result } = await import('./h3-execution-contract.js');
+    const { inspectH3Result } = await import('@basketikun/media-engine/canvas/h3-execution-contract');
     // 文件不存在 / 探测工具缺失，都属于「无法核验」而不是「规格不符」。
     const media = { meta: () => ({ filePath: '/nonexistent/does-not-exist.mp4' }) } as never;
     const result = await inspectH3Result({ media: [{ storageKey: 'video:x', mimeType: 'video/mp4' }] }, { h3ExecutionContract: {} }, media);
@@ -338,4 +338,22 @@ test('媒体核验拿不到 ffprobe 时记为 unverified，不能把已产出的
     assert.ok(specification?.issues?.length, '必须保留原因，便于排查是工具缺失还是文件不可读');
     // 产物本身不能被丢掉：这是「已生成但未核验」，下游仍要能拿到视频。
     assert.deepEqual((result as { media?: unknown[] }).media, [{ storageKey: 'video:x', mimeType: 'video/mp4' }]);
+});
+
+test('预检与提交必须用同一份选择：forceRegenerate 的 planHash 现在可以直接提交', t => {
+    const { stores, runner } = fixture(t);
+    const input = { projectId: 'p', nodeId: 'n', segmentId: 'a' };
+    const plain = runner.preview(input);
+    const forced = runner.preview({ ...input, forceRegenerate: true });
+    // 计划身份要区分「强制重跑」和「可复用缓存」，否则强制请求会被静默降级成缓存复用。
+    assert.notEqual(forced.planHash, plain.planHash);
+    // 目标集仍参与哈希：换一个 Clip 预检必须换一个身份。
+    assert.notEqual(runner.preview({ ...input, segmentId: 'b' }).planHash, plain.planHash);
+    // 选择不一致仍然必须被拦下——这才是预检真正要保护的语义。
+    assert.throws(() => runner.start({ ...input, expectedPlanHash: forced.planHash }), /预检已过期/);
+    t.mock.method(runner as any, 'execute', async () => {});
+    // h3_run_clip 现在会把 runFromCurrent / skipCompleted / forceRegenerate 一起转发；
+    // 旧版工具没有这些入参，forceRegenerate 的预检哈希永远提交不上（STALE_H3_PREVIEW）。
+    const task = runner.start({ ...input, forceRegenerate: true, expectedPlanHash: forced.planHash }, 'force-preview-run');
+    assert.equal(stores.tasks.get(task.id)!.status, 'queued');
 });

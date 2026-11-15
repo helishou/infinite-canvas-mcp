@@ -13,7 +13,7 @@ process.env.INFINITE_CANVAS_MEDIA_DIR = path.join(testRoot, "media");
 after(() => rm(testRoot, { recursive: true, force: true }));
 const { BackendDatabase } = await import("../db.js");
 const { createStores } = await import("../stores/index.js");
-const { VideoConcatBackend } = await import("../runtime/video-concat.js");
+const { VideoConcatBackend } = await import("@basketikun/media-engine/runtime/video-concat");
 const { CanvasVideoDispatcher, CANVAS_VIDEO_TRIM_MODEL } = await import("./video-dispatcher.js");
 const { prepareCanvasVideoTrimTarget } = await import("./generation-target.js");
 

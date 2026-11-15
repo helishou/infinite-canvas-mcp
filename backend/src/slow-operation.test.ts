@@ -3,7 +3,7 @@ import test from "node:test";
 
 // 模块在导入时读取阈值，先设短阈值再动态导入，避免测试真等 1 秒。
 process.env.INFINITE_CANVAS_SLOW_OPERATION_MS = "120";
-const { safeOperationPath, watchHttpOperation, startRuntimeMonitor } = await import("./slow-operation.js");
+const { safeOperationPath, watchHttpOperation, startRuntimeMonitor } = await import("@basketikun/media-engine/runtime/slow-operation");
 
 type Warning = { message: string; details: Record<string, unknown> };
 

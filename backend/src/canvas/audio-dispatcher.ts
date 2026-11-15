@@ -1,11 +1,11 @@
 import crypto from "node:crypto";
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
-import type { DirectAudioBackend, DirectAudioInput } from "../runtime/direct-audio.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { DirectAudioBackend, DirectAudioInput } from "@basketikun/media-engine/runtime/direct-audio";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { Stores } from "../stores/types.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasAudioGenerationInput = DirectAudioInput & {
@@ -112,8 +112,9 @@ export class CanvasAudioDispatcher {
         const childId = `audio-child-${task.id}`;
         this.children.set(task.id, childId);
         try {
-            const child = input.executor === "comfyui"
-                ? await this.comfy!.run("indextts-2.5", { prompt: input.prompt, referenceAudio: input.referenceAudio }, { ...(input.params || {}), speed: input.speed }, undefined, childId)
+            const comfy = input.executor === "comfyui" ? comfyAudioRequest(input) : null;
+            const child = comfy
+                ? await this.comfy!.run(comfy.preset, comfy.input, comfy.params, undefined, childId)
                 : this.directAudio!.run(input, childId, { parentTaskId: task.id, channelId: input.channelId });
             for (;;) {
                 const current = this.stores.tasks.get(child.id);
@@ -172,3 +173,28 @@ function bindSource(project: CanvasProject, input: CanvasAudioGenerationInput, t
 }
 function firstMedia(task: RuntimeTask) { const values = Array.isArray(task.result?.media) ? task.result!.media : []; const media = values[0]; if (!media || typeof media !== "object") throw new Error("音频任务完成但没有返回媒体"); return media as Record<string, unknown>; }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
+
+/** 画布音频模型 → ComfyUI preset。Drama3 用 T8 session（文本 + direction），其余沿用 IndexTTS 参考音频克隆。 */
+function audioPreset(input: CanvasAudioGenerationInput) {
+    return /drama3/i.test(String(input.model || "")) ? "drama3-tts" : "indextts-2.5";
+}
+
+function comfyAudioRequest(input: CanvasAudioGenerationInput) {
+    const preset = audioPreset(input);
+    if (preset === "drama3-tts") {
+        // 只把真正给了值的键带进 params，免得 undefined 键污染既有断言/日志
+        const params: Record<string, unknown> = { ...(input.params || {}) };
+        // 工作流字段写到 metadata.comfyParams，键名就是 field.id（voice / direction）
+        const voice = input.params?.voice ?? input.voice;
+        const direction = input.params?.direction ?? input.instructions;
+        if (typeof voice === "string" && voice) params.voice = voice;
+        if (typeof direction === "string" && direction) params.direction = direction;
+        // 连了参考音频 = 用这段音频现场克隆自定义音色；没连就用 session 文件
+        return { preset, input: { prompt: input.prompt, ...(input.referenceAudio ? { referenceAudio: input.referenceAudio } : {}) }, params };
+    }
+    return {
+        preset,
+        input: { prompt: input.prompt, referenceAudio: input.referenceAudio },
+        params: { ...(input.params || {}), speed: input.speed },
+    };
+}

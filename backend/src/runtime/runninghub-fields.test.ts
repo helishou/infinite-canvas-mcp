@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { discoverRunningHubFields, patchRunningHubWorkflow, RunningHubBackend } from "./runninghub.js";
+import { discoverRunningHubFields, patchRunningHubWorkflow, RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import type { SettingStore, TaskStore } from "../stores/types.js";
 
 /** 只验证映射校验路径，不触网也不建任务。 */
@@ -81,7 +81,7 @@ test("老档案里的 source=param 降级成 constant，档案不会整个读不
 });
 
 test("正向与负面提示词各取自己的值，不被同一个 input.prompt 覆盖", async () => {
-    const { resolveFieldsForTest } = await import("./runninghub.js");
+    const { resolveFieldsForTest } = await import("@basketikun/media-engine/runtime/runninghub");
     const task = {
         input: { prompt: "全局提示词" },
         params: {
@@ -99,7 +99,7 @@ test("正向与负面提示词各取自己的值，不被同一个 input.prompt 
 });
 
 test("字段没单独给值时才退回全局 input.prompt", async () => {
-    const { resolveFieldsForTest } = await import("./runninghub.js");
+    const { resolveFieldsForTest } = await import("@basketikun/media-engine/runtime/runninghub");
     const task = {
         input: { prompt: "全局提示词" },
         params: {
@@ -112,7 +112,7 @@ test("字段没单独给值时才退回全局 input.prompt", async () => {
 });
 
 test("平台拒绝时给出可操作中文提示，而不是透传英文错误码", async () => {
-    const { checkResponseForTest } = await import("./runninghub.js");
+    const { checkResponseForTest } = await import("@basketikun/media-engine/runtime/runninghub");
     const config = { apiKey: "", walletApiKey: "" } as never;
     // 810：工作流存在但没保存/没运行过
     assert.throws(

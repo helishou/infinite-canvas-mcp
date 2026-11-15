@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 
 export function WorkspaceSecondaryNav({ workspace, activeSlug }: { workspace: SecondaryWorkspace; activeSlug?: SecondaryNavigationSlug }) {
     const { t } = useTranslation();
-    const hint = workspace === "generate" ? "generationHint" : workspace === "resources" ? "resourcesHint" : undefined;
+    const hint = workspace === "resources" ? "resourcesHint" : undefined;
 
     return (
         <div className="border-t border-border/60 bg-card/40">

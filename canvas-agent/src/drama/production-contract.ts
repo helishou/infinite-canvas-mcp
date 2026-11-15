@@ -702,11 +702,57 @@ export const productionSettingsSchema = z.object({
     }).optional(),
 });
 
+/** 选题卡：开写前要定的题材、受众与卖点；只有策划含义，不参与任何制作真值。 */
+export const dramaTopicSchema = z.object({
+    /** 题材，最多两个（与导演台一致的「最多 2 个」口径）。 */
+    themes: z.array(z.string()).default([]),
+    /** 受众性别：不限 / 女性 / 男性。 */
+    gender: z.string().default(""),
+    /** 受众年龄：全龄 / 幼儿 / 儿童 / 少年 / 青年 / 中年 / 老年。 */
+    age: z.string().default(""),
+    /** 调性，可多选：甜 / 虐 / 甜虐 / 爽 / 燃 / 搞笑 / 暗黑 / 温情。 */
+    tones: z.array(z.string()).default([]),
+    /** 结局：HE / BE / OE。 */
+    ending: z.string().default(""),
+    /** 语言：中文 / English。 */
+    language: z.string().default(""),
+    /** 集数与每集时长；0 表示交给模型决定。 */
+    episodes: z.number().int().min(0).max(999).default(0),
+    episodeMinutes: z.number().min(0).max(180).default(0),
+    /** 画风：单选，后续出图沿用。 */
+    artStyle: z.string().default(""),
+    theme: z.string().default(""),
+    audience: z.string().default(""),
+    logline: z.string().default(""),
+    sellingPoint: z.string().default(""),
+    differentiation: z.string().default(""),
+}).strict();
+export type DramaTopic = z.infer<typeof dramaTopicSchema>;
+const defaultDramaTopic: DramaTopic = { themes: [], gender: "", age: "", tones: [], ending: "", language: "", episodes: 0, episodeMinutes: 0, artStyle: "", theme: "", audience: "", logline: "", sellingPoint: "", differentiation: "" };
+
+/** 大纲补充段：故事线仍存 folder.outline，这里只补它没有的三段，不复制第二份大纲。 */
+export const dramaOutlineDetailSchema = z.object({
+    worldContext: z.string().default(""),
+    threeActs: z.array(z.string()).default([]),
+    ending: z.string().default(""),
+    /** 大纲里自己写定的人物表；共享制作的角色登记都没填时用它兜底。 */
+    characters: z.array(z.string()).default([]),
+}).strict();
+export type DramaOutlineDetail = z.infer<typeof dramaOutlineDetailSchema>;
+const defaultDramaOutlineDetail: DramaOutlineDetail = { worldContext: "", threeActs: [], ending: "", characters: [] };
+
 export const dramaProductionPlanSchema = z.object({
     backgroundMusicEnabled: productionSettingsSchema.shape.backgroundMusicEnabled,
     parallelScenes: productionSettingsSchema.shape.parallelScenes,
     reviewPolicy: directorReviewPolicySchema.default(defaultDirectorReviewPolicy),
     requirements: z.string().default(""),
+    /** 原剧本：剧目级原文（粘贴或导入的完整剧本/小说正文），供改编与拆集引用。 */
+    sourceScript: z.string().default(""),
+    topic: dramaTopicSchema.default(defaultDramaTopic),
+    outlineDetail: dramaOutlineDetailSchema.default(defaultDramaOutlineDetail),
+    /** 大纲生成用的文本模型；空表示用设置里的默认文本模型。 */
+    outlineModel: z.string().default(""),
+
     imageModel: z.string().default(""),
     imageModelsByKind: productionSettingsSchema.shape.imageModelsByKind,
     /** Initial style image node selected during drama setup; transferred into the shared director source once it exists. */
@@ -889,4 +935,17 @@ export function emptyEpisodeProduction(): EpisodeProductionData {
 export function shotStoryboardKeyframe<T extends { anchor?: unknown; requiredForSubmission?: unknown }>(frames: readonly T[]): T | undefined {
     const submitted = frames.filter(frame => frame.requiredForSubmission === true && frame.anchor !== "composition");
     return submitted.find(frame => frame.anchor === "opening") || submitted[0];
+}
+
+/** 分集简介长到这个字数，说明它本身就是一份完整本集剧本/需求，不再算「待写」。 */
+export const SCRIPT_SYNOPSIS_THRESHOLD = 200;
+
+/**
+ * 这一集算不算已有剧本大纲：优先看 fullPlot；
+ * 老数据把整份剧本塞在 synopsis 里，够长也算写过，避免重复生成覆盖。
+ * 网页的「剧本」步骤与 agent 的 drama_get_planning 共用这一条判定。
+ */
+export function episodeHasScript(episode: { fullPlot?: string | null; synopsis?: string | null }): boolean {
+    if (String(episode.fullPlot || "").trim()) return true;
+    return String(episode.synopsis || "").trim().length >= SCRIPT_SYNOPSIS_THRESHOLD;
 }

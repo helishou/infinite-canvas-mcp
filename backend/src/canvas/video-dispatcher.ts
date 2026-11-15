@@ -2,20 +2,21 @@ import crypto from "node:crypto";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import type { RunningHubBackend } from "../runtime/runninghub.js";
-import { validateVideoTrimRange, type VideoConcatBackend } from "../runtime/video-concat.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
+import { validateVideoTrimRange, type VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
 import type { Stores, TaskStore } from "../stores/types.js";
-import type { WorkflowExecutor } from "../workflows/executor.js";
-import { convertComfyWorkflowToApi } from "../workflows/comfyui-workflow-conversion.js";
-import type { WorkflowStore } from "../workflows/store.js";
+import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
+import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
+import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
 import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowBindingForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
-import { DirectVideoBackend } from "../runtime/direct-video.js";
+import { DirectVideoBackend } from "@basketikun/media-engine/runtime/direct-video";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
-import { injectDurationTarget, parseWorkflowDurationTarget, readDurationSeconds, resolveDurationValue } from "../workflows/duration.js";
+import { injectDurationTarget, parseWorkflowDurationTarget, readDurationSeconds, resolveDurationValue } from "@basketikun/media-engine/workflows/duration";
+import { CanvasEngineClient, importEngineMedia } from "./engine-client.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
 export const CANVAS_VIDEO_TRIM_MODEL = "__local_video_trim__";
@@ -51,10 +52,14 @@ type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "work
 /** Backend 权威的普通视频任务；H3 连续 Clip 仍由专用 runner 管理。 */
 export class CanvasVideoDispatcher {
     private readonly children = new Map<string, Set<string>>();
+    /** 本地子任务 id → 引擎任务 id（配置了执行引擎时才有值）。 */
+    private readonly engineTasks = new Map<string, string>();
     constructor(private readonly stores: Stores, private readonly comfy: ComfyUiBackend, private readonly workflows: WorkflowStore,
         private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
         /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
-        private readonly runningHub?: RunningHubBackend) {}
+        private readonly runningHub?: RunningHubBackend,
+        /** 可选注入：配置了独立执行引擎时，本地工作流视频执行改走 `/v1/videos`。 */
+        private readonly engineClient?: CanvasEngineClient) {}
 
     /** H3 父日志记录自选模型实际工作流输入，沿用执行器字段过滤和显示名映射。 */
     generationSettings(input: CanvasVideoGenerationInput) {
@@ -186,6 +191,8 @@ export class CanvasVideoDispatcher {
         const task = this.stores.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
         for (const child of this.children.get(id) || []) {
+            const engineTaskId = this.engineTasks.get(child);
+            if (engineTaskId && this.engineClient) void this.engineClient.cancel(engineTaskId);
             try { this.workflowExecutor.cancel(child); } catch {}
             try { this.comfy.cancel(child); } catch {}
             try { this.concat.cancel(child); } catch {}
@@ -338,6 +345,9 @@ export class CanvasVideoDispatcher {
                 return firstMedia(await waitForTask(this.stores.tasks, child.id));
             } finally { this.untrack(taskId, childId); }
         }
+        if (this.engineClient && plan.workflow && !plan.input.comfyUrl) {
+            return this.dispatchVideoViaEngine(plan, taskId);
+        }
         const detail = await this.workflows.get(plan.workflow!);
         if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
         const baseConfig = detail.config || emptyWorkflowConfig(plan.workflow!);
@@ -403,6 +413,52 @@ export class CanvasVideoDispatcher {
             if (!media) throw new Error("视频工作流完成但没有返回媒体");
             return media;
         } finally { this.untrack(taskId, childId); }
+    }
+
+    /** 引擎路径：画布只发协议请求；字段与媒体槽位由 `/v1/models/{id}` 提供，时长由引擎注入。 */
+    private async dispatchVideoViaEngine(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
+        const engine = this.engineClient!;
+        const workflowName = plan.workflow!;
+        const info = await engine.modelInfo(workflowName);
+        const values = workflowValues(plan.input, workflowName);
+        if (values.seconds === undefined && plan.input.seconds !== undefined) values.seconds = plan.input.seconds;
+        for (const field of info.fields) {
+            if (field.type === "text" && (field.isPrompt || field.id.toLowerCase() === "prompt")) values[field.id] = plan.input.prompt;
+        }
+        const slots = info.mediaInputs;
+        const fill = async (ids: string[], references: CanvasVideoReference[], label: string) => {
+            if (references.length > ids.length) throw new Error(`所选视频模型的工作流没有映射全部${label}参考（收到 ${references.length} 个，映射 ${ids.length} 个）`);
+            for (let index = 0; index < references.length; index++) {
+                values[ids[index]] = await this.dataUrl(references[index]);
+            }
+        };
+        await fill(slots.images, plan.input.references || [], "图片");
+        await fill(slots.videos, plan.input.videoReferences || [], "视频");
+        await fill(slots.audios, plan.input.audioReferences || [], "音频");
+
+        const childId = `engine-video-child-${taskId}`;
+        this.assertActive(taskId);
+        this.track(taskId, childId);
+        try {
+            const created = await engine.createVideo({
+                model: workflowName,
+                prompt: plan.input.prompt,
+                fields: values,
+                seconds: plan.input.seconds,
+                size: plan.input.size,
+            });
+            this.engineTasks.set(childId, created.taskId);
+            const finished = await engine.waitVideo(created.taskId);
+            if (finished.status !== "succeeded") throw new Error(finished.error || `执行引擎返回 ${finished.status}`);
+            this.assertActive(taskId);
+            const imported = await importEngineMedia(this.stores.media, finished.media, (url) => engine.fetchMedia(url));
+            const media = imported.find((item) => String(item.mimeType).startsWith("video/")) || imported[0];
+            if (!media) throw new Error("视频工作流完成但没有返回媒体");
+            return media;
+        } finally {
+            this.engineTasks.delete(childId);
+            this.untrack(taskId, childId);
+        }
     }
 
     private plan(input: CanvasVideoGenerationInput): Plan {

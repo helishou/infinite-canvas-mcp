@@ -32,7 +32,7 @@ import type {
   RuntimeTask,
   RuntimeTaskStatus,
 } from "./db.js";
-import type { ComfyUiBackend } from "./comfyui/bridge.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import type {
@@ -45,7 +45,7 @@ import type { CanvasOperation } from "./canvas/project-ops.js";
 import type { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
-import { readWorkflowLivePreview } from "./workflows/live-preview.js";
+import { readWorkflowLivePreview } from "@basketikun/media-engine/workflows/live-preview";
 import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
@@ -68,9 +68,9 @@ import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
 import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
-import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
-import { safeOperationPath, watchHttpOperation } from "./slow-operation.js";
+import { safeOperationPath, watchHttpOperation } from "@basketikun/media-engine/runtime/slow-operation";
 import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";

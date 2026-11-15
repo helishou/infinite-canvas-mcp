@@ -184,6 +184,9 @@ importers:
       '@basketikun/canvas-agent':
         specifier: workspace:^
         version: link:../canvas-agent
+      '@basketikun/media-engine':
+        specifier: workspace:^
+        version: link:../media-engine
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.0
         version: 1.32.1(supports-color@8.1.1)(zod@3.25.76)
@@ -273,6 +276,34 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.5
+      tsx:
+        specifier: ^4.19.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+
+  media-engine:
+    dependencies:
+      sharp:
+        specifier: ^0.35.4
+        version: 0.35.5(@types/node@22.20.5)
+      winston:
+        specifier: ^3.19.0
+        version: 3.19.0
+      ws:
+        specifier: ^8.21.3
+        version: 8.22.0
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.5
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
       tsx:
         specifier: ^4.19.0
         version: 4.23.15

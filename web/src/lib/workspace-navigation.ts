@@ -1,7 +1,7 @@
 import type { NavigationToolSlug } from "@/constant/navigation-tools";
 
-export type SecondaryWorkspace = "projects" | "generate" | "resources";
-export type SecondaryNavigationSlug = "allProjects" | "canvasProjects" | "dramaProjects" | "image" | "video" | "assets" | "prompts";
+export type SecondaryWorkspace = "projects" | "resources";
+export type SecondaryNavigationSlug = "allProjects" | "canvasProjects" | "dramaProjects" | "assets" | "prompts";
 
 type WorkspaceNavigationState = {
     area?: NavigationToolSlug;
@@ -15,8 +15,7 @@ export function resolveWorkspaceNavigation(pathname: string, search = ""): Works
     const segments = pathname.split("/").filter(Boolean);
     const root = segments[0];
     const query = new URLSearchParams(search);
-    if (!root) return { area: "workbench", compact: false };
-    if (root === "image" || root === "video") return { area: "generate", secondary: "generate", activeSecondary: root, compact: false };
+    if (!root || root === "image" || root === "video") return { area: "workbench", compact: false };
     if (root === "assets" || root === "prompts") return { area: "resources", secondary: "resources", activeSecondary: root, compact: false };
     if (root === "workflows") return { area: "workflows", compact: false };
     if (root === "skills") return { area: "skills", compact: false };

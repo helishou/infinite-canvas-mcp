@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { WorkflowExecutor } from "./executor.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 // Captured failing prompt: f620e712-6537-48a0-9913-633db36935bc.
 // ComfyUI completed after 87,785ms, with node 237's SaveImage result.

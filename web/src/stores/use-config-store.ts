@@ -58,7 +58,7 @@ export type ModelChannel = {
     apiKey: string;
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
-    kind?: "api" | "local" | "comfyui" | "codex-cli";
+    kind?: "api" | "local" | "comfyui" | "codex-cli" | "hermes";
     /** 渠道自定义请求头（如 OpenCode Go 的 x-opencode-session）；内置鉴权头优先。 */
     headers?: Record<string, string>;
 };
@@ -302,7 +302,8 @@ function isAiConfigReady(config: AiConfig, model: string) {
     const match = findChannelModel(config, model);
     if (!match) return false;
     const channel = match.channel;
-    if (channel.kind === "codex-cli") return Boolean(model.trim());
+    // codex-cli 与 hermes（本地 ACP 导演 agent）的鉴权都在 agent 进程侧，不需要渠道 apiKey。
+    if (channel.kind === "codex-cli" || channel.kind === "hermes") return Boolean(model.trim());
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }

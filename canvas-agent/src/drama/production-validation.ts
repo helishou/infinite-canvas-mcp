@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { resizeShotAnchors } from "./subject-assembly.js";
 import { isH3StyleTemplateId } from "../plugins/minimax-h3/style-templates.js";
 import { currentCompilationArtifact } from "./compilation-scope.js";
+import { normalizeAssetCard } from "./asset-card-contract.js";
 import { toJsonSchemaCompat } from "@modelcontextprotocol/sdk/server/zod-json-schema-compat.js";
 import { z } from "zod";
 import { directorPatchFields, productionContractVersion, productionOperationSchema, productionEditSchema, productionPublishSchema, productionCompileSchema, productionCompileSubmissionSchema, directorRunStartSchema, canonicalProduction, isSubjectPromptAssembly, scriptBlockSchema, shotAudioBindingSchema, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
@@ -420,6 +421,9 @@ export function applyDirectorSourcePatch(director: DirectorProduction, entity: k
             }
             const previousDuration = Number(resolvedTarget.duration_frames);
             Object.assign(resolvedTarget, patch);
+            // 资产卡的图片路由/配方/模式/生成状态一律由卡片自身推导：旧卡缺少这些字段时，
+            // 编译器只会抛 "IM2 alias routing missing"，所以任何一次写入都顺手补齐。
+            if (entity === "asset_card" && collection === "asset_cards") Object.assign(resolvedTarget, normalizeAssetCard(resolvedTarget).card);
             // A production asset can point at a character/scene registry row. Keep
             // those display fields together at the source boundary so the normal
             // production projection updates the corresponding canvas entity node.

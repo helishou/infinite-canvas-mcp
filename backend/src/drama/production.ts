@@ -54,7 +54,7 @@ import {
 } from "@basketikun/canvas-agent/drama/production-contract";
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { generationSettingsSnapshot } from "../canvas/generation-settings.js";
+import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";

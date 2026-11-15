@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ComfyUiBackend } from "./bridge.js";
+import { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 
 function makeBridge(rootDir: string) {
     const store = new Map<string, string>([["comfyui.localRootDir", rootDir]]);

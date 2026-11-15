@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { WorkflowExecutor } from "./executor.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 /**
  * 真实链路回归：ComfyUI 的 /prompt 只是入队。模拟前两轮队列里跑的是别人的任务、

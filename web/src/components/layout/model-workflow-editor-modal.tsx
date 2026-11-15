@@ -269,9 +269,15 @@ export function ModelWorkflowEditorModal({ open, model, onSave, onClose }: { ope
                 {list.length ? (
                     <div className="grid grid-cols-1 gap-x-6 gap-y-2 md:grid-cols-2">
                         {list.map((item) => (
-                            <Checkbox key={item.key} checked={selected.includes(item.key)} onChange={(event) => toggle(item.key, event.target.checked)}>
-                                <span className="inline-flex min-w-0 items-center gap-1">
-                                    <span className="truncate" title={item.label}>
+                            <Checkbox
+                                key={item.key}
+                                className="w-full min-w-0"
+                                classNames={{ label: "min-w-0 flex-1" }}
+                                checked={selected.includes(item.key)}
+                                onChange={(event) => toggle(item.key, event.target.checked)}
+                            >
+                                <span className="flex min-w-0 items-center gap-1">
+                                    <span className="min-w-0 truncate" title={item.label}>
                                         {item.label}
                                     </span>
                                     <Tag className="m-0 shrink-0" color={item.provider === "runninghub" ? "blue" : "default"}>

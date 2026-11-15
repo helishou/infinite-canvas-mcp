@@ -62,7 +62,7 @@ type Props = {
     viewMemory?: StoryboardViewMemory;
     canvasId: string; onLocateClip?: (id: string) => void;
     canvasNodes: Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>;
-    renderEditor: (shot: Record<string, any>, workbench?: Record<string, any>) => ReactNode; clipEditor: (scope: { sceneId?: string; shotIds: string[]; editable: boolean }) => ReactNode;
+    renderEditor: (shot: Record<string, any>, workbench?: Record<string, any>, footerActions?: ReactNode) => ReactNode; clipEditor: (scope: { sceneId?: string; shotIds: string[]; editable: boolean }) => ReactNode;
     renderClipFields?: (segment: Record<string, any>) => ReactNode;
     /** 该镜头的起止状态（镜头开始时 / 镜头结束时），由 DirectorPanel 注入到左栏「连续性状态」，原在「画面与摄影」里。 */
     renderShotState?: (shot: Record<string, any>) => ReactNode;
@@ -87,6 +87,8 @@ type Props = {
     compileTargets?: { sourceHash: string; engineRuntimeId?: string; compilerHash?: string; items: Array<{ targetId: string; status: string }>; notReadyTargetIds?: string[] }; onCompile?: (sceneId?: string, targetId?: string, targetIds?: string[]) => void;
     onApplyTranslatedPrompts?: (items: Array<{ targetId: string; nodeId: string; segmentId: string; sourcePrompt: string; expectedCanvasPrompt: string; translatedPrompt: string }>) => Promise<void>;
     onToggleClipLock?: (clipId: string, locked: boolean) => Promise<boolean>;
+    /** 一次提交所有 Clip 的锁定/解锁，避免逐段提交撞 expectedRevision。 */
+    onToggleAllClipLocks?: (clipIds: string[], locked: boolean) => Promise<boolean>;
     lockReadOnly?: boolean;
     autoTranslateCompilation?: { id: string; targetIds: string[] } | null;
     onClip: (id: string) => void;
@@ -140,7 +142,7 @@ function compileDiagnosticTaskContext(diagnostics: ProductionCompilationDiagnost
 }
 
 /** The v2 authoring surface: stable Shots, derived Clip packaging, and compiler evidence. */
-export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderClipFields, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, lockReadOnly = false, autoTranslateCompilation, onClip, onDeleteClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
+export function SubjectStoryboardWorkbench({ director, production, owner, initialShotId, activeView, viewMemory, canvasNodes, canvasId, onLocateClip, renderEditor, renderClipFields, renderShotState, renderContinuity, renderShotActions, clipEditor, onRepartitionClips, onH3Boundary, onEditShot, onSaveShotPatch, onUpdateLegacyShotReferences, shotKeyframe, shotDrafts = {}, busy, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onCompile, onApplyTranslatedPrompts, onToggleClipLock, onToggleAllClipLocks, lockReadOnly = false, autoTranslateCompilation, onClip, onDeleteClip, onGenerateClip, runStartPending = false, onDiscuss, onNavigate }: Props) {
     const { t } = useTranslation();
     const { message, modal } = App.useApp();
     const source = director.source as Record<string, any>;
@@ -150,6 +152,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const shots = records(source.shots).sort((a, b) => Number(a.story_order) - Number(b.story_order)), clips = records(source.segments), subjects = records(source.subject_registry);
     const [clipLockOverrides, setClipLockOverrides] = useState<Record<string, boolean>>({});
     const [clipLockPending, setClipLockPending] = useState<Record<string, boolean>>({});
+    const [allLockIntent, setAllLockIntent] = useState<"lock" | "unlock" | null>(null);
     const clipLockQueueRef = useRef<Promise<void>>(Promise.resolve());
     const onToggleClipLockRef = useRef(onToggleClipLock);
     const lockBusyRef = useRef(Boolean(busy));
@@ -491,6 +494,28 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     };
     const clipStates = clips.map(clip => ({ id: String(clip.id), ...clipCompileState(String(clip.id)) }));
     const lockedClipIds = new Set(clips.filter(item => clipLockOverrides[String(item.id)] ?? item.locked === true).map(item => String(item.id)));
+    // 「全部」指制作稿里的全部 Clip，不受场次筛选影响；锁定是全局状态，筛选只改变当前视图。
+    const allClipIds = clips.map(item => String(item.id || "")).filter(Boolean);
+    const lockableIds = allClipIds.filter(id => !lockedClipIds.has(id));
+    const unlockableIds = allClipIds.filter(id => lockedClipIds.has(id));
+    const lockControlsDisabled = Boolean(busy || compileBusy || compilePending || translatingPrompts || lockReadOnly || allLockIntent || Object.keys(clipLockPending).length);
+    const runAllClipLocks = async (locked: boolean, ids: string[]) => {
+        if (!onToggleAllClipLocks || !ids.length || allLockIntent) return;
+        setAllLockIntent(locked ? "lock" : "unlock");
+        setClipLockOverrides(current => ({ ...current, ...Object.fromEntries(ids.map(id => [id, locked])) }));
+        const rollback = () => setClipLockOverrides(current => {
+            const value = { ...current };
+            for (const id of ids) delete value[id];
+            return value;
+        });
+        try {
+            const saved = await onToggleAllClipLocks(ids, locked);
+            // 成功时保留乐观覆盖：后端权威稿会让 director.sourceHash 变化，下面的 useEffect 自动收敛；
+            // 不复用单段的 render waiter，批量没有逐个回调可依赖，等待可能在无重渲染时卡住。
+            if (!saved) rollback();
+        } catch { rollback(); }
+        finally { setAllLockIntent(null); }
+    };
     const visibleClipStates = !sceneFilter ? clipStates : clipStates.filter(item => clips.find(clip => String(clip.id) === item.id)?.shot_ids?.some((id: string) => directSceneShotIds.has(String(id))));
     const viewableCompiledPrompts = visibleClipStates.flatMap(item => {
         const artifact = director.artifacts.find(candidate => candidate.kind === "h3" && candidate.targetId === item.id);
@@ -822,7 +847,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
     const translationStatusFor = (id: string) => {
         if (!translationProgress?.targetIds.includes(id)) {
             const written = writtenTranslationStatuses[id];
-            return written?.sourceHash === director.sourceHash ? written.status : "waiting";
+            return written?.sourceHash === director.sourceHash ? written.status : undefined;
         }
         if (translationProgress?.failedIds.includes(id)) return "failed";
         if (translationProgress?.writtenIds.includes(id)) return "complete";
@@ -867,6 +892,30 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                     {!locked && <Button type="text" size="small" className="!px-1.5" icon={<WandSparkles className="size-3" />} aria-label={t("director.atomic.compileOneClip", { clip: clipNumber })} title={t("director.atomic.compileOneClip", { clip: clipNumber })} disabled={busy || compileBusy || compilePending || translatingPrompts || !onCompile} onClick={() => onCompile?.(undefined, item.id)} />}
                 </div>;
     };
+    const renderSelectedClipActions = () => {
+        if (!subjectAssembly || !clip || !onGenerateClip) return undefined;
+        const clipId = String(clip.id), state = clipCompileState(clipId);
+        const label = clipLabel(clipIndex);
+        const unsaved = clipShotIds(clip).some(id => unsavedIds.has(String(id)));
+        const locked = lockedClipIds.has(clipId);
+        const job = activeRefreshJob(clipId);
+        const matches = productionSegmentRuntimeMatches(canvasNodes as any, clipId);
+        const running = matches.some(match => ["queued", "running", "awaiting_confirmation"].includes(String(match.segment.status)));
+        const disabled = busy || compileBusy || compilePending || runStartPending || translatingPrompts || Boolean(job) || locked || running || unsaved;
+        const hint = unsaved ? t("director.atomic.editClipSaveFirst") : locked ? t("director.atomic.clipLocked")
+            : running ? t("director.atomic.editClipRunning") : runStartPending ? t("director.atomic.editClipPreparing") : state.reason || state.label;
+        return <div className="space-y-2" data-shot-clip-actions={clipId}>
+            <p className="text-xs text-muted-foreground">{t("director.atomic.editClipLanguageHint")}</p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground" role="status">{label} · {hint}</span>
+                <div className="flex flex-wrap gap-2">
+                    {state.tone !== "ready" && onCompile && <Button size="small" icon={<WandSparkles className="size-3.5" />} loading={Boolean(job) || compileBusy} disabled={disabled} onClick={() => onCompile(undefined, clipId)}>{t("director.atomic.editClipUpdatePrompt")}</Button>}
+                    <Button size="small" icon={<Play className="size-3.5" />} loading={runStartPending || running} disabled={disabled || state.tone !== "ready"} onClick={() => onGenerateClip(clipId)}>{t("director.atomic.editClipGenerate", { clip: label })}</Button>
+                </div>
+            </div>
+            {!unsaved && state.tone === "blocked" && refreshCandidate?.blockingDiagnostic?.message && <p className="whitespace-pre-wrap text-xs text-destructive">{refreshCandidate.blockingDiagnostic.message}</p>}
+        </div>;
+    };
     return <div className="space-y-6" data-subject-storyboard-workbench data-storyboard-view={view} data-canvas-id={canvasId} data-mobile-editing={mobileEditing && Boolean(selected) && view === "shots"} data-production-section-root>
         {/* 紧凑头部：标题 + 统计 + 视图页签合一行；「主体与图片 / 连续性台账」与顶部工作区页签重复，已去掉（连续性入口就是顶部工作区页签）。 */}
         <header className="storyboard-toolbar border-b border-border pb-1">
@@ -892,6 +941,10 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <p className="text-sm text-muted-foreground">{t(subjectAssembly ? "director.atomic.packagingHint" : "director.atomic.legacyPackagingHint")}</p>
                 <div className="flex flex-wrap items-center gap-3">
                     {visibleClipStates.length > 0 && <span className="text-xs text-muted-foreground">{compileBusy ? t("director.atomic.compileInFlight") : t("director.atomic.compileSummary", compileCounts) + (compileCounts.blocked ? " · " + t("director.atomic.blockedCompileCount", { count: compileCounts.blocked }) : "") + (compileCounts.recorded ? " · " + t("director.atomic.recordedCompileCount", { count: compileCounts.recorded }) : "") + (compileCounts.running > 0 ? " · " + t("director.atomic.compileRunning", { running: compileCounts.running }) : "")}</span>}
+                    {onToggleAllClipLocks && allClipIds.length > 0 && <>
+                        <Button size="small" type="text" icon={<Lock className="size-3.5" />} loading={allLockIntent === "lock"} disabled={lockControlsDisabled || !lockableIds.length} aria-label={t("director.atomic.lockAllClips")} title={`${t("director.atomic.lockAllClips")} · ${t("director.atomic.lockAllClipsHint", { count: lockableIds.length })}`} data-production-lock-all onClick={() => void runAllClipLocks(true, lockableIds)}>{t("director.atomic.lockAllClips")}</Button>
+                        <Button size="small" type="text" icon={<LockOpen className="size-3.5" />} loading={allLockIntent === "unlock"} disabled={lockControlsDisabled || !unlockableIds.length} aria-label={t("director.atomic.unlockAllClips")} title={`${t("director.atomic.unlockAllClips")} · ${t("director.atomic.unlockAllClipsHint", { count: unlockableIds.length })}`} data-production-unlock-all onClick={() => void runAllClipLocks(false, unlockableIds)}>{t("director.atomic.unlockAllClips")}</Button>
+                    </>}
                     {renderClipFields && activeVisibleClipStates.length > 0 && <Button size="small" type="text" loading={translatingPrompts} disabled={!canTranslateCompiledPrompts} title={!visibleClipStates.every(item => item.tone === "ready") ? t("director.atomic.translationRequiresCompile") : undefined} onClick={() => void translateCompiledPrompts()}>{translatingPrompts ? t("director.atomic.translationRunning") : t("director.atomic.translateCompiledPrompts")}</Button>}
                     <Button size="small" type="primary" icon={<WandSparkles className="size-3.5" />} loading={compileBusy} disabled={busy || compileBusy || translatingPrompts || !clipsNeedingCompile.length || !onCompile || sceneFilter === "__unassigned__" || !sceneCompileAvailable} title={sceneFilter === "__unassigned__" ? t("director.atomic.compileUnassignedHint") : undefined} onClick={() => onCompile?.(undefined, undefined, clipsNeedingCompile.map(item => item.id))}>{compilePending ? t("drama.production.recoverReceipt") : t("director.atomic.compileAction")}</Button>
                 </div>
@@ -1043,7 +1096,7 @@ export function SubjectStoryboardWorkbench({ director, production, owner, initia
                 <section className="storyboard-editing" data-production-target={`shot:${activeId}`} data-production-section="shot-editing" tabIndex={-1}>
                     {(referenceDiagnostics.length > 0 || (!compiled && refresh?.blockingDiagnostic)) && <details className="mb-4 text-sm" hidden={detailView !== "editing"}><summary className="cursor-pointer text-muted-foreground">{t("director.workspace.shotIssueDetails")}</summary><div className="mt-2 space-y-2">{[...new Set([...(referenceDiagnostics.map(diagnostic => String(diagnostic.message || diagnostic.code))), ...(!compiled && refresh?.blockingDiagnostic ? [refresh.blockingDiagnostic.message] : [])])].map(message => <p key={message} className="whitespace-pre-wrap text-muted-foreground">{message}</p>)}</div></details>}
                     {/* 「连续性」收编为编辑器页签：detailView 开关经 __contextControl 传给 SubjectShotEditor，选中时它隐藏表单体与保存栏。 */}
-                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, { ...(workbench || {}), __contextControl: { active: detailView === "context", enter: () => setDetailView("context"), exit: () => setDetailView("editing") }, __sectionControl: { current: shotSection, select: setShotSection } })}</div>
+                    <div className="storyboard-editor-content" data-subject-editor={subjectAssembly || undefined}>{renderEditor(selected, { ...(workbench || {}), __contextControl: { active: detailView === "context", enter: () => setDetailView("context"), exit: () => setDetailView("editing") }, __sectionControl: { current: shotSection, select: setShotSection } }, renderSelectedClipActions())}</div>
                     {/* 镜头操作行（和导演讨论 / 跳到所在片段）：整个左栏的最后一块，不再夹在对白与连续性状态之间。 */}
                     <div hidden={detailView !== "editing"}>{renderShotActions?.(selected)}</div>
                 </section>

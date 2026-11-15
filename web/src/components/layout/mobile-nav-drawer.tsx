@@ -27,7 +27,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose, onUnavailableWo
                     const Icon = tool.icon;
                     const active = tool.slug === activeToolSlug;
                     const className = cn("flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm transition-colors", active ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground");
-                    const secondary = tool.slug === "projects" || tool.slug === "generate" || tool.slug === "resources" ? workspaceSecondaryNavigation[tool.slug] : undefined;
+                    const secondary = tool.slug === "projects" || tool.slug === "resources" ? workspaceSecondaryNavigation[tool.slug] : undefined;
                     return (
                         <div key={tool.slug}>
                             {tool.slug === "workflows" && !localComfyuiEnabled ? (

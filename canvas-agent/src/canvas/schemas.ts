@@ -4,7 +4,7 @@ import { nodePatchSchema } from "./edit-validation.js";
 export { validateNodeUpdate, validateH3Edit, validateH3Metadata } from "./edit-validation.js";
 import { z } from "zod";
 import { productionWorkspaceSchemas, productionWorkspaceDescriptions, productionWorkspaceToolNames } from "../drama/production-workspace-contract.js";
-import { productionEditSchema, productionOperationSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, type ProductionOperation } from "../drama/production-contract.js";
+import { dramaOutlineDetailSchema, dramaTopicSchema, productionEditSchema, productionOperationSchema, productionPreflightSchema, productionContractQuerySchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, type ProductionOperation } from "../drama/production-contract.js";
 import {
   collaborationDescriptions,
   collaborationSchemas,
@@ -106,6 +106,8 @@ export const toolNames = [
   "drama_create_episode",
   "drama_update_episode",
   "drama_delete_episode",
+  "drama_get_planning",
+  "drama_update_planning",
   "production_get_contract",
   "production_get_continuity",
   "production_check_continuity",
@@ -698,11 +700,11 @@ export const toolInputSchemas = {
     prompt: z
       .string()
       .optional()
-      .describe("生图提示词；仅当前工作流要求提示词时必填"),
+      .describe("生图提示词；run=true 时必填"),
     model: z
       .string()
       .optional()
-      .describe("模型 ID，例如 'krea2'、'qwen-image'；不传用工作台当前默认"),
+      .describe("模型 ID，例如 'krea2'、'qwen-image'；不传用当前默认"),
     quality: z
       .string()
       .optional()
@@ -717,7 +719,7 @@ export const toolInputSchemas = {
     run: z
       .boolean()
       .optional()
-      .describe("true=自动点击生成；false=仅填入表单不点；默认 true"),
+      .describe("true=新建画布并立即提交生成；false=仅应用参数并打开首页生图模式；默认 true"),
   }),
   workbench_video_get_config: z.object({}).passthrough(),
   workbench_video_generate: z.object({
@@ -728,7 +730,7 @@ export const toolInputSchemas = {
     resolution: z.string().optional().describe("分辨率，例如 '720p'、'1080p'"),
     generateAudio: z.boolean().optional().describe("是否同时生成音轨"),
     watermark: z.boolean().optional().describe("是否带水印"),
-    run: z.boolean().optional().describe("true=自动点击生成；默认 true"),
+    run: z.boolean().optional().describe("true=新建画布并立即提交生成；false=仅应用参数并打开首页视频模式；默认 true"),
   }),
   prompts_search: z.object({
     keyword: z.string().optional().describe("关键词模糊搜索标题与正文"),
@@ -833,6 +835,19 @@ export const toolInputSchemas = {
       .optional()
       .describe("新的画布 ID；传 null 解除绑定"),
   }),
+  drama_get_planning: z.object({
+    dramaId: z.string().min(1).optional().describe("剧目 ID；省略时读取当前活动剧目"),
+    includeSourceScript: z.boolean().default(false).describe("是否一并返回原剧本全文；默认只返回字节数，避免大稿撑爆输出"),
+  }),
+  drama_update_planning: z.object({
+    dramaId: z.string().min(1).optional().describe("剧目 ID；省略时写入当前活动剧目"),
+    expectedUpdatedAt: z.string().min(1).optional().describe("读取时拿到的 updatedAt；不匹配说明别的窗口改过，写入会被拒绝"),
+    sourceScript: z.string().max(400000).optional().describe("原剧本全文（与「原剧本」页签同一字段）；传空串清空"),
+    outline: z.string().max(400000).optional().describe("全剧故事线正文（「大纲」页签的故事线，与 folder.outline 同一字段）"),
+    topic: dramaTopicSchema.partial().optional().describe("选题卡字段；只传要改的键，其余保持原值"),
+    outlineDetail: dramaOutlineDetailSchema.partial().optional().describe("大纲补充段：时空背景、角色名单、三幕与节奏、结局和卡点；只传要改的键"),
+    outlineModel: z.string().max(200).optional().describe("这部剧后续生成大纲用的模型 ID"),
+  }).strict(),
   drama_delete_episode: z.object({
     episodeId: z.string().min(1).describe("分集 ID；删除分集不会删除绑定画布"),
   }),
@@ -857,7 +872,7 @@ export const toolInputSchemas = {
 export const toolDescriptions: Record<ToolName, string> = {
   ...collaborationDescriptions,
   site_navigate:
-    "在已连接的 Infinite Canvas 网页中跳转页面；没有已连接网页时会返回 BROWSER_NOT_CONNECTED，先连接网页。Acheng 制作使用 production={kind,id,workId,runId?}，网页会按当前 Backend 正式工作目标打开导演工作区或实际媒体节点/Clip；不要凭聊天文字或自行拼路由选择阶段。其他页面可继续使用 path，例如 /image、/video、/prompts、/assets、/config。对 Backend 的制作读写可直接使用原生工具，不需要为了调用工具先打开画布。",
+    "在已连接的 Infinite Canvas 网页中跳转页面；没有已连接网页时会返回 BROWSER_NOT_CONNECTED，先连接网页。Acheng 制作使用 production={kind,id,workId,runId?}，网页会按当前 Backend 正式工作目标打开导演工作区或实际媒体节点/Clip；不要凭聊天文字或自行拼路由选择阶段。其他页面可继续使用 path，例如 /prompts、/assets、/config；首页生成模式用 /?mode=image 或 /?mode=video（旧 /image、/video 会自动重定向到首页）。对 Backend 的制作读写可直接使用原生工具，不需要为了调用工具先打开画布。",
   canvas_list_projects:
     "列出用户全部画布（仅标题、创建/更新时间、节点数、连线数，不含完整数据），支持 keyword 搜索和 page/pageSize 分页。制作时返回的 id 默认配合 site_navigate 的结构化 production 目标进入统一导演工作台；只有用户明确要求画布媒体操作时才打开 /canvas/:id。",
   canvas_inspect:
@@ -923,13 +938,13 @@ export const toolDescriptions: Record<ToolName, string> = {
   comfyui_get_task: "默认只读取本地 ComfyUI 任务状态摘要；需要完整任务和事件历史时传 view='full'。",
   comfyui_cancel_task: "取消本地 ComfyUI 任务。",
   workbench_image_get_config:
-    "需要已连接的 Infinite Canvas 网页来读取生图工作台当前参数和可选项（模型、质量、尺寸/宽高比、张数范围）；网页未连接时先连接再调用。",
+    "需要已连接的 Infinite Canvas 网页来读取生图当前默认参数和可选项（模型、质量、尺寸/宽高比、张数范围）；网页未连接时先连接再调用。",
   workbench_image_generate:
-    "在生图工作台按需填入提示词并设置 model、quality、size（如 1:1 或 1024x1024）、count；提示词仅在当前工作流声明必填时必需。run 默认 true 会自动点击生成按钮。会自动跳转到生图工作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
+    "新建一张画布，按需设置 model、quality、size（如 1:1 或 1024x1024）、count 并提交 Backend 生图任务（run 默认 true），随后跳转到该画布；run=false 只应用参数并打开首页生图模式。run=true 时 prompt 必填。生成为异步过程，提交后返回 taskId 与 projectId，可用 generation_get_status 查询状态。",
   workbench_video_get_config:
-    "读取视频创作台的当前参数和可选项（可用模型、尺寸/比例、时长、清晰度/分辨率、是否生成声音与水印）。",
+    "读取视频生成的当前默认参数和可选项（可用模型、尺寸/比例、时长、清晰度/分辨率、是否生成声音与水印）。",
   workbench_video_generate:
-    "在视频创作台填入提示词并按需设置 model、size、seconds、resolution、generateAudio、watermark，run 默认 true 会自动点击生成按钮。会自动跳转到视频创作台。生成为异步过程，提交后返回 taskId，可用 generation_get_status 查询状态。",
+    "新建一张画布，填入提示词并按需设置 model、size、seconds、resolution、generateAudio、watermark，提交 Backend 视频任务（run 默认 true），随后跳转到该画布；run=false 只应用参数并打开首页视频模式。生成为异步过程，提交后返回 taskId 与 projectId，可用 generation_get_status 查询状态。",
   prompts_search:
     "搜索提示词库（第三方提示词合集），支持 keyword、category、tags 过滤和 page/pageSize 分页，返回标题、提示词、分类、标签、封面等。tags 传 string 数组，例如 ['古风','人物']。",
   assets_list:
@@ -950,6 +965,10 @@ export const toolDescriptions: Record<ToolName, string> = {
     "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:
     "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
+  drama_get_planning:
+    "读取剧目级策划真值：选题卡、全剧故事线、大纲补充段（时空背景/角色名单/三幕/结局）、原剧本字节数，以及「选题→大纲→剧本」三步各自的完成度（剧本会列出还没写的集号）。省略 dramaId 时读当前活动剧目；需要原剧本全文时传 includeSourceScript=true。只是读，不生成。",
+  drama_update_planning:
+    "写剧目级策划：sourceScript（原剧本）、outline（全剧故事线）、topic（选题卡）、outlineDetail（时空背景/角色名单/三幕/结局）、outlineModel。只传要改的键，其余保持原值；网页同页签刷新即可看到。写入前先 drama_get_planning 拿 updatedAt 作 expectedUpdatedAt，冲突会被拒绝而不是覆盖别处的修改。这里只存文本，不生成内容；要生成用剧目页的 outline-proposal / script-proposal。",
   drama_delete_episode:
     "删除分集记录；不会删除其绑定的画布，画布会变成独立资产。",
   production_get_contract: "查询本机当前激活引擎的制作合同。默认仅返回如何查询、可用 operationType/moduleId 和引擎身份；传 operationType 读取单操作 schema、示例和前置条件，传 moduleId 只返回模块说明及文件摘要。读取模块正文时从 module.nextRead 复制 moduleId/moduleFile，默认按 32 KiB 用 cursor 分块。只有传精确 operationType 时才能追加 includeRequests/includePatchFields/includeSourceContract。runtimeId 已弃用且不选择执行版本。",

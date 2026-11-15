@@ -1628,10 +1628,23 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             useAgentStore.getState().openPanel();
         } },
     ] : [];
+    // 统一的 node-action 派发：只有制作页在监听这个事件，画布独立打开时改为提示 + 跳转，避免按钮空转。
+    const dispatchProductionNodeAction = (detail: Record<string, unknown>) => {
+        if (!useProductionWorkspaceStore.getState().commandRunner) {
+            void message.info({ content: t("productionCanvas.actionNeedsProduction", { defaultValue: "这个操作在制作页执行，已切换到该对象" }), duration: 2.5 });
+            return false;
+        }
+        window.dispatchEvent(new CustomEvent("production-node-action", { detail }));
+        return true;
+    };
     const nodeAction = (action: "source" | "generate" | "video") => {
         if (!toolbarObject) return;
         useProductionWorkspaceStore.getState().setSelectedObject(toolbarObject);
-        window.dispatchEvent(new CustomEvent("production-node-action", { detail: { owner: toolbarObject.owner, object: toolbarObject, action } }));
+        // production-node-action 只有制作页在听；画布独立打开时没有任何监听器，
+        // 点了会完全没反应。这里改成把人送到制作页对应对象，别让按钮空转。
+        if (!dispatchProductionNodeAction({ owner: toolbarObject.owner, object: toolbarObject, action })) {
+            navigate(productionObjectPath(toolbarObject));
+        }
     };
     const productionPrimaryActions = toolbarObject ? [
         { ...productionToolbarItems[0], title: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), label: t(toolbarSharedSource ? "productionCanvas.source" : "productionCanvas.editObject"), onClick: toolbarSharedSource ? () => { navigate(`/canvas/${encodeURIComponent(toolbarSharedSource.sourceProjectId)}?workspace=assets&edit=1&nodeId=${encodeURIComponent(toolbarSharedSource.sourceNodeId)}&target=asset%3A${encodeURIComponent(toolbarSharedSource.assetId)}`); useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); } : productionToolbarItems[0].onClick },

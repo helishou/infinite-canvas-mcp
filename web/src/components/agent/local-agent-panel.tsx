@@ -87,6 +87,8 @@ const AGENT_PROTOCOL_VERSION = 6;
 const HISTORY_RETRY_DELAYS_MS = [0, 150, 350, 700, 1200];
 /** Backend 开发重载期间等它回来再判定连接结果的最长时间。 */
 const BACKEND_RELOAD_WAIT_MS = 20_000;
+// 连接成功不再弹全局提示：面板内的状态文案已足够，SSE 每次握手都会收到新的 hello，
+// 弹提示只会变成噪音。断线与重连仍由 onerror 的告警提示负责。
 const rt = (key: string, options?: Record<string, unknown>) => i18n.t(`agent.runtime.${key}`, options);
 
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
@@ -111,8 +113,13 @@ function agentErrorState(error: unknown) {
     return error instanceof AgentApiError ? (error.response as { state?: AgentConversationState }).state : undefined;
 }
 
+/** 线程 id 前缀就是这个对话的运行方式：`hermes-` 走 ACP，其余都是原生 Codex。 */
+function threadRuntime(threadId: string) {
+    return threadId.startsWith("hermes-") ? "hermes" : "codex";
+}
+
 function modelNeedsNewConversation(model: AgentModel | undefined, threadId: string) {
-    return Boolean(model?.runtime && threadId && model.runtime !== (threadId.startsWith("llm-") ? "llm" : "codex"));
+    return Boolean(model?.runtime && threadId && model.runtime !== threadRuntime(threadId));
 }
 
 function conversationBootstrapView(conversation: AgentConversationState) {
@@ -205,7 +212,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const conversationReady = conversation.status === "ready" || conversation.status === "warning";
     const queueBusy = codexRuntime.busy || waiting || conversation.status === "running";
     const queueWaiting = waiting || (codexRuntime.busy && codexRuntime.threadId === activeThreadId);
-    const conversationCanAcceptInput = conversationReady || conversation.status === "running";
+    // 初始化期间也允许输入：后端 /codex/turn 会先等这一轮建完再跑，避免用户干等 4 秒点不动。
+    const conversationCanAcceptInput = conversationReady || conversation.status === "running" || conversation.status === "preparing";
     const conversationBusy = conversation.status === "preparing" || conversation.status === "running";
     const closePanel = useAgentStore((state) => state.closePanel);
     const pushMessage = useAgentStore((state) => state.addMessage);
@@ -360,7 +368,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         let sequence = ++loadThreadsSequenceRef.current;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${legacyHistoryRef.current ? "codex" : "llm"}`);
+            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${legacyHistoryRef.current ? "codex" : "hermes"}`);
             if (sequence !== loadThreadsSequenceRef.current) return;
             if (data.conversation) {
                 applyConversationState(data.conversation);
@@ -543,7 +551,6 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 messages,
                 pendingApprovals,
             });
-            if (!headless) message.success(rt("localAgentConnected"));
             if (hello?.runtime) applyRuntimeState(hello.runtime, true);
             if (!busy && previousRuntime.activeThreadId === nextThreadId && previousRuntime.activeTurnId) void loadThreads(false, previousRuntime.activeTurnId);
             void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
@@ -1641,7 +1648,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         const isDelta = Boolean(stringText(item.delta));
         if (!text) return;
         if (item.type === "reasoning") {
-            const scoped = scopeEventChatItem(event, activityDeltaFallback(item, text), "synthetic:reasoning");
+            // 每段思考按 item.id 各成一张卡片，才能和工具卡片按到达顺序交错。
+            const scoped = scopeEventChatItem(event, activityDeltaFallback(item, text), `synthetic:reasoning:${item.id}`);
             const current = useAgentStore.getState().messages.find((message) => message.id === scoped.id);
             const activityItems = { ...(current?.activityItems || {}) };
             const previous = activityItems[item.id] || "";
@@ -1757,7 +1765,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             return;
         }
         if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.id) {
-            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: event.agent === "llm" ? event.item.model || "Agent" : "Codex", text: stringText(event.item.text) }, event.item.id);
+            const scoped = scopeEventChatItem(event, { id: event.item.id, role: "assistant", title: event.agent === "hermes" || event.agent === "llm" ? event.item.model || "Hermes" : "Codex", text: stringText(event.item.text) }, event.item.id);
             const currentMessages = useAgentStore.getState().messages;
             const index = currentMessages.findIndex((message) => message.id === scoped.id);
             if (index >= 0) {
@@ -1826,7 +1834,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         if (!text) return;
         const itemId = event.item?.id;
         if (!itemId) return;
-        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: event.agent === "llm" ? event.item?.model || "Agent" : "Codex", text, streamId: itemId }, itemId);
+        const scoped = scopeEventChatItem(event, { id: itemId, role: "assistant", title: event.agent === "hermes" || event.agent === "llm" ? event.item?.model || "Hermes" : "Codex", text, streamId: itemId }, itemId);
         const currentMessages = useAgentStore.getState().messages;
         const index = currentMessages.findIndex((message) => message.id === scoped.id);
         if (index < 0) {

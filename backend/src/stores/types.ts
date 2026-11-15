@@ -1,30 +1,21 @@
 import path from "node:path";
-import type { Readable } from "node:stream";
 import type {
     Asset, AssetFolder, CanvasFolder, CanvasProject,
-    GenerationLog, GenerationLogStatus, MediaFile,
+    GenerationLog,
     McpObservabilityEvent, McpObservabilityEventInput,
-    RuntimeTask, RuntimeTaskEvent, RuntimeTaskStatus,
+    RuntimeTask,
 } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import type { CanvasCommandContext } from "../canvas/collaboration.js";
+import type { TaskStore, MediaStore, SettingStore, TaskPatch, MediaStats, MediaCategory, RuntimeMedia, NamedMedia, GenerationLogInput, GenerationLogFilter } from "@basketikun/media-engine/contracts";
+
+// 任务 / 媒体 / 设置 store 契约的权威在 @basketikun/media-engine；此处 re-export 保持既有入口。
+export type { TaskStore, MediaStore, SettingStore, TaskPatch, MediaStats, MediaCategory, RuntimeMedia, NamedMedia, GenerationLogInput };
+export type LogFilter = GenerationLogFilter;
 
 /** 各 store 的筛选条件。 */
 export type AssetFilter = { kind?: string; folderId?: string; dramaId?: string };
-export type LogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 export type LogDeleteScope = { id?: string; projectId?: string; nodeId?: string };
-export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string };
-export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;
-export type MediaStats = { width?: number | null; height?: number | null; durationMs?: number | null };
-export type MediaCategory = "input" | "output" | "library";
-
-/** runtime 媒体（H3 ref 落地等）：按 name 幂等读写。 */
-export type RuntimeMedia = {
-    name: string;
-    path: string;
-    size: number;
-    bytes?: number;
-};
 
 /** 画布项目 store：权威来源为总后台 SQLite。 */
 export type H3NodeMaterial = {
@@ -95,51 +86,6 @@ export type AssetStore = {
     deleteFolder(id: string): number;
 };
 
-export type NamedMedia = RuntimeMedia & { id: string; mimeType: string; url: string };
-
-/** 媒体 store：media_files 表 + runtime-media/ 文件系统统一入口。 */
-export type MediaStore = {
-    /** 入库媒体（web 双写 / 生成结果落地），storageKey 由后台生成。 */
-    store(data: Buffer, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory } & MediaStats): MediaFile;
-    /** 流式归档媒体，避免视频下载与落盘期间同时保留整文件 Buffer。 */
-    storeStream(source: Readable, options: { name?: string; mimeType?: string; storageKey?: string; category?: MediaCategory; resolveMimeType?: (prefix: Buffer, bytes: number) => string } & MediaStats): Promise<MediaFile & { sha256: string; prefix: Buffer }>;
-    /** 按 base64 dataUrl 落地（兼容旧 Agent /runtime/media 与 H3 ref），返回带本地路径的完整记录。 */
-    storeDataUrl(dataUrl: string, name: string, extra?: MediaStats & { storageKey?: string; category?: MediaCategory }): MediaFile & { path: string; url: string };
-    /** 按 name 幂等读写 runtime 媒体（H3 ref 落地），对应旧 Agent 的 storeRuntimeMedia。 */
-    storeNamed(name: string, data: Buffer, mimeType?: string): NamedMedia;
-    meta(storageKey: string): MediaFile | null;
-    list(): MediaFile[];
-    read(storageKey: string): Promise<Buffer>;
-    /** runtime 媒体按文件名读（对应旧 Agent /runtime/media-file）。 */
-    readNamed(name: string): Buffer;
-    /** 代理 URL（相对总后台根路径）。 */
-    url(m: MediaFile): string;
-    delete(storageKey: string): number;
-};
-
-/** 任务 store：tasks + task_events。 */
-export type TaskStore = {
-    /**
-     * 创建任务。两种重载：
-     *   create(kind, input, params) — 由后端生成 UUID
-     *   create(id, kind, input, params) — 客户端预生成 taskId（用于「前端能跨刷新找回任务」）
-     */
-    create(kindOrId: string, inputOrKind: string | Record<string, unknown>, paramsOrInput: Record<string, unknown>, maybeParams?: Record<string, unknown>): RuntimeTask;
-    get(id: string): RuntimeTask | null;
-    /** 查询已清理任务 ID 的凭据；不存在返回 null。入口在副作用前调用。 */
-    getTombstone(id: string): { taskId: string; terminalStatus: string; prunedAt: string } | null;
-    list(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
-    modelUsage(): Array<{ model: string; channelId: string; count: number }>;
-    /** 摘要列表：同一过滤条件，但只回传卡片渲染所需的标量 + 输出媒体引用（裁掉多 MB 提示词大列）。返回结构与 RuntimeTask 兼容。 */
-    listSummaries(filter?: { status?: RuntimeTaskStatus; kind?: string; model?: string; scope?: "all" | "canvas" | "image" | "video"; projectId?: string; parentThreadId?: string; nodeIds?: string[]; segmentIds?: string[]; limit?: number; offset?: number }): RuntimeTask[];
-    update(id: string, patch: TaskPatch): RuntimeTask;
-    transitionH3(id: string, expectedStatus: RuntimeTaskStatus, expectedRevision: number, patch: TaskPatch & { status: RuntimeTaskStatus; result: Record<string, unknown> }, event: { type: string; payload: Record<string, unknown> }): RuntimeTask | null;
-    cancel(id: string): RuntimeTask;
-    events(id: string, after?: number): RuntimeTaskEvent[];
-    /** 追加一条任务事件（bridge 执行过程上报用）。 */
-    addEvent(id: string, type: string, payload: Record<string, unknown>): RuntimeTaskEvent;
-};
-
 /** 生成日志 store。 */
 export type GenerationLogStore = {
     create(input: GenerationLogInput): GenerationLog;
@@ -165,13 +111,6 @@ export type McpObservabilityStore = {
     optimizationMarkers(): unknown[];
     saveOptimizationMarker(input: unknown): unknown;
     deleteOptimizationMarker(id: string): boolean;
-};
-
-/** 运行时设置 store（runtime_settings 表）。 */
-export type SettingStore = {
-    get(key: string): unknown;
-    set(key: string, value: unknown): void;
-    delete(key: string): void;
 };
 
 /** 总后台 store 集合：server 路由和业务模块的统一依赖。 */

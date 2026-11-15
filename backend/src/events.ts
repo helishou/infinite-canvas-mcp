@@ -1,22 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { CanvasOperation } from "./canvas/project-ops.js";
+import type { EngineEvent, EngineEventSource } from "@basketikun/media-engine/events";
 
-export type BackendEvent = {
-    id: string;
-    type: string;
-    entityId?: string;
-    revision?: number;
-    createdAt: string;
-    payload: unknown;
-    source?: CanvasEventSource;
-    operationId?: string;
-};
-
-export type CanvasEventSource = {
-    clientId: string;
-    kind: "browser" | "mcp" | "agent" | "task" | "system";
-    label?: string;
-};
+// 事件契约权威在 @basketikun/media-engine；画布沿用既有类型名。
+export type BackendEvent = EngineEvent;
+export type CanvasEventSource = EngineEventSource;
 
 
 type Listener = (event: BackendEvent) => void;

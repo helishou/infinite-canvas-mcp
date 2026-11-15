@@ -18,7 +18,7 @@ import express, {
 } from "express";
 
 import { runClaudeTurn } from "../agent/claude.js";
-import { LlmAgent, isLlmThread, type LlmSettings } from "../agent/llm.js";
+import { HermesAgent, isHermesThread, type HermesSettings } from "../agent/hermes-agent.js";
 import {
   archiveCodexThread,
   CodexSkillLookupError,
@@ -63,6 +63,7 @@ import {
   type CanvasAgentConfig,
 } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { errorMessage } from "../utils/value.js";
 import { productionWriteReceipt } from "../drama/production-read.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
@@ -85,7 +86,7 @@ export type AgentHttpOptions = {
   backendUrl?: string;
   backendToken?: string;
   /** Backend owns channels and API-backed conversation history. */
-  settings?: LlmSettings;
+  settings?: HermesSettings;
 };
 
 export type AgentHttpRuntime = {
@@ -127,10 +128,12 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     const dramaId = String(result.context?.dramaId || "").trim();
     return { dramaId, source: dramaId ? "browser-focused" as const : "none" as const };
   };
-  const llm = options.settings ? new LlmAgent(options.settings, backend.backendUrl, backend.backendToken) : undefined;
-  const useLlm = () => {
+  const hermes = options.settings ? new HermesAgent(options.settings, backend.backendUrl, backend.backendToken) : undefined;
+  // 预热 ACP 进程（spawn + initialize + 插件发现约 2-3 秒），放到后台，第一轮对话就不用再等。
+  if (hermes) setTimeout(() => { void hermes.warm(ensureSiteWorkspace(config).workspacePath).catch((error) => logger.warn("Hermes ACP prewarm failed", { error: errorMessage(error) })); }, 2500).unref?.();
+  const useHermes = () => {
     const id = ensureSiteWorkspace(config).activeThreadId || "";
-    return Boolean(llm && (isLlmThread(id) || !id && llm.providers().some(provider => provider.kind !== "codex-cli")));
+    return Boolean(hermes && (isHermesThread(id) || !id && hermes.providers().some(provider => provider.kind !== "codex-cli")));
   };
   // Codex 会话与 Agent 共用当前已解析的 Backend 连接，不再从用户全局配置猜测端点或密钥。
   process.env.INFINITE_CANVAS_BACKEND_URL = backend.backendUrl;
@@ -222,14 +225,14 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         sourceClientId: clientId,
       });
       try {
-        const selectedModel = model?.includes("::") ? model : llm?.defaultModel();
-        const provider = selectedModel ? llm?.provider(selectedModel) : undefined;
+        const selectedModel = model?.includes("::") ? model : hermes?.defaultModel();
+        const provider = selectedModel ? hermes?.provider(selectedModel) : undefined;
         const thread = provider?.kind === "codex-cli"
           ? await startCodexThread(emit, workspace.workspacePath, permission, true, provider.model)
-          : llm && llm.providers().length ? llm.startThread(workspace.workspacePath, selectedModel)
+          : hermes && hermes.providers().length ? hermes.startThread(workspace.workspacePath, selectedModel)
           : await startCodexThread(emit, workspace.workspacePath, permission, true);
-        if (provider?.kind === "codex-cli") llm!.rememberCodexThread(thread.id, provider.id);
-        if (llm && isLlmThread(thread.id)) await llm.prepare(thread.id, workspace.workspacePath, emit);
+        if (provider?.kind === "codex-cli") hermes!.rememberCodexThread(thread.id, provider.id);
+        if (hermes && isHermesThread(thread.id)) await hermes.prepare(thread.id, workspace.workspacePath, emit);
         if (draftThreadStart !== prepared) return thread;
         const threadId = String((thread as Record<string, unknown>).id || "");
         if (threadId && !ensureSiteWorkspace(config).activeThreadId) {
@@ -276,8 +279,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       threadId,
       sourceClientId: clientId || undefined,
     });
-    const result = llm && isLlmThread(threadId)
-      ? await llm.prepare(threadId, workspace.workspacePath, emit)
+    const result = hermes && isHermesThread(threadId)
+      ? await hermes.prepare(threadId, workspace.workspacePath, emit)
       : await resumeCodexThread(emit, threadId, workspace.workspacePath, permission, true);
     session.completeConversationPreparation(threadId);
     return result;
@@ -848,16 +851,29 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
   app.get(
     agentRoute("/codex/models"),
     route(async (req, res) => {
-      const id = ensureSiteWorkspace(config).activeThreadId || "";
-      const configured = llm && req.query.source !== "codex" && (req.query.source === "llm" || llm.providers().length > 0 && (!id || isLlmThread(id) || llm.codexThreadModel(id)));
-      if (!configured) return void res.json({ ok: true, ...(await listCodexModels(emit)) });
-      let native: Awaited<ReturnType<typeof listCodexModels>>["data"] = [];
-      const errors: Array<{ message: string }> = [];
-      if (llm!.providers().some(provider => provider.kind === "codex-cli")) {
-        try { native = (await listCodexModels(emit)).data; }
-        catch (error) { errors.push({ message: error instanceof Error ? error.message : "无法读取 Codex CLI 模型列表" }); }
+      const source = String(req.query.source || "");
+      if (source === "hermes-catalog") {
+        if (!hermes) return void res.status(503).json({ ok: false, error: "Hermes 运行时不可用" });
+        const cwd = ensureSiteWorkspace(config).workspacePath;
+        try {
+          return void res.json({ ok: true, data: await hermes.catalog(cwd) });
+        } catch (error) {
+          // 目录读不出来要说清原因（hermes 未安装 / ACP 起不来 / 会话建不起来），不能只回 Internal error。
+          return void res.status(500).json({ ok: false, error: `Hermes 模型目录读取失败：${error instanceof Error ? error.message : String(error)}` });
+        }
       }
-      res.json({ ok: true, ...llm!.models(native), ...(errors.length ? { errors } : {}) });
+      // 列表恒为「本机 Codex 原生模型 + 渠道模型」的并集。
+      // 只按当前对话类型给一侧，另一侧已保存的模型会从下拉里消失，表现就是「引擎被还原」。
+      const errors: Array<{ message: string }> = [];
+      let native: Awaited<ReturnType<typeof listCodexModels>>["data"] = [];
+      try { native = (await listCodexModels(emit)).data; }
+      catch (error) { errors.push({ message: error instanceof Error ? error.message : "无法读取 Codex CLI 模型列表" }); }
+      if (source === "codex") return void res.json({ ok: true, data: native, ...(errors.length ? { errors } : {}) });
+      const channels = hermes ? hermes.models(native).data : [];
+      // 只留一个 isDefault：渠道已有默认（settings.agentModel）时，原生行不能再自称默认，
+      // 否则前端在旧值失效时会退到 Codex 那行，看起来又像「引擎被还原」。
+      const merged = channels.some(entry => entry.isDefault) ? native.map(entry => ({ ...entry, isDefault: false })) : native;
+      res.json({ ok: true, data: [...merged, ...channels], ...(errors.length ? { errors } : {}) });
     }),
   );
   app.get(
@@ -865,8 +881,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     route(async (req, res) => {
       const forceReload = String(req.query.forceReload || "") === "1" && !session.codexBusy;
       const workspace = ensureSiteWorkspace(config, forceReload);
-      const result = useLlm()
-        ? await llm!.skills(workspace.workspacePath)
+      const result = useHermes()
+        ? await hermes!.skills(workspace.workspacePath)
         : await listCodexSkills(emit, workspace.workspacePath, forceReload);
       res.json({
         ok: true,
@@ -891,8 +907,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
           .status(409)
           .json({ ok: false, error: "发起提炼的网页已断开，请重新连接后再试" });
       const selectedModel = String(req.body?.model || "") || undefined;
-      const selectedProvider = selectedModel?.includes("::") ? llm?.provider(selectedModel) : undefined;
-      if (selectedProvider && (useLlm() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
+      const selectedProvider = selectedModel?.includes("::") ? hermes?.provider(selectedModel) : undefined;
+      if (selectedProvider && (useHermes() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
       const model = selectedProvider?.kind === "codex-cli" ? selectedProvider.model : selectedModel;
       const effort = reasoningEffort(req.body?.effort);
       const previousCodexState = session.codexStateSnapshot;
@@ -911,7 +927,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
                 ok: false,
                 error: "当前对话已在其他页面切换，请同步后重试",
               });
-          const history = llm && isLlmThread(threadId) ? llm.read(threadId, workspace.workspacePath) : await readCodexThread(emit, threadId, workspace.workspacePath);
+          const history = hermes && isHermesThread(threadId) ? hermes.read(threadId, workspace.workspacePath) : await readCodexThread(emit, threadId, workspace.workspacePath);
           if (
             !history.messages.some(
               (message) => message.role === "user" && message.turnId,
@@ -924,7 +940,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
             { busy: true, threadId, turnId: "" },
             { preserveReplay: true },
           );
-          const data = llm && isLlmThread(threadId)
+          const data = hermes && isHermesThread(threadId)
             ? await generateLlmSkillDraft(history.messages.filter(message => ["user", "assistant"].includes(message.role)).map(message => ({ role: message.role, text: message.text })), model, effort)
             : await generateCodexSkillDraft(emit, workspace.workspacePath, { source, threadId, model, effort });
           if (!session.hasClient(clientId))
@@ -948,7 +964,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
           { busy: true, threadId: workspace.activeThreadId || "", turnId: "" },
           { preserveReplay: true },
         );
-        const data = useLlm()
+        const data = useHermes()
           ? await generateLlmSkillDraft(canvasSkillSource(snapshot), model, effort)
           : await generateCodexSkillDraft(emit, workspace.workspacePath, { source, snapshot, model, effort });
         if (!session.hasClient(clientId))
@@ -966,7 +982,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     }),
   );
   async function generateLlmSkillDraft(source: unknown, model?: string, effort?: string) {
-    const result = await llm!.structured({ cwd: ensureSiteWorkspace(config).workspacePath, model, effort, schema: SKILL_DRAFT_OUTPUT_SCHEMA, onThread: () => {},
+    const result = await hermes!.structured({ cwd: ensureSiteWorkspace(config).workspacePath, model, effort, schema: SKILL_DRAFT_OUTPUT_SCHEMA, onThread: () => {},
       prompt: `根据以下已完成内容提炼可编辑的通用 Skill。只保存稳定、可复用的步骤、约束和输出要求，不记录一次性结果或日志。instructions 不含 frontmatter。defaultPrompt 必须引用 $name；shortDescription 为空或 25–64 字符。禁止本地路径、外部 URL、节点身份和任何敏感凭证。\n${JSON.stringify(source)}` });
     return validateAgentSkillDraft(result.output);
   }
@@ -996,8 +1012,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       const selector = skillSelector(req.body);
       if (selector.name !== routeParam(req.params.name))
         return res.status(400).json({ ok: false, error: "Skill 选择无效" });
-      const data = useLlm()
-        ? await llm!.configureSkill(workspace.workspacePath, selector, req.body.enabled)
+      const data = useHermes()
+        ? await hermes!.configureSkill(workspace.workspacePath, selector, req.body.enabled)
         : await configureCodexSkill(emit, workspace.workspacePath, selector, req.body.enabled);
       session.emitAll("skills_changed", { forceReload: true });
       res.json({ ok: true, data });
@@ -1006,6 +1022,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
   app.post(
     agentRoute("/codex/skills/:name/delete"),
     codexMutation(async (req, res) => {
+      if (useHermes()) return void res.status(400).json({ ok: false, error: "Hermes 技能由 Hermes 自己管理（~/.hermes/skills 或工作区 .agents/skills），画布不代删；需要卸载用 hermes skills uninstall。" });
       await skillStore.delete(
         routeParam(req.params.name),
         String(req.body?.expectedRevision || ""),
@@ -1017,6 +1034,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
   app.post(
     agentRoute("/codex/skills/:name"),
     codexMutation(async (req, res) => {
+      if (useHermes()) return void res.status(400).json({ ok: false, error: "Hermes 技能直接改文件（SKILL.md），画布不代编辑；请在 Hermes 里用 skill_manage 或直接编辑。" });
       const data = await skillStore.update(
         routeParam(req.params.name),
         req.body,
@@ -1029,10 +1047,18 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     agentRoute("/codex/threads"),
     route(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
-      const result = llm && (req.query.source === "llm" || req.query.source !== "codex" && useLlm()) ? llm.list(workspace.workspacePath, String(req.query.searchTerm || "")) : await listCodexThreads(emit, {
-        cwd: workspace.workspacePath,
-        searchTerm: String(req.query.searchTerm || ""),
-      });
+      // 历史面板要看到「所有」对话：Hermes 与 Codex 各存一套索引，按当前引擎二选一会让另一边凭空消失。
+      const searchTerm = String(req.query.searchTerm || "");
+      const codexThreads = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm }).catch(() => ({ data: [], nextCursor: null }) as { data: unknown[]; nextCursor: null });
+      const hermesThreads = hermes ? hermes.list(workspace.workspacePath, searchTerm) : { data: [] as unknown[], nextCursor: null };
+      const result = req.query.source === "codex"
+        ? codexThreads
+        : req.query.source === "llm" || req.query.source === "hermes"
+          ? hermesThreads
+          : {
+              data: [...(codexThreads.data || []), ...((hermesThreads.data || []) as unknown[])].sort((left, right) => Number((right as { updatedAt?: number }).updatedAt || 0) - Number((left as { updatedAt?: number }).updatedAt || 0)),
+              nextCursor: null,
+            };
       res.json({
         ok: true,
         workspace,
@@ -1092,10 +1118,10 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     route(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
       const threadId = routeParam(req.params.threadId);
-      const result = llm && isLlmThread(threadId)
-        ? llm.read(threadId, workspace.workspacePath)
+      const result = hermes && isHermesThread(threadId)
+        ? hermes.read(threadId, workspace.workspacePath)
         : await readCodexThread(emit, threadId, workspace.workspacePath);
-      const selectedModel = !isLlmThread(threadId) ? llm?.codexThreadModel(threadId) : undefined;
+      const selectedModel = !isHermesThread(threadId) ? hermes?.codexThreadModel(threadId) : undefined;
       const thread = result.thread && typeof result.thread === "object"
         ? { ...result.thread, ...(selectedModel ? { model: selectedModel } : {}) }
         : result.thread;
@@ -1149,7 +1175,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     codexMutation(async (req, res) => {
       const workspace = ensureSiteWorkspace(config);
       const threadId = routeParam(req.params.threadId);
-      if (llm && isLlmThread(threadId)) llm.archive(threadId, workspace.workspacePath);
+      if (hermes && isHermesThread(threadId)) hermes.archive(threadId, workspace.workspacePath);
       else await archiveCodexThread(emit, threadId, workspace.workspacePath);
       const nextWorkspace = setActiveThread(
         workspace.activeThreadId === threadId
@@ -1167,6 +1193,11 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
   app.post(
     agentRoute("/codex/turn"),
     codexMutation(async (req, res) => {
+      // 会话初始化（Hermes 侧建 Agent ≈3.8s）还没结束时，先等这一轮建完再继续；
+      // 直接 409 会让用户白点一次，前端也没法在初始化期间发送。
+      if (draftThreadStart && session.conversationStateSnapshot.status === "preparing") {
+        await draftThreadStart.catch(() => undefined);
+      }
       const attachments = Array.isArray(req.body?.attachments)
         ? (req.body.attachments as AgentAttachment[])
         : [];
@@ -1214,8 +1245,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
           });
       }
       const selectedModel = String(req.body?.model || "") || undefined;
-      const selectedProvider = selectedModel?.includes("::") ? llm?.provider(selectedModel) : undefined;
-      if (selectedProvider && (useLlm() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
+      const selectedProvider = selectedModel?.includes("::") ? hermes?.provider(selectedModel) : undefined;
+      if (selectedProvider && (useHermes() ? selectedProvider.kind === "codex-cli" : selectedProvider.kind !== "codex-cli")) return void res.status(409).json({ ok: false, code: "MODEL_RUNTIME_CHANGED", error: "该模型使用不同的 Agent 运行方式，请先新建对话；原对话已保留" });
       const model = selectedProvider?.kind === "codex-cli" ? selectedProvider.model : selectedModel;
       const effort = reasoningEffort(req.body?.effort);
       // Refresh protected Skill mirrors only at the boundary of an accepted, idle turn.
@@ -1223,8 +1254,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       const skill =
         req.body?.skill === undefined
           ? undefined
-          : useLlm()
-            ? await llm!.resolveSkill(workspace.workspacePath, skillSelector(req.body.skill), true)
+          : useHermes()
+            ? await hermes!.resolveSkill(workspace.workspacePath, skillSelector(req.body.skill), true)
             : await resolveCodexSkill(emit, workspace.workspacePath, skillSelector(req.body.skill), true);
       const messageId = String(req.body?.messageId || Date.now());
       const messageText = String(
@@ -1288,8 +1319,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
             ...(sourceClientId ? { sourceClientId } : {}),
           });
         };
-        const runTurn = llm && isLlmThread(threadId)
-          ? (prompt: string, lifecycleEmit: AgentEmit, attachments: AgentAttachment[] = [], options: Parameters<typeof runCodexTurn>[3] = {}) => llm.run(prompt, lifecycleEmit, attachments, options, String(session.canvasStateForClient(clientId)?.projectId || "") || undefined)
+        const runTurn = hermes && isHermesThread(threadId)
+          ? (prompt: string, lifecycleEmit: AgentEmit, attachments: AgentAttachment[] = [], options: Parameters<typeof runCodexTurn>[3] = {}) => hermes.run(prompt, lifecycleEmit, attachments, options, String(session.canvasStateForClient(clientId)?.projectId || "") || undefined)
           : runCodexTurn;
         void runTurn(
           withAttachmentContext(prompt, attachmentRefs),
@@ -1306,7 +1337,7 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
             appEmit: emit,
             onStart: () => session.bindClient(clientId),
             onThread: (actualThreadId) => {
-              if (selectedProvider?.kind === "codex-cli") llm!.rememberCodexThread(actualThreadId, selectedProvider.id);
+              if (selectedProvider?.kind === "codex-cli") hermes!.rememberCodexThread(actualThreadId, selectedProvider.id);
               const threadChanged = actualThreadId !== threadId;
               void messageMetadataStore
                 .bindThread(messageId, actualThreadId)
@@ -1460,8 +1491,8 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
     agentRoute("/codex/interrupt"),
     route(async (req, res) => {
       const requestedThreadId = String(req.body?.threadId || "");
-      const ok = useLlm()
-        ? llm!.interrupt(skillDraftRunning ? undefined : requestedThreadId)
+      const ok = useHermes()
+        ? hermes!.interrupt(skillDraftRunning ? undefined : requestedThreadId)
         : await interruptCodexTurn(skillDraftRunning ? undefined : requestedThreadId);
       // Skill 草稿的停止不是生产 turn，不打标记；其余手动停止记录当前 turn，历史读取据此区分「已停止」与意外离线。
       if (ok && !skillDraftRunning) {

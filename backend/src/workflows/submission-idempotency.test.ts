@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WorkflowExecutor } from "./executor.js";
-import { RunningHubBackend } from "../runtime/runninghub.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
+import { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import { registerAgentRuntimeRoutes } from "../server/agent-runtime-routes.js";
 
 function localHarness() {

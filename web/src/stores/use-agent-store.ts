@@ -22,7 +22,7 @@ export type AgentPendingToolCall = { requestId: string; name: string; input?: { 
 export type AgentPermissionMode = "request" | "automatic" | "full";
 export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type AgentModel = {
-    runtime?: "llm" | "codex";
+    runtime?: "llm" | "codex" | "hermes";
     id: string;
     model: string;
     displayName: string;
@@ -344,6 +344,10 @@ async function hydrateAgentSettings() {
 
 if (typeof window !== "undefined") {
     window.addEventListener("backend-connected", () => {
+        void hydrateAgentSettings();
+    });
+    // 设置里改「导演引擎」后同步到输入框：否则面板里的模型仍是旧值，新建对话会继续走旧运行时。
+    window.addEventListener("agent-settings-changed", () => {
         void hydrateAgentSettings();
     });
 }

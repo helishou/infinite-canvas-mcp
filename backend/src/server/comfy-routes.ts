@@ -3,10 +3,10 @@ import { projectModelCatalog } from "@basketikun/canvas-agent/runtime/model-cata
 import type { Request, Response } from "express";
 
 import { type ResolvedConfig } from "../config.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { Stores } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
-import { readWorkflowLivePreview } from "../workflows/live-preview.js";
+import { readWorkflowLivePreview } from "@basketikun/media-engine/workflows/live-preview";
 
 /** ComfyUI Bridge 路由（总后台权威，Agent 变纯代理）。 */
 export function registerComfyRoutes(ctx: { app: import("express").Express; stores: Stores; config: ResolvedConfig; events?: BackendEventBus; basePath?: string }, bridge: ComfyUiBackend) {

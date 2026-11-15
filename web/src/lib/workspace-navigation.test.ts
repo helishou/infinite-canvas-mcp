@@ -16,34 +16,33 @@ for (const [pathname, area] of [
     ["/drama", "projects"],
     ["/drama/episodes/episode-a/production", "projects"],
     ["/drama/scenes/scene-a/production", "projects"],
-    ["/image", "generate"],
-    ["/video", "generate"],
+    ["/image", "workbench"],
+    ["/video", "workbench"],
     ["/assets", "resources"],
     ["/prompts", "resources"],
     ["/workflows", "workflows"],
+    ["/skills", "skills"],
 ] as const) {
     test(`${pathname} stays in the ${area} workspace`, () => {
         assert.equal(resolveWorkspaceNavigation(pathname).area, area);
     });
 }
 
-test("primary navigation includes six areas regardless of optional provider settings", () => {
+test("primary navigation keeps the merged workspaces without a standalone generate entry", () => {
     assert.deepEqual(
         navigationTools.map((item) => item.slug),
-        ["workbench", "projects", "freeCanvas", "generate", "resources", "workflows"],
+        ["workbench", "projects", "freeCanvas", "resources", "workflows", "skills"],
     );
     assert.deepEqual(
         navigationTools.map((item) => item.href),
-        ["/", "/projects", "/projects?type=canvas", "/image", "/assets", "/workflows"],
+        ["/", "/projects", "/projects?type=canvas", "/assets", "/workflows", "/skills"],
     );
 });
 
-test("image and video remain separately reachable full pages", () => {
-    assert.deepEqual(
-        workspaceSecondaryNavigation.generate.map((item) => item.href),
-        ["/image", "/video"],
-    );
-    assert.equal(resolveWorkspaceNavigation("/video").activeSecondary, "video");
+test("retired quick generate URLs classify as the home workbench and keep no secondary tab", () => {
+    assert.equal("generate" in workspaceSecondaryNavigation, false);
+    assert.deepEqual(resolveWorkspaceNavigation("/image"), { area: "workbench", compact: false });
+    assert.deepEqual(resolveWorkspaceNavigation("/video", "?prompt=kept"), { area: "workbench", compact: false });
 });
 
 test("assets and prompts remain separately reachable full pages", () => {

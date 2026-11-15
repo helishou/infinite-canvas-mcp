@@ -9,7 +9,7 @@ const argOf = (name, fallback) => {
 };
 const base = argOf("--base", "http://localhost:3001").replace(/\/$/, "");
 const viewport = { width: 1440, height: 900 };
-const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/image", "/video", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
+const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
 
 const checks = [];
 const check = (name, pass, detail) => checks.push({ name, pass: Boolean(pass), detail });
@@ -117,15 +117,6 @@ const emptyCover = await withPage("/prompts", (page) => page.evaluate(() => {
     return { hasCover: Boolean(cover), coverHeight: cover ? Math.round(cover.getBoundingClientRect().height) : 0 };
 }));
 check("无封面卡不渲染 cover", !emptyCover.hasCover || emptyCover.coverHeight > 0, JSON.stringify(emptyCover));
-
-// C1 空态收缩
-for (const route of ["/image", "/video"]) {
-    const height = await withPage(route, (page) => page.evaluate(() => {
-        const node = document.querySelector('[data-testid="workbench-empty"]');
-        return node ? Math.round(node.getBoundingClientRect().height) : null;
-    }));
-    check(`${route} 空态高 <160`, height != null && height < 160, String(height));
-}
 
 // C2 /mcp 首屏同时出现 KPI 与结论区（无异常时结论区是提示条而非表格）
 const mcpFirst = await withPage("/diagnostics/mcp", (page) => page.evaluate(() => {

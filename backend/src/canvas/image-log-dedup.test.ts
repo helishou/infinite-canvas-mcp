@@ -4,7 +4,7 @@ import sharp from "sharp";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
 import { CanvasImageDispatcher } from "./image-dispatcher.js";
-import { WorkflowExecutor } from "../workflows/executor.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 /**
  * 真实链路集成验证：画布生图走 comfy-workflow 时，
@@ -18,7 +18,8 @@ async function withStubbedComfy<T>(fn: () => Promise<T>): Promise<T> {
     (globalThis as any).WebSocket = undefined;
     globalThis.fetch = (async (url: string) => {
         if (String(url).endsWith("/prompt")) return new Response(JSON.stringify({ prompt_id: "p1" }), { status: 200, headers: { "content-type": "application/json" } });
-        if (String(url).includes("/history")) return new Response(JSON.stringify({ p1: { outputs: { "1": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } } } }), { status: 200, headers: { "content-type": "application/json" } });
+        // 执行器只在 history 带 success/completed 时才认定结束；只有 outputs 会一直轮询到超时。
+        if (String(url).includes("/history")) return new Response(JSON.stringify({ p1: { outputs: { "1": { images: [{ filename: "o.png", subfolder: "", type: "output" }] } }, status: { status_str: "success", completed: true } } }), { status: 200, headers: { "content-type": "application/json" } });
         if (String(url).includes("/view")) return new Response(outputImage, { status: 200, headers: { "content-type": "image/png" } });
         if (String(url).includes("/upload/image")) return new Response(JSON.stringify({ name: "shot1.png", subfolder: "", type: "input" }), { status: 200, headers: { "content-type": "application/json" } });
         throw new Error(`unexpected fetch: ${url}`);
@@ -54,10 +55,17 @@ test("画布生图走工作流时只写一条生成日志（不再出现「生�
             ],
         } as never);
 
-        const bridge = { url: "http://127.0.0.1:8188", getUrl: () => "http://127.0.0.1:8188", uploadImage: async () => "x.png", cancelPromptExecution: async () => undefined } as never;
+        const bridge = {
+            url: "http://127.0.0.1:8188", getUrl: () => "http://127.0.0.1:8188", uploadImage: async () => "x.png", cancelPromptExecution: async () => undefined,
+            isLocalUrl: () => false, stageLocalInput: () => null,
+            localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }),
+            releaseBeforeRepeat: () => false,
+        } as never;
         // 工作流必须真的有一个图片输入槽，否则 dispatcher 在提交前就抛错，压根走不到写日志那步
         // （那样测试会因为「0 条 workflow 日志」而假通过）。
         const workflows = {
+            // dispatcher 在成就地工作流时读一次配置（runTarget / runningHubProfileId）；未配置即本地执行。
+            getConfig: () => null,
             get: async () => ({
                 workflow: {
                     "10": { class_type: "LoadImage", inputs: { image: "placeholder.png" } },

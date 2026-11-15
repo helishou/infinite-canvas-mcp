@@ -4,7 +4,7 @@ import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
-import { buildNativeNanFengV15Workflow } from "../comfyui/bridge.js";
+import { buildNativeNanFengV15Workflow } from "@basketikun/media-engine/comfyui/bridge";
 
 function fixture(t: TestContext, segments: Array<Record<string, unknown>>) {
     const db = new BackendDatabase(":memory:");

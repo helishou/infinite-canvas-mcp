@@ -7,9 +7,12 @@
  * 白跑了 5 轮。
  *
  * 本模块只做一件事：把一个错误（code + message）判定成
- * `scope`（谁的问题）、`doNotRetry`（原样重提是否有意义）、`fix`（怎么修）。
+ * `scope`（谁的问题）、`doNotRetry`（原样重提是否有意义）、`fix`（怎么修），
+ * 外加 `retryClass`（上游提交三态下的建议处置类别）。
  * 不重试、不改业务、不留状态，纯函数，工具层与任务回执层共用同一张表。
  */
+
+import { retryClassForCode, type RetryClass } from "@basketikun/media-engine/runtime/submission-outcome";
 
 export type ErrorScope = "environment" | "input" | "conflict" | "transient" | "content";
 
@@ -29,6 +32,8 @@ export type ErrorDisposition = {
   scope: ErrorScope;
   /** true = 原样重提不会改变结果；false = 允许沿原身份恢复或定向回读后重来。 */
   doNotRetry: boolean;
+  /** 建议的恢复类别；只描述错误语义，不臆断任务是否真的提交成功。 */
+  retryClass?: RetryClass;
   fix?: ErrorFix;
 };
 
@@ -203,6 +208,7 @@ export function classifyErrorDisposition(input: {
   code?: string | null;
   message?: string | null;
   tool?: string;
+  retryClass?: RetryClass;
 }): ErrorDisposition {
   const rawCode = String(input.code || "").trim();
   const message = String(input.message || "");
@@ -211,7 +217,9 @@ export function classifyErrorDisposition(input: {
   const code = codeFallback && detected ? detected : rawCode || detected || UNKNOWN_TASK_CODE;
   const scope = scopeForCode(code);
   const fix = fixForCode(code, message, input.tool);
-  return { code, scope, doNotRetry: SCOPE_DO_NOT_RETRY[scope], ...(fix ? { fix } : {}) };
+  // 任务侧能提供真实提交记录时以它为准；否则只按错误码给出建议类别。
+  const retryClass = input.retryClass || retryClassForCode(code);
+  return { code, scope, doNotRetry: SCOPE_DO_NOT_RETRY[scope], ...(retryClass ? { retryClass } : {}), ...(fix ? { fix } : {}) };
 }
 
 /**

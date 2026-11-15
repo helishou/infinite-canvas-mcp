@@ -1,6 +1,6 @@
 import { lazy, Suspense, type ComponentType, type LazyExoticComponent } from "react";
 import { useTranslation } from "react-i18next";
-import { createBrowserRouter, Outlet, useRouteError } from "react-router-dom";
+import { createBrowserRouter, Navigate, Outlet, useLocation, useRouteError } from "react-router-dom";
 
 import { AnalyticsTracker } from "@/components/layout/analytics-tracker";
 import UserLayout from "@/layouts/user-layout";
@@ -19,11 +19,9 @@ const SceneProductionRedirect = lazy(() => import("@/pages/drama/legacy-routes")
 const LegacyDirectorPage = lazy(() => import("@/pages/director"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
-const ImagePage = lazy(() => import("@/pages/image"));
 const NotFound = lazy(() => import("@/pages/not-found"));
 const WorkflowsPage = lazy(() => import("@/pages/workflows"));
 const PromptsPage = lazy(() => import("@/pages/prompts"));
-const VideoPage = lazy(() => import("@/pages/video"));
 const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
@@ -63,6 +61,14 @@ function lazyPage(Page: LazyExoticComponent<ComponentType>) {
     );
 }
 
+/** 旧快速生成入口并入首页启动台：保留地址与查询参数，预选对应生成模式。 */
+function HomeModeRedirect({ mode }: { mode: "image" | "video" }) {
+    const { search } = useLocation();
+    const query = new URLSearchParams(search);
+    query.set("mode", mode);
+    return <Navigate to={{ pathname: "/", search: query.toString() }} replace />;
+}
+
 // Exported so reports can collapse a concrete pathname to its route pattern without a second route table.
 export const appRoutes = [
     { path: "/", element: lazyPage(HomePage) },
@@ -70,8 +76,8 @@ export const appRoutes = [
     { path: "/production", element: lazyPage(ProductionHubPage) },
     { path: "/director", element: lazyPage(LegacyDirectorPage) },
     { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },
-    { path: "/image", element: lazyPage(ImagePage) },
-    { path: "/video", element: lazyPage(VideoPage) },
+    { path: "/image", element: <HomeModeRedirect mode="image" /> },
+    { path: "/video", element: <HomeModeRedirect mode="video" /> },
     { path: "/assets", element: lazyPage(AssetsPage) },
     { path: "/prompts", element: lazyPage(PromptsPage) },
     { path: "/skills", element: lazyPage(SkillsPage) },

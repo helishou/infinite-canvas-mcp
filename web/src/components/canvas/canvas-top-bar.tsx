@@ -16,6 +16,7 @@ import { CanvasTextSuggestionsDialog } from "./canvas-text-suggestions-dialog";
 import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
+import { CanvasNodeFinder } from "@/components/canvas/canvas-node-finder";
 import { markProductionEntry } from "@/lib/production-navigation";
 
 export function CanvasTopBar({
@@ -154,7 +155,7 @@ export function CanvasTopBar({
                             </button>
                         )}
                     </div>
-                    {productionOwner && <CanvasProductionToolbar />}
+                    {productionOwner ? <CanvasProductionToolbar /> : <CanvasNodeFinder projectId={projectId} />}
                     <CanvasCollaborators collaborators={collaborators} />
                 </div>
 

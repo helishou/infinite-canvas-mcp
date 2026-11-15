@@ -4,7 +4,7 @@ import os from "node:os";
 import test, { type TestContext } from "node:test";
 import path from "node:path";
 
-import { collectOutputMedia, ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow as buildH3Entry, exactHistoryEntry, h3WatchdogState, localComfyInputName, readComfyHistory, summarizeH3Workflow, type ComfyUiDeps } from "./bridge.js";
+import { collectOutputMedia, ComfyUiBackend, attachH3ActualSubmission, buildNativeNanFengV15Workflow as buildH3Entry, exactHistoryEntry, h3WatchdogState, localComfyInputName, readComfyHistory, summarizeH3Workflow, type ComfyUiDeps } from "@basketikun/media-engine/comfyui/bridge";
 import { appendTailFramePrompt, routeTailFrameInput } from "../canvas/h3-runner.js";
 import { estimateH3Dimensions } from "../canvas/h3-params.js";
 import { MEDIA_DIR } from "../config.js";

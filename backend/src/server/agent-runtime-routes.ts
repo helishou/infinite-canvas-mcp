@@ -1,9 +1,9 @@
 import type { Express, Request, Response } from "express";
 import type { Stores } from "../stores/types.js";
-import type { RunningHubBackend } from "../runtime/runninghub.js";
-import type { VideoConcatBackend } from "../runtime/video-concat.js";
+import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
+import type { VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
 import type { BackendEventBus } from "../events.js";
-import { readWorkflowLivePreview } from "../workflows/live-preview.js";
+import { readWorkflowLivePreview } from "@basketikun/media-engine/workflows/live-preview";
 
 /** Agent 兼容运行时路由，实际任务由 Backend 服务和 TaskStore 承担。 */
 export function registerAgentRuntimeRoutes(app: Express, stores: Stores, runningHub: RunningHubBackend, videoConcat: VideoConcatBackend, events?: BackendEventBus) {

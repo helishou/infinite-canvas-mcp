@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { BackendDatabase } from "../db.js";
 import { createStores } from "../stores/index.js";
-import { DirectVideoBackend } from "./direct-video.js";
+import { DirectVideoBackend } from "@basketikun/media-engine/runtime/direct-video";
 
 test("直连视频由 Backend 创建并归档，轮询使用持久远端任务 ID", async (t: TestContext) => {
     const db = new BackendDatabase(":memory:");

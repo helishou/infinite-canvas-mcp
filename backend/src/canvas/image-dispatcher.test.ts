@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
 import crypto from "node:crypto";
-import { injectParams } from "../workflows/executor.js";
+import { injectParams } from "@basketikun/media-engine/workflows/executor";
 
 import { CanvasImageDispatcher, type CanvasImageReference } from "./image-dispatcher.js";
 

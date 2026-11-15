@@ -1,6 +1,7 @@
 packages:
   - backend
   - canvas-agent
+  - media-engine
   - web
   - plugins/canvas/sdk
   - plugins/canvas/minimax-h3

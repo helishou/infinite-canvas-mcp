@@ -80,10 +80,42 @@ export type WorkflowRunFields = {
     [fieldId: string]: unknown;
 };
 
-export function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
-    return request<{ workflows: WorkflowItem[] }>("GET", "/api/workflows");
+/**
+ * 引擎基址：画布后端 `/api/engine/status` 告知有没有配置独立执行引擎。
+ *
+ * 配了就经后端代理把工作流管理请求打到引擎（令牌不出服务端），没配仍走画布后端。
+ * 结果只缓存一次——设置改了刷新页面即可，不在会话里反复探测。
+ */
+let engineReady: Promise<boolean> | null = null;
+
+type PolledMedia = { url: string; storageKey?: string; mimeType?: string; filename?: string };
+type PolledTask = { status: string; error?: string; result?: { media?: PolledMedia[]; images?: PolledMedia[]; texts?: Array<{ nodeId?: string; content: string }> } };
+
+async function enginePath(path: string): Promise<string> {
+    engineReady ??= request<{ enabled?: boolean }>("GET", "/api/engine/status")
+        .then((status) => Boolean(status?.enabled))
+        .catch(() => false);
+    return (await engineReady) ? `/api/engine${path}` : path;
 }
 
+type EngineWorkflowItem = { name: string; title?: string; builtin?: boolean; fieldCount?: number; config?: WorkflowConfig | null };
+
+export async function fetchWorkflows(): Promise<{ workflows: WorkflowItem[] }> {
+    const path = await enginePath("/api/workflows");
+    if (path.startsWith("/api/engine")) {
+        const response = await request<{ data?: EngineWorkflowItem[] }>("GET", path);
+        return {
+            workflows: (response.data ?? []).map((item) => ({
+                name: item.name,
+                description: item.config?.description,
+                hasConfig: Boolean(item.config),
+            })),
+        };
+    }
+    return request<{ workflows: WorkflowItem[] }>("GET", path);
+}
+
+// 以下三个接口读的是"本机 ComfyUI 安装目录"，能力仍在画布侧（引擎没有实例目录），暂不迁移。
 export function fetchLocalComfyWorkflows(): Promise<{ workflows: LocalComfyWorkflowFile[] }> {
     return request<{ workflows: LocalComfyWorkflowFile[] }>("GET", "/api/comfyui/local-workflows");
 }
@@ -96,36 +128,36 @@ export function syncWorkflowFromComfyUI(name: string): Promise<{ name: string }>
     return request<{ name: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/sync-comfyui`);
 }
 
-export function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
-    return request<WorkflowDetail>("GET", `/api/workflows/${encodeURIComponent(name)}`);
+export async function fetchWorkflowDetail(name: string): Promise<WorkflowDetail> {
+    return request<WorkflowDetail>("GET", await enginePath(`/api/workflows/${encodeURIComponent(name)}`));
 }
 
-export function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
-    return request<WorkflowPackage>("GET", `/api/workflows/${encodeURIComponent(name)}/export`);
+export async function exportWorkflowPackage(name: string): Promise<WorkflowPackage> {
+    return request<WorkflowPackage>("GET", await enginePath(`/api/workflows/${encodeURIComponent(name)}/export`));
 }
 
-export function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string; inheritedFrom?: string }> {
-    return request<{ name: string; inheritedFrom?: string }>("POST", "/api/workflows/import", { name, package: workflowPackage, exposeModel: options?.exposeModel });
+export async function importWorkflowPackage(name: string, workflowPackage: WorkflowPackage, options?: { exposeModel?: boolean }): Promise<{ name: string; inheritedFrom?: string }> {
+    return request<{ name: string; inheritedFrom?: string }>("POST", await enginePath("/api/workflows/import"), { name, package: workflowPackage, exposeModel: options?.exposeModel });
 }
 
 // 仅重命名显示标题（title），不动底层文件名
-export function renameWorkflowTitle(name: string, title: string): Promise<{ name: string; title: string }> {
-    return request<{ name: string; title: string }>("PUT", `/api/workflows/${encodeURIComponent(name)}/title`, { title });
+export async function renameWorkflowTitle(name: string, title: string): Promise<{ name: string; title: string }> {
+    return request<{ name: string; title: string }>("PUT", await enginePath(`/api/workflows/${encodeURIComponent(name)}/title`), { title });
 }
 
 /** 拉取 ComfyUI 各节点 COMBO 输入的选项列表 */
-export function fetchWorkflowComboOptions(name: string): Promise<{ options: Record<string, Record<string, string[]>> }> {
-    return request<{ options: Record<string, Record<string, string[]>> }>("GET", `/api/workflows/${encodeURIComponent(name)}/combo-options`);
+export async function fetchWorkflowComboOptions(name: string): Promise<{ options: Record<string, Record<string, string[]>> }> {
+    return request<{ options: Record<string, Record<string, string[]>> }>("GET", await enginePath(`/api/workflows/${encodeURIComponent(name)}/combo-options`));
 }
 
-export function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<{ taskId: string }> {
+export async function runWorkflow(name: string, fields: WorkflowRunFields, config?: WorkflowConfig, clientTaskId?: string): Promise<{ taskId: string }> {
     // 后端 /run 现在后台执行、立即返回 taskId；前端用 pollWorkflowTask 轮询结果。
     // config 是 WorkflowExecutor.run 第一个会用到的字段（processImageFields 读
     // config.fields），前端如果漏传会让 executor 立刻崩
     // "Cannot read properties of undefined (reading 'fields')"。
     // 用户后续在 workflows 页面配完字段后，前端传真 config 让
     // processImageFields 能把 image 类型的 dataURL 上传到 ComfyUI。
-    return request<{ taskId: string }>("POST", `/api/workflows/${encodeURIComponent(name)}/run`, {
+    return request<{ taskId: string }>("POST", await enginePath(`/api/workflows/${encodeURIComponent(name)}/run`), {
         fields,
         clientTaskId,
         config: config ?? {
@@ -151,17 +183,24 @@ export async function pollWorkflowTask(
     // 与后端 ComfyUI 执行时限一致：后端仍在排队/执行时，前端不能先用 30 分钟把任务判死。
     const timeout = options?.timeoutMs ?? 120 * 60 * 1000;
     const startedAt = Date.now();
+    const engine = await enginePath("");
     for (;;) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         if (Date.now() - startedAt > timeout) throw new Error(`工作流任务轮询超时（${Math.round(timeout / 60000)} 分钟）；任务可能仍在 ComfyUI 队列中，请到任务面板查看实际状态`);
-        const res = await fetchBackendTask(taskId, options?.signal);
-        const task = res.task;
+        const task: PolledTask | undefined = engine
+            ? await request<{ id: string; status: string; error?: string | null; media?: Array<{ url: string; storage_key?: string; mime_type?: string; filename?: string }> }>("GET", `${engine}/api/tasks/${encodeURIComponent(taskId)}`)
+                .then((value): PolledTask => ({
+                    status: value.status,
+                    error: value.error ?? undefined,
+                    result: { media: (value.media ?? []).map((item) => ({ url: item.url, storageKey: item.storage_key, mimeType: item.mime_type, filename: item.filename })) },
+                }))
+            : ((await fetchBackendTask(taskId, options?.signal)).task as PolledTask | undefined);
         if (!task) throw new Error("工作流任务不存在");
         if (task.status === "succeeded") {
-            const media = (task.result?.media ?? task.result?.images ?? []).map((m) => ({
+            const media = ((task.result?.media ?? task.result?.images ?? []) as Array<{ url: string; storageKey?: string; mimeType?: string; filename?: string }>).map((m) => ({
                 url: m.url,
                 storageKey: m.storageKey,
-                mimeType: m.mimeType,
+                mimeType: m.mimeType ?? "",
                 filename: m.filename,
             }));
             return { taskId, media: media as WorkflowRunResult["media"], texts: task.result?.texts, status: { status_str: "success", completed: true } };

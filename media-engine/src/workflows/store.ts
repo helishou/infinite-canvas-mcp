@@ -1,0 +1,557 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { engineDirs } from "../dirs.js";
+import type { EnginePersistence } from "../contracts.js";
+import type { WorkflowConfig, WorkflowField } from "../contracts.js";
+import { mergeInheritedFields } from "./workflow-field-inherit.js";
+import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
+import { parseWorkflowDurationTarget } from "./duration.js";
+import type { ComfyUiBackend } from "../comfyui/bridge.js";
+
+const CUSTOM_SUBDIR = "custom";
+// 放宽：允许空格、全角符号、生僻字等任意可见字符；仅禁控制字符和路径非法字符（防穿越另由 workflowFilePath 兜底）
+const NAME_RE = /^[^\x00-\x1f\\/:*?"<>|]+\.json$/;
+const MEDIA_INPUT_KEYS = ["image", "video", "audio", "mask", "filename", "file"];
+const MEDIA_EXT_RE = /\.(png|jpe?g|webp|gif|bmp|tiff?|mp4|webm|mov|m4v|avi|mkv|mp3|wav|m4a|aac|ogg|flac)(?:\?|$)/i;
+/** 下拉里的“不用音色档案”哨兵：选中它就走无参考生成，音色由 seed 决定。 */
+export const NO_SESSION_VOICE = "(不用音色档案·纯文本自抽音色)";
+
+/** ComfyUI 里实际存在的 Drama3 音色档案；由 index.ts 定期从 object_info 刷新。 */
+let drama3VoiceOptions: string[] = [];
+
+/** 让画布的音色下拉跟随真实档案：新造一个 session 就自动出现在下拉里，不用改代码。 */
+export function setDrama3VoiceOptions(names: string[]): void {
+    drama3VoiceOptions = names.filter((n) => typeof n === "string" && n.trim().endsWith(".safetensors")).sort();
+}
+
+function withLiveVoiceOptions(config: WorkflowConfig | null, name: string): WorkflowConfig | null {
+    if (!config || name !== "Drama3-TTS.json" || !drama3VoiceOptions.length) return config;
+    const fields = config.fields.map((field) => {
+        if (field.id !== "voice") return field;
+        const fallback = drama3VoiceOptions.includes(String(field.default)) ? String(field.default) : drama3VoiceOptions[0];
+        return { ...field, options: [NO_SESSION_VOICE, ...drama3VoiceOptions], default: fallback };
+    });
+    return { ...config, fields };
+}
+
+const BUNDLED_WORKFLOWS = ["IndexTTS-2.5.json", "Drama3-TTS.json", "MiniMax_H3.json", "MiniMax_H3_T2I.json", "custom/视频修复FlashVSR1.1.json", "custom/moyou-自动色阶.json"];
+
+/** 解析持久化的输出节点选择。坏数据退化成空数组（= 不过滤，保留全部输出），不会误删产物。 */
+function parseOutputNodes(raw: string): string[] {
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch { return []; }
+}
+
+/** 解析持久化的时长输入目标。空串 / 坏数据一律视为未配置，绝不阻断生成。 */
+function parseStoredDurationTarget(raw: string) {
+    if (!raw) return null;
+    try { return parseWorkflowDurationTarget(JSON.parse(raw)); } catch { return null; }
+}
+const BUILTIN_CONFIGS: Record<string, WorkflowConfig> = {
+    "IndexTTS-2.5.json": {
+        title: "IndexTTS 2.5 配音",
+        backend: "comfyui",
+        operation: "tts",
+        description: "使用参考音频克隆音色，并通过本地 IndexTTS 2.5 生成语音。",
+        fields: [
+            { id: "reference_audio", node: "20", input: "audio", name: "参考音频", type: "audio", required: true },
+            { id: "text", node: "30", input: "text", name: "配音文本", type: "text", required: true, default: "", isPrompt: true },
+            { id: "language", node: "30", input: "language", name: "语言", type: "dropdown", default: "ZH", options: ["ZH", "EN", "JA", "ES", "AR"] },
+            { id: "duration_factor", node: "30", input: "duration_factor", name: "时长系数（越小越快）", type: "slider", default: 1, min: 0.5, max: 2, step: 0.05 },
+            { id: "seed", node: "30", input: "seed", name: "随机种子", type: "number", default: 0, randomEnabled: true },
+            { id: "filename_prefix", node: "40", input: "filename_prefix", name: "输出文件前缀", type: "text", default: "tts_audio/IndexTTS_2_5" },
+        ],
+    },
+    "Drama3-TTS.json": {
+        title: "Drama3 文生音频",
+        backend: "comfyui",
+        operation: "tts",
+        description: "Drama3 (T8) 文生音频：选音色 session、填文本与表演指令 direction，不需要参考音频。",
+        fields: [
+            { id: "text", node: "40", input: "text", name: "配音文本", type: "text", required: true, default: "", isPrompt: true },
+            { id: "voice", node: "20", input: "session_file", name: "音色（选第一项＝不用档案，模型按 seed 自抽音色）", type: "dropdown", default: "达妮娅.safetensors", options: ["(不用音色档案·纯文本自抽音色)", "达妮娅.safetensors", "dania_40s.safetensors", "dania_40s.safetensors", "rover_male.safetensors", "丹瑾.safetensors", "丽贝卡.safetensors", "仇远.safetensors", "今汐.safetensors", "凌阳.safetensors", "千咲.safetensors", "卜灵.safetensors", "卡卡罗.safetensors", "卡提希娅.safetensors", "吟霖.safetensors", "嘉贝莉娜.safetensors", "坎特蕾拉.safetensors", "夏空.safetensors", "奥古斯塔.safetensors", "守岸人.safetensors", "安可.safetensors", "尤诺.safetensors", "布兰特.safetensors", "弗洛洛.safetensors", "忌炎.safetensors", "折枝.safetensors", "散华.safetensors", "桃祈.safetensors", "椿.safetensors", "洛可可.safetensors", "洛瑟菈.safetensors", "渊武.safetensors", "漂泊者-女.safetensors", "漂泊者-男.safetensors", "灯灯.safetensors", "爱弥斯.safetensors", "珂莱塔.safetensors", "琳奈.safetensors", "白芷.safetensors", "相里要.safetensors", "秋水.safetensors", "秧秧.safetensors", "秧秧·玄翎.safetensors", "穗穗.safetensors", "绯雪.safetensors", "维里奈.safetensors", "莫宁.safetensors", "莫特斐.safetensors", "菲比.safetensors", "西格莉卡.safetensors", "赞妮.safetensors", "达妮娅.safetensors", "釉瑚.safetensors", "鉴心.safetensors", "长离.safetensors", "陆·赫斯.safetensors", "露帕.safetensors", "露西.safetensors"] },
+            { id: "voice_file", node: "20", input: "session_file", name: "自定义音色文件（填了优先于上面的下拉，如 我的音色.safetensors）", type: "text", default: "" },
+            { id: "direction", node: "30", input: "direction", name: "direction（表演指令；纯文本模式下可用它指定音色，如 [用低沉的老年男声说话]）", type: "text", default: "[平静]\n[一条一句][语速偏慢][字字清晰]" },
+            { id: "seed", node: "40", input: "seed", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+            { id: "max_frames", node: "40", input: "max_frames", name: "最大帧数（21.5 帧/秒）", type: "number", default: 900, min: 1, max: 8192, step: 50 },
+            { id: "chunk_bytes", node: "40", input: "chunk_bytes", name: "分块字节（越大越连贯）", type: "number", default: 1500, min: 32, max: 3000, step: 50 },
+            { id: "filename_prefix", node: "60", input: "filename_prefix", name: "输出文件前缀", type: "text", default: "tts_audio/Drama3" },
+        ],
+    },
+    "MiniMax_H3.json": {
+        title: "MiniMax H3 图生视频",
+        backend: "comfyui",
+        operation: "image-to-video",
+        description: "使用参考图和提示词生成带音频的视频，可自定义宽度、高度和时长。",
+        fields: [
+            { id: "reference_image", node: "137", input: "image", name: "参考图片", type: "image", required: true },
+            { id: "prompt", node: "138", input: "value", name: "视频提示词", type: "text", required: true, default: "", isPrompt: true },
+            { id: "width", node: "140", input: "value", name: "宽度（像素）", type: "number", default: 864, step: 32 },
+            { id: "height", node: "141", input: "value", name: "高度（像素）", type: "number", default: 480, step: 32 },
+            { id: "duration", node: "132", input: "value", name: "时长（秒）", type: "number", default: 8 },
+            { id: "noise_seed", node: "129", input: "noise_seed", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+        ],
+    },
+    "MiniMax_H3_T2I.json": {
+        title: "MiniMax H3 文生图",
+        backend: "comfyui",
+        operation: "text-to-image",
+        description: "使用 MiniMax H3 FL2VA INT8 底模从文字生成约 1MP 静态候选图；默认 20 步，输出 5 帧供挑选。",
+        outputNodes: ["70"],
+        fields: [
+            { id: "prompt", node: "5", input: "value", name: "画面描述", type: "text", required: true, default: "", isPrompt: true },
+            { id: "width", node: "6", input: "value", name: "宽度（像素）", type: "number", default: 864, min: 32, max: 8192, step: 32 },
+            { id: "height", node: "7", input: "value", name: "高度（像素）", type: "number", default: 1152, min: 32, max: 8192, step: 32 },
+            { id: "duration_seconds", node: "8", input: "value", name: "候选时长（秒）", type: "number", default: 0.2, min: 0.2, max: 1.6, step: 0.1 },
+            { id: "seed", node: "10", input: "value", name: "随机种子", type: "number", default: -1, randomEnabled: true },
+            { id: "steps", node: "11", input: "value", name: "采样步数", type: "number", default: 20, min: 1, max: 40, step: 1 },
+        ],
+    },
+    "custom/视频修复FlashVSR1.1.json": {
+        title: "FlashVSR 1.1 视频修复",
+        backend: "comfyui",
+        operation: "video-restore",
+        description: "使用 FlashVSR 1.1 放大并修复输入视频。",
+        fields: [
+            { id: "video", node: "10", input: "video", name: "输入视频", type: "video", required: true },
+            { id: "scale", node: "2", input: "value", name: "放大倍数", type: "number", default: 4 },
+            { id: "longer_edge", node: "40", input: "longer_edge", name: "预处理长边", type: "number", default: 960 },
+        ],
+    },
+    "custom/moyou-自动色阶.json": {
+        title: "moyou 自动色阶",
+        backend: "comfyui",
+        operation: "image-adjust",
+        description: "分析输入图片的色阶并生成自动校正结果。",
+        fields: [
+            { id: "source_image", node: "2", input: "image", name: "输入图片", type: "image", required: true },
+        ],
+    },
+};
+
+export type WorkflowListItem = {
+    name: string;
+    title: string;
+    builtin: boolean;
+    fieldCount: number;
+    addedAt: number;
+};
+
+export type WorkflowDetail = {
+    name: string;
+    workflow: Record<string, unknown>;
+    config: WorkflowConfig;
+    builtin: boolean;
+    source?: WorkflowSourceLink;
+};
+
+export type WorkflowSourceLink = {
+    instance: string;
+    relativePath: string;
+    syncedSha256: string;
+    syncedAt: string;
+    syncState?: "current" | "changed" | "missing";
+};
+
+export type WorkflowPackage = {
+    format: "infinite-canvas-workflow";
+    version: 1;
+    name: string;
+    workflow: Record<string, unknown>;
+    config: WorkflowConfig;
+};
+
+function workflowDir(): string {
+    return path.join(engineDirs().dataDir, "workflows");
+}
+
+function bundledWorkflowDir(): string {
+    return path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."), "workflows");
+}
+
+function workflowFilePath(name: string): string {
+    // 允许 "custom/filename.json" 格式，但 basename 必须匹配 NAME_RE
+    const parts = name.split('/');
+    const basename = parts[parts.length - 1];
+    if (!NAME_RE.test(basename)) {
+        throw new Error('工作流名称不合法：不能含路径符 / \\ : * ? " < > | 或控制字符');
+    }
+    const fullPath = path.resolve(workflowDir(), ...parts);
+    const rootPath = path.resolve(workflowDir());
+    const rel = path.relative(rootPath, fullPath);
+    if (rel.startsWith("..") || path.isAbsolute(rel)) {
+        throw new Error("工作流名称不合法：路径穿越");
+    }
+    return fullPath;
+}
+
+function workflowSourcePath(name: string) {
+    return `${workflowFilePath(name)}.source`;
+}
+
+function isBuiltin(name: string): boolean {
+    if (BUNDLED_WORKFLOWS.includes(name)) return true;
+    const basename = path.basename(name);
+    return !name.includes("/") && [
+        "Z-Image.json", "Z-Image-Enhance.json", "2511.json",
+        "klein-enhance.json", "Flux2-Klein.json", "upscale.json",
+    ].includes(basename);
+}
+
+export class WorkflowStore {
+    constructor(private readonly db: EnginePersistence) {}
+
+    private async ensureBundledWorkflows() {
+        await fs.mkdir(workflowDir(), { recursive: true, mode: 0o700 });
+        for (const name of BUNDLED_WORKFLOWS) {
+            const target = path.join(workflowDir(), name);
+            try { await fs.access(target); continue; } catch { /* install missing bundled workflow */ }
+            await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+            await fs.copyFile(path.join(bundledWorkflowDir(), name), target);
+        }
+    }
+
+    async list(): Promise<WorkflowListItem[]> {
+        await this.ensureBundledWorkflows();
+        const dir = workflowDir();
+        try { await fs.access(dir); } catch { return []; }
+        const items: Array<Omit<WorkflowListItem, "addedAt">> = [];
+        const seen = new Set<string>();
+
+        // 扫描根目录（内置工作流）
+        try {
+            const rootFiles = await fs.readdir(dir);
+            for (const fn of rootFiles) {
+                if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                const name = fn;
+                const config = this.getConfig(name);
+                items.push({
+                    name,
+                    title: config?.title || fn.replace(".json", ""),
+                    builtin: true,
+                    fieldCount: config?.fields?.length ?? 0,
+                });
+                seen.add(fn);
+            }
+        } catch { /* ignore */ }
+
+        // 扫描 custom 子目录（用户上传）
+        const customDir = path.join(dir, CUSTOM_SUBDIR);
+        try {
+            const files = await fs.readdir(customDir);
+            for (const fn of files) {
+                if (!fn.endsWith(".json") || fn.endsWith(".config.json")) continue;
+                if (seen.has(fn)) continue;
+                const name = `${CUSTOM_SUBDIR}/${fn}`;
+                const config = this.getConfig(name);
+                items.push({
+                    name,
+                    title: config?.title || fn.replace(".json", ""),
+                    builtin: isBuiltin(name),
+                    fieldCount: config?.fields?.length ?? 0,
+                });
+            }
+        } catch { /* custom dir may not exist */ }
+        const listed = await Promise.all(items.map(async (item) => {
+            try {
+                // File creation time represents when it was added; edits/reimports leave it unchanged.
+                const { birthtimeMs } = await fs.stat(workflowFilePath(item.name));
+                return { ...item, addedAt: birthtimeMs };
+            } catch {
+                return { ...item, addedAt: 0 };
+            }
+        }));
+        listed.sort((a, b) => a.title.localeCompare(b.title));
+        return listed;
+    }
+
+    async get(name: string): Promise<WorkflowDetail> {
+        await this.ensureBundledWorkflows();
+        const filePath = workflowFilePath(name);
+        let workflow: Record<string, unknown>;
+        try {
+            workflow = JSON.parse(await fs.readFile(filePath, "utf8"));
+        } catch {
+            throw new Error("Workflow not found");
+        }
+        const config = this.getConfig(name) ?? {
+            title: name.split('/').pop()!.replace(/\.json$/, ""),
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        };
+        const source = await this.getSourceLink(name);
+        return { name, workflow, config, builtin: isBuiltin(name), ...(source ? { source } : {}) };
+    }
+
+    async getSourceLink(name: string): Promise<WorkflowSourceLink | null> {
+        try {
+            const value = JSON.parse(await fs.readFile(workflowSourcePath(name), "utf8")) as Partial<WorkflowSourceLink>;
+            if (typeof value.instance !== "string" || typeof value.relativePath !== "string" || typeof value.syncedSha256 !== "string" || typeof value.syncedAt !== "string") return null;
+            return { instance: value.instance, relativePath: value.relativePath, syncedSha256: value.syncedSha256, syncedAt: value.syncedAt };
+        } catch { return null; }
+    }
+
+    async saveSourceLink(name: string, source: WorkflowSourceLink): Promise<void> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!source.instance || !source.relativePath || !/^[a-f\d]{64}$/i.test(source.syncedSha256)) throw new Error("ComfyUI 工作流来源信息无效");
+        await fs.writeFile(workflowSourcePath(name), JSON.stringify({ ...source, syncState: undefined }, null, 2), "utf8");
+    }
+
+    async upload(name: string, workflow: Record<string, unknown>): Promise<{ name: string }> {
+        const cleanName = path.basename(name.trim());
+        const finalName = cleanName.endsWith(".json") ? cleanName : `${cleanName}.json`;
+        if (!NAME_RE.test(finalName)) {
+            throw new Error('工作流名称不合法：不能含路径符 / \\ : * ? " < > | 或控制字符');
+        }
+        if (typeof workflow !== "object" || workflow === null || Object.keys(workflow).length === 0) {
+            throw new Error("工作流 JSON 为空");
+        }
+        // UI source (including virtual nodes, widgets and layout) is authoritative.
+        // Compilation here is validation only; the derived prompt is never stored.
+        if (Array.isArray(workflow.nodes)) convertComfyWorkflowToApi(workflow);
+        else {
+            const sample = Object.values(workflow)[0];
+            if (typeof sample !== "object" || sample === null || !("class_type" in sample)) {
+                throw new Error("不是有效的 ComfyUI API 工作流 JSON（需包含 class_type）");
+            }
+        }
+        const storedName = `${CUSTOM_SUBDIR}/${finalName}`;
+        const dir = path.join(workflowDir(), CUSTOM_SUBDIR);
+        await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+        await fs.writeFile(workflowFilePath(storedName), JSON.stringify(workflow, null, 2), "utf8");
+        return { name: storedName };
+    }
+
+    async exportPackage(name: string): Promise<WorkflowPackage> {
+        const detail = await this.get(name);
+        return {
+            format: "infinite-canvas-workflow",
+            version: 1,
+            name: detail.name,
+            workflow: detail.workflow,
+            config: detail.config,
+        };
+    }
+
+    async importPackage(fallbackName: string, value: unknown): Promise<{ name: string; inheritedFrom?: string }> {
+        if (!value || typeof value !== "object") throw new Error("工作流包格式不正确");
+        const pkg = value as Partial<WorkflowPackage>;
+        if (pkg.format !== "infinite-canvas-workflow") throw new Error("不是无限画布工作流包");
+        if (pkg.version !== 1) throw new Error(`不支持的工作流包版本：${String(pkg.version)}`);
+        if (!pkg.config || typeof pkg.config !== "object"
+            || typeof pkg.config.title !== "string"
+            || typeof pkg.config.backend !== "string"
+            || typeof pkg.config.operation !== "string"
+            || typeof pkg.config.description !== "string"
+            || !Array.isArray(pkg.config.fields)) {
+            throw new Error("工作流包缺少有效的字段配置");
+        }
+        const result = await this.upload(typeof pkg.name === "string" && pkg.name.trim() ? pkg.name : fallbackName, pkg.workflow as Record<string, unknown>);
+        // 上传到 RunningHub 时只带了节点图，云端档案的字段是平台自动发现的；
+        // 再下载回来时要沿用本地那份自定义字段配置，否则用户改过的名称/类型/默认值全丢。
+        const inherited = this.inheritFromCloudSibling(pkg.config as WorkflowConfig, result.name);
+        await this.saveConfig(result.name, inherited.config);
+        return { name: result.name, ...(inherited.inheritedFrom ? { inheritedFrom: inherited.inheritedFrom } : {}) };
+    }
+
+    /**
+     * 同一个云端档案若已经有本地工作流（用户上传后一直在本地编辑），把它的配置继承到新副本上。
+     * 字段以本地为准，云端新发现、本地没有的 `node::input` 追加在后面，避免丢掉云端新增节点。
+     */
+    private inheritFromCloudSibling(config: WorkflowConfig, selfName: string): { config: WorkflowConfig; inheritedFrom?: string } {
+        const profileId = config.runningHubProfileId;
+        if (!profileId) return { config };
+        const source = this.db.listWorkflowNamesByRunningHubProfile(profileId).find((name) => name !== selfName);
+        if (!source) return { config };
+        const sibling = this.getConfig(source);
+        if (!sibling) return { config };
+        return {
+            config: {
+                ...config,
+                fields: mergeInheritedFields(sibling.fields || [], config.fields || []),
+                ...(sibling.outputNodes?.length ? { outputNodes: sibling.outputNodes } : {}),
+                ...(sibling.mediaInputs ? { mediaInputs: sibling.mediaInputs } : {}),
+                ...(sibling.miniCards ? { miniCards: sibling.miniCards } : {}),
+            },
+            inheritedFrom: source,
+        };
+    }
+
+    async saveConfig(name: string, config: WorkflowConfig): Promise<{ config: WorkflowConfig }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        this.db.upsertWorkflowConfig(name, {
+            title: config.title,
+            backend: config.backend,
+            operation: config.operation,
+            description: config.description,
+            fieldsJson: JSON.stringify(config.fields),
+            mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
+            miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+            runningHubProfileId: config.runningHubProfileId ?? "",
+            runTarget: config.runTarget ?? "local",
+            // 没带这个字段就沿用旧值；显式传 [] 要存成 '[]'，与「从未配置」的空串区分开。
+            outputNodesJson: Array.isArray(config.outputNodes) ? JSON.stringify(config.outputNodes) : undefined,
+            // 预览桥节点：没带沿用旧值，显式传 '' 表示清空选择。
+            previewNodeId: config.previewNodeId === undefined ? undefined : config.previewNodeId,
+            // 时长输入节点：没带沿用旧值；显式 null 表示清空（存空串）。
+            durationTargetJson: config.durationTarget === undefined
+                ? undefined
+                : config.durationTarget ? JSON.stringify(config.durationTarget) : "",
+        });
+        return { config };
+    }
+
+    async saveWorkflow(name: string, workflow: Record<string, unknown>): Promise<{ workflow: Record<string, unknown> }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        if (!workflow || typeof workflow !== "object" || Object.keys(workflow).length === 0) throw new Error("工作流不能为空");
+        if (Array.isArray(workflow.nodes)) convertComfyWorkflowToApi(workflow);
+        await fs.writeFile(filePath, JSON.stringify(workflow, null, 2), "utf8");
+        return { workflow };
+    }
+
+    getFieldDefinitionsByIds(ids: string[]): Array<WorkflowField & { sourceWorkflow: string }> {
+        return this.db.getWorkflowFieldDefinitionsByIds(ids).map(({ workflowName, field }) => ({
+            ...field,
+            sourceWorkflow: workflowName,
+        }));
+    }
+
+    getConfig(name: string): WorkflowConfig | null {
+        return withLiveVoiceOptions(this.readConfig(name), name);
+    }
+
+    private readConfig(name: string): WorkflowConfig | null {
+        const row = this.db.getWorkflowConfig(name);
+        if (!row) return BUILTIN_CONFIGS[name] ? structuredClone(BUILTIN_CONFIGS[name]) : null;
+        try {
+            const config: WorkflowConfig = {
+                title: row.title,
+                backend: row.backend,
+                operation: row.operation,
+                description: row.description,
+                fields: JSON.parse(row.fieldsJson) as WorkflowField[],
+                mediaInputs: JSON.parse(row.mediaInputsJson),
+                miniCards: JSON.parse(row.miniCardsJson),
+                ...(row.runningHubProfileId ? { runningHubProfileId: row.runningHubProfileId } : {}),
+                ...(row.runTarget && row.runTarget !== "local" ? { runTarget: row.runTarget as WorkflowConfig["runTarget"] } : {}),
+                // 空串 = 从未配置过（前端据此默认勾选链路末端的输出节点）；'[]' = 用户显式清空，要如实返回空数组。
+                ...(row.outputNodesJson ? { outputNodes: parseOutputNodes(row.outputNodesJson) } : {}),
+                // 空串 = 用户显式关闭预览；字段缺失 = 从未配置（前端据此推荐唯一的预览桥）。
+                // 两者行为不同，不能合并成一个默认值。
+                previewNodeId: row.previewNodeId,
+                // 空串 / 坏数据 = 未配置，旧工作流完全不注入时长。
+                durationTarget: parseStoredDurationTarget(row.durationTargetJson),
+            };
+            if (name === "custom/视频修复FlashVSR1.1.json") {
+                config.fields = config.fields.map((field) => field.node === "10" && field.input === "video" ? { ...field, type: "video", required: true } : field);
+            }
+            return config;
+        } catch { return null; }
+    }
+
+    async delete(name: string): Promise<{ ok: true }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        await fs.unlink(filePath);
+        await fs.unlink(workflowSourcePath(name)).catch(() => undefined);
+        this.db.deleteWorkflowConfig(name);
+        return { ok: true };
+    }
+
+    /** 仅重命名显示标题（title），不动文件名与 config 其他字段 */
+    async renameTitle(name: string, title: string): Promise<{ name: string; title: string }> {
+        const filePath = workflowFilePath(name);
+        try { await fs.access(filePath); } catch { throw new Error("Workflow not found"); }
+        const existing = this.getConfig(name);
+        const config: WorkflowConfig = existing ?? {
+            title: name.split('/').pop()!.replace(/\.json$/, ""),
+            backend: "",
+            operation: "",
+            description: "",
+            fields: [],
+        };
+        config.title = title;
+        this.db.upsertWorkflowConfig(name, {
+            title: config.title,
+            backend: config.backend,
+            operation: config.operation,
+            description: config.description,
+            fieldsJson: JSON.stringify(config.fields),
+            mediaInputsJson: JSON.stringify(config.mediaInputs ?? {}),
+            miniCardsJson: JSON.stringify(config.miniCards ?? {}),
+        });
+        return { name, title: config.title };
+    }
+
+    /** 扫描工作流中所有媒体输入引用 */
+    scanMediaInputs(workflow: Record<string, unknown>): string[] {
+        if (Array.isArray(workflow.nodes)) workflow = convertComfyWorkflowToApi(workflow);
+        const required: string[] = [];
+        for (const nodeId of Object.keys(workflow)) {
+            const node = workflow[nodeId];
+            if (typeof node !== "object" || node === null) continue;
+            const inputs = (node as any).inputs;
+            if (typeof inputs !== "object" || inputs === null) continue;
+            for (const [inputName, value] of Object.entries(inputs)) {
+                if (this.isMediaValue(inputName, value)) {
+                    required.push(String(value));
+                }
+            }
+        }
+        return [...new Set(required)];
+    }
+
+    private isMediaValue(inputName: string, value: unknown): boolean {
+        if (typeof value !== "string" || !value.trim()) return false;
+        const key = inputName.toLowerCase();
+        if (MEDIA_INPUT_KEYS.some((token) => key.includes(token))) return true;
+        return MEDIA_EXT_RE.test(value);
+    }
+
+    getWorkflowPath(name: string): string {
+        return workflowFilePath(name);
+    }
+
+    /**
+     * 查询 ComfyUI 获取当前 workflow 中各节点 COMBO 输入的选项列表。
+     * 返回 { node_id: { input_name: [choice, ...] } }；ComfyUI 不可达时返回空对象。
+     */
+    async getComboOptions(name: string, bridge: ComfyUiBackend, signal?: AbortSignal): Promise<Record<string, Record<string, string[]>>> {
+        let workflow: Record<string, unknown>;
+        try {
+            workflow = JSON.parse(await fs.readFile(workflowFilePath(name), "utf8"));
+        } catch { return {}; }
+
+        if (Array.isArray(workflow.nodes)) workflow = convertComfyWorkflowToApi(workflow);
+        const classTypes = new Map<string, string>();
+        for (const [nodeId, rawNode] of Object.entries(workflow)) {
+            const node = typeof rawNode === "object" && rawNode !== null ? (rawNode as Record<string, unknown>) : {};
+            const classType = typeof node.class_type === "string" ? node.class_type : "";
+            if (classType) classTypes.set(nodeId, classType);
+        }
+
+        const options: Record<string, Record<string, string[]>> = {};
+        const uniqueClassTypes = [...new Set(classTypes.values())];
+        const classOptionsMap = new Map<string, Record<string, string[]>>();
+        await Promise.all(
+            uniqueClassTypes.map(async (classType) => {
+                const opts = await bridge.getNodeComboOptions(classType, signal);
+                if (Object.keys(opts).length > 0) classOptionsMap.set(classType, opts);
+            }),
+        );
+
+        for (const [nodeId, classType] of classTypes) {
+            const nodeOptions = classOptionsMap.get(classType);
+            if (nodeOptions && Object.keys(nodeOptions).length > 0) options[nodeId] = nodeOptions;
+        }
+        return options;
+    }
+}

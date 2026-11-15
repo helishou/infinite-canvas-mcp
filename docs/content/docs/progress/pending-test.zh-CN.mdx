@@ -5,6 +5,8 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- 镜头编辑区用中文核对制作内容，底部保留当前 Clip 的生成入口与更新状态：修改镜头、对白或参考绑定后就地保存，自动更新完成后直接生成。点击生成时仅为当前 Clip 自动准备英文，复用缓存和已有译文，保留手动提示词，不必切页翻译或等待整批翻译；翻译失败或源稿变化时不提交生成。检查未保存、锁定、生成中、切换镜头后的目标身份，以及编译保留其他未保存编辑。
+
 - schema 52→53 先备份校验再原子转换旧压缩数据；验证升级失败回滚、重开不重复迁移、历史回执与任务输入仍完整。52 以前备份需先由上一版升级；日常读写拒绝旧 gzip，不再回退旧整图布局。
 
 - 画布读取不再深拷贝刚解码的整图，保存复用事务内的前像；验证编辑隔离、H3个人视图剥离、共享素材、失败回滚和原操作回放。在线大JSON只执行一次Brotli压缩，旧 gzip 仅在升级边界读取，新建/导入仍保持隔离拷贝。
@@ -565,12 +567,14 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 画布文本任务与图片分析通过 Backend 创建任务，以隔离的只读 Codex 会话返回文本；场次工作者复用原工作池。取消后迟到结果不回写，重启后未确认的运行中 CLI 文本请求不自动重跑。此渠道只声明文本／图片分析能力，不将 Codex 模型登记为生图、视频或音频模型。
 - 本地模拟 Codex 与页面验证覆盖模型路由、临时图片、取消、任务终态及中英文、深浅主题、窄屏；实际 CLI 登录、模型权限和回复效果仍需使用验收。
 
-## 复用渠道模型的内置 Agent
+## 导演引擎：Codex CLI 与 Hermes
 
-- Backend 内置 Agent 的新对话复用已有渠道配置中的文本模型；默认使用已选文本模型，输入框可按“渠道 / 模型”切换，无需另填地址或 API Key。支持 OpenAI Responses、OpenAI Chat Completions 和 Gemini 协议；模型须支持工具调用。ComfyUI 模型和浏览器自定义脚本不进入 Agent 模型列表。
-- 对话、工具回包与终态保存在 Backend；画布操作继续通过共享 MCP。核对同名模型的渠道归属、跨模型续聊、图片附件及工具图片、Skill 读取／启停／草稿、双窗口目标画布绑定和断线历史恢复。只读本地文件工具不提供 Codex 的命令执行、任意文件修改或内置生图能力。
-- 场次创作与自动审核复用同一文本模型配置及原工作池；工作者仅能读文件和返回结构化数据，媒体提交仍经正式制作流程。停止、请求失败或进程中断后不自动重跑未确认的工具；恢复结构化结果只读取原已完成回合。旧 Codex 对话保留，在历史页选择“Codex 历史对话”后仍可通过原运行时恢复，需保留 Codex 安装。
-- 已通过本地模拟模型与 MCP 的针对性验证；各真实渠道的工具调用、视觉判断和正式制作效果仍需验收。
+- 导演对话只保留两种运行方式，都是「原生引擎 + 自有事件流」：渠道类型 `Codex CLI`（本机 Codex app-server）与 `Hermes`（本机 `hermes acp`，ACP over stdio）。原先「把任意 OpenAI／Gemini 兼容端点当导演模型」的自建工具循环已整段移除；图像／视频生成与文案翻译仍走 Backend 渠道配置，与导演链路无关。
+- Hermes 渠道只需在渠道里写模型 id（Hermes 口径 `provider:model`，如 `opencode-go:deepseek-v4.1-flash`），不填 Base URL／API Key，模型名也不加渠道前缀。打开对话时按需拉起本机 `hermes acp`，并把画布 MCP 以 session 级 server 传入，工具、技能与记忆由 Hermes 侧提供；`hermes.exe` 不在 PATH 时按 `HERMES_ACP_COMMAND` → `HERMES_HOME/bin` → `%LOCALAPPDATA%\hermes\bin` 兜底。
+- ACP 的 `session/update` 映射到既有 `agent_event` 词表（`item.started/updated/completed`、`turn.started/completed`、`agent_done`、`codex_approval`），前端不新增分支；线程 id 前缀 `hermes-`，跨运行方式切换仍提示新建对话、旧历史保留。中断走 `session/cancel`，审批走 `session/request_permission` 并接现有 request／automatic／full 闸门。
+- 场次工作者复用同一引擎：`ProductionAgentPool` 的 API worker 换成 Hermes worker，`canRun` 按 hermes 线程或渠道判定；`continue`／`recover` 读取同一 ACP 会话里的已完成回合，未确认的工具不自动重跑，媒体提交仍经正式制作流程。
+- 本地实测覆盖 initialize、`session/new`（返回 197 条模型目录）、prompt 流式（thought／tool_call／message）、取消与历史三行回读，以及渠道编辑器拉取 Hermes 目录；旧 `llm-` 前缀对话不再列出（settings 数据保留）。真实 Hermes 渠道的工具调用、视觉判断与制作效果仍需现场验收。
+- 前提：本机 Hermes 必须给 `hermes_cli/version_info.py` 的 `_run_git` 加 `stdin=subprocess.DEVNULL`，否则它在 Windows 上继承 ACP 的 stdin 管道，超时 kill 后 `communicate()` 永不返回，`session/new` 永久挂起。
 
 ## 场次并行导演制作
 

@@ -1,7 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Button, ConfigProvider } from "antd";
-import { PanelBottomClose } from "lucide-react";
+import { ConfigProvider } from "antd";
 import { useNavigate, useSearchParams, type NavigateFunction, type NavigateOptions, type To } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { CanvasHostContext, WorkbenchCanvasContext, setWorkbenchCanvasOverlayTarget, type CanvasTarget, type ProductionCanvasTarget } from "@/lib/canvas/canvas-host";
@@ -118,7 +117,7 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         return () => { if (visible) setWorkbenchCanvasOverlayTarget(null); };
     }, [target, visible]);
     const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer, switchProductionCanvas } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer, switchProductionCanvas]);
-    return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas: Boolean(target) }}>
+    return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas: Boolean(target), collapse }}>
         <div ref={workbench} className="h-full" data-workbench-underlay>{children}</div>
         {host && createPortal(<CanvasHostContext.Provider value={host}>
             <div ref={overlay} hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>
@@ -128,7 +127,6 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
                     const href = link.getAttribute("href");
                     if (href?.startsWith("/")) { event.preventDefault(); event.stopPropagation(); canvasNavigate(href); }
                 }} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background outline-none sm:rounded-xl sm:border sm:border-border">
-                    <header className="absolute right-2 top-2 z-[100] flex h-10 items-center"><span className="sr-only">{t("director.canvasOverlay.title")}</span><Button type="text" icon={<PanelBottomClose className="size-4" />} onClick={collapse}>{t("director.canvasOverlay.collapse")}</Button></header>
                     <ConfigProvider getPopupContainer={() => panel.current || document.body}><div className="min-h-0 flex-1"><Suspense fallback={<p className="p-6 text-sm text-muted-foreground">{t("director.atomic.loading")}</p>}><CanvasSurface key={host.projectId} projectId={host.projectId} /></Suspense></div></ConfigProvider>
                 </div>
             </div>

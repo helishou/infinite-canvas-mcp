@@ -55,5 +55,6 @@ test("Home uses actual drama ownership while retaining pins, recents and stable 
     assert.match(home, /homePinnedProject:\$\{entry.id\}/);
     assert.match(data, /homePinnedProject:\$\{projectId\}/);
     assert.match(home, /const latest = sorted\[0\]/);
-    assert.match(home, /openDestination\(`\/canvas\/\$\{encodeURIComponent\(id\)}`\)/);
+    // handoff（对齐影策）：openProject 支持可选 nodeId，画布加载后聚焦本次生成节点。
+    assert.match(home, /openDestination\(`\/canvas\/\$\{encodeURIComponent\(id\)\}\$\{nodeId \? `\?nodeId=/);
 });

@@ -118,8 +118,15 @@ export function WorkflowSelectModal({ open, selectedNames, onConfirm, onClose }:
             {visibleList.length ? (
                 <div className="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">
                     {visibleList.map((name) => (
-                        <Checkbox key={name} checked={selected.has(name)} onChange={(event) => toggle(name, event.target.checked)} disabled={loading}>
-                            <span className="truncate" title={name}>
+                        <Checkbox
+                            key={name}
+                            className="w-full min-w-0"
+                            classNames={{ label: "min-w-0 flex-1" }}
+                            checked={selected.has(name)}
+                            onChange={(event) => toggle(name, event.target.checked)}
+                            disabled={loading}
+                        >
+                            <span className="block min-w-0 truncate" title={name}>
                                 {name}
                             </span>
                         </Checkbox>

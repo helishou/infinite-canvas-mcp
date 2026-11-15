@@ -1,19 +1,19 @@
-import { workflowImageInputs } from "./image-input-capability.js";
+import { workflowImageInputs } from "@basketikun/media-engine/workflows/image-input-capability";
 import type { Request, Response, Router } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { WorkflowStore } from "./store.js";
-import type { WorkflowExecutor } from "./executor.js";
+import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
+import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 import type { WorkflowConfig } from "../db.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
-import { findUiWorkflowFile } from "./ui-workflow-file.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
+import { findUiWorkflowFile } from "@basketikun/media-engine/workflows/ui-workflow-file";
 import {
   loadInstances,
   saveInstances,
   validateInstance,
-} from "../comfyui/instances.js";
+} from "@basketikun/media-engine/comfyui/instances";
 
 type LocalComfyWorkflowFile = { id: string; instance: string; relativePath: string; name: string; bytes: number; modifiedAt: string };
 

@@ -10,7 +10,7 @@ const argOf = (name, fallback) => {
 };
 const base = argOf("--base", "http://localhost:3001").replace(/\/$/, "");
 const verbose = args.includes("--verbose");
-const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/image", "/video", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
+const routes = ["/", "/projects", "/canvas", "/production", "/assets", "/prompts", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local"];
 
 const browser = await chromium.launch();
 const rows = [];

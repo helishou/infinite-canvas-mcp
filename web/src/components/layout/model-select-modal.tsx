@@ -61,7 +61,7 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
 
     const fetchModels = async () => {
         if (!channel) return;
-        if (channel.kind !== "codex-cli" && (!channel.baseUrl.trim() || !channel.apiKey.trim())) {
+        if (channel.kind !== "codex-cli" && channel.kind !== "hermes" && (!channel.baseUrl.trim() || !channel.apiKey.trim())) {
             message.error(t("config.modelSelect.missingConfig"));
             return;
         }
@@ -113,7 +113,7 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
                     {t("config.modelSelect.fetch")}
                 </Button>
             </div>
-            <div className="mt-2 text-xs text-muted-foreground">{t(channel?.kind === "codex-cli" ? "config.channelEditor.codexHint" : "config.modelSelect.description")}</div>
+            <div className="mt-2 text-xs text-muted-foreground">{t(channel?.kind === "codex-cli" || channel?.kind === "hermes" ? "config.channelEditor.codexHint" : "config.modelSelect.description")}</div>
 
             <Tabs
                 className="mt-3"
@@ -140,8 +140,14 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
             {visibleList.length ? (
                 <div className="grid grid-cols-1 gap-x-8 gap-y-3 md:grid-cols-2">
                     {visibleList.map((name) => (
-                        <Checkbox key={name} checked={selected.has(name)} onChange={(event) => toggle(name, event.target.checked)}>
-                            <span className="truncate" title={name}>
+                        <Checkbox
+                            key={name}
+                            className="w-full min-w-0"
+                            classNames={{ label: "min-w-0 flex-1" }}
+                            checked={selected.has(name)}
+                            onChange={(event) => toggle(name, event.target.checked)}
+                        >
+                            <span className="block min-w-0 truncate" title={name}>
                                 {name}
                             </span>
                         </Checkbox>

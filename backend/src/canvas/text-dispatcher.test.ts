@@ -377,3 +377,45 @@ test("复制智能节点后运行副本，不把被复制的原节点当旧结�
     assert.deepEqual(copy.metadata.generatedTextResultIds, ["copy"]);
     assert.equal(nodes.length, 2);
 });
+
+test("Hermes 渠道文本任务由注入的导演运行时执行", async () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const stores = createStores(db);
+        stores.settings.set("ai.config", { channels: [{ id: "hermes-local", kind: "hermes", name: "Hermes", models: [{ name: "opencode-go:deepseek-v4.1-flash", capability: "text" }] }] });
+        let seen = "";
+        const dispatcher = new CanvasTextDispatcher({ url: "http://unused" } as any, stores, async () => { throw new Error("不应走 OpenAI 通道"); });
+        dispatcher.setHermesRunner(async request => { seen = `${request.model}:${request.prompt.slice(0, 10)}`; return "  导演 agent 的分镜  "; });
+        const started = dispatcher.start({ model: "hermes-local::opencode-go:deepseek-v4.1-flash", prompt: "生成分镜草案" });
+        const deadline = Date.now() + 1000;
+        while (!['succeeded', 'failed'].includes(stores.tasks.get(started.taskId)?.status || "") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.equal(seen, "opencode-go:deepseek-v4.1-flash:生成分镜草案");
+        assert.equal(stores.tasks.get(started.taskId)?.status, "succeeded");
+        assert.equal((stores.tasks.get(started.taskId)?.result?.texts as any[])[0].content, "导演 agent 的分镜");
+    } finally { db.close(); }
+});
+
+test("Hermes 渠道未注入运行时、或带图片参考时给出明确报错", async () => {
+    const db = new BackendDatabase(":memory:");
+    try {
+        const stores = createStores(db);
+        stores.settings.set("ai.config", { channels: [{ id: "hermes-local", kind: "hermes", models: [{ name: "m", capability: "text" }] }] });
+        const bare = new CanvasTextDispatcher({ url: "http://unused" } as any, stores);
+        const missing = bare.start({ model: "hermes-local::m", prompt: "p" });
+        const deadline = Date.now() + 1000;
+        while (!['succeeded', 'failed'].includes(stores.tasks.get(missing.taskId)?.status || "") && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.match(stores.tasks.get(missing.taskId)?.error || "", /Hermes 运行时不可用/);
+
+        const withImages = new CanvasTextDispatcher({ url: "http://unused" } as any, stores);
+        withImages.setHermesRunner(async () => "unused");
+        const started = withImages.start({ model: "hermes-local::m", prompt: "p", references: [{ name: "ref.png", dataUrl: "data:image/png;base64,AA==" }] });
+        const deadline2 = Date.now() + 1000;
+        while (!['succeeded', 'failed'].includes(stores.tasks.get(started.taskId)?.status || "") && Date.now() < deadline2) await new Promise(resolve => setTimeout(resolve, 5));
+        assert.match(stores.tasks.get(started.taskId)?.error || "", /暂不支持图片参考/);
+    } finally { db.close(); }
+});
+
+test("resolveTextProvider 校验 Hermes 渠道模型必须登记为 text", () => {
+    const config = { channels: [{ id: "hermes-local", kind: "hermes", models: [{ name: "vision-only", capability: "image" }] }] };
+    assert.throws(() => resolveTextProvider(config, "hermes-local::vision-only"), /只能使用已登记的文本模型/);
+});

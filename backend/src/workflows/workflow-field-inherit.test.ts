@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mergeInheritedFields, workflowFieldKey } from "./workflow-field-inherit.js";
+import { mergeInheritedFields, workflowFieldKey } from "@basketikun/media-engine/workflows/workflow-field-inherit";
 import type { WorkflowField } from "../db.js";
 
 function field(id: string, node: string, input: string, extra: Partial<WorkflowField> = {}): WorkflowField {

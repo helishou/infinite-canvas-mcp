@@ -740,9 +740,9 @@ function toolName(name: string) {
     if (name === "canvas_select_nodes") return "选择节点";
     if (name === "canvas_run_generation") return "触发生成";
     if (name === "workbench_image_get_config") return "生图配置";
-    if (name === "workbench_image_generate") return "生图工作台生成";
+    if (name === "workbench_image_generate") return "生成图片（新画布）";
     if (name === "workbench_video_get_config") return "视频配置";
-    if (name === "workbench_video_generate") return "视频创作台生成";
+    if (name === "workbench_video_generate") return "生成视频（新画布）";
     if (name === "prompts_search") return "搜索提示词";
     if (name === "assets_list") return "资产列表";
     if (name === "assets_add") return "添加资产";

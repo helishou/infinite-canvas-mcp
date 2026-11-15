@@ -1,5 +1,5 @@
 import type { BackendDatabase } from "../db.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { Stores } from "../stores/types.js";
 import { BackendEventBus } from "../events.js";
 import type { AgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";

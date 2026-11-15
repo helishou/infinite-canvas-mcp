@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { convertComfyWorkflowToApi } from "./comfyui-workflow-conversion.js";
+import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
 
 function fixture() {
   return { nodes: [

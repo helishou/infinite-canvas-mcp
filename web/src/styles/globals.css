@@ -704,15 +704,13 @@ body { font-family: var(--font-sans); }
 .ui-controls .ant-btn, .ui-controls aside button { min-height: var(--ui-control-height); }
 .ui-controls .prompt-filter-tag.ant-tag-checkable { display: inline-flex; align-items: center; min-height: 32px; font-size: 13px; line-height: 20px; border-radius: var(--ui-radius-control); }
 .ui-controls .ant-btn-sm { min-height: 32px; }
-.ui-result-action.ant-btn { height: auto; min-height: 36px; padding: 6px 8px; white-space: normal; font-size: 13px; line-height: 20px; }
-.ui-result-action.ant-btn > span:last-child { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 639px) {
     :root { --ui-title-size: 22px; --ui-title-leading: 30px; }
 }
 @media (max-width: 639px), (pointer: coarse) {
     :root { --ui-control-height: 44px; --ui-icon-hit: 44px; }
     .ui-nav-label { font-size: 14px; line-height: 22px; }
-    .ui-controls .ant-btn-sm, .ui-result-action.ant-btn, .ui-controls .prompt-filter-tag.ant-tag-checkable, .ui-controls .ant-dropdown-menu-item { min-height: 44px; }
+    .ui-controls .ant-btn-sm, .ui-controls .prompt-filter-tag.ant-tag-checkable, .ui-controls .ant-dropdown-menu-item { min-height: 44px; }
     .ui-controls .ant-input-affix-wrapper, .ui-controls .ant-select { min-height: 44px; }
 }
 

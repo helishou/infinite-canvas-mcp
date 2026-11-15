@@ -9,7 +9,6 @@
   },
   "files": [
     "dist",
-    "workflows",
     "workers"
   ],
   "scripts": {
@@ -47,6 +46,7 @@
   },
   "dependencies": {
     "@basketikun/canvas-agent": "workspace:^",
+    "@basketikun/media-engine": "workspace:^",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.1.0",
     "nanoid": "^5.1.16",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildExpandedNanFengV10Workflow, splitH3Confirmation } from "./bridge.js";
+import { buildExpandedNanFengV10Workflow, splitH3Confirmation } from "@basketikun/media-engine/comfyui/bridge";
 
 /**
  * 展开流与原生 NanFengH3MultiReferenceGeneratorV15 的等价性契约。

@@ -1,13 +1,18 @@
 import { AgentSubagents } from "./agent-subagents";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useSpring, useTransform } from "motion/react";
+import { CheckCircle2, ChevronDown, Circle, ListChecks, LoaderCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { summarizeCanvasAgentOps } from "@/lib/canvas/canvas-agent-ops";
 import { useAgentStore, type AgentChatItem, type AgentPendingApproval, type AgentPendingToolCall, type AgentTokenUsage } from "@/stores/use-agent-store";
-import { AgentApprovalCard, AgentChatMessage, AgentCommandGroup, AgentPendingToolCard, AgentToolCard, AgentWorkingMessage } from "./agent-chat-message";
-import { agentMessageToChatMessage, currentPlanMessage, isPlanMessage, latestPlanMessage, toolCallDetail, toolName, workingActivity } from "./agent-event-formatters";
+import { AgentApprovalCard, AgentChatMessage, AgentCommandGroup, AgentPendingToolCard, AgentWorkingMessage } from "./agent-chat-message";
+import { agentMessageToChatMessage, currentPlanMessage, isPlanMessage, latestPlanMessage, planFlow, toolCallDetail, toolName, workingActivity } from "./agent-event-formatters";
+import { planFlowRows } from "./agent-plan-flow";
+import { looksLikeOutlineWork, outlineFlowRows } from "./agent-outline-flow";
+import { productionFlowRows } from "./agent-production-flow";
+import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 import { AgentScrollToBottom } from "./agent-scroll-to-bottom";
 
 const SCROLL_BOTTOM_THRESHOLD = 48;
@@ -105,15 +110,98 @@ export function AgentChatTimeline({
     );
 }
 
+/** 面板里一行：模型计划、制作阶段、大纲三种来源统一成这个形状，渲染只认它。 */
+type PanelRow = { index: number | string; label: string; tone: "done" | "running" | "pending"; statusKey: string; depth: 0 | 1 };
+
 export function AgentTaskProgress({ theme, busy }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; busy: boolean }) {
-    const { t } = useTranslation();
-    const plan = useAgentStore((state) => busy ? currentPlanMessage(state.messages) : latestPlanMessage(state.messages));
-    if (!plan) return null;
+    const { t, i18n } = useTranslation();
+    const messages = useAgentStore((state) => state.messages);
+    const production = useProductionWorkspaceStore((state) => state.production);
+    const plan = busy ? currentPlanMessage(messages) : latestPlanMessage(messages);
+    const flow = planFlow(plan);
+    const turnTexts = busy && !flow ? currentTurnTexts(messages) : [];
+    // 有制作源稿阶段游标时，六段制作阶段就是「其他流程」的进度表（真值，不是推断）；当前阶段展开它自己的子步。
+    const stageRows = flow ? [] : productionFlowRows(production?.draft?.settings?.productionStage ?? null, turnTexts, busy, i18n.language.startsWith("en"));
+    // 没有制作游标、但这一轮明显在写大纲/剧本时，才用技能里的大纲六段顶上。
+    const outline = flow || stageRows.length ? null : looksLikeOutlineWork(turnTexts) ? outlineFlowRows(turnTexts, busy) : null;
+    const [open, setOpen] = useState(true);
+    const [elapsed, setElapsed] = useState(0);
+    // 计时按「本轮还在跑」算：清单每更新一次都会换 id，用 id 当键会把计时反复归零，所以只在 busy 翻转时重置。
+    const startedAtRef = useRef(0);
+    useEffect(() => {
+        if (!busy) {
+            startedAtRef.current = 0;
+            setElapsed(0);
+            return;
+        }
+        if (!startedAtRef.current) startedAtRef.current = Date.now();
+        const tick = () => setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
+        tick();
+        const timer = window.setInterval(tick, 1000);
+        return () => window.clearInterval(timer);
+    }, [busy]);
+    // 三种来源统一成一种行，渲染只认 label/tone/depth，不关心的来源细节。
+    const rows: PanelRow[] = flow
+        ? planFlowRows(flow).map((row) => ({ ...row, depth: 0 as const }))
+        : stageRows.length
+            ? stageRows.map((row) => ({ index: row.index, label: row.labelKey ? t(row.labelKey) : row.label ?? "", tone: row.tone, statusKey: row.statusKey, depth: row.depth }))
+            : (outline ?? []).map((row) => ({ ...row, depth: 0 as const }));
+    if (!rows.length) return null;
+    const topRows = rows.filter((row) => row.depth === 0);
+    const done = topRows.filter((row) => row.tone === "done").length;
+    const running = busy && rows.some((row) => row.tone === "running");
+    const allDone = done === topRows.length;
     return (
-        <div className="shrink-0 px-4 pt-2">
-            <AgentToolCard key={plan.id} title={plan.title || t("agent.events.progress")} text={plan.text} detail={plan.detail} theme={theme} />
+        <div className="shrink-0 px-4 pt-2" data-agent-flow={flow ? "plan" : stageRows.length ? "stage" : "outline"}>
+            <div className="min-w-0 overflow-hidden rounded-xl border" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+                <button type="button" className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left focus-visible:outline focus-visible:outline-2" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+                    <ListChecks className="size-3.5 shrink-0" style={{ color: allDone ? "#16a34a" : theme.node.muted }} />
+                    <span className="shrink-0 text-xs font-semibold">{t("agent.chat.flowTitle")}</span>
+                    <span aria-live="polite" className="shrink-0 text-[11px] tabular-nums opacity-50">{done}/{topRows.length}</span>
+                    <span className="min-w-0 flex-1" />
+                    <span className="shrink-0 text-[11px] opacity-50">{open ? t("agent.chat.flowCollapse") : t("agent.chat.flowExpand")}</span>
+                    <ChevronDown className={`size-3.5 shrink-0 opacity-60 transition-transform ${open ? "rotate-180" : ""}`} />
+                </button>
+                {open ? (
+                    <ol className="thin-scrollbar max-h-52 space-y-1 overflow-y-auto px-3 pb-2">
+                        {rows.map((row) => {
+                            const color = row.tone === "done" ? "#16a34a" : row.tone === "running" ? "#d97706" : theme.node.muted;
+                            const note = row.tone === "running" && running
+                                ? [flow?.explanation, elapsed >= 5 ? waitingLabel(t, elapsed) : ""].filter(Boolean).join(" · ")
+                                : "";
+                            return (
+                                <li key={`${row.index}-${row.label}`} className="min-w-0">
+                                    <div className={`flex min-w-0 items-start gap-2 leading-5 ${row.depth === 1 ? "pl-4 text-[11px]" : "text-xs"}`}>
+                                        <span className="mt-1 shrink-0" style={{ color }}>{row.tone === "done" ? <CheckCircle2 className="size-3" /> : row.tone === "running" ? <LoaderCircle className="size-3 animate-spin" /> : <Circle className="size-3" />}</span>
+                                        <span className={`min-w-0 break-words ${row.tone === "done" ? "opacity-55" : row.tone === "running" ? "font-medium" : "opacity-75"}`} style={{ color: row.tone === "running" ? theme.node.text : theme.node.muted }}>{row.depth === 1 ? `${row.index} ${row.label}` : `${row.index}. ${row.label}`}</span>
+                                        <span className="ml-auto shrink-0 pl-2 text-[11px]" style={{ color }}>{t(row.statusKey)}</span>
+                                    </div>
+                                    {note ? <p className="ml-5 break-words text-[11px] leading-4" style={{ color: theme.node.muted }}>{note}</p> : null}
+                                </li>
+                            );
+                        })}
+                    </ol>
+                ) : null}
+            </div>
         </div>
     );
+}
+
+/** 本轮（最后一条用户消息之后）出现过的文案：工具卡片标题、正文、状态说明都算。 */
+function currentTurnTexts(messages: AgentChatItem[]) {
+    const texts: string[] = [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.role === "user") break;
+        const text = `${message.title || ""} ${message.text || ""}`.trim();
+        if (text) texts.push(text);
+    }
+    return texts;
+}
+
+function waitingLabel(t: (key: string, options?: Record<string, unknown>) => string, seconds: number) {
+    if (seconds < 60) return t("agent.message.waitingSeconds", { seconds });
+    return t("agent.message.waitingMinutes", { minutes: Math.floor(seconds / 60), seconds: seconds % 60 });
 }
 
 const AgentChatMessageRow = memo(function AgentChatMessageRow({ item, theme }: { item: AgentChatItem; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {

@@ -1,5 +1,5 @@
 import type { SettingStore } from "../stores/types.js";
-import type { WorkflowDetail, WorkflowStore } from "./store.js";
+import type { WorkflowDetail, WorkflowStore } from "@basketikun/media-engine/workflows/store";
 import { WORKFLOW_ROUTE_UNSUPPORTED } from "../canvas/model-workflow.js";
 
 const AI_CONFIG_KEY = "ai.config";

@@ -1,4 +1,10 @@
-import { openAiBase, type LlmMessage, type LlmProvider } from "./llm-provider.js";
+export type VisionProvider = { id: string; model: string; name: string; baseUrl: string; apiKey: string; apiFormat: "openai" | "openai-chat" | "gemini"; supportsImages?: boolean; kind?: "codex-cli" | "hermes"; headers?: Record<string, string> };
+type VisionMessage = { parts: Array<{ text?: string } | { image?: string }> };
+/** 与 OpenAI 兼容端点拼接一致：已带 /v1 就不再补。 */
+function openAiBase(baseUrl: string) {
+    const base = baseUrl.replace(/\/+$/, "");
+    return /\/v\d+(?:beta)?$/i.test(base) ? base : `${base}/v1`;
+}
 
 /**
  * 视觉能力探测：只在真正要发图时才判断，结论只用于提前给出可操作的错误。
@@ -7,7 +13,6 @@ import { openAiBase, type LlmMessage, type LlmProvider } from "./llm-provider.js
  * 探针会发一次极小的计费请求，因此只缓存确定的结论；网络、鉴权、限流、5xx 等
  * 模糊失败一律视为“未知”放行，不能因为探测失败阻断用户正常的图片请求。
  */
-export type VisionProvider = Pick<LlmProvider, "id" | "model" | "name" | "baseUrl" | "apiKey" | "apiFormat" | "supportsImages" | "kind" | "headers">;
 
 const PROBE_TIMEOUT_MS = 20_000;
 /** 32×32 纯色 JPEG（273 字节），足够让服务端校验图片输入而不产生可读内容。 */
@@ -24,7 +29,7 @@ const REJECTION_STATUS = new Set([400, 404, 413, 415, 422]);
 const cache = new Map<string, boolean>();
 const cacheKey = (provider: VisionProvider) => `${provider.id}|${provider.baseUrl}|${provider.model}|${provider.apiFormat}`;
 
-export function hasImageParts(messages: LlmMessage[]): boolean {
+export function hasImageParts(messages: VisionMessage[]): boolean {
     return messages.some(message => message.parts.some(part => "image" in part));
 }
 

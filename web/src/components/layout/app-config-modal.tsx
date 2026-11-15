@@ -14,6 +14,8 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { ConfigConnection } from "@/components/layout/config-connection";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { ConfigImportFailure } from "@/services/config-import-operation";
+import { request as backendRequest } from "@/services/backend-api";
+import { fetchSettings, saveSettings } from "@/services/settings-api";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
@@ -63,6 +65,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
+    /** 导演引擎：Codex CLI 与 Hermes 是两条原生运行时，只能在设置里指定，新建对话才生效。 */
+    const [agentModelOptions, setAgentModelOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [agentModelValue, setAgentModelValue] = useState("");
     const [testingWebdav, setTestingWebdav] = useState(false);
     const [syncingWebdav, setSyncingWebdav] = useState(false);
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
@@ -83,6 +88,43 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const locale = i18n.resolvedLanguage as AppLocale;
     const imageResolutionOptions = mediaScaleOptions.map((value) => ({ value, label: value === "auto" ? t("settingsPanels.common.auto") : value.toUpperCase() }));
     useEffect(() => setActiveTab(initialTab), [initialTab]);
+    useEffect(() => {
+        if (!active || activeTab !== "channels") return;
+        let cancelled = false;
+        void fetchSettings().then((settings) => { if (!cancelled) setAgentModelValue(settings.agentModel || ""); }).catch(() => undefined);
+        // 只向运行时问「本机 Codex 原生模型」；渠道里的导演模型直接由本地配置派生，
+        // 否则运行时没热更时下拉会空（渠道明明存在却看不到）。
+        void backendRequest<{ data?: Array<{ model?: string; displayName?: string }> }>("GET", "/agent/codex/models?source=codex")
+            .then((data) => {
+                if (cancelled) return;
+                setAgentModelOptions((data.data || []).filter((row) => row.model).map((row) => ({ id: String(row.model), label: `Codex / ${String(row.displayName || row.model)}` })));
+            })
+            .catch(() => undefined);
+        return () => { cancelled = true; };
+    }, [active, activeTab]);
+    /** 渠道派生项：Codex CLI 渠道与 Hermes 渠道都是导演可选的运行时。 */
+    const channelAgentOptions = config.channels
+        .filter((channel) => channel.kind === "codex-cli" || channel.kind === "hermes")
+        .map((channel) => ({
+            runtime: (channel.kind === "hermes" ? "hermes" : "codex") as "codex" | "hermes",
+            options: channel.models
+                .filter((model) => (model.capability || "text") === "text" && !model.script?.trim())
+                .map((model) => ({ value: `${channel.id}::${model.name}`, label: `${channel.name || channel.id} / ${model.name}` })),
+        }));
+    const agentModelGroups = [
+        { label: t("config.channels.agentEngineCodex"), options: agentModelOptions.map((item) => ({ value: item.id, label: item.label })) },
+        ...channelAgentOptions.filter((group) => group.options.length).map((group) => ({ label: t(group.runtime === "hermes" ? "config.channels.agentEngineHermes" : "config.channels.agentEngineCodex"), options: group.options })),
+    ].filter((group) => group.options.length);
+    const changeAgentModel = async (value: string) => {
+        setAgentModelValue(value);
+        try {
+            await saveSettings({ agentModel: value });
+            window.dispatchEvent(new CustomEvent("agent-settings-changed"));
+            message.success(t("config.channels.agentEngineSaved"));
+        } catch {
+            message.error(t("config.channels.agentEngineSaveFailed"));
+        }
+    };
 
     if (!hydrated) return <ConfigConnection active />;
 
@@ -91,7 +133,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const finishConfig = () => {
-        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.models.length && (channel.kind === "codex-cli" || channel.apiKey.trim()));
+        const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.models.length && (channel.kind === "codex-cli" || channel.kind === "hermes" || channel.apiKey.trim()));
         setConfigDialogOpen(false);
         if (!ready) return;
         message.success(t(shouldPromptContinue ? "config.savedContinue" : "config.saved"));
@@ -203,6 +245,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         label: t("config.tabs.channels"),
                         children: (
                             <div>
+                                <section className="mb-5 rounded-lg border border-border p-4">
+                                    <h3 className="mb-1 text-sm font-medium">{t("config.channels.agentEngine")}</h3>
+                                    <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("config.channels.agentEngineHint")}</p>
+                                    {agentModelGroups.length ? (
+                                        <Select className="w-full sm:w-96" aria-label={t("config.channels.agentEngine")} value={agentModelValue || undefined} options={agentModelGroups} onChange={(value) => void changeAgentModel(value)} placeholder={t("config.channels.agentEnginePlaceholder")} />
+                                    ) : (
+                                        <div className="text-xs text-muted-foreground">{t("config.channels.agentEngineEmpty")}</div>
+                                    )}
+                                </section>
                                 <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                                     <div className="text-xs leading-relaxed text-muted-foreground">{t("config.channels.description")}</div>
                                     <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
@@ -215,7 +266,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <div className="min-w-0 flex-1 basis-48">
                                                 <div className="truncate text-sm font-medium">{channel.name || t("config.channels.unnamed")}</div>
                                                 <div className="mt-1 truncate text-xs leading-relaxed text-muted-foreground">
-                                                    {(channel.kind === "codex-cli" ? "Codex CLI" : channel.kind === "local" ? t("config.channelEditor.localKind") : apiFormatLabel(channel.apiFormat))} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.kind === "codex-cli" ? t("config.channelEditor.codexLocal") : channel.baseUrl || t("config.channels.missingUrl")}
+                                                    {(channel.kind === "codex-cli" ? "Codex CLI" : channel.kind === "hermes" ? "Hermes" : channel.kind === "local" ? t("config.channelEditor.localKind") : apiFormatLabel(channel.apiFormat))} · {t("config.channels.modelCount", { count: channel.models.length })} · {channel.kind === "codex-cli" ? t("config.channelEditor.codexLocal") : channel.baseUrl || t("config.channels.missingUrl")}
                                                 </div>
                                             </div>
                                             <div className="flex shrink-0 items-center gap-2">

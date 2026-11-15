@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { RuntimeTask } from "../db.js";
 import type { SettingStore, TaskStore } from "../stores/types.js";
-import { patchRunningHubWorkflow, resolveRunningHubOutputNodes, RunningHubBackend } from "./runninghub.js";
+import { patchRunningHubWorkflow, resolveRunningHubOutputNodes, RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 
 test("empty SaveImageToLocal path is filled only in the submitted workflow copy", () => {
     const graph = {

@@ -22,6 +22,19 @@ import { ModelPicker } from "@/components/model-picker";
 import { useConfigStore } from "@/stores/use-config-store";
 
 import { SceneProductionSettings } from "./scene-production-settings";
+import { OutlineTab, SourceScriptTab } from "./planning-writing-tabs";
+import { TopicCard } from "./planning-topic-card";
+import { PlanningScriptTab } from "./planning-script-tab";
+import { episodeHasScript, pendingScriptEpisodes } from "./planning-script-queue";
+import { launchPlanningDirector, planningPrompt, type PlanningLaunchScope } from "./planning-director-launch";
+import { PlanningStepBar } from "./planning-step-bar";
+import { nextPlanningStep, planningStepStates, topicFromLegacy, type PlanningStepKey } from "./planning-topic-logic";
+import { OutlineWizard, parseEpisodeLines, proposalLines } from "./planning-outline-wizard";
+import type { OutlineWizardStep } from "./planning-outline-wizard";
+
+/** 剧目规划的标签页：原剧本 / 选题 / 大纲 三个写作分区 + 信息 / 设置。 */
+export type PlanningTab = "source" | "topic" | "outline" | "script" | "info" | "settings";
+
 
 type DramaDraft = {
     productionPlan: DramaProductionPlan;
@@ -44,6 +57,14 @@ type EpisodeDraft = {
     withCanvas?: boolean;
 };
 
+function outlineCharacterNames(production: EpisodeProduction | null) {
+    const source = (production?.draft?.director as { source?: Record<string, unknown> } | undefined)?.source;
+    const rows = source?.character_registry;
+    return Array.isArray(rows)
+        ? rows.map((row) => String((row as { name?: string })?.name || (row as { id?: string })?.id || "")).filter(Boolean)
+        : [];
+}
+
 function sharedAssetImageSource(asset: Asset) {
     const image = asset.kind === "character"
         ? asset.data.images[asset.data.primaryIndex || 0]
@@ -58,7 +79,7 @@ function sharedAssetImageSource(asset: Asset) {
 export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode, view, initialPlanningTab, navigationTitleVisible = false }: {
     dramaId: string;
     view?: SeriesWorkspaceView;
-    initialPlanningTab?: "info" | "settings";
+    initialPlanningTab?: PlanningTab;
     navigationTitleVisible?: boolean;
     onEpisodesChanged?: (episodes: DramaEpisode[]) => void;
     onProduceEpisode?: (episode: DramaEpisode) => void;
@@ -74,7 +95,18 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [episodes, setEpisodes] = useState<DramaEpisode[]>([]);
     const [openingSharedCanvas, setOpeningSharedCanvas] = useState(false);
     const [draft, setDraft] = useState<DramaDraft | null>(null);
-    const [planningTab, setPlanningTab] = useState<"info" | "settings">(initialPlanningTab || "info");
+    const [planningTab, setPlanningTab] = useState<PlanningTab>(initialPlanningTab || "info");
+    /** 把当前这一步交给导演 agent：只给目标，怎么写由 agent 按策划合同决定。 */
+    const askDirectorForPlanning = (scope: PlanningLaunchScope) => {
+        if (!folder || !draft) return;
+        const result = launchPlanningDirector(planningPrompt(scope, {
+            dramaId: String(folder.id || ""),
+            name: String(draft.name || folder.name || ""),
+            pendingEpisodes: scope === "script" ? pendingScriptEpisodes(episodes).map(episode => episode.episodeNumber) : undefined,
+        }));
+        if (result === "offline") message.warning(t("planningAsk.offline"));
+        if (result === "busy") message.info(t("planningAsk.busy"));
+    };
     const initializedDraftFor = useRef<string | null>(null);
     const [activeCoverUrl, setActiveCoverUrl] = useState("");
     const [uploadingCover, setUploadingCover] = useState(false);
@@ -347,6 +379,47 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             },
         });
     };
+    /** 大纲某一步的写入：分集目录会真的建分集，其余直接落 draft，最后由保存按钮统一入库。 */
+    const applyOutlineStep = async (step: OutlineWizardStep, text: string) => {
+        if (!draft) return;
+        const detail = draft.productionPlan.outlineDetail;
+        if (step === "episodes") {
+            const existing = new Set(episodes.map(episode => episode.episodeNumber));
+            let created = 0;
+            for (const line of parseEpisodeLines(text)) {
+                if (!Number.isFinite(line.episodeNumber) || existing.has(line.episodeNumber)) continue;
+                await createBackendDramaEpisode(dramaId, { episodeNumber: line.episodeNumber, title: line.title, synopsis: line.synopsis });
+                created += 1;
+            }
+            if (created) {
+                const fresh = await fetchBackendDramaEpisodes(dramaId).catch(() => null);
+                if (fresh?.episodes) { setEpisodes(fresh.episodes); onEpisodesChanged?.(fresh.episodes); }
+            }
+            return;
+        }
+        if (step === "storyline") { setDraft({ ...draft, outline: text.trim() }); return; }
+        if (step === "characters") { setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, characters: proposalLines(text) } } }); return; }
+        if (step === "threeActs") {
+            const acts = proposalLines(text).slice(0, 3).map(line => line.split(/[｜|]/).slice(1).join("｜").trim() || line);
+            setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, threeActs: acts } } });
+            return;
+        }
+        if (step === "worldContext") { setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, worldContext: text.trim() } } }); return; }
+        setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, ending: text.trim() } } });
+    };
+    const stepInput = draft ? { topic: draft.productionPlan.topic, outline: draft.outline, worldContext: draft.productionPlan.outlineDetail.worldContext, episodeCount: episodes.length, episodesWithSynopsis: episodes.filter(episode => String(episode.synopsis || "").trim()).length, episodesWithScript: episodes.filter(episode => episodeHasScript(episode)).length, assetCount: sharedAssets.length, episodeCanvasCount: episodes.filter(episode => episode.canvasId).length } : null;
+    const stepStates = stepInput ? planningStepStates(stepInput) : [];
+    /** 步骤条：只有能派生的完成度才报，分镜/导演包在分集制作里，点过去即入口。 */
+    const openPlanningStep = (key: PlanningStepKey) => {
+        if (key === "topic" || key === "outline" || key === "script") { setPlanningTab(key); return; }
+        if (key === "assets") {
+            navigate(`${location.pathname}?${productionWorkspaceQuery(new URLSearchParams(location.search), "series", { seriesView: "shared" }).toString()}`);
+            return;
+        }
+        const episode = episodes[0];
+        if (!episode) { message.warning(t("planningSteps.needEpisode")); return; }
+        produceEpisode(episode);
+    };
     const saveFolder = async (confirm = true) => {
         if (!draft) return;
         if (confirm && !draft.productionPlan.storyboardImageMode) {
@@ -435,7 +508,12 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         <div>
             {(!view || view === "planning") && <section className="mb-5 space-y-3">
                 <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<div className="flex flex-wrap justify-end gap-2"><Button disabled={savingPlan || uploadingCover} loading={uploadingCover} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button><Button type="primary" loading={savingPlan} disabled={uploadingCover} onClick={() => void saveFolder()}>{t("productionCanvas.confirmPlan")}</Button></div>} />
-                {draft ? <Tabs activeKey={planningTab} onChange={key => setPlanningTab(key as "info" | "settings")} items={[
+                {draft ? <PlanningStepBar states={stepStates} next={nextPlanningStep(stepStates)} onOpen={openPlanningStep} /> : null}
+                {draft ? <Tabs activeKey={planningTab} onChange={key => setPlanningTab(key as PlanningTab)} items={[
+                    { key: "source", label: t("productionCanvas.writing.tabs.source"), children: <SourceScriptTab value={draft.productionPlan.sourceScript} onChange={sourceScript => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, sourceScript } })} /> },
+                    { key: "topic", label: t("productionCanvas.writing.tabs.topic"), children: <TopicCard topic={topicFromLegacy(draft.productionPlan.topic)} onChange={topic => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, topic } })} onAskDirector={() => askDirectorForPlanning("topic")} /> },
+                    { key: "outline", label: t("productionCanvas.writing.tabs.outline"), children: <div className="space-y-5 pt-1"><OutlineWizard dramaId={dramaId} plan={draft.productionPlan} outline={draft.outline} episodeCount={episodes.length} registryCharacters={outlineCharacterNames(sharedProduction).length} model={draft.productionPlan.outlineModel} config={modelConfig} onModelChange={outlineModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineModel } })} onApply={applyOutlineStep} onAskDirector={() => askDirectorForPlanning("outline")} /><OutlineTab outline={draft.outline} detail={draft.productionPlan.outlineDetail} characters={draft.productionPlan.outlineDetail.characters.length ? draft.productionPlan.outlineDetail.characters : outlineCharacterNames(sharedProduction)} episodes={episodes} onOutline={outline => setDraft({ ...draft, outline })} onDetail={outlineDetail => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail } })} /></div> },
+                    { key: "script", label: t("productionCanvas.writing.tabs.script"), children: <PlanningScriptTab onAskDirector={() => askDirectorForPlanning("script")} episodes={episodes} model={draft.productionPlan.outlineModel} config={modelConfig} onModelChange={outlineModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineModel } })} onSaved={fresh => { setEpisodes(fresh); onEpisodesChanged?.(fresh); }} /> },
                     { key: "info", label: t("productionCanvas.planningOverviewTab"), children: <div className="space-y-5 pt-1">
                 <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
                     <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-border bg-muted text-left dark:bg-muted" onClick={() => coverInputRef.current?.click()}>
@@ -447,7 +525,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                         <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.tags")}</span><Input placeholder={t("drama.tagsPlaceholder")} value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} /></label>
                     </div>
                 </div>
-                <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.outline")}</span><Input.TextArea rows={7} placeholder={t("drama.outlinePlaceholder")} value={draft.outline} onChange={(event) => setDraft({ ...draft, outline: event.target.value })} /></label>
+                <div className="block" data-planning-outline-summary><span className="mb-1.5 flex items-center gap-2 text-sm font-medium">{t("drama.outline")}<Button type="link" size="small" onClick={() => setPlanningTab("outline")}>{t("productionCanvas.writing.editInOutline")}</Button></span><p className="whitespace-pre-wrap break-words rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">{draft.outline.trim() ? (draft.outline.trim().length > 240 ? `${draft.outline.trim().slice(0, 240)}…` : draft.outline.trim()) : t("productionCanvas.writing.outlineEmpty")}</p></div>
                 <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("productionCanvas.planRequirements")}</span><Input.TextArea rows={3} value={draft.productionPlan.requirements} onChange={event => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, requirements: event.target.value } })} /></label>
                 <label className="block"><span className="mb-1.5 block text-sm font-medium">{t("drama.description")}</span><Input.TextArea rows={3} placeholder={t("drama.descriptionPlaceholder")} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></label>
                     </div> },

@@ -1,0 +1,104 @@
+{
+ "10": {
+  "class_type": "T8DramaLoader",
+  "inputs": {
+   "model": "drama3_fp8experts_bf16.safetensors",
+   "codec": "drama3_codec.safetensors",
+   "expert_cache_gb": 24,
+   "gdn_backend": "torch",
+   "moe_backend": "auto",
+   "cuda_graph": true,
+   "expert_placement": "ram",
+   "scene_head_mode": "compact"
+  },
+  "_meta": {
+   "title": "加载 Drama3 (T8)"
+  }
+ },
+ "20": {
+  "class_type": "T8DramaLoadSession",
+  "inputs": {
+   "session_file": "达妮娅.safetensors"
+  },
+  "_meta": {
+   "title": "音色（session 文件）"
+  }
+ },
+ "30": {
+  "class_type": "T8DramaSession",
+  "inputs": {
+   "references": [
+    "20",
+    1
+   ],
+   "direction": "[平静]\n[一条一句][语速偏慢][字字清晰]"
+  },
+  "_meta": {
+   "title": "表演指令 direction"
+  }
+ },
+ "40": {
+  "class_type": "T8DramaGenerate",
+  "inputs": {
+   "engine": [
+    "10",
+    0
+   ],
+   "mode": "speech",
+   "text": "请输入配音文本",
+   "session": [
+    "30",
+    0
+   ],
+   "lookahead": "",
+   "chunk_bytes": 1500,
+   "seed": 0,
+   "temperature": 0.7,
+   "top_p": 0.7,
+   "top_k": 30,
+   "max_frames": 900,
+   "seed_text": "",
+   "opening_retries": 1,
+   "sampling_preset": "custom",
+   "replace_delivery_tags": false
+  },
+  "_meta": {
+   "title": "生成语音"
+  }
+ },
+ "50": {
+  "class_type": "T8DramaDecode",
+  "inputs": {
+   "engine": [
+    "10",
+    0
+   ],
+   "session": [
+    "40",
+    0
+   ],
+   "take_index": -1,
+   "all_takes": false,
+   "shorten_long_pauses": true,
+   "max_pause_seconds": 0.5
+  },
+  "_meta": {
+   "title": "解码音频"
+  }
+ },
+ "60": {
+  "class_type": "SaveAudio",
+  "inputs": {
+   "audio": [
+    "50",
+    0
+   ],
+   "filename_prefix": "tts_audio/Drama3",
+   "audioUI": null,
+   "upload": null
+  },
+  "_meta": {
+   "title": "保存音频"
+  }
+ }
+}

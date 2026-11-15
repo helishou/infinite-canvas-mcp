@@ -340,6 +340,15 @@ export class BackendClient {
     }>(`/drama/episodes/${encodeURIComponent(episodeId)}${query}`);
   }
 
+  async getDramaPlanning(dramaId: string, includeSourceScript = false) {
+    const query = includeSourceScript ? "?include=sourceScript" : "";
+    return this.get<Record<string, unknown>>(`/drama/${encodeURIComponent(dramaId)}/planning${query}`);
+  }
+
+  async updateDramaPlanning(dramaId: string, patch: Record<string, unknown>) {
+    return this.patch<Record<string, unknown>>(`/drama/${encodeURIComponent(dramaId)}/planning`, patch);
+  }
+
   async createDramaEpisode(dramaId: string, input: Record<string, unknown>) {
     return this.post<{ ok: boolean; episode?: Record<string, unknown> }>(
       `/drama/projects/${encodeURIComponent(dramaId)}/episodes`,

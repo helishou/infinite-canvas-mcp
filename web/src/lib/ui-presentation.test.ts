@@ -31,16 +31,6 @@ test("UI typography uses the bundled variable font without remote font services"
     assert.doesNotMatch(roles, /(?:^|\n)(?:h[1-6]|p|input|textarea|\*|\.canvas)[^{]*\{/);
     assert.doesNotMatch(roles, /font-family\s*:/);
 });
-test("wrapping result labels retain save, edit and download callback targets", () => {
-    const source = readFileSync(new URL("../pages/image/index.tsx", import.meta.url), "utf8");
-    const card = source.slice(source.indexOf("function ResultImageCard("), source.indexOf("function PendingImageCard("));
-    assert.match(card, /onClick=\{\(\) => void onSaveAsset\(image, index\)\}/);
-    assert.match(card, /onClick=\{\(\) => void onEdit\(image, index\)\}/);
-    assert.match(card, /onClick=\{\(\) => onDownload\(image, index\)\}/);
-    assert.match(css, /\.ui-result-action\.ant-btn > span:last-child[^}]*white-space: normal/);
-    assert.doesNotMatch(source.match(/const RESULT_ACTION_BUTTON_CLASS = "([^"]+)"/)![1], /truncate|line-clamp|text-ellipsis/);
-});
-
 test("canvas authored prompts retain their previous face in inline and expanded editors", () => {
     const panel = readFileSync(new URL("../components/canvas/canvas-node-prompt-panel.tsx", import.meta.url), "utf8");
     assert.equal((panel.match(/canvas-authored-prompt/g) || []).length, 2);
@@ -48,20 +38,6 @@ test("canvas authored prompts retain their previous face in inline and expanded 
     const nodes = readFileSync(new URL("../components/canvas/canvas-node.tsx", import.meta.url), "utf8");
     assert.match(nodes, /const fontSize = node.metadata\?\.fontSize \|\| 14/);
     assert.match(nodes, /font-mono select-text/);
-});
-
-test("safe browser fixture uses exact production result and reference components", () => {
-    const source = readFileSync(new URL("../pages/image/index.tsx", import.meta.url), "utf8");
-    const fixture = readFileSync(new URL("../../tests/visual-polish-cards.tsx", import.meta.url), "utf8");
-    const slice = (text: string, name: string) => {
-        const start = text.indexOf(name);
-        assert.notEqual(start, -1, name);
-        const next = text.indexOf("\nfunction ", start + 1);
-        return text.slice(start, next < 0 ? text.length : next);
-    };
-    for (const name of ["function ResultImageCard(", "function ReferenceOrderButtons("]) {
-        assert.ok(fixture.includes(slice(source, name)), name);
-    }
 });
 
 test("control targets do not enlarge nested Ant input-clear buttons", () => {
@@ -100,7 +76,7 @@ test("font package keeps variable weights, lazy unicode subsets and its shipped 
     assert.doesNotMatch(h3, /\[data-canvas-no-zoom\] \{ font-family:/);
     assert.match(h3, /\.minimax-prompt-side \.nfh3-panel-actions button \{[^}]*font-weight:500; letter-spacing:0;/);
     const clipSettings = readFileSync(new URL("../../../plugins/canvas/minimax-h3/src/components/ClipSettings.tsx", import.meta.url), "utf8");
-    assert.match(clipSettings, /fontSize: 22, fontWeight: 400, lineHeight: "46px"/);
+    assert.match(clipSettings, /fontSize: 14, fontWeight: 400, lineHeight: "30px"/);
     assert.match(clipSettings, /color: "var\(--h3-control-text, var\(--h3-text\)\)"/);
     assert.doesNotMatch(clipSettings, /color: "#f3f7fb"/);
 });

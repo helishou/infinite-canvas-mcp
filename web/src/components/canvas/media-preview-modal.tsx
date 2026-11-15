@@ -137,6 +137,8 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
                 name: item?.name || "H3 输出视频",
                 position,
             } }));
+            // 目前没有任何监听器接收这个事件（分镜板写入尚未接入），明确告知而不是静默失败。
+            message.warning("当前帧已截取，但画布这边还没有接收分镜板写入的逻辑，帧没保存。");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "当前帧截取失败。");
         } finally {
@@ -159,6 +161,7 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
             duration: Number(videoRef.current?.duration || 0),
             times,
         } }));
+        message.warning("分镜轨提取同样卡在分镜板写入这一环，画布还没接入。");
     }, [closeVideoMenu, item?.canvasNodeId, item?.name, item?.storyboardFrameTimes, url]);
 
     useEffect(() => {

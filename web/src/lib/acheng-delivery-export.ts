@@ -1,8 +1,10 @@
 import { Zip, ZipPassThrough } from "fflate";
 
 import { backendMediaUrl, fetchBackendGenerationLogs, type EpisodeProduction, type ProductionReadiness } from "@/services/backend-api";
-import { productionSegmentRuntimeMatches, productionSegments } from "@/lib/production-source";
+import { productionSegmentRuntimeMatches, productionSegments, segmentShotIds } from "@/lib/production-source";
 import { productionSourceFps, productionSubtitleTracks } from "@/lib/production-subtitles";
+import { buildJianyingDraft, type JianyingCaption, type JianyingClip } from "@/lib/jianying-draft";
+import type { SubtitleCalibration } from "@/lib/subtitle-calibration";
 import type { CanvasNodeData } from "@/types/canvas";
 
 type RecordValue = Record<string, unknown>;
@@ -16,6 +18,10 @@ type ExportOptions = {
     readiness: ProductionReadiness;
     canvasNodes: CanvasNode[];
     includeGeneratedMedia?: boolean;
+    /** 按实际视频音频校准后的字幕时间线；仅当 sourceHash 一致时生效，创作稿 SRT 始终保留作对照。 */
+    calibration?: SubtitleCalibration | null;
+    /** 剪映草稿画布尺寸与本机草稿目录；留空时产出占位路径，由包内脚本替换。 */
+    jianying?: { width?: number; height?: number; root?: string };
 };
 type MediaEntry = { key: string; path: string; kind: "reference" | "asset" | "keyframe" | "video"; targetId: string; sha256?: string; requested: boolean; included: boolean; missingReason?: string };
 
@@ -80,12 +86,41 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
     for (const [shotId, frame] of Object.entries(snapshot.keyframes)) if (frame.storageKey) actualMedia.push({ key: frame.storageKey, path: `outputs/keyframes/${safeName(shotId)}.${extensionOf(frame.storageKey)}`, kind: "keyframe", targetId: shotId });
     const lockedClipIds = new Set((Array.isArray(d?.source?.segments) ? d.source.segments : [])
         .map(record).filter(segment => segment.locked === true).map(segment => String(segment.id || "")).filter(Boolean));
-    for (const group of productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null })) {
-        if (!lockedClipIds.has(String(group.id)) && group.locked !== true) continue;
+    // 剪映草稿的帧精确时间轴：v2 用 shot.duration_frames，旧稿用 shot.end_frame - start_frame。
+    const sourceRecord = record(director.source);
+    const sourceShots: RecordValue[] = Array.isArray(sourceRecord.shots) ? (sourceRecord.shots as unknown[]).map(record) : [];
+    const shotFrames = new Map<string, number>(sourceShots.map(shot => {
+        const frames = Number(shot.duration_frames);
+        const span = Number(shot.end_frame ?? 0) - Number(shot.start_frame ?? 0);
+        const value = Number.isFinite(frames) && frames > 0 ? frames : Number.isFinite(span) && span > 0 ? span : 0;
+        return [String(shot.id || ""), value] as const;
+    }));
+    const jianyingFps = productionSourceFps(director.source);
+    const jianyingClips: JianyingClip[] = [];
+    const jianyingWarnings: string[] = [];
+    const jianyingNames = new Set<string>();
+    const FALLBACK_CLIP_US = 5_000_000;
+    for (const [index, group] of productionSegments({ draft: snapshot as EpisodeProduction["draft"], published: null }).entries()) {
         const runtime = productionSegmentRuntimeMatches(options.canvasNodes, String(group.id), options.owner)[0]?.segment
             || options.canvasNodes.find(item => item.id === group.nodeId)?.metadata?.segments?.map(record).find(item => String(item.id || "") === String(group.segmentId || ""));
         const storageKey = String(runtime?.resultStorageKey || "");
-        if (storageKey) actualMedia.push({ key: storageKey, path: `outputs/video/${safeName(group.id)}.${extensionOf(storageKey)}`, kind: "video", targetId: group.id });
+        const baseName = safeName(String(group.id || `segment-${index + 1}`));
+        let fileName = `${baseName}.${storageKey ? extensionOf(storageKey) : "mp4"}`;
+        if (jianyingNames.has(fileName.toLowerCase())) {
+            fileName = `${baseName}-${index + 1}.${storageKey ? extensionOf(storageKey) : "mp4"}`;
+            jianyingWarnings.push(`段落 ${group.id} 的素材文件名重复，剪映草稿改用 ${fileName}`);
+        }
+        jianyingNames.add(fileName.toLowerCase());
+        // 时间轴覆盖全部段落：未生成 / 未锁定的段也占位，避免字幕帧窗被压缩后错位。
+        const frames = segmentShotIds(group).reduce((total, shotId) => total + (shotFrames.get(shotId) || 0), 0);
+        if (!(frames > 0)) jianyingWarnings.push(`段落 ${group.id} 无法从制作稿读取帧时长，剪映草稿按 5s 占位，导入后请核对`);
+        jianyingClips.push({
+            fileName,
+            name: String(group.id || baseName),
+            durationUs: frames > 0 ? Math.round(frames / jianyingFps * 1_000_000) : FALLBACK_CLIP_US,
+        });
+        if (!lockedClipIds.has(String(group.id)) && group.locked !== true) continue;
+        if (storageKey) actualMedia.push({ key: storageKey, path: `outputs/video/${fileName}`, kind: "video", targetId: group.id });
     }
     const chosenOutputs = options.includeGeneratedMedia ? actualMedia : [];
     const outputByKey = new Map<string, BinaryEntry>();
@@ -113,6 +148,35 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
         // 字幕是制作稿里既有台词的投影：按 Shot 时间窗与 ref 片段生成，不改写任何台词文本。
         const subtitleTracks = productionSubtitleTracks(director.source);
         const subtitleIndex = subtitleTracks.map(track => ({ timelineId: track.timelineId, path: `subtitles/${safeName(track.timelineId)}.srt`, cueCount: track.cues.length, cues: track.cues }));
+        // Calibration is a delivery-layer overlay: a stale sourceHash must never silently retime cues.
+        const calibration = options.calibration?.version === 1 && options.calibration.sourceHash === director.sourceHash ? options.calibration : null;
+        const calibrationWarnings: string[] = [];
+        if (options.calibration && !calibration) calibrationWarnings.push("字幕校准基于旧 sourceHash，已忽略；请重新校准当前制作稿");
+        const calibratedIndex = (calibration?.tracks || []).map(track => ({ timelineId: track.timelineId, path: `subtitles/calibrated/${safeName(track.timelineId)}.srt`, cueCount: track.cues.length, cues: track.cues }));
+        // 剪映草稿只有一条时间线：多条 timeline 时只投影第一条，其余在 warning 里列明，不做静默合并。
+        // 已校准时用实际音频时间线，未校准时回退到创作稿帧窗。
+        const primarySubtitleTrack = calibration?.tracks[0] || subtitleTracks[0];
+        const jianyingCaptions: JianyingCaption[] = (primarySubtitleTrack?.cues || []).map(cue => ({
+            text: cue.text,
+            startUs: Math.round(cue.startSeconds * 1_000_000),
+            durationUs: Math.round((cue.endSeconds - cue.startSeconds) * 1_000_000),
+        }));
+        if (subtitleTracks.length > 1) jianyingWarnings.push(`制作稿有 ${subtitleTracks.length} 条时间线，剪映草稿只投影 ${primarySubtitleTrack?.timelineId || "第一条"}，其余 ${subtitleTracks.length - 1} 条字幕轨未导入`);
+        let jianyingDraft: ReturnType<typeof buildJianyingDraft> | null = null;
+        try {
+            if (jianyingClips.length) jianyingDraft = buildJianyingDraft({
+                name: safeName(`${options.title || options.owner.id}-剪映草稿`),
+                width: options.jianying?.width ?? 1920,
+                height: options.jianying?.height ?? 1080,
+                fps: jianyingFps,
+                clips: jianyingClips,
+                captions: jianyingCaptions,
+                ...(options.jianying?.root ? { root: options.jianying.root } : {}),
+            });
+        } catch (error) {
+            jianyingWarnings.push(`剪映草稿未生成：${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (!jianyingClips.length) jianyingWarnings.push("剪映草稿未生成：制作稿没有可导出的段落");
         const completePrompts = artifacts.length > 0 && artifacts.every(item => item.status === "ready" && item.sourceHash === director.sourceHash && item.receipt.sourceHash === director.sourceHash && item.receipt.promptHash === item.sha256);
         const readyTargets = options.readiness.targets.filter(item => item.status === "ready" || item.status === "complete").length;
         const dependenciesCleared = !options.readiness.unresolved.length && options.readiness.targets.every(item => item.status === "ready" || item.status === "complete");
@@ -134,7 +198,19 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
                 : { targetId: item.targetId, status: item.status }),
             media: mediaEntries,
             outputsIncluded: options.includeGeneratedMedia === true,
-            subtitles: { contract: "srt-1", fps: productionSourceFps(director.source), tracks: subtitleIndex },
+            subtitles: {
+                contract: "srt-1", fps: productionSourceFps(director.source), tracks: subtitleIndex,
+                ...(calibration ? { calibrated: { contract: "srt-calibrated-1", sourceHash: calibration.sourceHash, createdAt: calibration.createdAt, model: calibration.model, language: calibration.language, tracks: calibratedIndex, report: calibration.report } } : {}),
+                ...(calibrationWarnings.length ? { warnings: calibrationWarnings } : {}),
+            },
+            jianying: jianyingDraft ? {
+                contract: "jianying-draft-1",
+                folder: `jianying/${jianyingDraft.name}`,
+                clips: jianyingDraft.stats.clips,
+                captions: jianyingDraft.stats.captions,
+                durationUs: jianyingDraft.durationUs,
+                warnings: [...jianyingWarnings, ...jianyingDraft.warnings],
+            } : { status: "skipped", warnings: jianyingWarnings },
             readinessSummary: { ready: readyTargets, total: options.readiness.targets.length, nextAction: options.readiness.nextAction },
         };
         addJson("production.json", { owner: options.owner, revision: sourceRevision, publishedVersion, stage: options.production.published ? "draft-with-published-baseline" : "draft", data: snapshot, publishedSnapshot: options.production.published });
@@ -145,6 +221,11 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
         for (const item of generatedPromptFiles) addBytes(item.path, encoder.encode(item.prompt));
         for (const track of subtitleTracks) addBytes(`subtitles/${safeName(track.timelineId)}.srt`, encoder.encode(track.srt));
         if (subtitleTracks.length) addJson("subtitles/index.json", { fps: productionSourceFps(director.source), tracks: subtitleIndex });
+        for (const track of calibration?.tracks || []) addBytes(`subtitles/calibrated/${safeName(track.timelineId)}.srt`, encoder.encode(track.srt));
+        if (calibratedIndex.length && calibration) addJson("subtitles/calibrated/index.json", { contract: "srt-calibrated-1", sourceHash: calibration.sourceHash, model: calibration.model, language: calibration.language, createdAt: calibration.createdAt, fps: productionSourceFps(director.source), tracks: calibratedIndex, report: calibration.report, warnings: calibrationWarnings });
+        if (jianyingDraft) for (const [fileName, content] of Object.entries(jianyingDraft.files)) {
+            addBytes(`jianying/${jianyingDraft.name}/${fileName}`, encoder.encode(content));
+        }
         for (const binary of allBinaries) {
             const response = await fetch(backendMediaUrl(binary.key));
             if (!response.ok) {
@@ -167,7 +248,7 @@ export async function exportAchengDeliveryBundle(options: ExportOptions) {
         manifest.media = mediaEntries;
         const missingRequestedMedia = mediaEntries.some(item => item.requested && !item.included);
         if (missingRequestedMedia) manifest.stage = "partial";
-        addBytes("README.txt", encoder.encode(`${options.title}\nAcheng revision ${sourceRevision} · published v${publishedVersion || "draft"}\nPackage status: ${String(manifest.stage)}\n${options.readiness.nextAction}\n${subtitleTracks.length ? `Subtitles: ${subtitleTracks.reduce((total, track) => total + track.cues.length, 0)} cues · ${subtitleTracks.map(track => `subtitles/${safeName(track.timelineId)}.srt`).join(", ")}` : "Subtitles: no recorded dialogue."}\n${missingRequestedMedia ? "Some requested media files were unavailable; see manifest.json." : ""}\n`));
+        addBytes("README.txt", encoder.encode(`${options.title}\nAcheng revision ${sourceRevision} · published v${publishedVersion || "draft"}\nPackage status: ${String(manifest.stage)}\n${options.readiness.nextAction}\n${subtitleTracks.length ? `Subtitles: ${subtitleTracks.reduce((total, track) => total + track.cues.length, 0)} cues · ${subtitleTracks.map(track => `subtitles/${safeName(track.timelineId)}.srt`).join(", ")}` : "Subtitles: no recorded dialogue."}\n${calibration ? `Calibrated subtitles (real audio): ${calibration.report.calibrated}/${calibration.report.totalCues} cues · ${calibratedIndex.map(track => track.path).join(", ")} · Jianying captions use this timeline` : "Calibrated subtitles: not applied (authored Shot windows in use)."}\n${calibrationWarnings.length ? `Calibration warnings: ${calibrationWarnings.join("; ")}\n` : ""}${jianyingDraft ? `Jianying draft: jianying/${jianyingDraft.name} · ${jianyingDraft.stats.clips} clips / ${jianyingDraft.stats.captions} captions · run apply-draft-root.mjs before import` : "Jianying draft: skipped (see manifest.json)"}\n${missingRequestedMedia ? "Some requested media files were unavailable; see manifest.json." : ""}\n`));
         addJson("manifest.json", manifest);
         archive.end();
         return await archiveDone;

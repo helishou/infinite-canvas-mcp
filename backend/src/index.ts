@@ -10,39 +10,44 @@ import { BackendDatabase } from "./db.js";
 import { registerBackendErrorHandler, setSelectionRealtime, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
-import { ComfyUiBackend } from "./comfyui/bridge.js";
+import { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
-import { RunningHubBackend } from "./runtime/runninghub.js";
-import { H3ExecutionQueue, h3CanResumeQueued } from "./runtime/h3-queue.js";
-import { VideoConcatBackend } from "./runtime/video-concat.js";
+import { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
+import { H3ExecutionQueue } from "@basketikun/media-engine/runtime/h3-queue";
+import { holdUnknownSubmission, submissionDecision, submissionDiagnostic } from "@basketikun/media-engine/runtime/submission-outcome";
+import { VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
+import { SubtitleTranscribeBackend } from "./runtime/subtitle-transcribe.js";
+import { registerSubtitleTranscribeRoutes } from "./server/subtitle-transcribe-routes.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
-import { LlmAgent, isLlmThread } from "@basketikun/canvas-agent/agent/llm";
+import { HermesAgent, isHermesThread } from "@basketikun/canvas-agent/agent/hermes-agent";
 import { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
-import { WorkflowStore } from "./workflows/store.js";
-import { WorkflowExecutor } from "./workflows/executor.js";
+import { WorkflowStore, setDrama3VoiceOptions } from "@basketikun/media-engine/workflows/store";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 import { WorkflowModelCatalog } from "./workflows/model-catalog.js";
 import { registerWorkflowRoutes } from "./workflows/routes.js";
 import { registerBackendMcpHttpRoutes, startBackendMcpServer } from "./mcp.js";
-import { DirectImageBackend } from "./runtime/chatgpt-image.js";
+import { DirectImageBackend } from "@basketikun/media-engine/runtime/chatgpt-image";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
+import { CanvasEngineClient } from "./canvas/engine-client.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
+import { registerEngineProxy } from "./server/engine-proxy.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { boundH3ParentTaskIds, CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
-import { DirectVideoBackend } from "./runtime/direct-video.js";
-import { DirectAudioBackend } from "./runtime/direct-audio.js";
+import { DirectVideoBackend } from "@basketikun/media-engine/runtime/direct-video";
+import { DirectAudioBackend } from "@basketikun/media-engine/runtime/direct-audio";
 import { CanvasAudioDispatcher } from "./canvas/audio-dispatcher.js";
 import { CANVAS_BROWSER_TASK_KIND, CanvasBrowserScriptDispatcher } from "./canvas/browser-script-dispatcher.js";
 import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-routes.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { createDevReloadGate } from "./runtime/dev-reload.js";
-import { startRuntimeMonitor } from "./slow-operation.js";
+import { startRuntimeMonitor } from "@basketikun/media-engine/runtime/slow-operation";
 import { registerCanvasCollaborationRoutes } from "./server/canvas-collaboration-routes.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
@@ -50,6 +55,7 @@ import { SharedAssetCoordinator } from "./drama/shared-assets.js";
 import { NativeProductionGeneration } from "./drama/native-generation.js";
 import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
+import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes } from "./server/drama-planning-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import {
   applyNetworkSettings,
@@ -99,6 +105,18 @@ async function startBackendHttpServer() {
     h3Queue,
   });
   const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
+
+  // 画布的音色下拉跟着 ComfyUI 里真实存在的 Drama3 档案走：新建一个 session 就自动可选。
+  const refreshDrama3Voices = async () => {
+    try {
+      const response = await fetch(`${runtime.comfy.getUrl()}/object_info/T8DramaLoadSession`);
+      const body = (await response.json()) as Record<string, any>;
+      const options = body?.T8DramaLoadSession?.input?.required?.session_file?.[1]?.options;
+      if (Array.isArray(options)) setDrama3VoiceOptions(options as string[]);
+    } catch { /* ComfyUI 不在线时保留上一次的列表 */ }
+  };
+  void refreshDrama3Voices();
+  setInterval(() => void refreshDrama3Voices(), 5 * 60 * 1000).unref?.();
   const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, h3Queue);
   const videoConcat = new VideoConcatBackend(
     runtime.tasks,
@@ -106,6 +124,7 @@ async function startBackendHttpServer() {
     runtime.events,
     runtime.media,
   );
+  const subtitleTranscriber = new SubtitleTranscribeBackend(runtime.tasks, runtime.media, runtime.events);
 
   // Workflow import routes
   const workflowStore = new WorkflowStore(db);
@@ -121,11 +140,14 @@ async function startBackendHttpServer() {
     runtime.stores.media,
     runtime.events,
     db,
+    config.url,
   );
   const directImage = new DirectImageBackend(
     runtime.stores.tasks,
     runtime.stores.media,
   );
+  // 独立执行引擎：设置里配了 engine.url 才启用，未配置时图片生成仍走本地执行器。
+  const engineClient = CanvasEngineClient.fromSettings(runtime.stores.settings);
   const canvasImageDispatcher = new CanvasImageDispatcher(
     config,
     runtime.stores,
@@ -135,10 +157,11 @@ async function startBackendHttpServer() {
     workflowExecutor,
     runtime.events,
     runningHub,
+    engineClient ?? undefined,
   );
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub);
+  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub, engineClient ?? undefined);
   const canvasH3Runner = new CanvasH3Runner(
     runtime.stores,
     runtime.events,
@@ -146,7 +169,7 @@ async function startBackendHttpServer() {
     runningHub,
     canvasVideoDispatcher,
   );
-  const directAudio = new DirectAudioBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
+  const directAudio = new DirectAudioBackend(runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
   const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio, runtime.comfy);
   const canvasBrowserScriptDispatcher = new CanvasBrowserScriptDispatcher(runtime.stores, runtime.events, canvasTextDispatcher);
   const canvasGeneration = new CanvasGenerationService(
@@ -247,13 +270,50 @@ async function startBackendHttpServer() {
     },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
+  // 工作流管理面代理到独立执行引擎（配置了 engine.url 才启用；未配置时接口回 503，前端回落本地）。
+  registerEngineProxy(app, () => CanvasEngineClient.fromSettings(runtime.stores.settings) ?? undefined);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
-  const productionLlm = new LlmAgent(runtime.stores.settings, config.url, config.token);
+  const productionHermes = new HermesAgent(runtime.stores.settings, config.url, config.token);
+  // 画布文本任务打通导演 agent：模型选到 hermes 渠道时由它执行（structured 单轮，
+  // 输出若是对象取 text/demand 字段，否则原样返回字符串）。
+  canvasTextDispatcher.setHermesRunner(async ({ model, prompt }) => {
+    // 导演 agent（Hermes structured）强制 JSON 输出；把回答包进 {text} 字段，
+    // 既给模型一个明确的落点，也避免它回显 schema。
+    // 模型偶发用散文回话（不按 JSON）：带逐次加强的纠正前缀重试（最多 3 次），
+    // 比把失败直接抛给前端更有用。
+    const runStructured = async (extra?: string) => {
+      const { output } = await productionHermes.structured({
+        cwd: process.cwd(),
+        prompt: extra ? `${extra}\n\n${prompt}` : prompt,
+        schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+        model,
+        effort: "auto",
+        onThread: () => undefined,
+      });
+      return output;
+    };
+    const toText = (output: unknown) => {
+      const nested = (output && typeof output === "object" ? output : {}) as Record<string, unknown>;
+      const text = typeof output === "string" ? output : String(nested.text ?? "");
+      if (!text.trim()) throw new Error("Hermes 文本任务返回了空内容");
+      return text;
+    };
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return toText(await runStructured(attempt === 1 ? undefined : "你上一次的回复不是合法 JSON，这是不合格的回答。重新回答：严格只输出一个 JSON 对象 {\"text\":\"你的回答\"}，不要代码块、不要解释、不要开场白，JSON 之外一个字都不要有。"));
+      } catch (error) {
+        lastError = error;
+        if (attempt < 3) logger.warn(`Hermes 文本任务第 ${attempt} 轮未按 JSON 回复，重试`, { error: error instanceof Error ? error.message : String(error), model });
+      }
+    }
+    throw lastError;
+  });
   const productionAgents = new ProductionAgentPool(undefined, {
-    canRun: request => request.threadId ? isLlmThread(request.threadId) : Boolean(request.model?.includes("::")),
-    run: request => productionLlm.structured(request),
-    retainHistory: (threadId, title) => productionLlm.retainHistory(threadId, title, process.cwd()),
-  }, (model, threadId) => productionLlm.nativeWorkerModel(model, threadId));
+    canRun: request => request.threadId ? isHermesThread(request.threadId) : productionHermes.provider(request.model)?.kind === "hermes",
+    run: request => productionHermes.structured(request),
+    retainHistory: (threadId, title) => productionHermes.retainHistory(threadId, title),
+  }, (model, threadId) => productionHermes.nativeWorkerModel(model, threadId));
   process.once("exit", () => productionAgents.stop());
   app.get("/production/worker-status", (_req, res) => res.json({
     ok: true,
@@ -263,8 +323,11 @@ async function startBackendHttpServer() {
   }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
+  registerDramaPlanningRoutes(app, runtime.db, runtime.stores);
+  registerDramaScriptRoutes(app, runtime.db, runtime.stores);
+  registerDramaPlanningStateRoutes(app, runtime.db);
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
-  const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionLlm.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
+  const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionHermes.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
   directorSubagents.reconcileStartup();
   registerDirectorSubagentRoutes(app, directorSubagents);
   const canvasProductionRunner = new EpisodeProductionRunner(canvasProduction, runtime.stores, canvasGeneration);
@@ -282,6 +345,7 @@ async function startBackendHttpServer() {
     videoConcat,
     runtime.events,
   );
+  registerSubtitleTranscribeRoutes(app, subtitleTranscriber, runtime.events);
   registerComfyRoutes(
     {
       app,
@@ -412,24 +476,31 @@ async function startBackendHttpServer() {
     // 已提交的 ComfyUI/RunningHub 子任务按各自远端 ID 恢复观察；只把未提交且没有
     // 可安全重放的本地队列意图标记失败，避免猜测任务是否已计费。
     if (task.kind.startsWith("comfyui:") || task.kind.startsWith("runninghub:")) {
-      const submitted = stores.tasks
-        .events(task.id)
-        .find((e) => e.type === "submitted")?.payload;
+      const events = stores.tasks.events(task.id);
+      const submitted = events.find((e) => e.type === "submitted")?.payload;
       const promptId = task.kind.startsWith("runninghub:") ? submitted?.taskId : submitted?.promptId;
-      if (h3CanResumeQueued(stores.tasks, task.id)) continue;
+      const decision = submissionDecision(task, events);
+      // 确定没提交（可安全重提）或已拿到远端 ID（resume 会恢复观察）的任务保持原状。
+      if (decision === "resubmit" || decision === "observe") continue;
       const createdTs = task.createdAt ? new Date(task.createdAt).getTime() : 0;
-      // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败，
-      // 与其让其挂在 running 里最多 1 小时，不如直接置失败（孤儿任务回收）。
+      // 超过 24 小时的 ComfyUI 任务，其 history 早被 ComfyUI 清理，resume 观察必然超时失败。
       const tooOld = task.kind.startsWith("comfyui:") && createdTs > 0 && Date.now() - createdTs > 24 * 60 * 60 * 1000;
+      if (decision === "reconcile" && !tooOld) {
+        // 提交窗口内的 unknown 既不重提也不误判失败：保留 running 并写明核对入口。
+        holdUnknownSubmission(stores.tasks, task.id, "backend 重启后未找到远端提交回执");
+        continue;
+      }
       if (typeof promptId !== "string" || !promptId || tooOld) {
         stores.tasks.update(task.id, {
           status: "failed",
           error:
-            tooOld && promptId
-              ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
-              : task.kind.startsWith("runninghub:")
-                ? "backend 重启后该 RunningHub 任务没有远端 taskId，无法安全恢复，已自动置为失败（孤儿任务回收）"
-                : "backend 重启后该 ComfyUI 任务没有 promptId，无法安全恢复，已自动置为失败（孤儿任务回收）",
+            decision === "reconcile"
+              ? submissionDiagnostic("backend 重启后提交状态仍未确认且已超过可恢复窗口（孤儿任务回收）")
+              : tooOld && promptId
+                ? "backend 重启后该 ComfyUI 任务已超过 24 小时，history 已不可恢复，已自动置为失败（孤儿任务回收）"
+                : task.kind.startsWith("runninghub:")
+                  ? "backend 重启后该 RunningHub 任务没有远端 taskId，无法安全恢复，已自动置为失败（孤儿任务回收）"
+                  : "backend 重启后该 ComfyUI 任务没有 promptId，无法安全恢复，已自动置为失败（孤儿任务回收）",
         });
         stores.tasks.addEvent(task.id, "status", { status: "failed" });
       }

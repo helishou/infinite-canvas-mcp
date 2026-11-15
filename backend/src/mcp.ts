@@ -21,7 +21,7 @@ import { nanoid } from "nanoid";
 import type { Express, Request, Response } from "express";
 
 import { loadConfig, type ResolvedConfig } from "./config.js";
-import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
 import {
   PluginMcpRegistry,
   buildPluginMcpContext,
@@ -529,6 +529,8 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_create_episode",
   "drama_update_episode",
   "drama_delete_episode",
+  "drama_get_planning",
+  "drama_update_planning",
   "production_compile",
   "production_get_compilation",
   "production_apply_compilation",
@@ -1802,6 +1804,30 @@ function registerBackendCanvasTools(
       });
     },
   );
+  server.registerTool("drama_get_planning", {
+    description: toolDescriptions.drama_get_planning,
+    inputSchema: toolInputSchemas.drama_get_planning,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_get_planning.parse(rawInput);
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    const planning = await backendApi.getDramaPlanning(dramaId, input.includeSourceScript);
+    return textResult({ ...planning, activeDramaId: dramaId, nextRead: { tool: "drama_update_planning", input: { dramaId, expectedUpdatedAt: planning.updatedAt } } });
+  });
+  server.registerTool("drama_update_planning", {
+    description: toolDescriptions.drama_update_planning,
+    inputSchema: toolInputSchemas.drama_update_planning,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_update_planning.parse(rawInput);
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    const { dramaId: _ignored, ...patch } = input;
+    if (!Object.keys(patch).length) throw new Error("没有要写的字段；至少传 sourceScript / outline / topic / outlineDetail / outlineModel 之一");
+    const result = await backendApi.updateDramaPlanning(dramaId, patch);
+    return textResult({ ...result, activeDramaId: dramaId, nextRead: { tool: "drama_get_planning", input: { dramaId } } });
+  });
   server.registerTool("production_initialize_from_current_demand", {
     description: "从已保存的分集 synopsis/fullPlot 原样初始化 Subject Prompt Assembly v2 正式剧本。明确的【镜头...】标记会拆成可编辑剧本段落，但不会被冒充为已定时的正式 Shot；readiness 会显示镜头、资产卡与 Clip 的后续缺口。仅允许无稿或无正文/镜头/Clip/资产/产物/活动工作游标的空壳；已有实际制作内容时拒绝覆盖。",
     inputSchema: z.object({ episodeId: z.string().trim().min(1).describe("分集 ID"), operationId: z.string().trim().min(1).describe("稳定操作 ID；重试同一请求时复用") }).strict(),
@@ -4121,7 +4147,7 @@ function classifyToolError(
     : undefined;
   const productionNextActions = Array.isArray(recordOf(error).nextActions) ? recordOf(error).nextActions as Array<Record<string, unknown>> : [];
   const domainCode = productionDiagnostics.length || ["SOURCE_FIELDS_UNSUPPORTED", "REFERENCE_INVALID", "MEDIA_IDENTITY_MISMATCH", "IDEMPOTENCY_CONFLICT", "H3_CLIP_OCCUPIED", "STALE_H3_PREVIEW"].includes(backendError.code || "") ? backendError.code : undefined;
-  const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
+  const commandCode = ["OPERATION_ID_REUSED", "MCP_COMMAND_MISMATCH", "MCP_COMMAND_REJECTED", "RECEIPT_UNAVAILABLE", "OPERATION_RECEIPT_UNAVAILABLE", "MCP_CALL_CANCELLED", "ASSET_NOT_FOUND", "EDIT_TARGET_MISMATCH"].includes(backendError.code || "") ? backendError.code : undefined;
   const authFailure = backendError.status === 401 || backendError.status === 403;
   const timeout = backendError.kind === "timeout";
   const cancelled = backendError.code === "MCP_CALL_CANCELLED" || backendError.kind === "cancelled" || (error instanceof Error && error.name === "AbortError");
@@ -4187,7 +4213,7 @@ function classifyToolError(
     ? error.issues.map(issue => compactEditOperationForIssue(input, issue.path)).find(Boolean) : undefined;
   const suggestedAction = compactOperation
     ? { tool: "production_get_contract", input: { operationType: compactOperation, ...(compactOperation === "patch_director_source" ? { includePatchFields: true } : {}) }, action: "本次未提交，只有 issues 里列出的这几处字段不合格；按 issues 的 path/unexpectedKeys 改完可直接用原 operationId 与同一 expectedRevision 重提，不需要重读合同或整份源稿。" }
-    : productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE"
+    : productionNextActions.length ? productionNextActions[0] : commandCode === "OPERATION_ID_REUSED" || commandCode === "MCP_COMMAND_MISMATCH" || commandCode === "RECEIPT_UNAVAILABLE" || commandCode === "OPERATION_RECEIPT_UNAVAILABLE"
     ? { tool: "mcp_get_command_receipt", input: { operationId: String(input.operationId || "") } }
     : cancelled
     ? { action: "本次等待已停止，后台任务不会被取消；可用原 taskId/taskIds 继续查询。" }
@@ -4269,7 +4295,7 @@ function classifyToolError(
       // 写操作定位信息：第几个操作、哪个字段、多了哪些键。调用方据此一次改对。
       ...(typeof item.opIndex === "number" ? { opIndex: item.opIndex } : {}), ...(typeof item.opType === "string" ? { opType: item.opType } : {}), ...(typeof item.fieldPath === "string" ? { fieldPath: item.fieldPath } : {}), ...(Array.isArray(item.unexpectedKeys) ? { unexpectedKeys: item.unexpectedKeys.filter((key) => typeof key === "string") } : {}) };
   }) : [];
-  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
+  const retryPolicy = commandCode === "OPERATION_ID_REUSED" || commandCode === "RECEIPT_UNAVAILABLE" || commandCode === "OPERATION_RECEIPT_UNAVAILABLE" ? "never_with_same_id" : staleH3Preview || domainCode || invalidInput ? "after_input_change" : undefined;
   const availableAction = "tool" in suggestedAction && typeof suggestedAction.tool === "string" && !isToolInProfile(state.profile, suggestedAction.tool)
     ? { action: `恢复入口 ${suggestedAction.tool} 不在当前 ${state.profile} 工具集；需要该操作时新建 /mcp?profile=full 连接并沿原身份恢复。` } : suggestedAction;
   // P7a：统一分级。scope/doNotRetry/fix 由 error-taxonomy 单点判定，
@@ -4281,6 +4307,7 @@ function classifyToolError(
     recoverable,
     scope: disposition.scope,
     doNotRetry: disposition.doNotRetry,
+    ...(disposition.retryClass ? { retryClass: disposition.retryClass } : {}),
     ...(disposition.fix ? { fix: disposition.fix } : {}),
     retryPolicy,
     issues,

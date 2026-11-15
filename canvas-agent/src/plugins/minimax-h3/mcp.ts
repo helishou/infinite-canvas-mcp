@@ -179,6 +179,10 @@ const TOOLS: PluginMcpToolWire[] = [
                 projectId: { type: "string", description: "画布项目 id" },
                 segmentId: { type: "string", description: "片段稳定 id；优先使用它定位片段" },
                 segmentIndex: { type: "integer", description: "兼容旧调用的片段下标；省略则运行首个未完成的片段" },
+                endSegmentId: { type: "string", description: "本次运行包含的最后一个 Clip；必须与预检时的取值一致" },
+                runFromCurrent: { type: "boolean", description: "是否从所选 Clip 连跑到段末；必须与预检时的取值一致，否则 planHash 不匹配" },
+                skipCompleted: { type: "boolean", description: "是否跳过已有结果的 Clip；必须与预检时的取值一致" },
+                forceRegenerate: { type: "boolean", description: "强制重新生成（不复用已有成片缓存）；预检传了它，这里也必须传同一个值" },
                 params: { type: "object", description: "设置类参数（aspectRatio/megapixels/steps/loraSlots 等）会在运行前自动写回 Clip 保存值，面板随之显示新值；aspectRatio 传裸比例（如 9:16）或完整标签均可，会自动归一" },
             },
             required: ["projectId", "nodeId"],
@@ -349,6 +353,8 @@ const TOOLS: PluginMcpToolWire[] = [
                 endSegmentId: { type: "string", description: "本次运行包含的最后一个 Clip；限定连续组范围" },
                 startSegmentId: { type: "string", description: "从该稳定 Clip id 起运行当前及后续片段；组中段须有匹配的上一段 AV 潜变量" },
                 skipCompleted: { type: "boolean", description: "是否跳过已有结果；默认 true，潜空间续写必须为 false" },
+                runFromCurrent: { type: "boolean", description: "是否从起点连跑到段末；默认 true。必须与预检取值一致，否则 planHash 不匹配" },
+                forceRegenerate: { type: "boolean", description: "强制重新生成（不复用已有成片缓存）；预检传了它，这里也必须传同一个值" },
                 params: { type: "object", description: "设置类参数（aspectRatio/megapixels/steps/loraSlots 等）会在运行前自动写回 Clip 保存值，面板随之显示新值；aspectRatio 传裸比例（如 9:16）或完整标签均可，会自动归一" },
                 waitForCompletion: { type: "boolean", description: "true=提交后在 MCP 内等到本批父任务终态，返回 wait.status(succeeded|partial|timeout|needs_confirmation)、outputs、pending、blocked；默认 false，提交后立即返回任务摘要" },
                 timeoutMs: { type: "integer", minimum: 1000, maximum: 1800000, description: "waitForCompletion=true 时的最长等待时间，默认 60000ms；超时返回 pending 与进度比例，原任务保留不重提" },
@@ -540,6 +546,8 @@ function buildH3ClipSnapshot(segment: H3Segment, compilation: ReturnType<typeof 
         runtime,
         prompt: { semantic: compilation.semanticPrompt, compiled: compilation.compiledPrompt },
         references: compilation.references.map((reference) => ({ id: reference.id, assetId: reference.assetId, label: reference.label, role: reference.role, mediaType: reference.mediaType, ordinal: reference.ordinal, token: reference.token, subjectId: reference.subjectId, groupId: reference.groupId, outfitId: reference.outfitId, storageKey: reference.storageKey, url: reference.url })),
+        referenceCount: compilation.references.length,
+        ...(compilation.labelMapHash ? { labelMapHash: compilation.labelMapHash } : {}),
         characterGroups: groups,
         issues: compilation.issues,
     };
@@ -1248,7 +1256,7 @@ export const pluginMcp: PluginMcpModule = {
             },
             h3_get_clip_references: async (input) => {
                 const { projectId, nodeId, segmentId, revision, timings, snapshot } = await readH3Clip(context, input);
-                return { ok: true, projectId, nodeId, segmentId, revision, references: snapshot!.references, characterGroups: snapshot!.characterGroups, issues: snapshot!.issues, timings };
+                return { ok: true, projectId, nodeId, segmentId, revision, references: snapshot!.references, referenceCount: snapshot!.referenceCount, ...(snapshot!.labelMapHash ? { labelMapHash: snapshot!.labelMapHash } : {}), characterGroups: snapshot!.characterGroups, issues: snapshot!.issues, timings };
             },
             h3_get_clip_runtime: async (input) => {
                 const { projectId, nodeId, segmentId, segment, revision, timings } = await readH3Clip(context, input, undefined, false);
@@ -1277,6 +1285,10 @@ export const pluginMcp: PluginMcpModule = {
                     nodeId,
                     ...(typeof input.segmentId === "string" ? { segmentId: input.segmentId } : {}),
                     ...(typeof input.segmentIndex === "number" ? { segmentIndex: input.segmentIndex } : {}),
+                    ...(typeof input.endSegmentId === "string" ? { endSegmentId: input.endSegmentId } : {}),
+                    ...(typeof input.runFromCurrent === "boolean" ? { runFromCurrent: input.runFromCurrent } : {}),
+                    ...(typeof input.skipCompleted === "boolean" ? { skipCompleted: input.skipCompleted } : {}),
+                    ...(typeof input.forceRegenerate === "boolean" ? { forceRegenerate: input.forceRegenerate } : {}),
                     params: (input.params as Record<string, unknown>) || {},
                     ...(typeof input.expectedPlanHash === "string" ? { expectedPlanHash: input.expectedPlanHash } : {}),
                     ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}),
@@ -1467,13 +1479,14 @@ export const pluginMcp: PluginMcpModule = {
                 const onlyIds = Array.isArray(input.nodeIds) ? (input.nodeIds as string[]).map(String) : null;
                 const startSegmentId = String(input.startSegmentId || "");
                 const skipCompleted = input.skipCompleted === undefined ? true : input.skipCompleted === true;
+                const runFromCurrent = input.runFromCurrent === undefined ? true : input.runFromCurrent === true;
                 const project = await context.getCanvasProject(projectId);
                 if (!project) throw new Error(`画布不存在:${projectId}`);
                 const nodes = (Array.isArray(project.nodes) ? project.nodes as AgentCanvasNode[] : []).filter((node) => isH3Node(node) && (!onlyIds || onlyIds.includes(node.id)));
                 if (startSegmentId && (nodes.length !== 1 || !segmentsOf(nodes[0]).some((segment) => segment.id === startSegmentId))) {
                     throw new Error("指定 startSegmentId 时必须精确选择一个包含该 Clip 的 H3 节点");
                 }
-                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), ...(startSegmentId ? { segmentId: startSegmentId } : {}), ...(input.endSegmentId ? { endSegmentId: String(input.endSegmentId) } : {}), runFromCurrent: true, skipCompleted, params: override, ...(typeof input.expectedPlanHash === "string" ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}) });
+                const result = await context.backend.canvasRunGeneration({ mode: "video", operation: "h3-run", projectId, nodeIds: nodes.map((node) => node.id), ...(startSegmentId ? { segmentId: startSegmentId } : {}), ...(input.endSegmentId ? { endSegmentId: String(input.endSegmentId) } : {}), runFromCurrent, skipCompleted, ...(typeof input.forceRegenerate === "boolean" ? { forceRegenerate: input.forceRegenerate } : {}), params: override, ...(typeof input.expectedPlanHash === "string" ? { expectedPlanHash: input.expectedPlanHash } : {}), ...(typeof input.idempotencyKey === "string" ? { idempotencyKey: input.idempotencyKey } : {}) });
                 if (!result.task) throw new Error("Backend H3 批量运行未返回任务");
                 return summarizeRuntimeTask(result.task);
             },

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { setEngineDirs } from "@basketikun/media-engine/dirs";
 
 export const DEFAULT_PORT = 17370;
 const DEFAULT_ORIGINS = ["http://127.0.0.1:3001", "http://localhost:3001"];
@@ -77,6 +78,9 @@ export const MEDIA_TOOLS_DIR = (() => {
         return "";
     }
 })();
+
+// 画布部署目录注入执行引擎：所有 backend 入口（服务、测试、维护脚本）经 config 统一生效。
+setEngineDirs({ dataDir: DATA_DIR, mediaDir: MEDIA_DIR, mediaToolsDir: MEDIA_TOOLS_DIR });
 
 export type ResolvedConfig = Required<Pick<BackendConfig, "url" | "token">> & { port: number; origins: string[]; listenHost?: BackendConfig["listenHost"] };
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WorkflowExecutor } from "./executor.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 const image = (filename: string) => ({ images: [{ filename, type: "output", subfolder: "" }] });
 for (const scenario of ["running-history", "cached", "ws-events", "subset", "all-cached"] as const) {

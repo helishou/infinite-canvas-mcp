@@ -8,10 +8,15 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tsc = rel => path.join(root, rel, "node_modules/typescript/bin/tsc");
 
 const jobs = [
+    { name: "engine", dir: "media-engine", bin: tsc("media-engine"), args: ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", ".tsbuildinfo/check.tsbuildinfo"] },
     { name: "backend", dir: "backend", bin: tsc("backend"), args: ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", ".tsbuildinfo/check.tsbuildinfo"] },
     { name: "agent", dir: "canvas-agent", bin: tsc("canvas-agent"), args: ["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", ".tsbuildinfo/check.tsbuildinfo"], stack: 8000 },
     { name: "web", dir: "web", bin: tsc("backend"), args: ["--noEmit"] },
 ];
+
+// backend/web 的类型检查消费 media-engine 的 dist 声明，先确保产物存在。
+const engineBuild = spawn(process.execPath, [tsc("media-engine"), "-p", "tsconfig.json"], { cwd: path.join(root, "media-engine"), stdio: "inherit" });
+await new Promise(resolve => engineBuild.on("exit", resolve));
 
 const prefix = (name, text) => text.split("\n").filter(Boolean).map(line => `[${name}] ${line}`).join("\n");
 

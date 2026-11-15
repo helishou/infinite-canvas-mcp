@@ -1,11 +1,10 @@
-import { Clapperboard, FileText, FolderOpen, House, ImagePlus, Images, LayoutGrid, Sparkles, Video, Workflow, WandSparkles } from "lucide-react";
+import { Clapperboard, FileText, FolderOpen, House, Images, LayoutGrid, Workflow, WandSparkles } from "lucide-react";
 
 /** Primary workspaces. Existing tool URLs remain the canonical destinations. */
 export const navigationTools = [
     { slug: "workbench", href: "/", icon: House },
     { slug: "projects", href: "/projects", icon: FolderOpen },
     { slug: "freeCanvas", href: "/projects?type=canvas", icon: LayoutGrid },
-    { slug: "generate", href: "/image", icon: Sparkles },
     { slug: "resources", href: "/assets", icon: Images },
     { slug: "workflows", href: "/workflows", icon: Workflow },
     { slug: "skills", href: "/skills", icon: WandSparkles },
@@ -18,10 +17,6 @@ export const workspaceSecondaryNavigation = {
         { slug: "allProjects", href: "/projects", icon: FolderOpen },
         { slug: "canvasProjects", href: "/projects?type=canvas", icon: LayoutGrid },
         { slug: "dramaProjects", href: "/projects?type=drama", icon: Clapperboard },
-    ],
-    generate: [
-        { slug: "image", href: "/image", icon: ImagePlus },
-        { slug: "video", href: "/video", icon: Video },
     ],
     resources: [
         { slug: "assets", href: "/assets", icon: Images },

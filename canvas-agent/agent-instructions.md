@@ -14,6 +14,7 @@
 | 任务类型 | 模块路径 | 触发条件 |
 |---|---|
 | 导演委派 | instructions/director-delegation.md | 涉及子代理派发、采纳、续写、恢复 |
+| 剧目策划 | instructions/drama-planning.md | 涉及选题、大纲、分集剧本等剧目级策划读写 |
 | 制作源稿 | instructions/production-authoring.md | 涉及制作数据读写、创作流程、时长、编译、连续性 |
 | 画布操作 | instructions/canvas-operations.md | 涉及画布节点、H3 Clip、生成、导航、工作台 |
 

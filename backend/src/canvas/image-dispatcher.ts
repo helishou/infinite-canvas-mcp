@@ -1,4 +1,4 @@
-import { workflowImageInputs } from "../workflows/image-input-capability.js";
+import { workflowImageInputs } from "@basketikun/media-engine/workflows/image-input-capability";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
@@ -6,12 +6,12 @@ import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 
 import type { ResolvedConfig } from "../config.js";
 import type { RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import type { RunningHubBackend } from "../runtime/runninghub.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import {
   DirectImageBackend,
   type ChatGptImageReference,
-} from "../runtime/chatgpt-image.js";
+} from "@basketikun/media-engine/runtime/chatgpt-image";
 import {
   builtinWorkflowName,
   decodeChannelModel,
@@ -21,9 +21,9 @@ import {
   workflowResolutionMessage,
 } from "./model-workflow.js";
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
-import type { WorkflowExecutor } from "../workflows/executor.js";
-import { convertComfyWorkflowToApi } from "../workflows/comfyui-workflow-conversion.js";
-import type { WorkflowStore } from "../workflows/store.js";
+import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
+import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
+import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
 import type { BackendEventBus } from "../events.js";
 import {
   resolveCanvasExecutor,
@@ -32,19 +32,13 @@ import {
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { StyleTransferRunner, type StyleTransferParams } from "./style-transfer.js";
 import { commandFingerprint } from "./collaboration.js";
-import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
+import { CanvasEngineClient, importEngineMedia } from "./engine-client.js";
 
-export type CanvasImageReference = {
-  id?: string;
-  name?: string;
-  dataUrl?: string;
-  url?: string;
-  storageKey?: string;
-  mimeType?: string;
-  sha256?: string;
-};
+export type { CanvasImageReference } from "@basketikun/media-engine/contracts";
+import type { CanvasImageReference } from "@basketikun/media-engine/contracts";
 
 export type CanvasImageGenerationInput = {
   projectId?: string;
@@ -108,6 +102,8 @@ type DispatcherHooks = {
  */
 export class CanvasImageDispatcher {
   private readonly childTasks = new Map<string, Set<string>>();
+  /** 本地子任务 id → 引擎任务 id（配置了执行引擎时才有值）。 */
+  private readonly engineTasks = new Map<string, string>();
   private readonly styleTransfer = new StyleTransferRunner();
   constructor(
     private readonly config: ResolvedConfig,
@@ -119,6 +115,11 @@ export class CanvasImageDispatcher {
     private readonly events?: BackendEventBus,
     /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
     private readonly runningHub?: RunningHubBackend,
+    /**
+     * 可选注入：配置了独立执行引擎时，本地工作流执行改走 HTTP（`/v1/images/generations`）。
+     * 未注入或该工作流需要画布侧改图（蒙版编辑等）时仍走本地执行器。
+     */
+    private readonly engineClient?: CanvasEngineClient,
   ) {}
 
   private get logs(): GenerationLogStore {
@@ -754,6 +755,8 @@ export class CanvasImageDispatcher {
   cancel(id: string) {
     const childIds = [...(this.childTasks.get(id) || [])];
     for (const childId of childIds) {
+      const engineTaskId = this.engineTasks.get(childId);
+      if (engineTaskId && this.engineClient) void this.engineClient.cancel(engineTaskId);
       try {
         this.directImage.cancel(childId);
       } catch {
@@ -843,6 +846,9 @@ export class CanvasImageDispatcher {
     workflowName: string,
     suffix = "",
   ) {
+    if (this.shouldDispatchToEngine(input)) {
+      return this.dispatchWorkflowViaEngine(input, taskId, workflowName, suffix);
+    }
     const detail = await this.workflows.get(workflowName);
     if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
     const fields = detail.config?.fields || [];
@@ -898,6 +904,62 @@ export class CanvasImageDispatcher {
       );
       return { taskId, media: result.media };
     } finally {
+      this.untrackChild(taskId, childTaskId);
+    }
+  }
+
+  /**
+   * 走独立执行引擎的条件：配了引擎、且这条请求不需要画布侧改图。
+   * 蒙版编辑（maskReferenceWorkflow）与 flux2-klein 图适配目前都在画布本地改图，
+   * 引擎还接不了，先明确回落到本地执行器——不做「大概等价」的假迁移。
+   */
+  private shouldDispatchToEngine(input: CanvasImageGenerationInput) {
+    if (!this.engineClient) return false;
+    if (input.maskEdit) return false;
+    if (/klein/i.test(input.model || "")) return false;
+    return true;
+  }
+
+  /** 引擎路径：画布只发协议请求，能力（字段、图片槽位）由 `/v1/models/{id}` 提供。 */
+  private async dispatchWorkflowViaEngine(
+    input: CanvasImageGenerationInput,
+    taskId: string,
+    workflowName: string,
+    suffix = "",
+  ) {
+    const engine = this.engineClient!;
+    const info = await engine.modelInfo(workflowName);
+    const { fieldValues } = imageWorkflowFieldValues(input, info.fields, input.params || {});
+    const references = executionImageInputs(input);
+    const slots = info.imageInput.fieldIds;
+    if (references.length > slots.length) {
+      throw new Error(`工作流「${workflowName}」只有 ${slots.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请减少参考输入或更换工作流`);
+    }
+    if (!info.imageInput.counts.includes(references.length)) {
+      throw new Error(`工作流「${workflowName}」不支持 ${references.length} 张参考图；可用输入张数：${info.imageInput.counts.join("、") || "无"}，未提交生成任务`);
+    }
+    const images: string[] = [];
+    for (const reference of references) {
+      images.push(await this.referenceDataUrl(await this.modelReference(reference, taskId)));
+    }
+
+    const childTaskId = `engine-child-${taskId}${suffix}`;
+    this.assertNotCancelled(taskId);
+    this.trackChild(taskId, childTaskId);
+    try {
+      const started = await engine.generateImages({
+        model: workflowName,
+        prompt: input.prompt,
+        fields: fieldValues,
+        images,
+      });
+      if (started.taskId) this.engineTasks.set(childTaskId, started.taskId);
+      this.assertNotCancelled(taskId);
+      const media = await importEngineMedia(this.stores.media, started.media, (url) => engine.fetchMedia(url));
+      if (!media.length) throw new Error(`执行引擎没有回传任何产物（${workflowName}）`);
+      return { taskId, media };
+    } finally {
+      this.engineTasks.delete(childTaskId);
       this.untrackChild(taskId, childTaskId);
     }
   }

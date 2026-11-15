@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { WorkflowExecutor } from "./executor.js";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 type LogRow = { id?: string; platform: string; status: string; workflow?: string; runtimeTaskId?: string; params?: Record<string, unknown> };
 
@@ -61,7 +61,11 @@ function harness(logs: LogRow[], parentLog?: LogRow, historicalFields: Array<{ w
         url: (item: { storageKey: string }) => `/media/${encodeURIComponent(item.storageKey)}`,
     };
     const executor = new WorkflowExecutor(
-        { getUrl: () => "http://127.0.0.1:8188", uploadImage: async () => "x.png", cancelPromptExecution: async () => undefined } as never,
+        {
+            getUrl: () => "http://127.0.0.1:8188", uploadImage: async () => "x.png", cancelPromptExecution: async () => undefined,
+            localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }),
+            isLocalUrl: () => false, releaseBeforeRepeat: () => false,
+        } as never,
         {
             create: (id: string, _kind: string, input: Record<string, unknown>, params: Record<string, unknown>) => {
                 const task = { id, kind: "workflow", status: "queued", progress: 0, input, params, result: null, error: null, createdAt: "", updatedAt: "", executor: "comfy-workflow", outputs: [] };
@@ -152,7 +156,7 @@ test("视频续写事实按 runtimeTaskId 命中 H3 自选模型日志（平台�
     };
     const executor = harness([], parentLog);
     const summary = { prevVideoFile: "prev.mp4", addedNodes: 9, loopId: "14", startSegmentNode: "11", endSegmentNode: "10", continuationRewires: 10, overlapRewires: 2 };
-    (executor as unknown as { recordVideoContinuationLog: (id: string, s: typeof summary) => void }).recordVideoContinuationLog("h3-parent", summary);
+    (executor as unknown as { recordContinuationLogParam: (id: string, key: "videoContinuation" | "latentContinuation", s: typeof summary) => void }).recordContinuationLogParam("h3-parent", "videoContinuation", summary);
     assert.deepEqual(parentLog.params?.videoContinuation, summary, "续写事实必须写进用户实际查看的 selected-video-model 日志");
     assert.deepEqual(parentLog.params?.generationSettings, { resume_prev: true, prev_video: "/media/video%3Aabc" }, "不得覆盖已有 generationSettings");
     assert.deepEqual(parentLog.params?.submission, { compiledPrompt: "x" }, "不得覆盖已有 submission");

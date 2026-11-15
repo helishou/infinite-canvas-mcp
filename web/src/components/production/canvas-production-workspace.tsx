@@ -6,18 +6,19 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { productionSceneEntries, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { fetchProductionCanvasContext, fetchBackendDramaEpisodes, ensureEpisodeCanvas, ensureSharedAssetCanvas, fetchProductionSharedAssets,
-    fetchBackendCanvasFolders, type ApprovedSharedAsset, type DramaEpisode } from "@/services/backend-api";
+    fetchEpisodeProduction, fetchProductionReadiness, fetchBackendCanvasFolders, type ApprovedSharedAsset, type DramaEpisode } from "@/services/backend-api";
 import { productionTarget } from "@/lib/production-navigation";
 import { productionSegments, productionShots, productionSegmentRuntimeMatches, segmentShotIds, shotTitle, subjectDisplayName } from "@/lib/production-source";
 import { MediaImage } from "@/components/media/media-image";
-import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
+import { useProductionWorkspaceStore, type ProductionCommand } from "@/stores/use-production-workspace-store";
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { backendMediaUrl, fetchProductionSceneArchives, type ProductionSceneArchive } from "@/services/backend-api";
+import { arrangeProductionScene, backendMediaUrl, editEpisodeProduction, fetchProductionSceneArchives, prepareProductionTargets, type ProductionSceneArchive, type ProductionTarget } from "@/services/backend-api";
+import { nanoid } from "nanoid";
 
 const productionRows = (value: unknown): Record<string, any>[] => Array.isArray(value) ? value.filter(item => item && typeof item === "object") : [];
 function productionDirectoryText(value: unknown): string {
@@ -129,18 +130,47 @@ export function ProductionDirectory({ filter = "", onLocate, onOpenDirector }: {
     const { navigate } = useCanvasRoute();
     const { search: query } = useCanvasRoute();
     const busy = useProductionWorkspaceStore(state => state.commandBusy);
-    const { modal } = App.useApp();
+    const { modal, message } = App.useApp();
+    const [pendingAction, setPendingAction] = useState("");
+    const preparingId = pendingAction.startsWith("prepare:") ? pendingAction.slice(8) : "";
     const canvasProject = useCanvasStore(state => state.projects.find(project => project.id === context?.canvasId));
     const canvasNodes = canvasProject?.nodes;
     const [archives, setArchives] = useState<ProductionSceneArchive[]>([]);
+    const [directoryError, setDirectoryError] = useState("");
+    const [reloadToken, setReloadToken] = useState(0);
     useEffect(() => {
         let active = true;
         if (!context?.owner || !production?.draft.director) { setArchives([]); return () => { active = false; }; }
         void fetchProductionSceneArchives(productionTarget(context.owner)).then(result => { if (active) setArchives(result.archives); }).catch(() => { if (active) setArchives([]); });
         return () => { active = false; };
     }, [context?.owner?.kind, context?.owner?.id, production?.revision]);
+    // 独立画布页（/canvas/:id 或新标签页）没有制作工作台常驻，store 里可能一直缺制作快照；
+    // 目录打开时按归属补齐，失败就停在可重试的错误上，而不是永远显示“正在读取”。
+    const ownerKind = context?.owner?.kind;
+    const ownerId = context?.owner?.id;
+    useEffect(() => {
+        if (!ownerKind || !ownerId || production) return;
+        const target = productionTarget({ kind: ownerKind, id: ownerId });
+        let active = true;
+        setDirectoryError("");
+        void Promise.all([
+            fetchEpisodeProduction(target).then(result => result.production),
+            fetchProductionReadiness(target).then(result => result.readiness).catch(() => null),
+        ]).then(([record, nextReadiness]) => {
+            // 工作台可能已经推进到更新快照，迟到的补齐读取不能把它覆盖回去。
+            if (active && !useProductionWorkspaceStore.getState().production) useProductionWorkspaceStore.getState().setSnapshot(ownerId, record, nextReadiness);
+        }).catch(error => { if (active) setDirectoryError(String(error)); });
+        return () => { active = false; };
+    }, [ownerKind, ownerId, production, reloadToken]);
     if (!context?.owner) return null;
-    if (!production) return <div role="status" className="flex items-center gap-2 p-4 text-sm text-muted-foreground"><Spin size="small" />{t("productionCanvas.directoryLoading")}{onOpenDirector && <Button type="text" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
+    if (!production) return directoryError
+        ? <div role="alert" data-production-directory-error className="flex flex-col items-center gap-2 p-5 text-center text-sm text-muted-foreground">
+            <p>{t("productionCanvas.directoryLoadFailed")}</p>
+            <p className="max-w-full break-all text-[11px] opacity-70">{directoryError}</p>
+            <Button size="small" onClick={() => setReloadToken(value => value + 1)}>{t("productionCanvas.directoryRetry")}</Button>
+            {onOpenDirector && <Button type="text" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}
+        </div>
+        : <div role="status" className="flex items-center gap-2 p-4 text-sm text-muted-foreground"><Spin size="small" />{t("productionCanvas.directoryLoading")}{onOpenDirector && <Button type="text" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
     if (!production.draft.director) return <div className="flex flex-col items-center gap-2 p-5 text-center text-sm text-muted-foreground"><p>{t("productionCanvas.ready")}</p>{onOpenDirector && <Button type="link" size="small" onClick={onOpenDirector}>{t("productionCanvas.openDirector")}</Button>}</div>;
     const director = production.draft.director;
     const source = director.source as Record<string, any>;
@@ -202,11 +232,42 @@ export function ProductionDirectory({ filter = "", onLocate, onOpenDirector }: {
         if (kind === "scene") { useAgentStore.getState().closePanel(); }
         else if (edit || !nodeId || kind === "story") { useProductionWorkspaceStore.getState().setPanelTab("object"); useAgentStore.getState().openPanel(); }
     };
-    const prepare = (id: string) => { onLocate?.(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "prepare", targets: [id] } } })); };
+    // 统一的命令入口：制作页注册了 commandRunner 就走它（带 pending 记账与远端刷新）；
+    // 画布页没有监听器，原来只 dispatch 窗口事件，点了完全没反应 —— 这里兜底直接打后端。
+    const runCommand = async (key: string, command: ProductionCommand) => {
+        onLocate?.();
+        const owner = context.owner;
+        if (!owner) { message.warning(t("productionCanvas.noOwner", { defaultValue: "当前画布没有绑定制作对象" })); return; }
+        const target: ProductionTarget = owner.kind === "canvas" ? { projectId: owner.id } : owner.kind === "scene" ? { sceneId: owner.id } : owner.id;
+        const store = useProductionWorkspaceStore.getState();
+        if (busy || pendingAction) return;
+        setPendingAction(key);
+        store.setCommandBusy(owner.id, true);
+        try {
+            const runner = store.commandRunner;
+            if (runner) {
+                await runner(command);
+            } else {
+                const latest = await fetchEpisodeProduction(target);
+                const revision = Number(latest.production.revision);
+                const result = command.kind === "prepare"
+                    ? await prepareProductionTargets(target, revision, command.targets, nanoid())
+                    : command.kind === "arrange"
+                        ? await arrangeProductionScene(target, revision, command.sceneId, nanoid())
+                        : await editEpisodeProduction(target, revision, command.ops, nanoid());
+                useProductionWorkspaceStore.getState().setSnapshot(owner.id, result.production, useProductionWorkspaceStore.getState().readiness);
+            }
+            message.success(t("productionCanvas.commandDone", { defaultValue: "已完成" }));
+        } catch (error) { message.error(String(error)); }
+        finally {
+            setPendingAction("");
+            useProductionWorkspaceStore.getState().setCommandBusy(owner.id, false);
+        }
+    };
+    const prepare = (id: string) => runCommand(`prepare:${id}`, { kind: "prepare", targets: [id] });
     const submitEdit = (op: ProductionOperation) => {
         if (!canvasProject) return;
-        onLocate?.();
-        window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "edit", ops: [op] } } }));
+        void runCommand(`edit:${op.type}`, { kind: "edit", ops: [op] });
     };
     const confirmArchive = (sceneId: string, title: string) => modal.confirm({ title: t("productionCanvas.archiveSceneConfirm", { scene: title }), okText: t("productionCanvas.archiveScene"), okType: "danger", cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "archive_director_scene", sceneId, expectedCanvasRevision: Number(canvasProject?.revision || 0), confirmed: true }) });
     const confirmRestore = (archive: ProductionSceneArchive) => modal.confirm({ title: t("productionCanvas.restoreSceneConfirm", { scene: archive.sceneTitle }), okText: t("productionCanvas.restoreScene"), cancelText: t("common.cancel"), onOk: () => submitEdit({ type: "restore_director_scene", archiveId: archive.archiveId, expectedCanvasRevision: Number(canvasProject?.revision || 0) }) });
@@ -223,7 +284,7 @@ export function ProductionDirectory({ filter = "", onLocate, onOpenDirector }: {
                 {subtitle && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{subtitle}</span>}
             </button>
             {status && <span className="text-[11px] opacity-60">{t(`director.workspace.targetStatus.${status}`, { defaultValue: status })}</span>}
-            {prepareId && <Button size="small" type="text" disabled={busy} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
+            {prepareId && <Button size="small" type="text" disabled={busy} loading={preparingId === prepareId} onClick={() => void prepare(prepareId)}>{t("productionCanvas.prepare")}</Button>}
             {kind === "segment" && <Button size="small" type="text" danger disabled={busy || !canvasProject} onClick={() => confirmClipDelete(id, title)}>{t("productionCanvas.deleteClip")}</Button>}
             {!prepareId && kind !== "scene" && <Button size="small" type="text" icon={<Pencil className="size-3" />} aria-label={t("productionCanvas.editNamed", { name: title })} onClick={() => select(workspace, kind, id, true)} />}
         </div>;
@@ -252,7 +313,7 @@ export function ProductionDirectory({ filter = "", onLocate, onOpenDirector }: {
             })}
         </details>}
         {sceneRows.map(({ scene, index, sceneValues, sceneShots, sceneSegments }) => <details key={scene.id} open><summary className="px-2 py-2 text-xs font-medium">{index + 1}. {scene.title}
-            <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("production-workspace-command", { detail: { owner: context.owner, command: { kind: "arrange", sceneId: scene.id } } })); }}>{t("productionCanvas.arrange")}</Button>
+            <Button type="text" size="small" disabled={busy} onClick={event => { event.preventDefault(); event.stopPropagation(); void runCommand(`arrange:${scene.id}`, { kind: "arrange", sceneId: scene.id }); }}>{t("productionCanvas.arrange")}</Button>
             <Button type="text" size="small" danger disabled={busy || !canvasProject} onClick={event => { event.preventDefault(); event.stopPropagation(); confirmArchive(scene.id, scene.title); }}>{t("productionCanvas.archiveScene")}</Button></summary>
             {row("scene", scene.id, `${scene.title || scene.id} · ${t("productionCanvas.script")}`, "story", undefined, [sceneValues, scene.text], undefined, scene.text)}
             {sceneShots.map(shot => {

@@ -1,21 +1,19 @@
 import { nanoid } from "nanoid";
-import { flushCanvasProjectBeforeGeneration } from "@/stores/canvas/use-canvas-store";
 import type { NavigateFunction } from "react-router-dom";
 
 import i18n from "@/i18n";
+import { startCreativeGeneration } from "@/lib/creative-generation";
 import { fetchPrompts } from "@/services/api/prompts";
 import { fetchBackendTasks } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import { imageAspectOptions, imageQualityOptions } from "@/components/image-settings-panel";
 import { videoResolutionOptions, videoSecondOptions, videoSizeOptions } from "@/components/video-settings-panel";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAssetStore, saveLibraryAsset, type Asset } from "@/stores/use-asset-store";
 import { modelOptionLabel, modelOptionName, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
-import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 
-// Execute site-level Agent tools in the browser. Canvas generation status is read from
-// the Backend task store; workbench commands remain browser-facing because their pages
-// still own the provider-specific submission lifecycle.
+// Execute site-level Agent tools in the browser. Image/video generation goes through the
+// same Backend canvas task path as the home launch pad; status is read from the Backend task store.
 
 export const SITE_TOOL_NAMES = [
     "canvas_list_projects",
@@ -54,7 +52,7 @@ export const SITE_TOOL_LABELS: Record<SiteToolName, string> = {
 type SiteToolInput = Record<string, unknown>;
 type SiteToolContext = { canvasSnapshot?: unknown };
 type GenerationStatus = "idle" | "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
-type GenerationStatusItem = { id: string; source: "canvas" | "image" | "video"; status: GenerationStatus; kind?: string; title?: string; prompt?: string; projectId?: string; createdAt?: string; updatedAt?: string; successCount?: number; failCount?: number; error?: string };
+type GenerationStatusItem = { id: string; source: "canvas" | "image" | "video"; status: GenerationStatus; kind?: string; title?: string; prompt?: string; projectId?: string; createdAt?: string; updatedAt?: string; error?: string };
 
 export async function runSiteTool(name: SiteToolName, input: SiteToolInput, navigate: NavigateFunction, context: SiteToolContext = {}): Promise<unknown> {
     switch (name) {
@@ -87,7 +85,6 @@ async function getGenerationStatus(input: SiteToolInput) {
     const nodeIds = new Set(Array.isArray(input.nodeIds) ? input.nodeIds.filter((id): id is string => typeof id === "string") : []);
     const limit = Math.max(1, Math.min(100, Math.floor(Number(input.limit)) || 20));
     const tasks: GenerationStatusItem[] = [];
-    const backendTaskIds = new Set<string>();
 
     const backendTasks = await fetchBackendTasks({
         scope,
@@ -97,7 +94,6 @@ async function getGenerationStatus(input: SiteToolInput) {
         taskId: taskId || undefined,
     });
     backendTasks.tasks?.forEach((task) => {
-        backendTaskIds.add(task.id);
         const kind = String(task.kind || task.executor || task.model || "");
         const isCanvas = Boolean(task.projectId || task.nodeId || task.segmentId);
         const isImage = /image/i.test(`${kind} ${task.executor || ""} ${task.model || ""}`);
@@ -118,15 +114,6 @@ async function getGenerationStatus(input: SiteToolInput) {
             error: task.error || undefined,
         });
     });
-
-    if (scope !== "canvas" && !nodeIds.size) {
-        useWorkbenchAgentStore.getState().tasks.forEach((task) => {
-            if (backendTaskIds.has(task.id)) return;
-            if ((scope === "image" || scope === "video") && task.kind !== scope) return;
-            if (taskId && task.id !== taskId) return;
-            tasks.push({ ...task, source: task.kind, prompt: compactPrompt(task.prompt) });
-        });
-    }
 
     tasks.sort((a, b) => generationStatusOrder(a.status) - generationStatusOrder(b.status) || (b.updatedAt || "").localeCompare(a.updatedAt || ""));
     return { tasks: tasks.slice(0, limit) };
@@ -191,11 +178,17 @@ async function runImageWorkbench(input: SiteToolInput, navigate: NavigateFunctio
         configStore.updateConfig("count", count);
         applied.count = count;
     }
-    const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
+    const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
     const run = input.run !== false;
-    navigate("/image");
-    const taskId = await useWorkbenchAgentStore.getState().dispatchImage({ prompt, run });
-    return { ok: true, navigated: "/image", prompt, run, taskId, applied, note: siteText(run ? "imageGenerationStarted" : "imageConfigApplied") };
+    if (!run) {
+        navigate("/?mode=image");
+        return { ok: true, navigated: "/?mode=image", prompt: prompt || undefined, run, applied, note: siteText("imageConfigApplied") };
+    }
+    if (!prompt) throw new Error(siteText("promptRequired"));
+    const { projectId, taskId } = await startCreativeGeneration({ capability: "image", prompt });
+    const destination = `/canvas/${encodeURIComponent(projectId)}`;
+    navigate(destination);
+    return { ok: true, navigated: destination, projectId, prompt, run, taskId, applied, note: siteText("imageGenerationStarted") };
 }
 
 function getVideoConfig() {
@@ -246,11 +239,17 @@ async function runVideoWorkbench(input: SiteToolInput, navigate: NavigateFunctio
         configStore.updateConfig("videoWatermark", String(input.watermark));
         applied.watermark = input.watermark;
     }
-    const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
+    const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
     const run = input.run !== false;
-    navigate("/video");
-    const taskId = await useWorkbenchAgentStore.getState().dispatchVideo({ prompt, run });
-    return { ok: true, navigated: "/video", prompt, run, taskId, applied, note: siteText(run ? "videoGenerationStarted" : "videoConfigApplied") };
+    if (!run) {
+        navigate("/?mode=video");
+        return { ok: true, navigated: "/?mode=video", prompt: prompt || undefined, run, applied, note: siteText("videoConfigApplied") };
+    }
+    if (!prompt) throw new Error(siteText("promptRequired"));
+    const { projectId, taskId } = await startCreativeGeneration({ capability: "video", prompt });
+    const destination = `/canvas/${encodeURIComponent(projectId)}`;
+    navigate(destination);
+    return { ok: true, navigated: destination, projectId, prompt, run, taskId, applied, note: siteText("videoGenerationStarted") };
 }
 
 async function searchPrompts(input: SiteToolInput) {

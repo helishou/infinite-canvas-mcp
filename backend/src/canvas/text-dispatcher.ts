@@ -10,7 +10,7 @@ import type { Stores } from "../stores/types.js";
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasTextReference = {
@@ -37,7 +37,7 @@ export type CanvasTextGenerationInput = {
 };
 
 export type TextProvider = {
-    kind?: "codex-cli";
+    kind?: "codex-cli" | "hermes";
     /** 渠道限定标识，与 Agent 侧一致：`channelId::model`。 */
     id: string;
     name: string;
@@ -84,6 +84,10 @@ export function resolveTextProvider(
         if (!declaration || declaration.capability !== "text") throw new Error("Codex CLI 渠道只能使用已登记的文本模型");
         return { kind: "codex-cli", id, name, model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"), ...(supportsImages === undefined ? {} : { supportsImages }) };
     }
+    if (channel.kind === "hermes") {
+        if (!declaration || declaration.capability !== "text") throw new Error("Hermes 渠道只能使用已登记的文本模型");
+        return { kind: "hermes", id, name, model, baseUrl: "", apiKey: "", apiFormat: "openai", systemPrompt: String(params?.systemPrompt ?? config.systemPrompt ?? "").trim(), reasoningEffort: String(params?.reasoningEffort || config.reasoningEffort || "auto"), ...(supportsImages === undefined ? {} : { supportsImages }) };
+    }
     const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
     if (apiFormat !== "openai" && apiFormat !== "openai-chat") throw new Error(`Backend 文本执行器暂不支持渠道协议：${apiFormat}`);
     const baseUrl = String(channel.baseUrl || config.baseUrl || "").trim();
@@ -114,6 +118,23 @@ export class CanvasTextDispatcher {
         private readonly stores: Stores,
         private readonly requestText: TextRequest = requestOpenAiText,
     ) {}
+
+    /**
+     * Hermes 渠道（导演 agent 的运行时）由宿主注入：text-dispatcher 拿不到
+     * HermesAgent（它在 index.ts 里创建得更晚），所以用 setter 而不是构造参数。
+     */
+    private hermesRunner?: (request: { model: string; prompt: string; imageDataUrls: string[] }) => Promise<string>;
+
+    setHermesRunner(runner: (request: { model: string; prompt: string; imageDataUrls: string[] }) => Promise<string>) {
+        this.hermesRunner = runner;
+    }
+
+    /** 导演 agent（Hermes）跑一次文本生成；图片参考暂不支持（Hermes structured 吃文件路径，与 dataUrl 通道不同）。 */
+    private async runHermes(provider: TextProvider, prompt: string, imageDataUrls: string[]) {
+        if (!this.hermesRunner) throw new Error("Hermes 运行时不可用：导演 agent 未连接（请确认设置里的导演渠道已启动）");
+        if (imageDataUrls.length) throw new Error("Hermes 渠道的文本任务暂不支持图片参考，请改用 API 渠道或去掉参考图");
+        return await this.hermesRunner({ model: provider.model, prompt, imageDataUrls });
+    }
 
     start(rawInput: CanvasTextGenerationInput) {
         let input = this.prepareInput(rawInput);
@@ -239,7 +260,9 @@ export class CanvasTextDispatcher {
         const contents: string[] = [];
         for (let index = 0; index < count; index++) {
             if (controller.signal.aborted) return;
-            const content = (await this.requestTextWithRetry(provider, input.prompt, imageDataUrls, controller.signal)).trim();
+            const content = provider.kind === "hermes"
+                ? (await this.runHermes(provider, input.prompt, imageDataUrls)).trim()
+                : (await this.requestTextWithRetry(provider, input.prompt, imageDataUrls, controller.signal)).trim();
             if (controller.signal.aborted) return; // 提供方可能忽略 AbortSignal；迟到结果不能把 cancelled 改回 succeeded。
             if (!content) throw new Error("文本模型返回了空内容");
             contents.push(content);

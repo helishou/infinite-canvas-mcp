@@ -12,9 +12,9 @@ test("local ComfyUI import preserves the authoritative source and compiles it at
   process.env.INFINITE_CANVAS_DATA_DIR = root;
   let server: ReturnType<ReturnType<typeof express>["listen"]> | undefined;
   try {
-    const { WorkflowStore } = await import("./store.js");
+    const { WorkflowStore } = await import("@basketikun/media-engine/workflows/store");
     const { registerWorkflowRoutes } = await import("./routes.js");
-    const { WorkflowExecutor } = await import("./executor.js");
+    const { WorkflowExecutor } = await import("@basketikun/media-engine/workflows/executor");
     const comfyRoot = path.join(root, "comfy");
     const workflowDir = path.join(comfyRoot, "user/default/workflows");
     await fs.mkdir(workflowDir, { recursive: true });
@@ -30,7 +30,15 @@ test("local ComfyUI import preserves the authoritative source and compiles it at
     await fs.writeFile(path.join(root, "comfyui-instances.json"), JSON.stringify({ instances: ["127.0.0.1:8188"], roots: { "127.0.0.1:8188": comfyRoot } }));
     const db = { getWorkflowConfig: () => null } as never;
     const store = new WorkflowStore(db);
-    const prepareExecutor = new WorkflowExecutor({} as never, { create: () => ({ id: "test-task" }) } as never, {} as never);
+    // 只跑到 prepareRun：ComfyUI 连接、队列提交与 GPU 都不发生，但执行器会问本地直连与暂存能力。
+    const bridgeStub = {
+      getUrl: () => "http://localhost:8188",
+      isLocalUrl: () => false,
+      localH3DirectConfig: () => ({ rootDir: "", inputDir: "", cacheDir: "", mediaDir: "", ready: false }),
+      stageLocalInput: () => null,
+      releaseBeforeRepeat: () => false,
+    };
+    const prepareExecutor = new WorkflowExecutor(bridgeStub as never, { create: () => ({ id: "test-task" }) } as never, {} as never);
     let received: unknown;
     let prepared: any;
     const executor = { runBackground: async (workflow: unknown, config: unknown, fields: unknown, client: unknown) => {
@@ -56,7 +64,7 @@ test("local ComfyUI import preserves the authoritative source and compiles it at
     assert.deepEqual(detail.workflow, disk);
     assert.ok(detail.source?.syncedSha256);
     assert.deepEqual(disk, JSON.parse(raw));
-    const { convertComfyWorkflowToApi } = await import("./comfyui-workflow-conversion.js");
+    const { convertComfyWorkflowToApi } = await import("@basketikun/media-engine/workflows/comfyui-workflow-conversion");
     const api = convertComfyWorkflowToApi(detail.workflow) as any;
     assert.ok(Object.values(api).every((node: any) => !["SetNode", "GetNode", "Reroute"].includes(node.class_type)));
     if (inputPath) {

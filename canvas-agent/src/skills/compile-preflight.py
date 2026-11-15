@@ -35,6 +35,49 @@ def diagnose(runtime, source):
         except (ContractError, ValueError, TypeError, KeyError, IndexError, AttributeError, OSError, ZeroDivisionError) as error:
             add(error, path, target, code=code, severity=severity, example=example_for_error(str(error)) if example_for_error else None)
 
+    # IM2 图像卡合同：路由、配方、模式、状态由卡片自身推导；七步与交易字段是必须撰写的内容。
+    # 整批校验只会抛一句 "IM2 alias routing missing"，所以这里按卡归因，把缺的字段名报出来。
+    image_route = {"target_skill": "im2-clean-image", "source_repository": "im2-image-skills"}
+    image_recipes = ("portrait", "dark", "fantasy", "hard_surface", "ink", "monochrome", "product", "clean_slate", "style")
+    image_modes = ("GENERATE", "EDIT", "REBUILD", "MIXED")
+
+    def text_of(value):
+        return value.strip() if isinstance(value, str) else ""
+
+    def card_gaps(card):
+        gaps = []
+        for field, value in image_route.items():
+            if text_of(card.get(field)) != value:
+                gaps.append(field)
+        if text_of(card.get("recipe")) not in image_recipes:
+            gaps.append("recipe")
+        if text_of(card.get("mode")) not in image_modes:
+            gaps.append("mode")
+        steps = card.get("seven_steps")
+        if not isinstance(steps, list) or [step.get("step") if isinstance(step, dict) else None for step in steps] != list(range(1, 8)):
+            gaps.append("seven_steps")
+        elif any(not text_of(step.get("content")) for step in steps if isinstance(step, dict)):
+            gaps.append("seven_steps.content")
+        transaction = card.get("transaction") if isinstance(card.get("transaction"), dict) else {}
+        for field in ("change", "preserve", "rebuild"):
+            if not text_of(transaction.get(field)):
+                gaps.append("transaction." + field)
+        if text_of(card.get("generation_status")) not in ("planned", "generated"):
+            gaps.append("generation_status")
+        if not text_of(card.get("prompt")):
+            gaps.append("prompt")
+        return gaps
+
+    def describe_gaps(target, gaps):
+        routing = [gap for gap in gaps if gap in image_route]
+        parts = []
+        if routing:
+            parts.append("缺少 IM2 图片路由（%s），编译器会把它报成 \"IM2 alias routing missing\"" % "、".join(routing))
+        other = [gap for gap in gaps if gap not in image_route]
+        if other:
+            parts.append("缺少 " + "、".join(other))
+        return "资产卡 %s 不满足图像卡合同：%s。补齐这些字段后重新预检。" % (target or "(无 id)", "；".join(parts))
+
     if source.get("segments"):
         if not isinstance(source["segments"], list):
             add("视频段落必须为数组", "segments")
@@ -152,6 +195,17 @@ def diagnose(runtime, source):
             return None
         check(lambda: asset_plan.resolve_card(card, source, base, True), f"asset_cards.{index}.references", target,
               severity="warning", code="ASSET_REFERENCE_QUALITY")
+        # 图像卡合同：路由/配方/模式/状态优先，内容字段（七步、交易）缺了要按卡点名，
+        # 否则编译器只会抛一句无法归因的 "IM2 alias routing missing"。
+        gaps = card_gaps(card)
+        if gaps:
+            add(describe_gaps(target, gaps), f"asset_cards.{index}", target, code="ASSET_CARD_CONTRACT")
+        else:
+            single = copy.deepcopy(source)
+            single["asset_plan"] = [node for node in plans if isinstance(node, dict) and str(node.get("id") or node.get("asset_id") or "") == target] if isinstance(plans, list) else []
+            single["asset_cards"] = [card]
+            check(lambda: post_hooks.check_assets(single, base, True), f"asset_cards.{index}", target,
+                  prompt_example, severity="warning", code="ASSET_CARD_CONTRACT_QUALITY")
         check(lambda: render_asset_prompt(card, source.get("prompt_bindings"), source.get("style_lock")), f"asset_cards.{index}.prompt", target,
               prompt_example, severity="warning", code="ASSET_PROMPT_QUALITY")
         if anchor_id and isinstance(plans, list):

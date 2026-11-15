@@ -11,13 +11,14 @@ import { h3MotionGroup } from "@basketikun/canvas-agent/plugins/minimax-h3/runti
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
-import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import type { RunningHubBackend } from "../runtime/runninghub.js";
+import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import type { CanvasVideoDispatcher } from "./video-dispatcher.js";
-import { h3ExecutionMode, h3CanResumeQueued, h3LocalOnlyReason } from "../runtime/h3-queue.js";
+import { h3ExecutionMode, h3LocalOnlyReason } from "@basketikun/media-engine/runtime/h3-queue";
+import { holdUnknownSubmission, submissionDecision } from "@basketikun/media-engine/runtime/submission-outcome";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
-import { generationSettingsSnapshot } from "./generation-settings.js";
+import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import { createLogger } from "../logger.js";
 import { h3ClipCacheFingerprint, h3ClipCacheFingerprintV1, h3ConfirmationKind, h3ConfirmationFingerprintParams, h3ConfirmationPhaseParams, pickH3PostpassParams, stableH3Fingerprint } from "./h3-cache.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
@@ -25,7 +26,7 @@ import { cleanupStoryboardCompositeDirectory, createStoryboardComposite, remapCo
 import { H3_PARAM_KEYS, resolveH3Runtime, normalizeH3Params, randomH3Seed, estimateH3Dimensions, canonicalH3AspectRatio, h3StoryboardIssues } from "./h3-params.js";
 import { diagnoseH3Clips } from "./h3-diagnose.js";
 import type { CanvasOperation } from "./project-ops.js";
-import { mediaToolPath } from "../runtime/media-tools.js";
+import { mediaToolPath } from "@basketikun/media-engine/runtime/media-tools";
 
 type H3RunInput = {
     projectId: string;
@@ -782,8 +783,9 @@ export class CanvasH3Runner {
                     });
                     child = await this.startChild(task, plan, override, childId, completedByKey);
                 } else if (["queued", "running"].includes(child.status)) {
-                    const submitted = this.stores.tasks.events(child.id).some((event) => event.type === "submitted");
-                    if (!submitted && !h3CanResumeQueued(this.stores.tasks, child.id)) child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务创建后未记录远端提交，拒绝重复提交" });
+                    const decision = submissionDecision(child, this.stores.tasks.events(child.id));
+                    if (decision === "fail") child = this.stores.tasks.update(child.id, { status: "failed", error: "子任务既无远端提交回执，也无可安全重放的排队意图，拒绝重复提交" });
+                    else if (decision === "reconcile") holdUnknownSubmission(this.stores.tasks, child.id, "子任务提交状态未确认，请核对远端任务后按原身份恢复");
                     else this.comfy.resume(child.id);
                 }
                 this.currentChildren.set(task.id, child.id);

@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { h3ContinuationFolder, stageH3ContinuationSeed } from "../comfyui/continuation-seed.js";
-import { WorkflowExecutor } from "./executor.js";
+import { h3ContinuationFolder, stageH3ContinuationSeed } from "@basketikun/media-engine/comfyui/continuation-seed";
+import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 
 const LOCAL_URL = "http://127.0.0.1:8188";
 const TARGET = { workflow: "project-1", group: "node-1", run: "parent-task-1" };
@@ -88,6 +88,7 @@ function harness(root: string) {
         getUrl: () => LOCAL_URL,
         isLocalUrl: (url: string) => url === LOCAL_URL,
         localH3DirectConfig: () => ({ rootDir: root, inputDir: "", cacheDir: "", mediaDir: "", ready: true }),
+        releaseBeforeRepeat: () => false,
         stageLocalInput: () => null,
         prepareH3ContinuationSeed: (source: any, target: any, index: number) => stageH3ContinuationSeed(root, source, target, index),
     };

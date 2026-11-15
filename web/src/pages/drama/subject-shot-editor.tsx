@@ -23,11 +23,11 @@ type Props = {
     canvasNodes: Array<{ id: string; title?: string; type?: string; metadata?: Record<string, unknown> }>; canvasId: string; busy: boolean;
     draftValue?: string; onDraftChange: (value: string | undefined) => void;
     workbench?: Record<string, any>;
-    assets?: Record<string, any>; preview?: ReactNode;
+    assets?: Record<string, any>; preview?: ReactNode; footerActions?: ReactNode;
     onSave: (shotId: string, patch: Record<string, unknown>, keyframes?: Keyframes, utterances?: Utterances) => Promise<boolean>;
 };
 
-export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, draftValue, onDraftChange, onSave, workbench, assets = {}, preview }: Props) {
+export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, draftValue, onDraftChange, onSave, workbench, assets = {}, preview, footerActions }: Props) {
     const { t } = useTranslation(), { message } = App.useApp();
     const id = String(shot.id), { draft, invalid } = readShotFormDraft(draftValue, shot, source), value = draft.value;
     const dirty = shotDraftChanged(draft), changedSource = dirty && shotDraftSourceChanged(draft, shot, source);
@@ -467,7 +467,10 @@ export function SubjectShotEditor({ shot, source, canvasNodes, canvasId, busy, d
           </div>
         </div>}
         </div>
-        <footer className="sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card py-3" hidden={Boolean(contextControl?.active)}><span className="text-xs text-muted-foreground">{t(dirty ? "director.atomic.draftKept" : "director.atomic.saved")}</span><Button type="primary" loading={saving} disabled={disabled || !dirty || changedSource || cameraFieldsMissing} onClick={() => void save()}>{t("director.atomic.saveShot")}</Button></footer>
+        <footer className="sticky bottom-0 z-10 space-y-3 border-t border-border bg-card py-3" hidden={Boolean(contextControl?.active)}>
+            <div className="flex flex-wrap items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{t(dirty ? "director.atomic.draftKept" : "director.atomic.saved")}</span><Button type="primary" loading={saving} disabled={disabled || !dirty || changedSource || cameraFieldsMissing} onClick={() => void save()}>{t("director.atomic.saveShot")}</Button></div>
+            {footerActions && <fieldset disabled={saving || invalid || changedSource} className="min-w-0">{footerActions}</fieldset>}
+        </footer>
         <CameraLibraryModal
             open={libraryOpen}
             disabled={disabled}

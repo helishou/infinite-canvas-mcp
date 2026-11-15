@@ -4,7 +4,7 @@ import { BackendDatabase } from "../db.js";
 import { BackendEventBus } from "../events.js";
 import { createStores } from "../stores/index.js";
 import { CanvasH3Runner } from "./h3-runner.js";
-import { H3ExecutionQueue } from "../runtime/h3-queue.js";
+import { H3ExecutionQueue } from "@basketikun/media-engine/runtime/h3-queue";
 
 test("单独运行下一段追加尾帧参考，保留保存模式且不启用潜空间续写", async (t) => {
     const db = new BackendDatabase(":memory:");

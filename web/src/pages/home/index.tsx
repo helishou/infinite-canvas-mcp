@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState } from "react";
-import { Alert, App, Button, Empty, Input, Modal, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
-import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, App, Button, Drawer, Empty, Input, Modal, Popconfirm, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
+import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Pencil, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { fetchProductionCanvasContext, BackendApiError } from "@/services/backend-api";
@@ -13,7 +13,22 @@ import { PageHeader } from "@/components/layout/page-header";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { cn } from "@/lib/utils";
-import { collectOutputs, projectCover, taskDestination, type WorkbenchOutput } from "./workbench-data";
+import { CreativeLaunchPad } from "./creative-launch-pad";
+import { CreativeGenerationFeed } from "./creative-generation-feed";
+import {
+    appendConversationLaunch,
+    collectOutputs,
+    CREATIVE_CONVERSATION_STORAGE_KEY,
+    nextConversationId,
+    pruneConversations,
+    readCreativeConversations,
+    taskDestination,
+    writeCreativeConversations,
+    projectCover,
+    type CreativeConversation,
+    type CreativeLaunch,
+    type WorkbenchOutput,
+} from "./workbench-data";
 import { WorkbenchMediaPreview } from "./workbench-media";
 import { useProjectCoverResults, useStableProjectCovers, useWorkbenchData } from "./use-workbench-data";
 
@@ -47,6 +62,38 @@ function HomeWorkbench() {
     const [visibleCount, setVisibleCount] = useState(12);
     const [previewProject, setPreviewProject] = useState<CanvasProject | null>(null);
     const [previewOutput, setPreviewOutput] = useState<WorkbenchOutput | null>(null);
+    const homeStorage = typeof localStorage !== "undefined" ? localStorage : undefined;
+    // 对齐影策：多会话 + 活动会话 + 对话形态开关，全部持久化；空会话不入库。
+    const [conversations, setConversations] = useState<CreativeConversation[]>(() => readCreativeConversations(homeStorage, Date.now()));
+    const [activeConversationId, setActiveConversationId] = useState(() => readCreativeConversations(homeStorage, Date.now())[0]?.id || "");
+    const [threadActive, setThreadActive] = useState(() => {
+        try {
+            return sessionStorage.getItem("home-thread-active") === "1";
+        } catch {
+            return false;
+        }
+    });
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const [renamingConversation, setRenamingConversation] = useState<CreativeConversation | null>(null);
+    const [renameText, setRenameText] = useState("");
+    // 编辑并重发（影策）：nonce 变化即回填追问输入条。
+    const [editRequest, setEditRequest] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
+    const persistConversations = (next: CreativeConversation[]) => {
+        const pruned = pruneConversations(next, Date.now());
+        setConversations(pruned);
+        writeCreativeConversations(homeStorage, pruned);
+    };
+    const setThreadActivePersisted = (value: boolean) => {
+        setThreadActive(value);
+        try {
+            sessionStorage.setItem("home-thread-active", value ? "1" : "0");
+        } catch {
+            /* 可选持久化失败不影响本次会话 */
+        }
+    };
+    const activeConversation = conversations.find(item => item.id === activeConversationId) || conversations[0] || null;
+    const activeLaunches = activeConversation?.launches || [];
+    const otherConversationCount = Math.max(0, conversations.length - (activeConversation ? 1 : 0));
     const [tasksOpen, setTasksOpen] = useState(false);
     const [outputsOpen, setOutputsOpen] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -107,8 +154,61 @@ function HomeWorkbench() {
         if (requestId !== openDestinationRequest.current) return;
         navigate(destination);
     };
-    const openProject = (id: string) => openDestination(`/canvas/${encodeURIComponent(id)}`);
-    const continueEditing = async (projectId: string) => {
+    const openProject = (id: string, nodeId?: string) => openDestination(`/canvas/${encodeURIComponent(id)}${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ""}`);
+    const totalLaunchCount = conversations.reduce((count, item) => count + item.launches.length, 0);
+    const recordLaunch = (launch: CreativeLaunch) => {
+        const targetId = activeConversation?.id || nextConversationId();
+        if (!activeConversation) {
+            const conversation: CreativeConversation = { id: targetId, title: launch.prompt.slice(0, 24), createdAt: launch.createdAt, updatedAt: launch.createdAt, canvasId: launch.projectId, launches: [launch] };
+            persistConversations([conversation, ...conversations]);
+            setActiveConversationId(targetId);
+        } else {
+            persistConversations(appendConversationLaunch(conversations, targetId, launch));
+        }
+        // 提交成功 → 原地进入对话工作台并滚动到消息流。
+        setThreadActivePersisted(true);
+        // 立刻拉一次任务列表：既让进度条马上出现，也启动轮询兜底
+        // （轮询在每次 load 完成后才会排下一轮；若页面空闲，只有主动 refresh 才能让它接管）。
+        data.refresh();
+        window.requestAnimationFrame(() => document.getElementById("creative-generation-feed")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    };
+    const dismissLaunch = (taskId: string) => {
+        const next = conversations
+            .map(conversation => ({ ...conversation, launches: conversation.launches.filter(item => item.taskId !== taskId) }))
+            .filter(conversation => conversation.launches.length > 0);
+        persistConversations(next);
+        if (activeConversation && !next.some(item => item.id === activeConversation.id)) setActiveConversationId(next[0]?.id || "");
+    };
+    const startNewConversation = () => {
+        // 新对话先在内存里建空会话（允许空，不入库）；第一条提交时落标题。
+        const conversation: CreativeConversation = { id: nextConversationId(), title: "", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), launches: [] };
+        setConversations(current => [conversation, ...current]);
+        setActiveConversationId(conversation.id);
+        try {
+            homeStorage?.setItem(CREATIVE_CONVERSATION_STORAGE_KEY, JSON.stringify(pruneConversations([conversation, ...conversations], Date.now())));
+        } catch { /* 可选持久化 */ }
+        setThreadActivePersisted(true);
+        window.requestAnimationFrame(() => document.getElementById("creative-generation-feed")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    };
+    const selectConversation = (id: string) => {
+        setActiveConversationId(id);
+        setHistoryOpen(false);
+        setThreadActivePersisted(true);
+        window.requestAnimationFrame(() => document.getElementById("creative-generation-feed")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    };
+    const deleteConversation = (id: string) => {
+        const next = conversations.filter(item => item.id !== id);
+        persistConversations(next);
+        if (activeConversationId === id) setActiveConversationId(next[0]?.id || "");
+    };
+    const renameConversation = () => {
+        if (!renamingConversation) return;
+        const title = renameText.trim();
+        if (title) persistConversations(conversations.map(item => item.id === renamingConversation.id ? { ...item, title } : item));
+        setRenamingConversation(null);
+    };
+    // 影策 handoff：进画布时带上生成节点，画布加载后自动聚焦到本次成果。
+    const continueEditing = async (projectId: string, nodeId?: string) => {
         const requestId = ++openDestinationRequest.current;
         const knownDrama = data.canvasOwners.get(projectId);
         if (knownDrama || !data.dramaReady && data.connected) {
@@ -116,6 +216,7 @@ function HomeWorkbench() {
                 const { context } = await fetchProductionCanvasContext(projectId);
                 if (requestId !== openDestinationRequest.current) return;
                 if (["episode", "scene", "shared-assets"].includes(context.role) && (context.dramaId || knownDrama?.id)) {
+                    // ProductionCanvasTarget 不支持 nodeId：drama 画布只做切换，不做节点聚焦。
                     canvasHost?.switchProductionCanvas({ projectId, dramaId: context.dramaId || knownDrama!.id, episodeId: context.episodeId || undefined, keepCanvasOpen: true });
                     return;
                 }
@@ -125,7 +226,7 @@ function HomeWorkbench() {
                 return;
             }
         }
-        if (requestId === openDestinationRequest.current) openProject(projectId);
+        if (requestId === openDestinationRequest.current) openProject(projectId, nodeId);
     };
     const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
     const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
@@ -196,8 +297,40 @@ function HomeWorkbench() {
         </>
     );
 
+    const flatLaunches = useMemo(() => conversations.flatMap(item => item.launches).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), [conversations]);
+    // 对齐影策：对话形态是全屏页（fixed 覆盖层），有活动会话且已有消息时接管整个视口；
+    // 「返回」或「新对话」（空会话）退出覆盖层，回到创作台。
+    const threadOverlayOpen = threadActive && Boolean(activeConversation) && activeLaunches.length > 0;
+    useEffect(() => {
+        if (!threadOverlayOpen) return;
+        const previous = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        return () => { document.body.style.overflow = previous; };
+    }, [threadOverlayOpen]);
     return (
         <main className="ui-controls min-h-full bg-background text-foreground" data-testid="home-workbench">
+            {threadOverlayOpen && (
+                <div className="fixed inset-0 z-[70] flex flex-col bg-background" data-testid="home-thread-overlay">
+                    <div className="flex min-h-0 w-full flex-1 flex-col px-4 py-5 sm:px-6">
+                        <CreativeGenerationFeed
+                            launches={activeLaunches}
+                            tasks={data.tasks}
+                            logs={data.logs}
+                            threadActive
+                            composer={<CreativeLaunchPad variant="thread" onGenerated={recordLaunch} sharedProjectId={activeConversation?.canvasId} injectedDraft={editRequest} />}
+                            onDismiss={dismissLaunch}
+                            onOpenProject={openProject}
+                            onPreview={setPreviewOutput}
+                            onNewThread={startNewConversation}
+                            onOpenHistory={() => setHistoryOpen(true)}
+                            hasOtherConversations={otherConversationCount > 0}
+                            onEditPrompt={(text) => setEditRequest(current => ({ text, nonce: current.nonce + 1 }))}
+                            onContinueCanvas={(projectId, nodeId) => void continueEditing(projectId, nodeId)}
+                            onBack={() => setThreadActivePersisted(false)}
+                        />
+                    </div>
+                </div>
+            )}
             <div className="mx-auto max-w-[1440px] px-4 pt-6 pb-24 sm:px-6 lg:px-8">
                 <PageHeader
                     className="mb-5"
@@ -206,6 +339,44 @@ function HomeWorkbench() {
                     description={!hasWork ? t("landing.canvasSubtitle") : undefined}
                     actions={pageActions}
                 />
+                {/* 影策 isEmpty 分支：非对话形态或活动会话还没有消息时，显示完整创作台（含示例与快捷入口）。 */}
+                {(!threadActive || !activeConversation || activeLaunches.length === 0) && (
+                    <CreativeLaunchPad
+                        onGenerated={recordLaunch}
+                        historyCount={totalLaunchCount}
+                        sharedProjectId={activeConversation?.canvasId}
+                        onOpenHistory={() => {
+                            setThreadActivePersisted(true);
+                            setHistoryOpen(true);
+                        }}
+                    />
+                )}
+                {threadOverlayOpen ? null : threadActive ? (
+                    <CreativeGenerationFeed
+                        launches={activeLaunches}
+                        tasks={data.tasks}
+                        logs={data.logs}
+                        threadActive
+                        composer={activeLaunches.length > 0 ? <CreativeLaunchPad variant="thread" onGenerated={recordLaunch} sharedProjectId={activeConversation?.canvasId} injectedDraft={editRequest} /> : undefined}
+                        onDismiss={dismissLaunch}
+                        onOpenProject={openProject}
+                        onPreview={setPreviewOutput}
+                        onNewThread={startNewConversation}
+                        onOpenHistory={() => setHistoryOpen(true)}
+                        hasOtherConversations={otherConversationCount > 0}
+                        onEditPrompt={(text) => setEditRequest(current => ({ text, nonce: current.nonce + 1 }))}
+                        onContinueCanvas={(projectId, nodeId) => void continueEditing(projectId, nodeId)}
+                    />
+                ) : totalLaunchCount > 0 ? (
+                    <CreativeGenerationFeed
+                        launches={flatLaunches}
+                        tasks={data.tasks}
+                        logs={data.logs}
+                        onDismiss={dismissLaunch}
+                        onOpenProject={openProject}
+                        onPreview={setPreviewOutput}
+                    />
+                ) : null}
                 {!hasWork && creationActions}
                 {data.connected && (data.errors.length > 0 || data.dramaError) && (
                     <Alert
@@ -512,6 +683,50 @@ function HomeWorkbench() {
                         <Empty description={t("home.workbench.noTasks")} />
                     )}
                 </div>
+            </Modal>
+            <Drawer
+                open={historyOpen}
+                title={t("home.workbench.threadHistory")}
+                onClose={() => setHistoryOpen(false)}
+                width={380}
+                data-testid="creative-history-drawer"
+            >
+                {conversations.length ? (
+                    <div className="flex flex-col gap-2">
+                        {conversations.map(conversation => (
+                            <div
+                                key={conversation.id}
+                                className={cn("group flex min-w-0 items-center gap-2 rounded-lg border border-border p-3 transition-colors", conversation.id === activeConversation?.id ? "border-primary/50 bg-muted/40" : "hover:bg-muted/30")}
+                                data-testid="creative-history-item"
+                            >
+                                <button type="button" className="min-w-0 flex-1 cursor-pointer text-left" onClick={() => selectConversation(conversation.id)}>
+                                    <p className="ui-group-title truncate">{conversation.title || t("home.workbench.threadEmpty")}</p>
+                                    <p className="ui-caption mt-1 text-muted-foreground">
+                                        {t("home.workbench.threadMessageCount", { count: conversation.launches.length })} · {date(conversation.updatedAt)}
+                                    </p>
+                                </button>
+                                <Button type="text" size="small" className="ui-icon-button" aria-label={t("home.workbench.threadRename")} icon={<Pencil className="size-3.5" />} onClick={() => { setRenamingConversation(conversation); setRenameText(conversation.title); }} />
+                                <Popconfirm title={t("home.workbench.threadDeleteConfirm")} onConfirm={() => deleteConversation(conversation.id)} okText={t("common.delete")} cancelText={t("common.cancel")}>
+                                    <Button type="text" size="small" className="ui-icon-button" danger aria-label={t("common.delete")} icon={<Trash2 className="size-3.5" />} />
+                                </Popconfirm>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("home.workbench.threadHistoryEmpty")} />
+                )}
+            </Drawer>
+            <Modal
+                open={Boolean(renamingConversation)}
+                title={t("home.workbench.threadRename")}
+                onCancel={() => setRenamingConversation(null)}
+                onOk={renameConversation}
+                okText={t("common.save")}
+                cancelText={t("common.cancel")}
+                okButtonProps={{ disabled: !renameText.trim() }}
+                destroyOnHidden
+            >
+                <Input value={renameText} onChange={event => setRenameText(event.target.value)} onPressEnter={renameConversation} autoFocus maxLength={60} />
             </Modal>
             <CanvasDeleteProjectsDialog />
         </main>

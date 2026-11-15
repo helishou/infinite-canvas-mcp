@@ -20,6 +20,7 @@ import { groupScriptScenes, dialogueBody, dialogueSpeakerLabel, readableText, hu
 import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { useMediaPreviewStore } from "@/stores/use-media-preview-store";
 import { saveAs } from "file-saver";
+import type { SubtitleCalibration } from "@/lib/subtitle-calibration";
 import { ContinuityPanel } from "./continuity-panel";
 import { SceneProductionPanel } from "./scene-production-panel";
 import { clipStyleCatalog } from "./clip-style-options";
@@ -37,6 +38,7 @@ import type { ImageNodeChoice } from "./smart-image-node-options";
 import { createManualDirectorAsset, manualAssetsForSubject, type ManualAssetKind } from "./manual-director-assets";
 import { createManualScriptScene } from "./manual-director-scenes";
 import { readClipPartitionDraft } from "./subject-clip-draft";
+import { buildClipLockPlan, type CanvasLockEdit, type ClipLockInput, type SourceLockPatch } from "./clip-lock-plan";
 import { ClipSourceFields } from "./clip-source-fields";
 import { storyboardDurationFrames } from "./storyboard-display";
 import { productionOverviewMedia } from "./production-overview-media";
@@ -637,14 +639,59 @@ function SubjectClipPartitionEditor({ shots, segments, fps, busy, shotTitle, onS
   </section>;
 }
 
+/** Delivery-layer subtitle calibration: real audio word timestamps, no change to the authored source. */
+function SubtitleCalibrationPanel({ calibration, calibrating, progress, clips, busy, onCalibrate, onCancel, onClear }: {
+  calibration?: SubtitleCalibration | null;
+  calibrating: boolean;
+  progress: number;
+  clips: Array<{ segmentId: string; storageKey: string }>;
+  busy: boolean;
+  onCalibrate: (clips: Array<{ segmentId: string; storageKey: string }>) => void;
+  onCancel?: () => void;
+  onClear?: () => void;
+}) {
+  const { t } = useTranslation();
+  const rows = calibration ? calibration.tracks.flatMap(track => track.cues).slice(0, 8) : [];
+  const report = calibration?.report;
+  return <section className="space-y-3 rounded-lg border border-border bg-card p-3" data-subtitle-calibration>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div><h4 className="text-sm font-medium">{t("director.workspace.calibrateSubtitles")}</h4>
+        <p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.calibrateSubtitlesHint")}</p></div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="small" loading={calibrating} disabled={busy || calibrating || !clips.length} onClick={() => onCalibrate(clips)}>{t("director.workspace.calibrateSubtitles")}</Button>
+        {calibrating && onCancel && <Button size="small" onClick={onCancel}>{t("director.workspace.cancelCalibration")}</Button>}
+        {calibration && !calibrating && onClear && <Button size="small" onClick={onClear}>{t("director.workspace.clearCalibration")}</Button>}
+      </div>
+    </div>
+    {calibrating && <div className="h-1.5 w-full overflow-hidden rounded bg-muted"><div className="h-full bg-emerald-500 transition-all" style={{ width: `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%` }} /></div>}
+    {calibration && !calibrating && <>
+      <Alert type={report?.calibrated ? "success" : "warning"} showIcon
+        message={t("director.workspace.calibrationSummary", { calibrated: report?.calibrated ?? 0, total: report?.totalCues ?? 0, shift: (report?.averageShiftSeconds ?? 0).toFixed(2), model: calibration.model })}
+        description={report?.warnings.length ? <ul className="list-disc space-y-1 pl-5">{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : t("director.workspace.calibrationApplied")} />
+      {rows.length > 0 && <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-border text-left text-muted-foreground">
+        <th className="py-1 pr-2 font-medium">{t("director.workspace.calibrationCue")}</th>
+        <th className="py-1 pr-2 font-medium">{t("director.workspace.calibrationOriginal")}</th>
+        <th className="py-1 pr-2 font-medium">{t("director.workspace.calibrationActual")}</th>
+        <th className="py-1 font-medium">{t("director.workspace.calibrationStatus")}</th>
+      </tr></thead><tbody>{rows.map((cue, index) => <tr key={`${cue.utteranceId}:${index}`} className="border-b border-border/60">
+        <td className="max-w-64 truncate py-1 pr-2">{cue.text}</td>
+        <td className="py-1 pr-2 tabular-nums">{formatSeconds(cue.originalStartSeconds)}s</td>
+        <td className="py-1 pr-2 tabular-nums">{formatSeconds(cue.startSeconds)}s</td>
+        <td className="py-1"><Tag color={cue.calibrated ? "green" : "default"}>{t(cue.calibrated ? "director.workspace.calibrationMoved" : "director.workspace.calibrationKept")}</Tag></td>
+      </tr>)}</tbody></table></div>}
+    </>}
+  </section>;
+}
+
 export function DirectorPanel({
   workspace, director, production, readiness, run, batches, runtimeTasks = [], canvasNodes, sharedCanvasNodes, sharedCanvasId, versions, busy, canvasId, canvasRole, focusTarget, embedded = false, continuityReport, continuitySnapshotLoading = false,
   briefDraft, onBriefDraftChange, onOpenSharedAsset, onPromoteExistingSharedAsset,
   onPrepareEntities, onUpsertSubject, onSwitchToSharedNode, onDeleteSubject, onDeleteScene, onDeleteAsset, onRemoveCanvasAsset, onPatchCanvasAsset, onCreateManualAsset, onIncludeSharedNode, onRemoveSharedAsset, onSaveV2Shot, onRepartitionClips, onEditShot,
   compact = false, navigationTitleVisible = false, onSaveScript, generationSupported = true, assetScopeHint,
-  onBrief, onPatch, onEditCanvasClip, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRetire, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
+  onBrief, onPatch, onPatchMany, onEditCanvasClip, onEditCanvasClips, onAdoptDirectorFields, onAdoptClipStyle, onRegroup, onWorkflow, onSettings, onSourceDraftChange, sourceDrafts, onBindAsset, onBoundary, onH3Boundary, onPublish, onReplace, onAskDirector, onAnswerDecision, onNavigate, onLocateTarget, onStart, onPause, onResume, onRetire, onRestore, onRefresh, onSceneCommand, sceneCommandPending, onExport, exporting, runStartPending, activeTargetIds, onSaveContinuity, onCheckContinuity, onContinuitySnapshot,
   onCompile, onGenerateClip, onDeleteClip, compileBusy = false, compilePending = false, compileError = "", compileNotice = "", compileDiagnostics = [], compileTargets, onSplitScene,
   onApplyTranslatedPrompts, autoTranslateCompilation, readOnly = false, onArchive,
+  calibration, calibrating = false, calibrationProgress = 0, onCalibrateSubtitles, onCancelCalibration, onClearCalibration,
 }: {
   workspace: DirectorWorkspace; director?: DirectorProduction; production: EpisodeProduction; readiness?: ProductionReadiness; run?: ProductionBatch | null;
   continuityReport?: import("@/services/backend-api").ProductionContinuity;
@@ -685,6 +732,9 @@ export function DirectorPanel({
   onEditShot?: (operation: Extract<ProductionOperation, { type: "edit_director_shot" }>) => Promise<boolean>;
 
   onEditCanvasClip?: (nodeId: string, segmentId: string, patch: Record<string, unknown>, refreshProduction?: boolean) => Promise<boolean>;
+  /** 批量 Clip 锁定：一次提交多个源稿补丁 / 一次更新多个画布 H3 节点，避免逐段提交撞 revision。 */
+  onPatchMany?: (patches: SourceLockPatch[]) => Promise<boolean>;
+  onEditCanvasClips?: (edits: CanvasLockEdit[], refreshProduction?: boolean) => Promise<boolean>;
   onAdoptDirectorFields?: (targetId: string, nodeId: string, segmentId: string | undefined, fields: string[]) => Promise<boolean>;
   onAdoptClipStyle?: (targetId: string, styleTemplateId: string | null) => Promise<boolean>;
   onRegroup: (segmentId: string, shotIds: string[], removeSegmentIds: string[]) => Promise<boolean> | void;
@@ -714,6 +764,12 @@ export function DirectorPanel({
   onSceneCommand: (action: ProductionSceneAction, revision: number) => Promise<unknown>;
   onExport: (includeGeneratedMedia: boolean) => Promise<void>;
   exporting: boolean;
+  calibration?: SubtitleCalibration | null;
+  calibrating?: boolean;
+  calibrationProgress?: number;
+  onCalibrateSubtitles?: (clips: Array<{ segmentId: string; storageKey: string }>) => void;
+  onCancelCalibration?: () => void;
+  onClearCalibration?: () => void;
   onCompile?: (sceneId?: string, targetId?: string, targetIds?: string[]) => void;
   /** 编译就绪的 Clip 直接提交生成，复用生成页同一条 startRun。 */
   onGenerateClip?: (clipId: string) => void;
@@ -1988,12 +2044,12 @@ export function DirectorPanel({
     </section>;
   };
 
-  const renderShotDetails = (shot: Record<string, any>, includeCompleteSource = false, workbench?: Record<string, any>) => {
+  const renderShotDetails = (shot: Record<string, any>, includeCompleteSource = false, workbench?: Record<string, any>, footerActions?: ReactNode) => {
     const id = String(shot.id || "");
     if (d && isSubjectPromptAssembly(d.source)) return <div className="space-y-5" data-shot-details-editor>
       {/* v2 关键帧页签的每个镜头卡片自带缩略图、定位链接、解除绑定与更换节点选择器；
           再传 renderShotKeyframe 预览会把同一份绑定信息在顶部重复渲染一遍。 */}
-      <SubjectShotEditor preview={undefined} key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench} assets={d.assets}
+      <SubjectShotEditor preview={undefined} footerActions={footerActions} key={id} shot={shot} source={d.source} canvasNodes={canvasNodes} canvasId={canvasId} busy={busy} workbench={workbench} assets={d.assets}
         draftValue={sourceDrafts[`v2shot:${id}`]} onDraftChange={value => onSourceDraftChange(`v2shot:${id}`, value)} onSave={onSaveV2Shot || (async () => false)} />
     </div>;
     return <div className="space-y-5" data-shot-reading={id}>
@@ -2068,36 +2124,54 @@ export function DirectorPanel({
     </div>;
   };
 
-  const toggleClipLock = async (clipId: string, locked: boolean) => {
-    const sourceSegment = segments.find(item => String(item.id) === clipId);
-    if (!sourceSegment || !onPatch) return false;
+  /** 单段与批量锁定共用同一份计划：源稿补丁 + 画布噪声种子写入 + 失败回滚。 */
+  const clipLockInputs = (clipIds: string[]): ClipLockInput[] => clipIds.flatMap(clipId => {
+    const source = segments.find(item => String(item.id) === clipId);
+    if (!source) return [];
     const runtime = clipRuntime(clipId);
-    const runtimeSegment = runtime?.segment;
-    const seedValue = Number(runtimeSegment?.seed ?? runtimeSegment?.noiseSeed);
-    const hasSeed = Number.isFinite(seedValue) && seedValue >= 0;
-    const currentMode = runtimeSegment?.noiseSeedMode === "fixed" ? "fixed" : "random";
-    const restoreMode = sourceSegment.preLockNoiseSeedMode === "fixed" ? "fixed" : sourceSegment.preLockNoiseSeedMode === "random" ? "random" : currentMode;
-    const seed = hasSeed ? seedValue : Math.max(1, Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
-    if (runtime && onEditCanvasClip) {
-      const changed = await onEditCanvasClip(runtime.node.id, String(runtime.segment.id), locked
-        ? { noiseSeedMode: "fixed", seed, noiseSeed: seed }
-        : { noiseSeedMode: restoreMode }, false);
-      if (!changed) return false;
-    }
-    const saved = await onPatch("segment", clipId, locked
-      ? { locked: true, preLockNoiseSeedMode: currentMode }
-      : { locked: false, preLockNoiseSeedMode: null });
-    if (saved === false && runtime && onEditCanvasClip) {
-      await onEditCanvasClip(runtime.node.id, String(runtime.segment.id), locked
-        ? { noiseSeedMode: currentMode }
-        : { noiseSeedMode: "fixed" }, false);
-    }
+    return [{
+      source: { id: clipId, locked: source.locked, preLockNoiseSeedMode: source.preLockNoiseSeedMode },
+      ...(runtime ? { runtime: {
+        nodeId: String(runtime.node.id),
+        segmentId: String(runtime.segment.id),
+        seed: runtime.segment.seed,
+        noiseSeed: runtime.segment.noiseSeed,
+        noiseSeedMode: runtime.segment.noiseSeedMode,
+      } } : {}),
+    }];
+  });
+  const applyCanvasLockEdits = async (edits: CanvasLockEdit[]) => {
+    if (!edits.length) return true;
+    if (onEditCanvasClips) return onEditCanvasClips(edits, false);
+    if (!onEditCanvasClip) return false;
+    for (const edit of edits) if (!(await onEditCanvasClip(edit.nodeId, edit.segmentId, edit.patch, false))) return false;
+    return true;
+  };
+
+  const toggleClipLock = async (clipId: string, locked: boolean) => {
+    if (!onPatch) return false;
+    const plan = buildClipLockPlan(clipLockInputs([clipId]), locked);
+    if (!plan.ids.length) return true;
+    if (!(await applyCanvasLockEdits(plan.canvasEdits))) return false;
+    const saved = await onPatch("segment", clipId, plan.patches[0].patch);
+    if (saved === false) await applyCanvasLockEdits(plan.rollbackCanvasEdits);
+    return saved !== false;
+  };
+
+  /** 全部锁定 / 全部解锁：所有段落在一次 ops 提交里写入，画布节点也只保存一次。 */
+  const toggleAllClipLocks = async (clipIds: string[], locked: boolean) => {
+    if (!onPatchMany || !clipIds.length) return false;
+    const plan = buildClipLockPlan(clipLockInputs(clipIds), locked);
+    if (!plan.ids.length) return true;
+    if (!(await applyCanvasLockEdits(plan.canvasEdits))) return false;
+    const saved = await onPatchMany(plan.patches);
+    if (saved === false) await applyCanvasLockEdits(plan.rollbackCanvasEdits);
     return saved !== false;
   };
 
   const renderShots = (activeView: "shots" | "clips" = "shots") => {
     if (d) return <SubjectStoryboardWorkbench key={JSON.stringify(subjectOwner)} viewMemory={storyboardViews.current[JSON.stringify(subjectOwner)] ||= {}} activeView={activeView} director={d} production={production} owner={subjectOwner} canvasNodes={canvasNodes} canvasId={canvasId} onLocateClip={id => onLocateTarget?.("segment", id)}
-      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench) => renderShotDetails(shot, false, workbench)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onToggleClipLock={toggleClipLock} shotDrafts={sourceDrafts}
+      initialShotId={focusTarget?.startsWith("shot:") ? focusedId : undefined} renderEditor={(shot, workbench, actions) => renderShotDetails(shot, false, workbench, actions)} onRepartitionClips={subjectAssembly ? onRepartitionClips : undefined} onH3Boundary={subjectAssembly ? onH3Boundary : undefined} onEditShot={subjectAssembly ? onEditShot : undefined} onSaveShotPatch={subjectAssembly && onSaveV2Shot ? (shotId, patch) => onSaveV2Shot(shotId, patch) : undefined} onToggleClipLock={toggleClipLock} onToggleAllClipLocks={onPatchMany ? toggleAllClipLocks : undefined} shotDrafts={sourceDrafts}
       renderClipFields={segment => <ClipSourceFields key={String(segment.id)} segment={segment} musicEnabled={production.draft.settings.backgroundMusicEnabled === true} busy={busy || readOnly} names={nameMap} sourceDrafts={sourceDrafts} onDraftChange={onSourceDraftChange} onSave={async patch => onPatch("segment", String(segment.id), patch)} settings={renderSegmentStyle(segment, true)} />}
       shotKeyframe={frameForShot}
       renderContinuity={isSubjectPromptAssembly(d.source) ? undefined : shot => renderShotContinuity(shot)}
@@ -2150,6 +2224,25 @@ export function DirectorPanel({
     {(["preparing", "ready", "running", "results"] as const).map(stage => { const count = readiness.targets.filter(target => productionTargetStage(target) === stage).length; return count > 0 ? <Tag key={stage}>{`${t(`director.canvasOverlay.stage.${stage}`)} · ${count}`}</Tag> : null; })}
     {attentionTargets.length > 0 && <Tag color="orange">{t("director.workspace.productionSummaryAttention", { count: attentionTargets.length })}</Tag>}
   </section> : null;
+  /** 制作设置只影响下次任务，属于「设置与历史」工作区；生成页保留编译/发布动作与一个入口。 */
+  const renderRunSettings = () => <div className="space-y-3">
+    <section className="rounded-lg border border-border bg-card p-4">
+      <label className="mb-2 block text-sm font-medium">{t('director.workspace.videoAspectRatio')}</label>
+      <Select className="min-w-48" disabled={busy} value={production.draft.settings.videoAspectRatio || ''} onChange={value => onSettings({ videoAspectRatio: value || null, videoAspectRatioConfirmed: true })} options={['', '9:16', '16:9', '1:1', '4:3', '3:4', '2:3', '3:2', '21:9'].map(value => ({ value, label: value || t('director.workspace.inheritVideoAspectRatio') }))} />
+      <p className="mt-2 text-xs text-muted-foreground">{t('director.workspace.videoAspectRatioHint')}</p>
+      <div className="mt-4 border-t border-border pt-4"><label className="flex items-center justify-between gap-3 text-sm"><span>{t("director.studio.backgroundMusic")}</span><Switch aria-label={t("director.studio.backgroundMusic")} checked={production.draft.settings.backgroundMusicEnabled === true} disabled={busy || readOnly} onChange={backgroundMusicEnabled => onSettings({ backgroundMusicEnabled })} /></label><p className="mt-2 text-xs text-muted-foreground">{t("director.studio.backgroundMusicHint")}</p></div>
+    </section>
+    {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2" data-production-spec-settings aria-label={t("director.workspace.productionSpec")}>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.fps")}</span><div className="flex items-center gap-2"><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_num ?? 24)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_num: value }); }} /><span className="text-xs text-muted-foreground">/</span><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_den ?? 1)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_den: value }); }} /></div></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.totalDuration")}</span><Input key={`spec-duration:${String(source.production_total_duration ?? "")}`} defaultValue={String(source.production_total_duration ?? "")} placeholder="90 · 2160/24" disabled={busy || !onPatch} onBlur={event => { const value = event.target.value.trim(); if (!value || /^\d+(\.\d+)?$/.test(value) || /^\d+\/\d+$/.test(value)) void onPatch("spec", undefined, { production_total_duration: value }); else event.target.value = String(source.production_total_duration ?? ""); }} /></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.clipLimit")}</span><InputNumber className="w-28" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.generation_clip_limit ?? 0) || null} placeholder="12" onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { generation_clip_limit: value }); }} /></label>
+      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.deliveryScope")}</span><Select className="min-w-40" disabled={busy || !onPatch} value={String(source.delivery_scope ?? "prompt_only")} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "full_production", label: t("director.workspace.fullProduction") }]} onChange={value => void onPatch("spec", undefined, { delivery_scope: value })} /></label>
+      <label className="grid gap-1 text-sm md:col-span-2"><span className="font-medium">{t("director.workspace.detailPolicy")}</span><Input key={`spec-policy:${String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")}`} defaultValue={String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")} placeholder="ref2va_v2" disabled={busy || !onPatch} onBlur={event => { const profile = event.target.value.trim(); if (profile) void onPatch("spec", undefined, { prompt_detail_policy: { ...((source.prompt_detail_policy && typeof source.prompt_detail_policy === "object" && !Array.isArray(source.prompt_detail_policy) ? source.prompt_detail_policy : {}) as Record<string, unknown>), profile } }); }} /></label>
+      <p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.specHint")}</p>
+    </section>}
+    {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.contentDelivery")}</span><Select value={delivery} disabled={busy} options={[{ value: "auto_file_batch", label: t("director.workspace.autoFileBatch") }, { value: "interactive_segment", label: t("director.workspace.interactiveSegment") }]} onChange={value => onWorkflow({ contentDeliveryMode: value })} /></label><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.mediaProduction")}</span><Select value={mode} disabled={busy} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "per_item", label: t("director.workspace.perItem") }, { value: "automatic", label: t("director.workspace.automatic") }]} onChange={value => onWorkflow({ mediaProductionMode: value })} /></label><p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.settingsNextRun")}</p></section>}
+  </div>;
+
   const renderProduction = () => <div className="space-y-4" data-production-section-root>
     <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.workspace.tab.production")} help={<p>{t("director.generation.flowHint")}</p>} actions={<Button size="small" onClick={onRefresh}>{t("director.workspace.refresh")}</Button>} toolbar={<ProductionSectionNavigation items={[
       { id: "checks", label: t("director.generation.prepareInputs") },
@@ -2169,25 +2262,15 @@ export function DirectorPanel({
     {compileNotice && <Alert type="success" showIcon message={compileNotice} style={{ whiteSpace: "pre-line" }} />}
     <section className="space-y-3" data-production-section="checks" tabIndex={-1}>
       <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">{t("director.generation.prepareInputs")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.generation.prepareHint")}</p></div><div className="flex flex-wrap gap-2"><Button size="small" loading={compileBusy} disabled={busy || compileBusy || !d || !onCompile} onClick={() => onCompile?.()}>{compilePending ? t("drama.production.recoverReceipt") : t("director.workspace.validateCompile")}</Button><Button disabled={busy || !d} onClick={onPublish}>{t("drama.production.directorPublish")}</Button></div></div>
-    <details className="rounded-lg border border-border p-3"><summary className="cursor-pointer text-sm font-medium">{t("director.micro.runParameters")}</summary><div className="mt-3 space-y-3">    <section className="rounded-lg border border-border bg-card p-4">
-      <label className="mb-2 block text-sm font-medium">{t('director.workspace.videoAspectRatio')}</label>
-      <Select className="min-w-48" disabled={busy} value={production.draft.settings.videoAspectRatio || ''} onChange={value => onSettings({ videoAspectRatio: value || null, videoAspectRatioConfirmed: true })} options={['', '9:16', '16:9', '1:1', '4:3', '3:4', '2:3', '3:2', '21:9'].map(value => ({ value, label: value || t('director.workspace.inheritVideoAspectRatio') }))} />
-      <p className="mt-2 text-xs text-muted-foreground">{t('director.workspace.videoAspectRatioHint')}</p>
-      <div className="mt-4 border-t border-border pt-4"><label className="flex items-center justify-between gap-3 text-sm"><span>{t("director.studio.backgroundMusic")}</span><Switch aria-label={t("director.studio.backgroundMusic")} checked={production.draft.settings.backgroundMusicEnabled === true} disabled={busy || readOnly} onChange={backgroundMusicEnabled => onSettings({ backgroundMusicEnabled })} /></label><p className="mt-2 text-xs text-muted-foreground">{t("director.studio.backgroundMusicHint")}</p></div>
-    </section>
-    {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2" data-production-spec-settings aria-label={t("director.workspace.productionSpec")}>
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.fps")}</span><div className="flex items-center gap-2"><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_num ?? 24)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_num: value }); }} /><span className="text-xs text-muted-foreground">/</span><InputNumber className="w-24" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.fps_den ?? 1)} onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { fps_den: value }); }} /></div></label>
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.totalDuration")}</span><Input key={`spec-duration:${String(source.production_total_duration ?? "")}`} defaultValue={String(source.production_total_duration ?? "")} placeholder="90 · 2160/24" disabled={busy || !onPatch} onBlur={event => { const value = event.target.value.trim(); if (!value || /^\d+(\.\d+)?$/.test(value) || /^\d+\/\d+$/.test(value)) void onPatch("spec", undefined, { production_total_duration: value }); else event.target.value = String(source.production_total_duration ?? ""); }} /></label>
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.clipLimit")}</span><InputNumber className="w-28" min={1} precision={0} disabled={busy || !onPatch} value={Number(source.generation_clip_limit ?? 0) || null} placeholder="12" onChange={value => { if (Number.isInteger(value)) void onPatch("spec", undefined, { generation_clip_limit: value }); }} /></label>
-      <label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.deliveryScope")}</span><Select className="min-w-40" disabled={busy || !onPatch} value={String(source.delivery_scope ?? "prompt_only")} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "full_production", label: t("director.workspace.fullProduction") }]} onChange={value => void onPatch("spec", undefined, { delivery_scope: value })} /></label>
-      <label className="grid gap-1 text-sm md:col-span-2"><span className="font-medium">{t("director.workspace.detailPolicy")}</span><Input key={`spec-policy:${String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")}`} defaultValue={String((source.prompt_detail_policy as Record<string, unknown> | undefined)?.profile ?? "")} placeholder="ref2va_v2" disabled={busy || !onPatch} onBlur={event => { const profile = event.target.value.trim(); if (profile) void onPatch("spec", undefined, { prompt_detail_policy: { ...((source.prompt_detail_policy && typeof source.prompt_detail_policy === "object" && !Array.isArray(source.prompt_detail_policy) ? source.prompt_detail_policy : {}) as Record<string, unknown>), profile } }); }} /></label>
-      <p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.specHint")}</p>
-    </section>}
-    {d && <section className="grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2"><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.contentDelivery")}</span><Select value={delivery} disabled={busy} options={[{ value: "auto_file_batch", label: t("director.workspace.autoFileBatch") }, { value: "interactive_segment", label: t("director.workspace.interactiveSegment") }]} onChange={value => onWorkflow({ contentDeliveryMode: value })} /></label><label className="grid gap-1 text-sm"><span className="font-medium">{t("director.workspace.mediaProduction")}</span><Select value={mode} disabled={busy} options={[{ value: "prompt_only", label: t("director.workspace.promptOnly") }, { value: "per_item", label: t("director.workspace.perItem") }, { value: "automatic", label: t("director.workspace.automatic") }]} onChange={value => onWorkflow({ mediaProductionMode: value })} /></label><p className="text-xs text-muted-foreground md:col-span-2">{t("director.workspace.settingsNextRun")}</p></section>}
-</div></details>
+    {!compact && <div className="flex flex-wrap items-center gap-2"><Button size="small" type="text" icon={<ArrowRight className="size-3" />} onClick={() => onNavigate("advanced")}>{t("director.workspace.openProductionSettings")}</Button><span className="text-xs text-muted-foreground">{t("director.workspace.settingsMovedHint")}</span></div>}
     </section>
     <section className="space-y-4 border-t border-border pt-5" data-production-section="delivery" tabIndex={-1}>
       <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">{t("director.micro.resultsDelivery")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.micro.resultsDeliveryHint")}</p></div><div className="flex flex-wrap items-center gap-2"><label className="flex items-center gap-2 text-xs text-muted-foreground"><Switch checked={includeGeneratedMedia} disabled={exporting} onChange={setIncludeGeneratedMedia} />{t("director.workspace.includeGeneratedMedia")}</label><span className="text-xs text-muted-foreground">{t("director.workspace.subtitlesIncluded")}</span><Button size="small" loading={exporting} disabled={!d || exporting} onClick={() => void onExport(includeGeneratedMedia)}>{t("director.workspace.exportBundle")}</Button></div></div>
+    {onCalibrateSubtitles && <SubtitleCalibrationPanel
+      calibration={calibration} calibrating={calibrating} progress={calibrationProgress} busy={busy}
+      clips={deliveredClips.map(({ group, storageKey }) => ({ segmentId: String(group.id), storageKey }))}
+      onCalibrate={onCalibrateSubtitles} onCancel={onCancelCalibration} onClear={onClearCalibration}
+    />}
     {deliveredClips.length > 0 && <section className="space-y-3" data-locked-clip-results><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">{t("director.workspace.deliveredVideos")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.technicalCloseout")}</p></div><Button size="small" icon={<ArrowDownToLine className="size-3" />} loading={downloadingAllClips} onClick={() => void downloadAllDeliveredClips()}>{t("director.workspace.downloadAllClips")}</Button></div><div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-2 2xl:grid-cols-3">{deliveredClips.map(({ group, storageKey }, index) => <article key={group.id} className="min-w-0 space-y-3 rounded-xl border border-border bg-card p-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="min-w-0 flex-1 truncate text-sm font-medium">{segmentTitle(group.id)}</p><div className="flex flex-wrap gap-1"><Button size="small" onClick={() => onNavigate("shots", segments.find(segment => segment.id === group.id)?.shot_ids?.[0] ? { kind: "shot", id: String(segments.find(segment => segment.id === group.id)?.shot_ids?.[0]) } : undefined)}>{t("director.workspace.tab.shots")}</Button><Button size="small" onClick={() => onLocateTarget?.("segment", group.id)}>{t("productionCanvas.locateResult")}</Button><Button size="small" icon={<ArrowDownToLine className="size-3" />} onClick={() => void downloadDeliveredClip(storageKey, clipFileName(index, segmentTitle(group.id), null)).catch(cause => message.error(String(cause)))}>{t("common.download")}</Button></div></div><div className="flex justify-center"><video key={`${group.id}:${storageKey}`} className="max-h-[38dvh] w-full max-w-2xl rounded-lg object-contain" controls preload="metadata" src={backendMediaUrl(storageKey)} onError={() => setVideoPreviewErrors(current => current[group.id] === storageKey ? current : { ...current, [group.id]: storageKey })} onLoadedData={() => setVideoPreviewErrors(current => { if (current[group.id] !== storageKey) return current; const next = { ...current }; delete next[group.id]; return next; })} /></div>{videoPreviewErrors[group.id] === storageKey && <p className="text-xs text-muted-foreground">{t("director.workspace.targetStatus.complete")} · {t("composer.mentions.previewUnavailable")}</p>}</article>)}</div></section>}
 
     {!deliveredClips.length && <div className="flex min-h-36 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 p-6 text-center"><Film className="mb-3 size-7 text-muted-foreground" /><h3 className="font-medium">{t("director.studio.noResults")}</h3><p className="mt-2 text-sm text-muted-foreground">{t("director.studio.noResultsHint")}</p></div>}
@@ -2214,11 +2297,16 @@ export function DirectorPanel({
 
   const renderAdvanced = () => <div className="space-y-3" data-production-section-root>
     <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("director.workspace.advancedTitle")} help={<p>{t("director.workspace.advancedHint")}</p>} toolbar={<ProductionSectionNavigation items={[
+      { id: "settings", label: t("director.workspace.productionSettingsTitle") },
       { id: "history", label: t("director.micro.versionsHistory") },
       { id: "technical", label: t("director.micro.technicalSources") },
       { id: "management", label: t("director.micro.advancedManagement") },
     ]} />} />
     {compact && <details className="border-b border-border pb-4"><summary className="cursor-pointer font-medium">{t("productionCanvas.productionSettings")}</summary><div className="mt-4">{renderProduction()}</div></details>}
+    <section className="space-y-3" data-production-section="settings" tabIndex={-1}>
+      <div><h3 className="font-semibold">{t("director.workspace.productionSettingsTitle")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.workspace.settingsMovedHint")}</p></div>
+      {renderRunSettings()}
+    </section>
     <section className="space-y-5" data-production-section="history" tabIndex={-1}>
       <div><h3 className="font-semibold">{t("director.micro.versionsHistory")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("director.micro.versionsHistoryHint")}</p></div>
     <section className="space-y-2"><h3 className="font-semibold">{t("director.workspace.history")}</h3>{versions.length ? versions.map(item => <article key={item.version} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card p-3"><span>v{item.version} · {item.stage} · {new Date(item.createdAt).toLocaleString()}</span><Button size="small" icon={<RotateCcw className="size-3" />} disabled={busy} onClick={() => onRestore(item.version)}>{t("director.workspace.restore")}</Button></article>) : <p className="text-sm text-muted-foreground">{t("director.workspace.noHistory")}</p>}</section>

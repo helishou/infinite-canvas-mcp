@@ -11,7 +11,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { mcpEfficiencyReport } from "./mcp-efficiency-report.js";
 import { decodeStoredJson, encodeStoredJson, storedJsonText, type StoredJson } from "./json-storage.js";
-import type { WorkflowDurationTarget } from "./workflows/duration.js";
+import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
 import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION, MINIMUM_DATABASE_SCHEMA_VERSION } from "./database-upgrade.js";
@@ -19,13 +19,12 @@ import { createDatabaseSnapshot } from "./database-snapshots.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
 import { syncH3ModeEdits } from "./drama/h3-mode-sync.js";
 import { syncImageReferenceEdits } from "./drama/image-inputs.js";
-import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { completedImageSlots, dropImageSlots, imageSourceStatus, linkedCharacterImageUpdates } from "./canvas/image-result-slots.js";
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation, type CanvasOperationResult } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
 import { collaborationError, commandFingerprint, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
-import { redactInlineMedia } from "./runtime/redact-inline-media.js";
+import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
 import * as Y from "yjs";
 import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
@@ -34,25 +33,12 @@ import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, te
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory } from "./canvas/history-maintenance.js";
 import { canonicalSharedAssetIds, captureAssetEdits, deleteDramaAsset, normalizeAssetInsertion, projectAsset, propagateAssetChanges, purgeOrphanedSharedAssets, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
+import type { RuntimeTask, RuntimeTaskStatus, RuntimeTaskEvent, GenerationLog, GenerationLogStatus, MediaFile, WorkflowFieldType, WorkflowField, WorkflowConfig, WorkflowRunTarget, WorkflowConfigRow } from "@basketikun/media-engine/contracts";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
+// 任务 / 媒体 / 工作流契约的权威在 @basketikun/media-engine；此处 re-export 保持既有入口。
 
-export type RuntimeTaskStatus = "queued" | "running" | "awaiting_confirmation" | "succeeded" | "failed" | "cancelled";
-export type GenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
-
-export type RuntimeTask = {
-    id: string; kind: string; status: RuntimeTaskStatus; progress: number;
-    input: Record<string, unknown>; params: Record<string, unknown>;
-    result: Record<string, unknown> | null; error: string | null;
-    createdAt: string; updatedAt: string;
-    parentTaskId?: string;
-    projectId?: string;
-    nodeId?: string;
-    segmentId?: string;
-    executor?: string;
-    model?: string;
-    outputs: Array<Record<string, unknown>>;
-};
+export type { RuntimeTask, RuntimeTaskStatus, RuntimeTaskEvent, GenerationLog, GenerationLogStatus, MediaFile, WorkflowFieldType, WorkflowField, WorkflowConfig, WorkflowRunTarget, WorkflowConfigRow };
 
 function taskSearchFields(kind: string, input: Record<string, unknown>, params: Record<string, unknown>) {
     const inputParams = recordOf(input.params);
@@ -65,20 +51,6 @@ function taskSearchFields(kind: string, input: Record<string, unknown>, params: 
     const search = `${kind} ${executor} ${model || ""}`;
     return { projectId, nodeId, segmentId, model, isImage: /image/i.test(search) ? 1 : 0, isVideo: /video|h3/i.test(search) ? 1 : 0 };
 }
-export type RuntimeTaskEvent = {
-    id: number; taskId: string; type: string;
-    payload: Record<string, unknown>; createdAt: string;
-};
-export type GenerationLog = {
-    id: string; projectId: string; nodeId?: string; segmentId?: string;
-    status: GenerationLogStatus; platform: string;
-    workflow?: string; model?: string; taskMode?: string; prompt?: string;
-    references: Array<Record<string, unknown>>; inputCounts: Record<string, number>;
-    runtimeTaskId?: string; promptId?: string;
-    startedAt: string; finishedAt?: string; durationMs: number;
-    outputs: Array<Record<string, unknown>>; error?: string;
-    params: Record<string, unknown>; createdAt: string; updatedAt: string;
-};
 export type McpObservabilityEventInput = {
     sessionId: string; traceId: string; event: "tool.started" | "tool.succeeded" | "tool.failed"; tool: string;
     projectId?: string; nodeId?: string; operationId?: string; taskId?: string;
@@ -86,11 +58,6 @@ export type McpObservabilityEventInput = {
     inputSummary?: Record<string, unknown>; outputSummary?: Record<string, unknown>;
 };
 export type McpObservabilityEvent = McpObservabilityEventInput & { id: string; createdAt: string };
-export type MediaFile = {
-    storageKey: string; filePath: string; mimeType: string;
-    bytes: number; width: number | null; height: number | null; durationMs: number | null;
-    createdAt: string; sha256?: string | null;
-};
 export type AssetFolder = { id: string; name: string; parentId: string | null; createdAt: string };
 export type CanvasFolder = {
     id: string; name: string; createdAt: string; updatedAt?: string;
@@ -140,72 +107,6 @@ export type PluginDeclaration = {
     enabled: boolean;
     tools: Array<Record<string, unknown>>;
     updatedAt: string;
-};
-
-// ── Workflow Import ──────────────────────────────────────────────────────
-
-export type WorkflowFieldType = 'text' | 'number' | 'slider' | 'boolean' | 'dropdown' | 'image' | 'audio' | 'video';
-
-export type WorkflowField = {
-    id: string;
-    node: string;
-    input: string;
-    name: string;
-    type: WorkflowFieldType;
-    required?: boolean;
-    default?: unknown;
-    min?: number;
-    max?: number;
-    step?: number;
-    options?: string[];
-    randomEnabled?: boolean;
-    isPrompt?: boolean;
-    /**
-     * 可选媒体字段：值为空时直接把加载器节点从提交图里剪掉（连同悬空连线），
-     * 让下游的“可选输入”分支退回原始行为。用于视频续写这类“有就用、没有就当首段”的加载器。
-     */
-    optionalWhenEmpty?: boolean;
-};
-
-export type WorkflowConfig = {
-    title: string;
-    backend: string;
-    operation: string;
-    description: string;
-    fields: WorkflowField[];
-    /** 指定输出节点：只保留这些节点的产物；留空表示不过滤。 */
-    outputNodes?: string[];
-    /**
-     * 预览桥节点（单值）：该节点发出的预览帧会推送到画布节点的生成态画面。
-     * 只影响展示，不参与产物筛选、归档与生成日志。留空表示不采集预览。
-     */
-    previewNodeId?: string;
-    /**
-     * 时长输入节点（单值）：画布视频生成时，把制作台的秒数换算后写入这个节点输入。
-     * 与提示词 isPrompt 的自动注入同构，不要求该输入同时是一个可填字段。
-     * 未配置 / null 表示不注入，旧工作流行为不变。仅本地 ComfyUI 链生效。
-     */
-    durationTarget?: WorkflowDurationTarget | null;
-    mediaInputs?: Record<string, unknown>;
-    miniCards?: Record<string, unknown>;
-    /** 绑定的 RunningHub 云端档案 id（本地工作流 ↔ 云端工作流）。留空表示没绑定。 */
-    runningHubProfileId?: string;
-    /** 运行位置：本地 ComfyUI / 云端 RunningHub / 两者自动（本地并发占满时上云）。 */
-    runTarget?: WorkflowRunTarget;
-};
-
-export type WorkflowRunTarget = "local" | "cloud" | "hybrid";
-
-export type WorkflowConfigRow = {
-    name: string; title: string; backend: string; description: string; operation: string;
-    fieldsJson: string; mediaInputsJson: string; miniCardsJson: string; updatedAt: string;
-    runningHubProfileId: string; runTarget: string;
-    /** 输出节点选择的原始 JSON；空串表示从未配置过（此时前端会默认勾选链路末端的输出节点）。 */
-    outputNodesJson: string;
-    /** 预览桥节点 id；空串表示未选择。 */
-    previewNodeId: string;
-    /** 时长输入目标的原始 JSON；空串表示未配置（含显式清空）。 */
-    durationTargetJson: string;
 };
 
 // ── Database ──────────────────────────────────────────────────────────────────
@@ -2808,6 +2709,9 @@ export class BackendDatabase {
                 : result && Array.isArray(result.images)
                     ? (result.images as Array<Record<string, unknown>>).filter((item) => item && typeof item === "object")
                     : [];
+            // 文本结果体积小且是首页对话工作台/任务中心的唯一展示内容，摘要保留；
+            // prompt/params 等大字段仍不入响应体。
+            const texts = result && Array.isArray(result.texts) ? result.texts : [];
             const kind = String(row.kind);
             return {
                 id: String(row.id), kind,
@@ -2825,7 +2729,7 @@ export class BackendDatabase {
                 // 完整原文仍从 listTasks / getTask 获取。
                 input: inputProjectId || inputScope ? { ...(inputProjectId ? { projectId: inputProjectId } : {}), ...(inputScope ? { scope: inputScope } : {}) } : {},
                 params: {},
-                result: null,
+                result: texts.length ? { texts } : null,
                 outputs,
                 error: row.error ? String(row.error) : null,
                 createdAt: String(row.created_at),
