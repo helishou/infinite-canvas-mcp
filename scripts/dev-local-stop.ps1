@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $launcherPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "dev-local.ps1"))
-$ports = @(17370, 17371, 3001)
+$ports = @(8300, 17370, 17371, 3001)
 
 function Stop-ProcessTree([int]$RootProcessId) {
     $snapshot = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
@@ -59,5 +59,5 @@ if ($remaining.Count -gt 0) {
 if ($stopped.Count -eq 0) {
     Write-Host "[dev-stop] No running Infinite Canvas development stack found."
 } else {
-    Write-Host "[dev-stop] Development stack stopped. Ports 17370, 17371 and 3001 are free."
+    Write-Host "[dev-stop] Development stack stopped. Ports 8300, 17370, 17371 and 3001 are free."
 }

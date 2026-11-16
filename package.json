@@ -1,40 +1,42 @@
 {
-    "name": "infinite-canvas-mcp",
-    "version": "0.1.0",
-    "private": true,
-    "packageManager": "pnpm@12.12.1",
-    "engines": {
-        "node": "^22.16.0 || >=24.0.0"
-    },
-    "scripts": {
-        "test": "node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run test && node scripts/pnpm.mjs --filter @basketikun/media-engine run test && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run test && node scripts/pnpm.mjs --filter infinite-canvas run test",
-        "postinstall": "node scripts/patch-rc-portal.mjs",
-        "predev": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build",
-        "dev": "node scripts/pnpm.mjs run predev && concurrently -n backend,web \"node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev\" \"node scripts/pnpm.mjs --filter infinite-canvas run dev\"",
-        "predev:backend": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build",
-        "dev:backend": "node scripts/pnpm.mjs run predev:backend && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev",
-        "start:backend": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run build && node scripts/dev-backend-watch.mjs --stable",
-        "dev:agent": "node scripts/dev-agent.mjs",
-        "predev:web": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build",
-        "dev:web": "node scripts/pnpm.mjs run predev:web && node scripts/pnpm.mjs --filter infinite-canvas run dev",
-        "predev:services": "node scripts/prepare-dev-services.mjs",
-        "dev:services": "node scripts/pnpm.mjs run predev:services && concurrently -n backend,agent,web \"node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev\" \"node scripts/pnpm.mjs run dev:agent\" \"node scripts/pnpm.mjs --filter infinite-canvas run dev\"",
-        "dev:local": "scripts\\dev-local.bat",
-        "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",
-        "build": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run build && node scripts/pnpm.mjs --filter infinite-canvas run build",
-        "build:plugins": "node scripts/build-official-plugins.mjs",
-        "typecheck": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter infinite-canvas run typecheck",
-        "check:all": "node scripts/check-all.mjs",
-        "acheng:status": "node scripts/acheng-engine.mjs status",
-        "acheng:update": "node scripts/acheng-engine.mjs update",
-        "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
-        "acheng:vendor": "node scripts/acheng-engine.mjs vendor",
-        "rh": "node tools/rh-flow/rh-flow.mjs"
-    },
-    "devDependencies": {
-        "@infinite-canvas/plugin-sdk": "workspace:*",
-        "concurrently": "^9.1.0",
-        "esbuild": "^0.25.0",
-        "playwright": "1.63.0"
-    }
+  "name": "infinite-canvas-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.12.1",
+  "engines": {
+    "node": "^22.16.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run test && node scripts/pnpm.mjs --filter @basketikun/media-engine run test && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run test && node scripts/pnpm.mjs --filter infinite-canvas run test",
+    "postinstall": "node scripts/patch-rc-portal.mjs",
+    "predev": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/dev-engine.mjs --build",
+    "dev": "node scripts/pnpm.mjs run predev && concurrently -n engine,backend,web \"node scripts/dev-engine.mjs\" \"node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev\" \"node scripts/pnpm.mjs --filter infinite-canvas run dev\"",
+    "predev:backend": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build",
+    "dev:backend": "node scripts/pnpm.mjs run predev:backend && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev",
+    "start:backend": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run build && node scripts/dev-backend-watch.mjs --stable",
+    "dev:agent": "node scripts/dev-agent.mjs",
+    "predev:web": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build",
+    "dev:web": "node scripts/pnpm.mjs run predev:web && node scripts/pnpm.mjs --filter infinite-canvas run dev",
+    "predev:services": "node scripts/prepare-dev-services.mjs && node scripts/dev-engine.mjs --build",
+    "dev:services": "node scripts/pnpm.mjs run predev:services && concurrently -n engine,backend,agent,web \"node scripts/dev-engine.mjs\" \"node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev\" \"node scripts/pnpm.mjs run dev:agent\" \"node scripts/pnpm.mjs --filter infinite-canvas run dev\"",
+    "dev:local": "scripts\\dev-local.bat",
+    "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",
+    "build": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run build && node scripts/pnpm.mjs --filter infinite-canvas run build",
+    "build:plugins": "node scripts/build-official-plugins.mjs",
+    "typecheck": "node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter infinite-canvas run typecheck",
+    "check:all": "node scripts/check-all.mjs",
+    "acheng:status": "node scripts/acheng-engine.mjs status",
+    "acheng:update": "node scripts/acheng-engine.mjs update",
+    "acheng:rollback": "node scripts/acheng-engine.mjs rollback",
+    "acheng:vendor": "node scripts/acheng-engine.mjs vendor",
+    "rh": "node tools/rh-flow/rh-flow.mjs",
+    "dev:engine": "node scripts/dev-engine.mjs",
+    "build:engine": "node scripts/dev-engine.mjs --build"
+  },
+  "devDependencies": {
+    "@infinite-canvas/plugin-sdk": "workspace:*",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.25.0",
+    "playwright": "1.63.0"
+  }
 }

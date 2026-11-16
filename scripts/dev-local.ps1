@@ -32,7 +32,7 @@ foreach ($launcher in $staleLaunchers) {
     Stop-ProcessTree -rootProcessId $launcher.ProcessId -processes $processSnapshot
 }
 
-$ports = @(17370, 17371, 3001)
+$ports = @(8300, 17370, 17371, 3001)
 Write-Host "[dev-local] Cleaning stale local services on ports $($ports -join ', ')..."
 $pids = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
     Where-Object { $ports -contains $_.LocalPort } |
