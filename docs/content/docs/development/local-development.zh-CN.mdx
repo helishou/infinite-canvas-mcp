@@ -10,6 +10,16 @@ Backend 管理数据、媒体与画布任务，`web/` 提供界面。Backend 已
 ## 1. 从仓库根目录启动
 
 ```bash
+> **git-bash 用户注意**：Windows 上 `C:\Program Files
+odejs\corepack` 与 `%APPDATA%
+pm\pnpm`
+> 是 POSIX sh shim，在 MSYS 环境下会把 `/c/...` 解析成 `<当前盘>:\c\...`，报
+> `Cannot find module 'E:\c\Program Files
+odejs
+ode_modules\corepack\dist\corepack.js'`。
+> 这时改用 `npm run <脚本名>`（根脚本已走 `scripts/pnpm.mjs` 启动器，不经过 shim），
+> 或直接 `node scripts/pnpm.mjs --filter <包> run <脚本>`。cmd / PowerShell 下 `corepack pnpm` 不受影响。
+
 corepack pnpm install --frozen-lockfile
 corepack pnpm run dev
 ```

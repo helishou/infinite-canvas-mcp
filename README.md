@@ -56,6 +56,16 @@ H3 和导演制作是可选能力：需要相应模型、ComfyUI 自定义节点
 | 依赖 | 要求与用途 |
 | --- | --- |
 | Node.js | 建议 **24 LTS**；兼容 **22.16.0+ 的 22.x**，不使用 23.x。Backend 使用内置 `node:sqlite` 的事务状态 API |
+> **git-bash 用户注意**：Windows 上 `C:\Program Files
+odejs\corepack` 与 `%APPDATA%
+pm\pnpm`
+> 是 POSIX sh shim，在 MSYS 环境下会把 `/c/...` 解析成 `<当前盘>:\c\...`，报
+> `Cannot find module 'E:\c\Program Files
+odejs
+ode_modules\corepack\dist\corepack.js'`。
+> 这时改用 `npm run <脚本名>`（根脚本已走 `scripts/pnpm.mjs` 启动器，不经过 shim），
+> 或直接 `node scripts/pnpm.mjs --filter <包> run <脚本>`。cmd / PowerShell 下 `corepack pnpm` 不受影响。
+
 | Corepack + pnpm | 项目固定 **pnpm 12.12.1**，统一用 `corepack pnpm`；所有 workspace 在根目录一次安装 |
 | Git | 获取源码、初始化 Git 子模块；Acheng 版本管理也使用 Git |
 | 浏览器 | 运行画布界面；基础编辑不需要 GPU、模型 Key 或 Codex 登录 |

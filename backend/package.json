@@ -1,69 +1,69 @@
 {
-  "name": "@helishou/infinite-canvas-backend",
-  "version": "0.1.0",
-  "license": "MIT",
-  "type": "module",
-  "main": "./dist/index.js",
-  "bin": {
-    "ic-backend": "dist/index.js"
-  },
-  "files": [
-    "dist",
-    "workers"
-  ],
-  "scripts": {
-    "dev": "node ../scripts/dev-backend-watch.mjs",
-    "dev:watch": "node ../scripts/dev-backend-watch.mjs",
-    "dev:once": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
-    "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
-    "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
-    "reconcile-shared-asset-consumers": "tsx src/maintenance/reconcile-shared-asset-consumers.ts",
-    "check:mcp-payloads": "node --import tsx --test --test-name-pattern=\"large preparation|large MCP exports|HTTP MCP defaults|shared-node Clip ordering\" src/drama/production-canvas.test.ts src/server/mcp-payload-contracts.test.ts src/server/mcp-export-routes.test.ts",
-    "audit:mcp-payloads": "tsx src/maintenance/mcp-payload-audit.ts",
-    "prune-observability": "tsx src/maintenance/prune-observability.ts",
-    "prune-db-snapshots": "tsx src/maintenance/prune-db-snapshots.ts",
-    "prune-agent-threads": "tsx src/maintenance/prune-agent-threads.ts",
-    "migrate-agent-thread-attachments": "tsx src/maintenance/migrate-agent-thread-attachments.ts",
-    "audit-media-references": "tsx src/maintenance/audit-media-references.ts",
-    "audit-canvas-storage": "tsx src/maintenance/audit-canvas-storage.ts",
-    "repack-json-storage": "tsx src/maintenance/repack-json-storage.ts",
-    "benchmark-canvas-storage": "tsx src/maintenance/canvas-storage-benchmark.ts",
-    "deduplicate-media-paths": "tsx src/maintenance/deduplicate-media-paths.ts",
-    "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
-    "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
-    "dedup-production-receipts": "tsx src/maintenance/dedup-production-receipts.ts",
-    "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
-    "repair-dangling-shared-assets": "tsx src/maintenance/repair-dangling-shared-assets.ts",
-    "director-source-storage": "tsx src/maintenance/director-source-storage.ts",
-    "media-and-compilation-storage": "tsx src/maintenance/media-and-compilation-storage.ts",
-    "prune-production-receipts": "tsx src/maintenance/prune-production-receipts.ts",
-    "sync-episode-demand": "tsx src/maintenance/sync-episode-demand.ts",
-    "test": "node ../scripts/test.mjs",
-    "start": "node dist/index.js",
-    "prepack": "corepack pnpm run build"
-  },
-  "dependencies": {
-    "@basketikun/canvas-agent": "workspace:^",
-    "@basketikun/media-engine": "workspace:^",
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "express": "^5.1.0",
-    "nanoid": "^5.1.16",
-    "sharp": "^0.35.4",
-    "winston": "^3.19.0",
-    "ws": "^8.21.3",
-    "yjs": "^13.6.32",
-    "zod": "^3.25.0"
-  },
-  "devDependencies": {
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.0.0",
-    "@types/ws": "^8.18.1",
-    "tsx": "^4.19.0",
-    "typescript": "^5.8.0"
-  },
-  "engines": {
-    "node": "^22.16.0 || >=24.0.0"
-  }
+    "name": "@helishou/infinite-canvas-backend",
+    "version": "0.1.0",
+    "license": "MIT",
+    "type": "module",
+    "main": "./dist/index.js",
+    "bin": {
+        "ic-backend": "dist/index.js"
+    },
+    "files": [
+        "dist",
+        "workers"
+    ],
+    "scripts": {
+        "dev": "node ../scripts/dev-backend-watch.mjs",
+        "dev:watch": "node ../scripts/dev-backend-watch.mjs",
+        "dev:once": "tsx src/index.ts",
+        "build": "tsc -p tsconfig.json",
+        "check": "tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
+        "redact-inline-media": "tsx src/maintenance/redact-inline-media.ts",
+        "prune-canvas-batches": "tsx src/maintenance/prune-canvas-batches.ts",
+        "reconcile-shared-asset-consumers": "tsx src/maintenance/reconcile-shared-asset-consumers.ts",
+        "check:mcp-payloads": "node --import tsx --test --test-name-pattern=\"large preparation|large MCP exports|HTTP MCP defaults|shared-node Clip ordering\" src/drama/production-canvas.test.ts src/server/mcp-payload-contracts.test.ts src/server/mcp-export-routes.test.ts",
+        "audit:mcp-payloads": "tsx src/maintenance/mcp-payload-audit.ts",
+        "prune-observability": "tsx src/maintenance/prune-observability.ts",
+        "prune-db-snapshots": "tsx src/maintenance/prune-db-snapshots.ts",
+        "prune-agent-threads": "tsx src/maintenance/prune-agent-threads.ts",
+        "migrate-agent-thread-attachments": "tsx src/maintenance/migrate-agent-thread-attachments.ts",
+        "audit-media-references": "tsx src/maintenance/audit-media-references.ts",
+        "audit-canvas-storage": "tsx src/maintenance/audit-canvas-storage.ts",
+        "repack-json-storage": "tsx src/maintenance/repack-json-storage.ts",
+        "benchmark-canvas-storage": "tsx src/maintenance/canvas-storage-benchmark.ts",
+        "deduplicate-media-paths": "tsx src/maintenance/deduplicate-media-paths.ts",
+        "rebalance-canvas-history": "tsx src/maintenance/rebalance-canvas-history.ts",
+        "prune-runtime-history": "tsx src/maintenance/prune-runtime-history.ts",
+        "dedup-production-receipts": "tsx src/maintenance/dedup-production-receipts.ts",
+        "purge-scene-productions": "tsx src/maintenance/purge-scene-productions.ts",
+        "repair-dangling-shared-assets": "tsx src/maintenance/repair-dangling-shared-assets.ts",
+        "director-source-storage": "tsx src/maintenance/director-source-storage.ts",
+        "media-and-compilation-storage": "tsx src/maintenance/media-and-compilation-storage.ts",
+        "prune-production-receipts": "tsx src/maintenance/prune-production-receipts.ts",
+        "sync-episode-demand": "tsx src/maintenance/sync-episode-demand.ts",
+        "test": "node ../scripts/test.mjs",
+        "start": "node dist/index.js",
+        "prepack": "node ../../scripts/pnpm.mjs run build"
+    },
+    "dependencies": {
+        "@basketikun/canvas-agent": "workspace:^",
+        "@basketikun/media-engine": "workspace:^",
+        "@modelcontextprotocol/sdk": "^1.30.0",
+        "express": "^5.1.0",
+        "nanoid": "^5.1.16",
+        "sharp": "^0.35.4",
+        "winston": "^3.19.0",
+        "ws": "^8.21.3",
+        "yjs": "^13.6.32",
+        "zod": "^3.25.0"
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.0",
+        "@types/node": "^22.0.0",
+        "@types/ws": "^8.18.1",
+        "tsx": "^4.19.0",
+        "typescript": "^5.8.0"
+    },
+    "engines": {
+        "node": "^22.16.0 || >=24.0.0"
+    }
 }
