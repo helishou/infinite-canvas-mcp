@@ -3,7 +3,6 @@ export type CanvasExecutorId =
   | "direct-image"
   | "engine-image"
   | "engine-video"
-  | "builtin-comfy"
   | "comfy-workflow"
   | "runninghub-workflow"
   | "h3"
@@ -33,54 +32,11 @@ const modelRegistry: CanvasModelDeclaration[] = [
     matches: (model) => /^gpt-image(?:-|$)/i.test(model),
   },
   {
-    id: "z-image",
-    modes: ["image"],
-    inputRoles: ["prompt", "image"],
-    executor: "builtin-comfy",
-    matches: (model) => /^z-image$/i.test(model),
-  },
-  {
-    id: "flux2-klein",
-    modes: ["image"],
-    inputRoles: ["prompt", "image"],
-    executor: "builtin-comfy",
-    matches: (model) => /^flux2-klein$/i.test(model),
-  },
-  {
     id: "local-style-transfer",
     modes: ["image"],
     inputRoles: ["image"],
     executor: "local-style-transfer",
     matches: (model) => /^local-style-transfer$/i.test(model),
-  },
-  {
-    id: "moyou-自动色阶",
-    modes: ["image"],
-    inputRoles: ["image"],
-    executor: "comfy-workflow",
-    matches: (model) => /^moyou-自动色阶$/i.test(model),
-  },
-  {
-    id: "minimax-h3:video",
-    modes: ["video"],
-    inputRoles: [
-      "prompt",
-      "character_identity",
-      "character_turnaround",
-      "scene",
-      "blocking",
-      "storyboard",
-      "keyframe",
-      "motion_reference",
-      "audio_reference",
-      "character_voice",
-      "style",
-      "palette",
-      "prop",
-    ],
-    executor: "h3",
-    matches: (model, preset) =>
-      /^minimax-h3(?::|$)/i.test(model) || preset === "minimax-h3",
   },
 ];
 

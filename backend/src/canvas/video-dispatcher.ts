@@ -2,21 +2,17 @@ import crypto from "node:crypto";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
-import { findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
-import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
-import { validateVideoTrimRange, type VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
+import { findComfyuiEngineTarget, findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
+import { validateVideoTrimRange, type VideoConcatBackend } from "../engine-contract/video-concat.js";
 import type { Stores, TaskStore } from "../stores/types.js";
-import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
-import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
-import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
+import type { WorkflowCatalog } from "../engine-contract/workflow-catalog.js";
 import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowBindingForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
-import { DirectVideoBackend } from "@basketikun/media-engine/runtime/direct-video";
+import { DirectVideoBackend } from "../engine-contract/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
+import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
-import { injectDurationTarget, parseWorkflowDurationTarget, readDurationSeconds, resolveDurationValue } from "@basketikun/media-engine/workflows/duration";
+import { injectDurationTarget, parseWorkflowDurationTarget, readDurationSeconds, resolveDurationValue } from "../engine-contract/duration.js";
 import { CanvasEngineClient, importEngineMedia } from "./engine-client.js";
 
 export const CANVAS_VIDEO_CONCAT_MODEL = "__local_video_concat__";
@@ -55,10 +51,8 @@ export class CanvasVideoDispatcher {
     private readonly children = new Map<string, Set<string>>();
     /** 本地子任务 id → 引擎任务 id（配置了执行引擎时才有值）。 */
     private readonly engineTasks = new Map<string, { taskId: string; target: EngineChannelTarget }>();
-    constructor(private readonly stores: Stores, private readonly comfy: ComfyUiBackend, private readonly workflows: WorkflowStore,
-        private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
-        /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
-        private readonly runningHub?: RunningHubBackend,
+    constructor(private readonly stores: Stores, private readonly workflows: WorkflowCatalog,
+        private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
         /** 可选注入：配置了独立执行引擎时，本地工作流视频执行改走 `/v1/videos`。 */
     ) {}
 
@@ -180,7 +174,6 @@ export class CanvasVideoDispatcher {
             // 从存储里找回来并按远端 taskId 恢复观察，否则云端任务失去跟踪。
             for (const child of this.stores.tasks.list({ kind: "runninghub:workflow", limit: 200 })) {
                 if (String(child.params?.parentTaskId || "") !== task.id || !["queued", "running"].includes(child.status)) continue;
-                try { this.runningHub?.resume(child.id); } catch {}
             }
             const log = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
             const startedAt = log ? Date.parse(log.startedAt) : Date.now();
@@ -194,11 +187,8 @@ export class CanvasVideoDispatcher {
         for (const child of this.children.get(id) || []) {
             const engineTask = this.engineTasks.get(child);
             if (engineTask) void new CanvasEngineClient(engineTask.target.baseUrl, engineTask.target.token).cancel(engineTask.taskId);
-            try { this.workflowExecutor.cancel(child); } catch {}
-            try { this.comfy.cancel(child); } catch {}
             try { this.concat.cancel(child); } catch {}
             try { this.directVideo?.cancel(child); } catch {}
-            try { this.runningHub?.cancel(child); } catch {}
         }
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasVideoGenerationInput;
@@ -241,21 +231,12 @@ export class CanvasVideoDispatcher {
             .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status))
             || this.stores.tasks.list({ kind: "canvas-video", limit: 500 })
                 .some((task) => task.id !== currentTaskId && ["queued", "running"].includes(task.status) && task.executor === "workflow");
-        let comfyBusy: boolean;
-        try {
-            const baseUrl = (plan.input.comfyUrl || this.comfy.getUrl()).replace(/\/$/, "");
-            const response = await fetch(`${baseUrl}/queue`, { signal: AbortSignal.timeout(5000) });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const queue = await response.json() as { queue_running?: unknown; queue_pending?: unknown };
-            if (!Array.isArray(queue.queue_running) || !Array.isArray(queue.queue_pending)) throw new Error("响应缺少 queue_running/queue_pending");
-            comfyBusy = queue.queue_running.length > 0 || queue.queue_pending.length > 0;
-        } catch (error) {
-            throw new Error(`本地+RH 无法确认 ComfyUI 队列状态，未提交任务：${messageOf(error)}`);
-        }
+        // 本地 ComfyUI 直连已下线：混合路由不再探测本地队列，只看 Backend 自己跟踪的本地任务。
+        const comfyBusy = false;
         if (!trackedLocalBusy && !comfyBusy) return plan;
 
         const profileId = workflowConfig?.runningHubProfileId;
-        const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+        const profile = undefined; // RunningHub 档案在引擎侧，画布不再本地解析
         if (!profileId || !profile) {
             throw new Error("本地 ComfyUI 正忙，但当前工作流没有绑定有效的 RunningHub 工作流；请先绑定 RH 工作流后重试");
         }
@@ -301,56 +282,21 @@ export class CanvasVideoDispatcher {
             } finally { this.untrack(taskId, childId); }
         }
         if (plan.kind === "runninghub-workflow") {
-            const runningHub = this.runningHub;
-            if (!runningHub) throw new Error("Backend 未初始化 RunningHub 执行器，无法运行绑定的 RunningHub 工作流");
-            const childId = `video-runninghub-child-${taskId}`;
-            this.assertActive(taskId);
-            this.track(taskId, childId);
-            try {
-                // 平台提交、任务状态与媒体归档都交给 RunningHubBackend；视频档自身校验出视频结果。
-                const profile = runningHub.listWorkflowProfiles().find((item) => item.id === plan.runninghubProfileId);
-                if (!profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
-                const localConfig = plan.workflow ? this.workflows.getConfig(plan.workflow) : null;
-                const localValues = workflowValues(plan.input, plan.workflow || "");
-                const values = bridgeLocalWorkflowValues(profile.fields || [], localConfig?.fields || [], localValues);
-                const [references, videos, audios] = await Promise.all([
-                    Promise.all((plan.input.references || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
-                    Promise.all((plan.input.videoReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
-                    Promise.all((plan.input.audioReferences || []).map(async (reference) => this.stores.media.url(await this.materialize(reference)))),
-                ]);
-                const task = await runningHub.runWorkflow(plan.runninghubProfileId!, {
-                    prompt: plan.input.prompt,
-                    references,
-                    videos,
-                    audios,
-                }, values, {
-                    parentTaskId: taskId,
-                    projectId: plan.input.projectId,
-                    nodeId: plan.input.nodeId,
-                    model: plan.input.model,
-                    ...(localConfig?.outputNodes?.length ? { outputNodes: localConfig.outputNodes } : {}),
-                    ...(plan.input.seconds ? { seconds: plan.input.seconds } : {}),
-                    ...(plan.input.size ? { size: plan.input.size } : {}),
-                    ...(plan.input.width && plan.input.height ? { width: plan.input.width, height: plan.input.height } : {}),
-                }, childId);
-                return firstMedia(await waitForTask(this.stores.tasks, task.id));
-            } finally { this.untrack(taskId, childId); }
+            throw new Error("RunningHub 执行已迁移到执行引擎（comfyui2api），画布不再本地跑云端工作流");
         }
         if (plan.kind === "preset") {
             const childId = `video-comfy-child-${taskId}`;
             this.assertActive(taskId);
             this.track(taskId, childId);
             try {
-                const child = await this.comfy.run(plan.preset!, plan.input.input || { prompt: plan.input.prompt },
-                    { ...(plan.input.params || {}), parentTaskId: taskId, projectId: plan.input.projectId, nodeId: plan.input.nodeId, model: plan.input.model }, plan.input.comfyUrl, childId);
-                return firstMedia(await waitForTask(this.stores.tasks, child.id));
+                throw new Error("本地 ComfyUI 预设执行已下线：请改用执行引擎提供的模型");
             } finally { this.untrack(taskId, childId); }
         }
         if (plan.kind === "engine" && plan.engine) {
             return this.dispatchVideoViaEngine(plan, taskId);
         }
         const detail = await this.workflows.get(plan.workflow!);
-        if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
+        // 引擎已返回 API 格式图，无需再转换。
         const baseConfig = detail.config || emptyWorkflowConfig(plan.workflow!);
         let fields = baseConfig.fields || [];
         let effectiveConfig = baseConfig;
@@ -408,11 +354,8 @@ export class CanvasVideoDispatcher {
         try {
             const existing = this.stores.tasks.get(childId);
             if (existing && ["succeeded", "failed", "cancelled"].includes(existing.status)) return firstMedia(await waitForTask(this.stores.tasks, childId));
-            const result = await this.workflowExecutor.run(detail.workflow, effectiveConfig, values,
-                crypto.randomUUID(), plan.input.comfyUrl, plan.workflow, childId, plan.input.projectId, plan.input.nodeId, taskId);
-            const media = result.media.find((item) => String(item.mimeType || "").startsWith("video/")) || result.media[0];
-            if (!media) throw new Error("视频工作流完成但没有返回媒体");
-            return media;
+            void childId;
+            throw new Error("画布本地工作流模型已下线：请改用执行引擎（engine-local）里的同名模型");
         } finally { this.untrack(taskId, childId); }
     }
 
@@ -473,22 +416,17 @@ export class CanvasVideoDispatcher {
         if (input.model === CANVAS_VIDEO_CONCAT_MODEL) return { input, kind: "concat" };
         const config = this.stores.settings.get("ai.config");
         // 引擎渠道：模型属于 media-engine，执行走 /v1/videos 异步协议（自定义 comfyUrl 仍本地）
-        const engineTarget = input.comfyUrl ? null : findEngineChannel(config, input.model);
+        const engineTarget = input.comfyUrl ? null : (findEngineChannel(config, input.model) ?? findComfyuiEngineTarget(config, input.model));
         if (engineTarget) return { input, kind: "engine", engine: engineTarget };
         if (usesWorkflowExecutor(config, input.model)) {
             const resolved = resolveWorkflowBindingForModel(config, input.model, Number.isSafeInteger(input.workflowReferenceCount) ? Number(input.workflowReferenceCount) : (input.references || []).length);
             if (!resolved.ok) throw new Error(`${workflowResolutionMessage(resolved)}（模型=${input.model}）`);
             const withParams = { ...input, params: { ...resolved.params, ...(input.params || {}) } };
-            if (resolved.binding.provider === "runninghub") {
-                if (!this.runningHub) throw new Error(`模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`);
-                return { input: withParams, kind: "runninghub-workflow", runninghubProfileId: resolved.binding.profileId };
-            }
+            if (resolved.binding.provider === "runninghub") throw new Error("RunningHub 执行已迁移到执行引擎（comfyui2api），画布不再本地跑云端工作流");
             const workflowConfig = this.workflows.getConfig(resolved.binding.workflow);
             const profileId = workflowConfig?.runningHubProfileId;
             const requestedTarget = input.runTarget ?? workflowConfig?.runTarget ?? "local";
-            const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
-            if (requestedTarget === "cloud" && !profileId) throw new Error("当前本地工作流没有绑定 RunningHub 工作流");
-            if (requestedTarget === "cloud" && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
+            const profile = undefined; // RunningHub 档案在引擎侧，画布不再本地解析
             const localBusy = requestedTarget === "hybrid" && (
                 this.stores.tasks.list({ kind: "workflow", limit: 500 }).some((task) => ["queued", "running"].includes(task.status))
                 || this.stores.tasks.list({ kind: "canvas-video", limit: 500 }).some((task) => ["queued", "running"].includes(task.status) && task.executor === "workflow")

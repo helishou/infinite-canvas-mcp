@@ -26,6 +26,13 @@ type RawChannel = {
     models?: unknown;
 };
 
+/** 去掉结尾的斜杠（不用正则，避免转义踩坑）。 */
+function trimSlash(value: string): string {
+    let out = value;
+    while (out.endsWith("/")) out = out.slice(0, -1);
+    return out;
+}
+
 function channelsOf(aiConfig: unknown): RawChannel[] {
     const config = aiConfig && typeof aiConfig === "object" ? (aiConfig as { channels?: unknown }) : {};
     return Array.isArray(config.channels) ? (config.channels as RawChannel[]) : [];
@@ -56,6 +63,47 @@ export function findEngineChannel(aiConfig: unknown, selectedModel: string): Eng
     if (!baseUrl) return null;
     const token = String(channel.apiKey ?? "").trim();
     return { channelId: String(channel.id ?? ""), baseUrl, model, ...(token ? { token } : {}) };
+}
+
+/**
+ * comfyui 渠道的模型也走引擎：引擎本身就是 ComfyUI 的 OpenAI 适配层，
+ * 画布不需要自己再跑一遍工作流执行器。
+ *
+ * 引擎地址取值顺序：COMFYUI2API_URL / MEDIA_ENGINE_URL 环境变量 > 任意一个
+ * OpenAI 协议的本地引擎渠道 > http://127.0.0.1:8300。
+ */
+export function findComfyuiEngineTarget(aiConfig: unknown, selectedModel: string): EngineChannelTarget | null {
+    const raw = String(selectedModel || "").trim();
+    if (!raw) return null;
+    const decoded = decodeChannelModel(raw)?.channelId;
+    const model = modelOptionName(raw).trim();
+    const channels = channelsOf(aiConfig);
+    const owner = decoded
+        ? channels.find((item) => String(item.id ?? "") === decoded)
+        : channels.find((item) => modelNames(item).includes(model));
+    if (!owner || String(owner.kind ?? "").trim() !== "comfyui") return null;
+
+    const env = process.env;
+    const envUrl = String(env.COMFYUI2API_URL ?? env.MEDIA_ENGINE_URL ?? "").trim();
+    // 优先画布里那个明确的引擎渠道（id/名称带 engine），否则退到任意 OpenAI 协议的
+    // 本地渠道——不能随手挑第一个，别把画布上别的本地服务当成引擎。
+    const engineCandidates = channels.filter((item) => {
+        const kind = String(item.kind ?? "").trim();
+        if (kind !== "local" && kind !== "api") return false;
+        if (String((item as { apiFormat?: unknown }).apiFormat ?? "openai").trim() !== "openai") return false;
+        return Boolean(String(item.baseUrl ?? "").trim());
+    });
+    const named = (item: RawChannel) => `${String(item.id ?? "")} ${String((item as { name?: unknown }).name ?? "")}`.toLowerCase().includes("engine");
+    const engineChannel = engineCandidates.find(named) ?? engineCandidates.find((item) => trimSlash(String(item.baseUrl ?? "")) === "http://127.0.0.1:8300");
+    const engineBaseUrl = envUrl || String(engineChannel?.baseUrl ?? "").trim() || "http://127.0.0.1:8300";
+    const engineToken = String(engineChannel?.apiKey ?? "").trim();
+    const token = env.COMFYUI2API_TOKEN ?? env.MEDIA_ENGINE_TOKEN ?? engineToken;
+    return {
+        channelId: String(owner.id ?? ""),
+        baseUrl: trimSlash(engineBaseUrl),
+        model,
+        ...(token ? { token } : {}),
+    };
 }
 
 /** 引擎渠道里的模型默认都走引擎执行，不再落到浏览器/本地执行器。 */

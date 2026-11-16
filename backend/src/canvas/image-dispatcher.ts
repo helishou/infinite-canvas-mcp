@@ -1,4 +1,3 @@
-import { workflowImageInputs } from "@basketikun/media-engine/workflows/image-input-capability";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
@@ -6,12 +5,10 @@ import { imageSlotStatus, imageSourceStatus } from "./image-result-slots.js";
 
 import type { ResolvedConfig } from "../config.js";
 import type { RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
-import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import {
   DirectImageBackend,
   type ChatGptImageReference,
-} from "@basketikun/media-engine/runtime/chatgpt-image";
+} from "../engine-contract/chatgpt-image.js";
 import {
   builtinWorkflowName,
   decodeChannelModel,
@@ -20,11 +17,9 @@ import {
   usesWorkflowExecutor,
   workflowResolutionMessage,
 } from "./model-workflow.js";
-import { findChannelConfig, findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
+import { findChannelConfig, findComfyuiEngineTarget, findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
-import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
-import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
-import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
+import type { WorkflowCatalog } from "../engine-contract/workflow-catalog.js";
 import type { BackendEventBus } from "../events.js";
 import {
   resolveCanvasExecutor,
@@ -33,13 +28,13 @@ import {
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { StyleTransferRunner, type StyleTransferParams } from "./style-transfer.js";
 import { commandFingerprint } from "./collaboration.js";
-import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
+import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
 import { CanvasEngineClient, generateImagesOpenAI, importEngineMedia } from "./engine-client.js";
 
-export type { CanvasImageReference } from "@basketikun/media-engine/contracts";
-import type { CanvasImageReference } from "@basketikun/media-engine/contracts";
+export type { CanvasImageReference } from "../engine-contract/contracts.js";
+import type { CanvasImageReference } from "../engine-contract/contracts.js";
 
 export type CanvasImageGenerationInput = {
   projectId?: string;
@@ -111,13 +106,10 @@ export class CanvasImageDispatcher {
   constructor(
     private readonly config: ResolvedConfig,
     private readonly stores: Stores,
-    private readonly comfy: ComfyUiBackend,
     private readonly directImage: DirectImageBackend,
-    private readonly workflows: WorkflowStore,
-    private readonly workflowExecutor: WorkflowExecutor,
+    private readonly workflows: WorkflowCatalog,
     private readonly events?: BackendEventBus,
     /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
-    private readonly runningHub?: RunningHubBackend,
   ) {}
 
   private get logs(): GenerationLogStore {
@@ -549,9 +541,10 @@ export class CanvasImageDispatcher {
       ...(Object.keys(params).length ? { params } : {}),
     };
     // 引擎渠道：这个模型是 media-engine 的模型，执行交给引擎的 /v1/images/generations。
-    // 蒙版编辑与 flux2-klein 仍需要画布侧改图，留在本地执行器。
-    const engineTarget = findEngineChannel(aiConfig, selectedModel);
-    if (engineTarget && !input.maskEdit && !/klein/i.test(model)) {
+    // 蒙版编辑仍需要画布侧改图，留在本地执行器。
+    // comfyui 渠道的模型也交给引擎：画布不再自己跑工作流执行器。
+    const engineTarget = findEngineChannel(aiConfig, selectedModel) ?? findComfyuiEngineTarget(aiConfig, selectedModel);
+    if (engineTarget && !input.maskEdit) {
       return { executor: "engine-image", input: normalized, engine: engineTarget };
     }
     if (usesWorkflowExecutor(aiConfig, selectedModel)) {
@@ -564,17 +557,7 @@ export class CanvasImageDispatcher {
         throw new Error(
           `${workflowResolutionMessage(resolved)}（模型=${input.model}）`,
         );
-      if (resolved.binding.provider === "runninghub") {
-        if (!this.runningHub)
-          throw new Error(
-            `模型「${input.model}」绑定了 RunningHub 工作流，但当前 Backend 未初始化 RunningHub 执行器`,
-          );
-        return {
-          executor: "runninghub-workflow",
-          input: { ...normalized, params: { ...resolved.params, ...params } },
-          runninghubProfileId: resolved.binding.profileId,
-        };
-      }
+      if (resolved.binding.provider === "runninghub") throw new Error("RunningHub 执行已迁移到执行引擎（comfyui2api），画布不再本地跑云端工作流");
       const planInput = {
         ...normalized,
         params: { ...resolved.params, ...this.canvasComfyParams(input), ...params },
@@ -582,7 +565,7 @@ export class CanvasImageDispatcher {
       const workflowConfig = this.workflows.getConfig(resolved.binding.workflow);
       const profileId = workflowConfig?.runningHubProfileId;
       const requestedTarget = input.runTarget ?? workflowConfig?.runTarget ?? "local";
-      const profile = profileId ? this.runningHub?.listWorkflowProfiles().find((item) => item.id === profileId) : undefined;
+      const profile = undefined; // RunningHub 档案与执行都在引擎侧，画布不再本地解析
       if (requestedTarget === "cloud" && !profileId) throw new Error("当前本地工作流没有绑定 RunningHub 工作流");
       if (requestedTarget === "cloud" && !profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
       const localBusy = requestedTarget === "hybrid" && (
@@ -616,13 +599,6 @@ export class CanvasImageDispatcher {
       return { executor, input: normalized };
     }
 
-    const preset = builtinPreset(model);
-    if (executor === "builtin-comfy" && preset) {
-      if (preset === "flux2-klein" && !executionImageInputs(input).length)
-        throw new Error("Flux2-Klein 至少需要一张参考图");
-      return { executor, input: normalized, preset };
-    }
-
     const workflow = builtinWorkflowName(model);
     if (executor === "comfy-workflow" && workflow) {
       const savedParams = this.canvasComfyParams(input);
@@ -649,13 +625,11 @@ export class CanvasImageDispatcher {
     // 保持网页原有批量并发语义，但所有子任务归属同一父任务，取消覆盖整批。
     const results = await Promise.allSettled(Array.from({ length: count }, async (_, index) => {
       const suffix = count > 1 ? `-${index}` : "";
-      const result = plan.executor === "builtin-comfy" && plan.preset
-        ? await this.dispatchBuiltin(plan.input, taskId, plan.preset, suffix)
-        : plan.executor === "runninghub-workflow" && plan.runninghubProfileId
+      const result = (plan.executor === "runninghub-workflow" && plan.runninghubProfileId
           ? await this.dispatchRunningHub(plan.input, taskId, plan.runninghubProfileId, suffix, plan.workflow)
           : plan.executor === "comfy-workflow" && plan.workflow
             ? await this.dispatchWorkflow(plan.input, taskId, plan.workflow, suffix)
-            : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })();
+            : (() => { throw new Error(`画布图片执行计划不完整：${plan.input.model}`); })());
       return result.media.map((media) => ({ ...media, ...(plan.input.imageIds ? { imageId: plan.input.imageIds[index] } : {}) }));
     }));
     const rejected = results.filter((result) => result.status === "rejected");
@@ -795,25 +769,9 @@ export class CanvasImageDispatcher {
         /* 外层任务仍以取消为准 */
       }
       try {
-        this.workflowExecutor.cancel(childId);
-      } catch {
-        /* 子任务可能尚未创建 */
-      }
-      try {
-        this.comfy.cancel(childId);
-      } catch {
-        /* 子任务可能已经结束 */
-      }
-      try {
         this.styleTransfer.cancel(childId);
       } catch {
         /* 进程可能已经结束 */
-      }
-      try {
-        // RunningHub 子任务是远端任务，必须显式取消，否则云端仍会跑完并计费。
-        this.runningHub?.cancel(childId);
-      } catch {
-        /* 子任务可能已经结束 */
       }
     }
     const task = this.stores.tasks.get(id);
@@ -831,113 +789,16 @@ export class CanvasImageDispatcher {
     return updated;
   }
 
-  private async dispatchBuiltin(
-    input: CanvasImageGenerationInput,
-    taskId: string,
-    preset: string,
-    suffix = "",
-  ) {
-    const references = await Promise.all(
-      executionImageInputs(input).map(async (reference) =>
-        this.materializeReference(await this.modelReference(reference, taskId)),
-      ),
-    );
-    const childTaskId = `comfy-child-${taskId}${suffix}`;
-    this.assertNotCancelled(taskId);
-    this.trackChild(taskId, childTaskId);
-    try {
-    const task = await this.comfy.run(
-      preset,
-      {
-        prompt: input.prompt,
-        references: references.map((reference) => reference.filePath),
-      },
-      {
-        width: input.width,
-        height: input.height,
-        size: input.size,
-        ...(input.params || {}),
-        parentTaskId: taskId,
-        projectId: input.projectId,
-        nodeId: input.nodeId,
-        model: input.model,
-      },
-      undefined,
-      childTaskId,
-    );
-      const completed = await waitForTask(this.stores.tasks, task.id);
-      return { taskId, media: mediaFromTask(completed) };
-    } finally {
-      this.untrackChild(taskId, childTaskId);
-    }
-  }
-
   private async dispatchWorkflow(
     input: CanvasImageGenerationInput,
     taskId: string,
     workflowName: string,
     suffix = "",
-  ) {
-    const detail = await this.workflows.get(workflowName);
-    if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
-    const fields = detail.config?.fields || [];
-    const { fieldValues, dimensions, expectedRatio } = imageWorkflowFieldValues(input, fields, input.params || {});
-    // Prompt is optional at the workflow level. Only an explicitly mapped prompt
-    // field consumes input.prompt; image/parameter-only flows may carry a leftover prompt.
-    for (const field of fields.filter((field) => ["aspect_ratio", "width", "height"].includes(field.input))) {
-      if (fieldValues[field.id] === undefined) continue;
-      for (const nodeId of field.node.split(",")) {
-        const node = detail.workflow[nodeId.trim()] as { inputs?: Record<string, unknown> } | undefined;
-        if (!node?.inputs || !(field.input in node.inputs)) throw new Error(`工作流尺寸字段「${field.name || field.input}」未连接到真实节点输入 ${nodeId}.${field.input}`);
-      }
-    }
-
-    const capability = workflowImageInputs(detail.workflow, fields, detail.config?.outputNodes);
-    const imageFields = capability.fields;
-    const references = executionImageInputs(input);
-    if (references.length > imageFields.length) {
-      throw new Error(`工作流「${workflowName}」只有 ${imageFields.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请减少参考输入或更换工作流`);
-    }
-    if (!capability.counts.includes(references.length)) {
-      throw new Error(`工作流「${workflowName}」不支持 ${references.length} 张参考图；可用输入张数：${capability.counts.join('、') || '无'}，未提交生成任务`);
-    }
-    for (let index = 0; index < imageFields.length; index++) {
-      const field = imageFields[index];
-      const reference = references[index];
-      fieldValues[field.id] = reference
-        ? await this.referenceDataUrl(await this.modelReference(reference, taskId))
-        : null;
-    }
-
-    const workflow =
-      input.maskEdit && references.length >= 2
-        ? maskReferenceWorkflow(detail.workflow, imageFields[1]?.node) || detail.workflow
-        : detail.workflow;
-    const executableWorkflow = adaptFlux2KleinWorkflow(workflow, input.model);
-
-    const childTaskId = `workflow-child-${taskId}${suffix}`;
-    this.assertNotCancelled(taskId);
-    this.trackChild(taskId, childTaskId);
-    try {
-      const result = await this.workflowExecutor.run(
-        executableWorkflow,
-        detail.config || emptyWorkflowConfig(workflowName),
-        fieldValues,
-        crypto.randomUUID(),
-        undefined,
-        workflowName,
-        childTaskId,
-        input.projectId,
-        input.nodeId,
-        taskId,
-      );
-      return { taskId, media: result.media };
-    } finally {
-      this.untrackChild(taskId, childTaskId);
-    }
+  ): Promise<{ media: Array<{ url: string; mimeType: string } & Record<string, unknown>> }> {
+    void input; void taskId; void workflowName; void suffix;
+    throw new Error("画布本地工作流模型已下线：请改用执行引擎（engine-local）里的同名模型");
   }
 
-  /** 引擎路径：画布只发协议请求，能力（字段、图片槽位）由 `/v1/models/{id}` 提供。 */
   private async dispatchEngineImage(
     input: CanvasImageGenerationInput,
     taskId: string,
@@ -991,55 +852,16 @@ export class CanvasImageDispatcher {
     }
   }
 
-  /**
-   * RunningHub 图片：档案自带字段映射，这里只把画布输入翻译成平台输入。
-   * 平台调用、任务状态、媒体归档都由 RunningHubBackend 负责，本方法不碰 HTTP。
-   */
+  /** RunningHub 图片执行已迁移到执行引擎；画布只保留编排，不再直连云端。 */
   private async dispatchRunningHub(
     input: CanvasImageGenerationInput,
     taskId: string,
     profileId: string,
     suffix = "",
     workflowName?: string,
-  ) {
-    const runningHub = this.runningHub;
-    if (!runningHub) throw new Error("Backend 未初始化 RunningHub 执行器，无法运行绑定的 RunningHub 工作流");
-    const references = executionImageInputs(input);
-    const localConfig = workflowName ? this.workflows.getConfig(workflowName) : null;
-    const localFields = localConfig?.fields || [];
-    const { fieldValues: localValues } = imageWorkflowFieldValues(input, localFields, input.params || {});
-    const profile = runningHub.listWorkflowProfiles().find((item) => item.id === profileId);
-    if (!profile) throw new Error("绑定的 RunningHub 工作流档案不存在，请重新绑定");
-    const values = workflowName
-      ? bridgeLocalWorkflowValues(profile.fields || [], localFields, localValues)
-      : localValues;
-    const childTaskId = `runninghub-child-${taskId}${suffix}`;
-    this.assertNotCancelled(taskId);
-    this.trackChild(taskId, childTaskId);
-    try {
-      const task = await runningHub.runWorkflow(
-        profileId,
-        {
-          prompt: input.prompt,
-          references: await Promise.all(references.map(async (reference) => this.stores.media.url(await this.materializeReference(await this.modelReference(reference, taskId))))),
-        },
-        values,
-        {
-          parentTaskId: taskId,
-          projectId: input.projectId,
-          nodeId: input.nodeId,
-          model: input.model,
-          ...(input.width && input.height ? { width: input.width, height: input.height } : {}),
-          ...(input.size ? { size: input.size } : {}),
-          ...(input.count ? { count: input.count } : {}),
-        },
-        childTaskId,
-      );
-      const completed = await waitForTask(this.stores.tasks, task.id);
-      return { taskId, media: mediaFromTask(completed) };
-    } finally {
-      this.untrackChild(taskId, childTaskId);
-    }
+  ): Promise<{ media: Array<{ url: string; mimeType: string } & Record<string, unknown>> }> {
+    void input; void taskId; void profileId; void suffix; void workflowName;
+    throw new Error("RunningHub 执行已迁移到执行引擎（comfyui2api），画布不再本地跑云端工作流");
   }
 
   private async referenceDataUrl(reference: CanvasImageReference) {
@@ -1200,15 +1022,6 @@ function configuredProvider(
   return baseUrl || apiKey ? { baseUrl, apiKey } : undefined;
 }
 
-function builtinPreset(model: string) {
-  const value = modelOptionName(model)
-    .trim()
-    .toLowerCase()
-    .replace(/\.json$/, "");
-  if (value === "z-image") return "z-image";
-  if (value === "flux2-klein") return "flux2-klein";
-  return "";
-}
 
 /**
  * 蒙版局部修改的工作流改写：只在能确认「蒙版图片接入了活动图像分支」时改写图，

@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
 
 import type { CanvasProject, RuntimeTask } from "../db.js";
-import type { DirectAudioBackend, DirectAudioInput } from "@basketikun/media-engine/runtime/direct-audio";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
+import type { DirectAudioBackend, DirectAudioInput } from "../engine-contract/direct-audio.js";
 import type { Stores } from "../stores/types.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
+import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasAudioGenerationInput = DirectAudioInput & {
@@ -22,12 +21,13 @@ export type CanvasAudioGenerationInput = DirectAudioInput & {
 export class CanvasAudioDispatcher {
     private readonly children = new Map<string, string>();
 
-    constructor(private readonly stores: Stores, private readonly directAudio?: DirectAudioBackend, private readonly comfy?: ComfyUiBackend) {}
+    constructor(private readonly stores: Stores, private readonly directAudio?: DirectAudioBackend) {}
 
     start(raw: CanvasAudioGenerationInput) {
         let input = normalize(raw);
         const executor = input.executor || "direct-audio";
-        if (executor === "comfyui" ? !this.comfy : !this.directAudio) throw new Error(executor === "comfyui" ? "Backend ComfyUI 执行器未初始化" : "Backend 直连音频执行器未初始化");
+        if (executor === "comfyui") throw new Error("本地 ComfyUI 音频执行已下线：请改用执行引擎的音频模型");
+        if (!this.directAudio) throw new Error("Backend 直连音频执行器未初始化");
         const taskId = input.clientTaskId || `canvas-audio-${crypto.randomUUID()}`;
         const existing = this.stores.tasks.get(taskId);
         if (existing) return { taskId: existing.id, executor };
@@ -98,7 +98,7 @@ export class CanvasAudioDispatcher {
         const task = this.stores.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
         const child = this.children.get(id);
-        if (child) try { task.executor === "comfyui" ? this.comfy?.cancel(child) : this.directAudio?.cancel(child); } catch {}
+        if (child) try { if (task.executor !== "comfyui") this.directAudio?.cancel(child); } catch {}
         const cancelled = this.stores.tasks.cancel(id);
         const input = task.input as CanvasAudioGenerationInput;
         const log = this.stores.logs.list({ runtimeTaskId: id, limit: 1 })[0];
@@ -112,10 +112,8 @@ export class CanvasAudioDispatcher {
         const childId = `audio-child-${task.id}`;
         this.children.set(task.id, childId);
         try {
-            const comfy = input.executor === "comfyui" ? comfyAudioRequest(input) : null;
-            const child = comfy
-                ? await this.comfy!.run(comfy.preset, comfy.input, comfy.params, undefined, childId)
-                : this.directAudio!.run(input, childId, { parentTaskId: task.id, channelId: input.channelId });
+            if (input.executor === "comfyui") throw new Error("本地 ComfyUI 音频执行已下线：请改用执行引擎的音频模型");
+            const child = this.directAudio!.run(input, childId, { parentTaskId: task.id, channelId: input.channelId });
             for (;;) {
                 const current = this.stores.tasks.get(child.id);
                 if (!current) throw new Error("音频子任务不存在");

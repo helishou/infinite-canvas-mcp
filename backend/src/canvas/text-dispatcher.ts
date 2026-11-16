@@ -10,7 +10,7 @@ import type { Stores } from "../stores/types.js";
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
-import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
+import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import type { CanvasOperation } from "./project-ops.js";
 
 export type CanvasTextReference = {

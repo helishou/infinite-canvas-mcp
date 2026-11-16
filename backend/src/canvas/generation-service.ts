@@ -4,9 +4,6 @@ import { inputHash } from '../drama/canvas-inputs.js';
 import type { CanvasGenerationCommand, CanvasLoopPrepare } from "@basketikun/canvas-agent/generation-contract";
 import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
-import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
-import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
 import type { BackendDatabase } from "../db.js";
 import { resolveProjectArtProfile } from "../drama/art-style.js";
@@ -35,6 +32,8 @@ import { productionImageInput } from "@basketikun/canvas-agent/reference-contrac
  * 在这里收口。新增能力应注册到 executor-registry 并在本服务增加一次执行器
  * 适配，不再给每个入口各写一套分支。
  */
+import { CanvasH3Runner } from "./h3-runner.js";
+
 export class CanvasGenerationService {
     private productionObserver?: {
         prepare(command: CanvasGenerationCommand): { command: CanvasGenerationCommand; context?: unknown; executionProject?: CanvasProject; executionDefaults?: Record<string, unknown> };
@@ -43,13 +42,12 @@ export class CanvasGenerationService {
     observeProduction(observer: NonNullable<CanvasGenerationService["productionObserver"]>) { this.productionObserver = observer; }
     constructor(
         private readonly image: CanvasImageDispatcher,
-        private readonly h3: CanvasH3Runner,
         private readonly stores: Stores,
         private readonly events: BackendEventBus,
-        private readonly comfy: ComfyUiBackend,
-        private readonly runningHub: RunningHubBackend,
         private readonly text?: CanvasTextDispatcher,
         private readonly video?: CanvasVideoDispatcher,
+        /** H3 节点执行器：只剩「自选视频模型」分支（引擎 H3 展开流）。 */
+        private readonly h3?: CanvasH3Runner,
         private readonly audio?: CanvasAudioDispatcher,
         private readonly browserScript?: CanvasBrowserScriptDispatcher,
         /** 剧目级设置（画风）解析用；未注入时按无画风处理，行为与旧版一致。 */
@@ -73,10 +71,10 @@ export class CanvasGenerationService {
             if (active) throw Object.assign(new Error(`图片目标正在由任务 ${active.id} 生成，请使用原任务入口`), { code: "TARGET_OCCUPIED", taskId: active.id });
         }
         const executionProject = options?.executionProject || (prepared as any).executionProject;
-        const result = executionProject && prepared.command.operation === "h3-run"
-            ? { task: this.h3.startFrozen(prepared.command as any, command.idempotencyKey || command.clientTaskId, executionProject, options?.executionDefaults || (prepared as any).executionDefaults || {}), executor: "h3" }
-            : await this.dispatch(prepared.command);
-        const taskId = "taskId" in result ? result.taskId : result.task.id;
+        const result = (await this.dispatch(prepared.command)) as { task?: { id: string }; taskId?: string } | undefined;
+        if (!result) throw new Error("画布生成没有返回任务");
+        const taskId = result.taskId ?? result.task?.id;
+        if (!taskId) throw new Error("画布生成没有返回任务 ID");
         if (prepared.context) this.productionObserver?.submitted(taskId, prepared.context);
         return { ...result, taskId };
     }
@@ -128,14 +126,12 @@ export class CanvasGenerationService {
     }
 
     previewH3(command: CanvasGenerationCommand) {
-        if (command.inputBasis === "published") {
-            const prepared = this.productionObserver?.prepare(command);
-            if (prepared?.executionProject) return this.h3.previewFrozen(prepared.command as any, prepared.executionProject, prepared.executionDefaults || {});
-        }
-        return this.h3.preview(command as Parameters<CanvasH3Runner['preview']>[0]);
+        if (!this.h3) throw new Error("H3 执行器未初始化");
+        return this.h3.preview(command as Parameters<CanvasH3Runner["preview"]>[0]);
     }
 
     private startH3(command: CanvasGenerationCommand) {
+        if (!this.h3) throw new Error("H3 执行器未初始化");
         if (!command.projectId || (!command.nodeId && !command.nodeIds?.length)) throw new Error("H3 生成缺少 projectId 或节点 ID");
         const task = this.h3.start({
             projectId: command.projectId,
@@ -150,7 +146,7 @@ export class CanvasGenerationService {
             ...(command.expectedPlanHash ? { expectedPlanHash: command.expectedPlanHash } : {}),
             ...(command.params ? { params: command.params } : {}),
         }, command.idempotencyKey || command.clientTaskId);
-        return { task, taskId: task.id, executor: "h3" };
+        return { task, taskId: task.id, executor: "h3" as const };
     }
 
     private startImage(command: CanvasGenerationCommand) {
@@ -300,8 +296,7 @@ export class CanvasGenerationService {
         const onCreated = binding && binding.bindOnStart !== false
             ? (created: RuntimeTask) => bindCanvasTask(this.stores, binding, created.id)
             : undefined;
-        const task = await this.comfy.run(command.preset || "minimax-h3", command.input || {}, params, command.comfyUrl, clientTaskId, onCreated);
-        return { ok: true, task, taskId: task.id, executor };
+        throw new Error("本地 ComfyUI 预设执行已下线：请改用执行引擎提供的模型");
     }
 
     private startAudio(command: CanvasGenerationCommand) {

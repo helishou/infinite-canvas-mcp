@@ -10,14 +10,12 @@ import { BackendDatabase } from "./db.js";
 import { registerBackendErrorHandler, setSelectionRealtime, startServer } from "./server.js";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
-import { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
-import { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import { H3ExecutionQueue } from "@basketikun/media-engine/runtime/h3-queue";
-import { holdUnknownSubmission, submissionDecision, submissionDiagnostic } from "@basketikun/media-engine/runtime/submission-outcome";
-import { VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
+import { holdUnknownSubmission, submissionDecision, submissionDiagnostic } from "./engine-contract/submission-outcome.js";
+import { VideoConcatBackend } from "./engine-contract/video-concat.js";
 import { SubtitleTranscribeBackend } from "./runtime/subtitle-transcribe.js";
 import { registerSubtitleTranscribeRoutes } from "./server/subtitle-transcribe-routes.js";
 import { registerAudioTranscribeRoutes } from "./server/audio-transcribe-routes.js";
@@ -25,28 +23,27 @@ import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
 import { HermesAgent, isHermesThread } from "@basketikun/canvas-agent/agent/hermes-agent";
 import { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
-import { WorkflowStore, setDrama3VoiceOptions } from "@basketikun/media-engine/workflows/store";
-import { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
+import { engineTargets, probeEngineTarget, WorkflowCatalog } from "./engine-contract/workflow-catalog.js";
 import { WorkflowModelCatalog } from "./workflows/model-catalog.js";
 import { registerWorkflowRoutes } from "./workflows/routes.js";
 import { registerBackendMcpHttpRoutes, startBackendMcpServer } from "./mcp.js";
-import { DirectImageBackend } from "@basketikun/media-engine/runtime/chatgpt-image";
+import { DirectImageBackend } from "./engine-contract/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
-import { boundH3ParentTaskIds, CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
-import { DirectVideoBackend } from "@basketikun/media-engine/runtime/direct-video";
-import { DirectAudioBackend } from "@basketikun/media-engine/runtime/direct-audio";
+import { DirectVideoBackend } from "./engine-contract/direct-video.js";
+import { DirectAudioBackend } from "./engine-contract/direct-audio.js";
 import { CanvasAudioDispatcher } from "./canvas/audio-dispatcher.js";
+import { CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CANVAS_BROWSER_TASK_KIND, CanvasBrowserScriptDispatcher } from "./canvas/browser-script-dispatcher.js";
 import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-routes.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
 import { CanvasReferenceService } from "./canvas/reference-service.js";
 import { createDevReloadGate } from "./runtime/dev-reload.js";
-import { startRuntimeMonitor } from "@basketikun/media-engine/runtime/slow-operation";
+import { startRuntimeMonitor } from "./engine-contract/slow-operation.js";
 import { registerCanvasCollaborationRoutes } from "./server/canvas-collaboration-routes.js";
 import { registerCanvasReferenceRoutes } from "./server/canvas-reference-routes.js";
 import { EpisodeProductionService } from "./drama/production.js";
@@ -96,28 +93,8 @@ async function startBackendHttpServer() {
     await writeBackH3Task(stores, events, task);
   };
   const h3Queue = new H3ExecutionQueue(stores.tasks, stores.settings, true);
-  const comfy = new ComfyUiBackend({
-    tasks: stores.tasks,
-    settings: stores.settings,
-    media: stores.media,
-    events,
-    onTaskTerminal: writeBackStandaloneH3Task,
-    h3Queue,
-  });
-  const runtime = createBackendRuntimeContext({ db, stores, comfy, events });
+  const runtime = createBackendRuntimeContext({ db, stores, events });
 
-  // 画布的音色下拉跟着 ComfyUI 里真实存在的 Drama3 档案走：新建一个 session 就自动可选。
-  const refreshDrama3Voices = async () => {
-    try {
-      const response = await fetch(`${runtime.comfy.getUrl()}/object_info/T8DramaLoadSession`);
-      const body = (await response.json()) as Record<string, any>;
-      const options = body?.T8DramaLoadSession?.input?.required?.session_file?.[1]?.options;
-      if (Array.isArray(options)) setDrama3VoiceOptions(options as string[]);
-    } catch { /* ComfyUI 不在线时保留上一次的列表 */ }
-  };
-  void refreshDrama3Voices();
-  setInterval(() => void refreshDrama3Voices(), 5 * 60 * 1000).unref?.();
-  const runningHub = new RunningHubBackend(runtime.tasks, runtime.stores.settings, runtime.events, runtime.media, h3Queue);
   const videoConcat = new VideoConcatBackend(
     runtime.tasks,
     undefined,
@@ -127,21 +104,18 @@ async function startBackendHttpServer() {
   const subtitleTranscriber = new SubtitleTranscribeBackend(runtime.tasks, runtime.media, runtime.events);
 
   // Workflow import routes
-  const workflowStore = new WorkflowStore(db);
+  const workflowStore = new WorkflowCatalog(() => engineTargets(runtime.stores.settings.get("ai.config")));
+  void workflowStore.refresh().catch(() => {});
   const workflowModels = new WorkflowModelCatalog(
     workflowStore,
     stores.settings,
   );
-  await workflowModels.syncStoredConfig();
+  await workflowModels.syncStoredConfig().catch((error) => {
+    logger.warn("工作流模型目录启动同步失败，稍后自动重试", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   markStartupStage("executorsAndWorkflowCatalog");
-  const workflowExecutor = new WorkflowExecutor(
-    runtime.comfy,
-    runtime.stores.tasks,
-    runtime.stores.media,
-    runtime.events,
-    db,
-    config.url,
-  );
   const directImage = new DirectImageBackend(
     runtime.stores.tasks,
     runtime.stores.media,
@@ -150,35 +124,25 @@ async function startBackendHttpServer() {
   const canvasImageDispatcher = new CanvasImageDispatcher(
     config,
     runtime.stores,
-    runtime.comfy,
     directImage,
     workflowStore,
-    workflowExecutor,
     runtime.events,
-    runningHub,
   );
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub);
-  const canvasH3Runner = new CanvasH3Runner(
-    runtime.stores,
-    runtime.events,
-    runtime.comfy,
-    runningHub,
-    canvasVideoDispatcher,
-  );
+  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, workflowStore, videoConcat, directVideo);
   const directAudio = new DirectAudioBackend(runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio, runtime.comfy);
+  const canvasAudioDispatcher = new CanvasAudioDispatcher(runtime.stores, directAudio);
   const canvasBrowserScriptDispatcher = new CanvasBrowserScriptDispatcher(runtime.stores, runtime.events, canvasTextDispatcher);
+  // H3 节点只剩「自选视频模型」链路；具体跑本地还是 RunningHub 由引擎侧工作流参数决定。
+  const canvasH3Runner = new CanvasH3Runner(runtime.stores, runtime.events, canvasVideoDispatcher);
   const canvasGeneration = new CanvasGenerationService(
     canvasImageDispatcher,
-    canvasH3Runner,
     runtime.stores,
     runtime.events,
-    runtime.comfy,
-    runningHub,
     canvasTextDispatcher,
     canvasVideoDispatcher,
+    canvasH3Runner,
     canvasAudioDispatcher,
     canvasBrowserScriptDispatcher,
     runtime.db,
@@ -188,10 +152,11 @@ async function startBackendHttpServer() {
   const devActiveTask = devReload ? db.db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running','awaiting_confirmation') LIMIT 1") : null;
   const { app, drainHttpConnections } = startServer(runtime.db, config, {
     devReloadMiddleware: devReload?.middleware,
-    comfy: runtime.comfy,
     events: runtime.events,
     stores: runtime.stores,
-    resolveH3Confirmation: (id, action) => canvasH3Runner.resolveConfirmation(id, action),
+    resolveH3Confirmation: () => {
+      throw new Error("H3 生成已迁移到执行引擎");
+    },
     cancelTask: (task) => {
       if (task.kind === "canvas-image")
         return canvasImageDispatcher.cancel(task.id);
@@ -203,15 +168,12 @@ async function startBackendHttpServer() {
         return canvasAudioDispatcher.cancel(task.id);
       if (task.kind === CANVAS_BROWSER_TASK_KIND)
         return canvasBrowserScriptDispatcher.cancel(task.id);
-      if (task.kind === "canvas-h3-run") return canvasH3Runner.cancel(task.id);
-      if (task.kind.startsWith("comfyui:"))
-        return runtime.comfy.cancel(task.id);
+      if (task.kind === "canvas-h3-run") throw new Error("H3 任务已迁移到执行引擎");
       if (task.kind.startsWith("runninghub:"))
-        return runningHub.cancel(task.id);
+        throw new Error("RunningHub 任务已迁移到执行引擎，请在引擎里取消");
       if (task.kind === "video-concat" || task.kind === "video-trim" || task.kind === "video-audio-extract") return videoConcat.cancel(task.id);
       if (task.kind === "direct-video") return directVideo.cancel(task.id);
       if (task.kind === "direct-audio") return directAudio.cancel(task.id);
-      if (task.kind === "workflow") return workflowExecutor.cancel(task.id);
       if (task.kind.startsWith("image:")) return directImage.cancel(task.id);
       throw new Error(`任务类型 ${task.kind} 没有注册取消执行器`);
     },
@@ -225,17 +187,8 @@ async function startBackendHttpServer() {
       const clientTaskId = `retry-${crypto.randomUUID()}`;
       const params = { ...task.params, parentTaskId: task.id };
       if (task.kind.startsWith("comfyui:"))
-        return runtime.comfy.run(
-          task.kind.slice("comfyui:".length),
-          task.input,
-          params,
-          undefined,
-          clientTaskId,
-        );
-      if (task.kind === "runninghub:workflow")
-        return runningHub.runWorkflow(String(task.params.runninghubProfileId || ""), task.input, task.params.runninghubParams && typeof task.params.runninghubParams === "object" ? task.params.runninghubParams as Record<string, unknown> : {}, params, clientTaskId);
-      if (task.kind === "direct-video") return directVideo.retry(task);
-      if (task.kind === "direct-audio") return directAudio.retry(task);
+        throw new Error("本地 ComfyUI 预设执行已下线：请改用执行引擎的模型");
+      if (task.kind === "runninghub:workflow") throw new Error("RunningHub 执行已迁移到执行引擎（comfyui2api）");
       throw new Error(`任务类型 ${task.kind} 没有注册重试执行器`);
     },
     prepareAiConfig: async (value) =>
@@ -243,13 +196,18 @@ async function startBackendHttpServer() {
   });
   registerComfyRoutes(
     { app, stores: runtime.stores, config, events: runtime.events },
-    runtime.comfy,
   );
+  // 画布工作流页已下线：前端只跳转到引擎控制台，地址由这里给，避免写死。
+  app.get("/api/engine/console", async (_req, res) => {
+    const target = await probeEngineTarget(
+      engineTargets(runtime.stores.settings.get("ai.config")),
+    );
+    const url = target ? `${target.baseUrl.replace(/\/v1$/i, "")}/` : "";
+    res.json({ ok: Boolean(url), url });
+  });
   registerWorkflowRoutes(
     app,
     workflowStore,
-    workflowExecutor,
-    runtime.comfy,
     async (name) => {
       const result = await workflowModels.exposeImportedWorkflow(name);
       if (result.changed)
@@ -341,7 +299,6 @@ async function startBackendHttpServer() {
   registerAgentRuntimeRoutes(
     app,
     runtime.stores,
-    runningHub,
     videoConcat,
     runtime.events,
   );
@@ -355,7 +312,6 @@ async function startBackendHttpServer() {
       events: runtime.events,
       basePath: "/agent",
     },
-    runtime.comfy,
   );
   const agent = createAgentRuntime({
     backendUrl: config.url,
@@ -375,18 +331,9 @@ async function startBackendHttpServer() {
   markStartupStage("routesAndAgent");
   // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
   // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
-  const recoveryTasks = db.listStartupRecoveryTasks([...boundH3ParentTaskIds(stores.projects.list())], 10);
+  const recoveryTasks = db.listStartupRecoveryTasks([], 10);
   markStartupStage("recoverySelection");
   for (const task of recoveryTasks) {
-    if (task.kind === "canvas-h3-run" && ["succeeded", "failed", "cancelled"].includes(task.status)) {
-      void canvasH3Runner.reconcileTerminal(task).catch((error) =>
-        logger.warn("H3 终态节点回写修复失败", {
-          taskId: task.id,
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      continue;
-    }
     const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
     const pendingLog = binding?.generationLogId ? stores.logs.get(binding.generationLogId) : null;
     if (task.kind === "comfyui:minimax-h3"
@@ -432,15 +379,6 @@ async function startBackendHttpServer() {
       task.kind === "direct-audio"
     )
       directAudio.resume(task.id);
-    if (task.kind === "canvas-h3-run")
-      canvasH3Runner.resume(task);
-    if (
-      ["queued", "running"].includes(task.status) &&
-      task.kind.startsWith("comfyui:")
-    )
-      runtime.comfy.resume(task.id);
-    if (["queued", "running"].includes(task.status) && task.kind.startsWith("runninghub:"))
-      runningHub.resume(task.id);
   }
   // ── 孤儿任务回收（防僵尸堆积）───────────────────────────────────
   // backend 重启（tsx --watch 源码热更、崩溃等）会杀掉内存中的执行循环，遗留

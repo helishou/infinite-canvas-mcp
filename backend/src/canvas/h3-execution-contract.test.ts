@@ -8,13 +8,30 @@ import { resolveH3Runtime, estimateH3Dimensions, h3StoryboardIssues } from "@bas
 import { assertH3WorkflowContract, compareH3MediaSpecification } from '@basketikun/media-engine/canvas/h3-execution-contract';
 import { resolveNanFengWorkflowParams } from '@basketikun/media-engine/comfyui/bridge';
 
+/** H3 只走「自选视频模型」：测试用假视频调度器代替真实的引擎渠道客户端。 */
+function fakeVideoDispatcher(stores: ReturnType<typeof createStores>, behavior: (request: any, bind: any) => any = () => undefined) {
+    return {
+        start(request: any, bind?: (task: any) => void) {
+            const id = String(request?.clientTaskId || `video-${Math.random().toString(16).slice(2, 8)}`);
+            const existing = stores.tasks.get(id);
+            const task = existing || stores.tasks.create(id, "canvas-video", { model: request?.model }, {});
+            bind?.(task);
+            void behavior(request, task);
+            return { taskId: task.id };
+        },
+        generationSettings() { return {}; },
+        resume() { /* 无需恢复 */ },
+        cancel() { /* 无需取消 */ },
+    };
+}
+
 function fixture(t: test.TestContext, manualClip: Record<string, unknown> = {}) {
     const db = new BackendDatabase(':memory:');
     t.after(() => db.close());
     const stores = createStores(db);
     stores.projects.create({ id: 'p', nodes: [{ id: 'n', type: 'minimax-h3', metadata: { sampler: 'res_multistep', segments: [{ id: 'a', mode: 't2v', prompt: '完整对白和动作', aspectRatio: '9:16', h3ParameterPolicy: 'defaults', ...manualClip }, { id: 'b', mode: 't2v', prompt: '下一段', aspectRatio: '9:16', h3ParameterPolicy: 'defaults' }] } }], connections: [] });
     stores.settings.set('plugin:minimax-h3:defaults:v1', { sampler: 'er_sde', megapixels: 0.6, loraSlots: [{ name: 'turbo', strength: 0.75, enabled: true }] });
-    return { db, stores, runner: new CanvasH3Runner(stores, new BackendEventBus(), {} as never, {} as never) };
+    return { db, stores, runner: new CanvasH3Runner(stores, new BackendEventBus(), fakeVideoDispatcher(stores) as never) };
 }
 
 test('defaults policy ignores stale generation overrides but preserves planned aspect, duration and boundaries', () => {
@@ -102,16 +119,17 @@ test('every canvas submission rejects hidden parameter overrides and accepts sav
     for (const manualClip of [{}, { directorEngine: 'acheng' }]) {
         const { stores, runner } = fixture(t, manualClip);
         const input = { projectId: 'p', nodeId: 'n', segmentId: 'a', skipCompleted: false };
-        for (const params of [{ megapixels: 0.8 }, { steps: 12 }, { sampler: 'euler' },
-            { loraSlots: [{ name: 'other', strength: 0.5, enabled: true }] }, { latentUpscaleEnabled: true }]) {
+        // 自选模型执行链下，采样器/LoRA/潜空间放大这些 H3 原生参数不再参与执行，
+        // 真正还会改变画面的参数（时长/模式/自选模型）仍要与 Clip 保存值一致。
+        for (const params of [{ duration: 3 }, { mode: 'i2v' }, { selectedVideoModel: 'engine-local::别的模型' }]) {
             const preview = runner.preview({ ...input, params });
-            assert.equal(preview.ready, false);
-            assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH'));
+            assert.equal(preview.ready, false, JSON.stringify(params));
+            assert.ok(preview.diagnostics.some(issue => issue.code === 'H3_UI_PARAMETER_MISMATCH'), JSON.stringify(params));
             assert.throws(() => runner.start({ ...input, params }), /必须与 Clip 保存值一致/);
         }
         assert.equal(stores.tasks.list().length, 0);
-        assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }), /必须与 Clip 保存值一致/);
-        assert.throws(() => runner.startFrozen({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { megapixels: 0.8 } }, 'frozen-hidden-override', stores.projects.get('p')!, stores.settings.get('plugin:minimax-h3:defaults:v1') as Record<string, unknown>), /必须与 Clip 保存值一致/);
+        assert.throws(() => runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { duration: 3 } }), /必须与 Clip 保存值一致/);
+        assert.throws(() => runner.startFrozen({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false, params: { duration: 3 } }, 'frozen-hidden-override', stores.projects.get('p')!, stores.settings.get('plugin:minimax-h3:defaults:v1') as Record<string, unknown>), /必须与 Clip 保存值一致/);
         // The rejected submissions must not have written the override back onto the Clip.
         assert.equal(((stores.projects.get('p')!.nodes as any[])[0].metadata.segments[0]).megapixels, undefined);
         stores.projects.applyOperations('p', undefined, [{ type: 'update_h3_segment', nodeId: 'n', segmentId: 'a', patch: { megapixels: 0.8, videoSteps: 12, sampler: 'euler' } }]);
@@ -239,17 +257,17 @@ test('a frozen batch keeps its default snapshot after a settings update; a speci
     const submitted: Record<string, unknown>[] = [];
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const comfy = { async run(_preset: string, input: any, params: any, _url: any, id: string, created: any) {
-        const child = stores.tasks.create(id, 'comfyui:minimax-h3', input, params);
-        submitted.push(params); created(child);
+    const dispatcher = fakeVideoDispatcher(stores, async (request: any, child: any) => {
+        submitted.push((request?.params ?? {}) as Record<string, unknown>);
         await gate;
-        return stores.tasks.update(id, { status: 'failed', error: 'wrong orientation', result: { media: [{ url: '/media/wrong', storageKey: 'wrong', mimeType: 'video/mp4' }], specification: { status: 'mismatch' } } });
-    } };
-    const runner = new CanvasH3Runner(stores, new BackendEventBus(), comfy as never, { ready: () => false, queue: { select: () => 'local', unreserve() {} } } as never);
+        stores.tasks.update(child.id, { status: 'failed', error: 'wrong orientation', result: { media: [{ url: '/media/wrong', storageKey: 'wrong', mimeType: 'video/mp4' }], specification: { status: 'mismatch' } } });
+    });
+    const runner = new CanvasH3Runner(stores, new BackendEventBus(), dispatcher as never);
     const parent = runner.start({ projectId: 'p', nodeId: 'n', runFromCurrent: true, skipCompleted: false });
     for (let i = 0; i < 50 && submitted.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 5));
     stores.settings.set('plugin:minimax-h3:defaults:v1', { sampler: 'euler' });
-    assert.equal(submitted[0].sampler, 'er_sde');
+    // 原生采样器不再进入执行请求；冻结快照仍要保留当时的默认值
+    assert.equal(((stores.tasks.get(parent.id)!.input.runPlan as any).defaults.sampler), 'er_sde');
     assert.equal((stores.tasks.get(parent.id)!.input.runPlan as any).defaults.sampler, 'er_sde');
     release();
     for (let i = 0; i < 50 && stores.tasks.get(parent.id)!.status !== 'failed'; i++) await new Promise(resolve => setTimeout(resolve, 5));
@@ -263,20 +281,8 @@ test('a frozen batch keeps its default snapshot after a settings update; a speci
     assert.equal(projectSegments[1].status, 'error');
 });
 
-test("outgoing motion flags form a complete latent chain including the closing Clip without creating tasks", t => {
-    const { stores, runner } = fixture(t);
-    stores.projects.applyOperations("p", undefined, [
-        { type: "update_h3_segment", nodeId: "n", segmentId: "a", patch: { motionContextEnabled: true } },
-        { type: "update_h3_segment", nodeId: "n", segmentId: "b", patch: { motionContextEnabled: true } },
-        { type: "add_h3_segment", nodeId: "n", segment: { id: "c", prompt: "The bell stops.", motionContextEnabled: false } },
-    ]);
-    const input = { projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: false };
-    const before = JSON.stringify(stores.projects.get("p"));
-    const plans = (runner as any).plansFor(input);
-    assert.deepEqual(plans.map((plan: any) => plan.continuation?.index), [1, 2, 3]);
-    assert.equal(new Set(plans.map((plan: any) => plan.continuation?.group)).size, 1);
-    assert.equal(stores.tasks.list().length, 0); assert.equal(JSON.stringify(stores.projects.get("p")), before);
-});
+// 原生 H3 的潜空间续写链已移除（H3 只走自选视频模型，Clip 之间不再继承潜变量），
+// 相关断言随能力一起删除。
 
 test("自选视频模型忽略保存的 H3 续写与二采开关，也不进入潜空间连续组", t => {
     const { stores, runner } = fixture(t);

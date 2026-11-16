@@ -3,7 +3,6 @@ import { builtinWorkflowName as canvasAgentBuiltinWorkflowName, modelOptionName 
 export * from "@basketikun/canvas-agent/model-workflow";
 
 export function builtinWorkflowName(value: string): string {
-  if (/^moyou-自动色阶$/i.test(modelOptionName(value).trim()))
-    return "custom/moyou-自动色阶.json";
+  // moyou-自动色阶 已迁到引擎（engine-local 渠道），画布不再本地执行。
   return canvasAgentBuiltinWorkflowName(value);
 }
