@@ -30,18 +30,10 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose, onUnavailableWo
                     const secondary = tool.slug === "projects" || tool.slug === "resources" ? workspaceSecondaryNavigation[tool.slug] : undefined;
                     return (
                         <div key={tool.slug}>
-                            {tool.slug === "workflows" && !localComfyuiEnabled ? (
-                                <button type="button" className={className} onClick={onUnavailableWorkflows} aria-haspopup="dialog">
-                                    <Icon className="size-5 shrink-0" />
-                                    <span className="flex-1">{t(`workspaceNavigation.${tool.slug}`)}</span>
-                                    <span className="text-[11px] text-muted-foreground">{t("workspaceNavigation.disabled")}</span>
-                                </button>
-                            ) : (
-                                <Link to={tool.href} aria-current={active ? "page" : undefined} onClick={onClose} className={className}>
-                                    <Icon className="size-5 shrink-0" />
-                                    <span>{t(`workspaceNavigation.${tool.slug}`)}</span>
-                                </Link>
-                            )}
+                            <Link to={tool.href} aria-current={active ? "page" : undefined} onClick={onClose} className={className}>
+                                <Icon className="size-5 shrink-0" />
+                                <span>{t(`workspaceNavigation.${tool.slug}`)}</span>
+                            </Link>
                             {secondary ? (
                                 <div className="mt-1 flex flex-wrap gap-1 pl-10">
                                     {secondary.map((item) => (

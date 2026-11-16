@@ -76,17 +76,6 @@ export function AppTopNav() {
                                     "relative flex h-9 shrink-0 items-center gap-2 rounded-md px-3 ui-nav-label transition-colors",
                                     active ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground",
                                 );
-                                if (tool.slug === "workflows" && !localComfyuiEnabled) {
-                                    return (
-                                        <Tooltip key={tool.slug} title={t("workspaceNavigation.workflowSettingsHint")}>
-                                            <button type="button" className={className} onClick={showWorkflowNotice} aria-haspopup="dialog">
-                                                <Icon className="size-4" />
-                                                <span>{t(`workspaceNavigation.${tool.slug}`)}</span>
-                                                <span className="size-1.5 rounded-full bg-muted-foreground/50" aria-label={t("workspaceNavigation.disabled")} />
-                                            </button>
-                                        </Tooltip>
-                                    );
-                                }
                                 return (
                                     <Link key={tool.slug} to={tool.href} aria-current={active ? "page" : undefined} className={className}>
                                         <Icon className="size-4" />
