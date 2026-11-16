@@ -9,6 +9,7 @@ import i18n from "@/i18n";
 import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 import { ACHENG_DIRECTOR_SKILL_NAME, findProjectAchengDirectorSkill, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
 import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
+import { subscribeUseMarketSkill } from "@/lib/market-skill-bus";
 import { enqueueAgentPrompt } from "@/lib/agent/agent-prompt-queue";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { resizeDataUrl } from "@/lib/canvas/canvas-image-data";
@@ -232,6 +233,8 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     const connectionPendingRef = useRef(false);
     const connectedRef = useRef(false);
     const errorLoggedRef = useRef(false);
+    /** 掉线自动重连的退避计数：连上 hello 后清零，用户显式断开时随 effect 清理停下。 */
+    const retryAttemptsRef = useRef(0);
     const attachmentUrlsRef = useRef(new Set<string>());
     const clientIdRef = useRef("");
     const [clientReady, setClientReady] = useState(false);
@@ -479,6 +482,25 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         setAgentState({ connected: false });
         let protocolRejected = false;
         let eventQueue = Promise.resolve();
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        /**
+         * 掉线后按退避自动重连，而不是停在「连接本地 Agent」等用户手动点。
+         * Backend 热重载／Agent 进程重启会把 SSE 打断，重连几次通常就回来了；
+         * 用户显式断开时 enabled 变 false，effect 重跑会清掉这里的定时器并停下。
+         */
+        const scheduleReconnect = () => {
+            if (disposed || protocolRejected || retryTimer) return;
+            const state = useAgentStore.getState();
+            if (!state.enabled || !String(state.token || "").trim()) return;
+            // 不设总次数上限：开发重载可能持续几分钟，连不上就一直按 30s 重试；
+            // 用户显式断开会让 enabled 变 false，effect 重跑后这里不再排期。
+            retryAttemptsRef.current += 1;
+            const delay = Math.min(30000, 2000 * 2 ** (retryAttemptsRef.current - 1));
+            retryTimer = setTimeout(() => {
+                retryTimer = null;
+                if (!disposed) setReconnectEpoch(value => value + 1);
+            }, delay);
+        };
         runtimeCursorRef.current = null;
         setRuntimeHeartbeatMs(0);
         runtimeRequestSequenceRef.current++;
@@ -537,6 +559,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 ? bindPendingTurnMessages(current.messages.filter((item) => !isConnectionErrorMessage(item)), nextThreadId, activeTurnId)
                 : current.messages.filter((item) => !isConnectionErrorMessage(item));
             errorLoggedRef.current = false;
+            retryAttemptsRef.current = 0;
             connectedRef.current = true;
             setAgentState({
                 connected: true,
@@ -739,9 +762,12 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             // Keep EventSource open after the first failed handshake too. The browser
             // retries the SSE connection; closing it here turned transient startup or
             // reconnect failures into a permanent disconnect that needed user action.
+            // 浏览器放弃重试或后端还在重启时，这里自己按退避再连，不让面板停在连接页。
+            scheduleReconnect();
         };
         return () => {
             disposed = true;
+            if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
             runtimeRequestSequenceRef.current++;
             source.close();
             connectedRef.current = false;
@@ -758,6 +784,35 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     useEffect(() => {
         if (connected) void loadSkills(endpoint, token);
     }, [connected, endpoint, loadSkills, token]);
+
+    // 技能广场「用此技能对话」：强制刷新技能列表后选中对应技能、填入提示并打开面板。
+    // 只选中不发送，用户可继续补充要求；不会改动任何生成 prompt。
+    useEffect(() => subscribeUseMarketSkill(async (detail) => {
+        const store = useAgentStore.getState();
+        store.setAgentState({ panelOpen: true, panelMounted: true, activeTab: "chat" });
+        if (!store.enabled || !store.connected) {
+            message.warning(i18n.t("skillMarket.useSkill.disconnected"));
+            return;
+        }
+        let skills = useAgentSkillStore.getState().skills;
+        try {
+            await loadSkills(endpoint, token, true);
+            skills = useAgentSkillStore.getState().skills;
+        } catch { /* 沿用已有列表再尝试匹配 */ }
+        const names = [detail.name, detail.slug].filter(Boolean) as string[];
+        const matched = skills.find(skill => skill.enabled && (detail.path
+            ? names.includes(skill.name) && skill.path === detail.path
+            : names.includes(skill.name)))
+            || skills.find(skill => skill.enabled && names.includes(skill.name))
+            || null;
+        if (!matched) {
+            message.warning(i18n.t("skillMarket.useSkill.notFound", { name: detail.name }));
+            return;
+        }
+        useAgentSkillStore.getState().selectSkill(matched, detail.prompt || "");
+        useAgentStore.getState().setAgentState({ prompt: detail.prompt || "" });
+        message.success(i18n.t("skillMarket.useSkill.ready", { name: matched.interface?.displayName || matched.name }));
+    }), [endpoint, token, loadSkills, message]);
 
     useEffect(() => {
         if (!connected) return;

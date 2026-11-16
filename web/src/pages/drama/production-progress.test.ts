@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readinessCounts, stageStates } from "./production-progress";
+import { readinessCounts, readinessKindCounts, stageStates } from "./production-progress";
 
 test("阶段游标缺失时返回空：界面显示未初始化，不假装从第一步开始", () => {
     assert.deepEqual(stageStates(null), []);
@@ -37,4 +37,21 @@ test("就绪计数把 ready/complete 算可用，needs_review 与 blocked 分开
 test("没有目标时不虚报计数", () => {
     assert.deepEqual(readinessCounts(null), { ready: 0, blocked: 0, review: 0, total: 0 });
     assert.deepEqual(readinessCounts([]), { ready: 0, blocked: 0, review: 0, total: 0 });
+});
+
+test("按类别的可用数与总计数同一口径：资产做完变 complete 也算可用", () => {
+    const targets = [
+        { kind: "asset", status: "complete" },
+        { kind: "asset", status: "complete" },
+        { kind: "asset", status: "ready" },
+        { kind: "asset", status: "blocked" },
+        { kind: "keyframe", status: "complete" },
+        { kind: "segment", status: "ready" },
+        { kind: "segment", status: "needs_review" },
+    ];
+    // 总计数：ready+complete 都算可用 → 5/7
+    assert.equal(readinessCounts(targets).ready, 5);
+    // 类别计数必须与之吻合，不能出现「资产 0」而总数 5 的矛盾
+    assert.deepEqual(readinessKindCounts(targets), { asset: 3, keyframe: 1, segment: 1 });
+    assert.deepEqual(readinessKindCounts(null), { asset: 0, keyframe: 0, segment: 0 });
 });

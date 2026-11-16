@@ -33,3 +33,13 @@ test("老数据把整份剧本塞在简介里，够长也算写过，不会被�
     assert.equal(episodeHasScript({ fullPlot: "场1｜…", synopsis: "" }), true);
     assert.deepEqual(pendingScriptEpisodes([episode(1, "", longSynopsis), episode(2, "", "短短一句")]).map((item) => item.episodeNumber), [2]);
 });
+
+test("拆章建集写进简介的原文不算剧本写过", () => {
+    // 建集时 synopsis 存的是该集原文（带「【章】」前缀）；它够长，但不是剧本。
+    const sourceSynopsis = "【章】第三章 雄黄与除妖\n" + "字".repeat(SCRIPT_SYNOPSIS_THRESHOLD);
+    assert.equal(episodeHasScript({ fullPlot: "", synopsis: sourceSynopsis }), false);
+    assert.equal(episodeHasScript({ fullPlot: "", synopsis: "  " + sourceSynopsis }), false, "前导空白不影响判定");
+    // 真写了 fullPlot 才算写过。
+    assert.equal(episodeHasScript({ fullPlot: "场1｜…", synopsis: sourceSynopsis }), true);
+    assert.deepEqual(pendingScriptEpisodes([episode(1, "", sourceSynopsis)]).map((item) => item.episodeNumber), [1]);
+});

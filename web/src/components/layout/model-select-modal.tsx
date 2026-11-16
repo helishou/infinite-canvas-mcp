@@ -1,4 +1,5 @@
 import { App, Button, Checkbox, Input, Modal, Tabs } from "antd";
+import { shouldProxyLocalModelList } from "@/services/api/local-models";
 import { RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -61,7 +62,9 @@ export function ModelSelectModal({ open, channel, selectedNames, onConfirm, onCl
 
     const fetchModels = async () => {
         if (!channel) return;
-        if (channel.kind !== "codex-cli" && channel.kind !== "hermes" && (!channel.baseUrl.trim() || !channel.apiKey.trim())) {
+        // 本地引擎（kind=local 或回环地址）本来就不需要 API Key，别拿 Key 当拉取前置条件。
+        const keyRequired = channel.kind !== "codex-cli" && channel.kind !== "hermes" && channel.kind !== "local" && !shouldProxyLocalModelList(channel.baseUrl, channel.apiFormat);
+        if (!channel.baseUrl.trim() || (keyRequired && !channel.apiKey.trim())) {
             message.error(t("config.modelSelect.missingConfig"));
             return;
         }

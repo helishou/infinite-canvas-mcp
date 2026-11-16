@@ -4,6 +4,7 @@ import type { SeriesWorkspaceView } from "./production-workspace";
 import { productionEntities, productionEntityBinding, productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionSegmentRuntimeMatches } from "@/lib/production-source";
 import { ProductionInputDiff } from "./production-input-diff";
+import { readinessKindCounts } from "./production-progress";
 import { matchesProductionAssetNode, subjectProductionKind } from "./production-asset-identity";
 import { currentClipRefreshes, groupedRefreshIssues } from "./production-refresh-display";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -1169,14 +1170,15 @@ export function DirectorPanel({
 
   const readinessCounts = useMemo(() => {
     const items = readiness?.targets || [];
+    const byKind = readinessKindCounts(items);
     return {
       ready: items.filter(item => item.status === "ready").length,
       blocked: items.filter(item => item.status === "blocked").length,
       review: items.filter(item => item.status === "needs_review").length,
       done: items.filter(item => item.status === "complete").length,
-      readyAssets: items.filter(item => item.kind === "asset" && item.status === "ready").length,
-      readyKeyframes: items.filter(item => item.kind === "keyframe" && item.status === "ready").length,
-      readySegments: items.filter(item => item.kind === "segment" && item.status === "ready").length,
+      readyAssets: byKind.asset,
+      readyKeyframes: byKind.keyframe,
+      readySegments: byKind.segment,
     };
   }, [readiness?.targets]);
   const sceneCapacity = useMemo(() => {

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { App, Button, Drawer, Empty, Input, Segmented, Select, Spin, Switch, Tag, Upload } from "antd";
-import { Bookmark, Boxes, Check, Download, FileArchive, FileText, Heart, Plus, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
+import { Bookmark, Boxes, Check, Download, FileArchive, FileText, Heart, MessageSquareText, Plus, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Streamdown } from "streamdown";
 
 import {
-    fetchMarketSkills, fetchSkillDetail, fileToBase64, installMarketSkill, readSkillFrontmatter, splitSkillFrontmatter,
-    uninstallMarketSkill, updateSkillState, type MarketSkill, type SkillCategory, type UploadFileEntry,
+    fetchMarketSkills, fetchSkillDetail, fetchSkillSlotMap, fileToBase64, installCatalogSkill, installMarketSkill, readSkillFrontmatter, splitSkillFrontmatter,
+    uninstallMarketSkill, updateSkillState, type MarketSkill, type SkillCategory, type SkillSlotMap, type UploadFileEntry,
 } from "@/services/api/skill-market";
+import { publishUseMarketSkill } from "@/lib/market-skill-bus";
 
 const CATEGORIES: SkillCategory[] = ["drama", "ecommerce", "creative", "social", "others"];
 
@@ -22,13 +23,17 @@ function accentFor(category: SkillCategory) {
     return categoryTone[category] || "default";
 }
 
-function SkillCard({ skill, onOpen, onToggleAdd, onToggleLike }: {
+function SkillCard({ skill, onOpen, onToggleAdd, onToggleLike, onInstall, onUse }: {
     skill: MarketSkill;
     onOpen: () => void;
     onToggleAdd: () => void;
     onToggleLike: () => void;
+    onInstall: () => void;
+    onUse: () => void;
 }) {
     const { t } = useTranslation();
+    const isCatalog = skill.source === "catalog";
+    const notInstalled = isCatalog && !skill.installed;
     return (
         <article className="group relative flex min-h-[172px] flex-col rounded-xl border border-border bg-card p-4 transition-colors hover:border-primary/60" data-testid="market-skill-card" data-skill={skill.name}>
             <div className="flex items-start gap-3">
@@ -38,8 +43,15 @@ function SkillCard({ skill, onOpen, onToggleAdd, onToggleLike }: {
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                         <Tag bordered={false} color={accentFor(skill.tag)} className="!m-0">{t(`skillMarket.category.${skill.tag}`)}</Tag>
                         <span className="text-[11px] text-muted-foreground">{t(`skillMarket.source.${skill.source}`)}</span>
+                        {skill.catalog?.group ? <span className="text-[10px] text-muted-foreground">· {skill.catalog.group}</span> : null}
                         {skill.version ? <span className="font-mono text-[10px] text-muted-foreground">v{skill.version}</span> : null}
                     </div>
+                    {skill.catalog?.slots?.length ? (
+                        <div className="mt-1.5 flex flex-wrap gap-1" data-testid="market-card-slots">
+                            {skill.catalog.slots.slice(0, 3).map(slot => <Tag key={slot} bordered={false} color="blue" className="!m-0 !text-[10px]">{t(`skillMarket.slot.${slot}`)}</Tag>)}
+                            {skill.catalog.slots.length > 3 ? <Tag bordered={false} className="!m-0 !text-[10px]">+{skill.catalog.slots.length - 3}</Tag> : null}
+                        </div>
+                    ) : null}
                 </div>
                 <button type="button" aria-label={t("skillMarket.card.like")} data-testid="market-card-like" onClick={onToggleLike}
                     className={`grid size-8 shrink-0 place-items-center rounded-full border transition-colors ${skill.liked ? "border-rose-400/50 bg-rose-500/10 text-rose-500" : "border-border text-muted-foreground hover:text-rose-500"}`}>
@@ -51,7 +63,11 @@ function SkillCard({ skill, onOpen, onToggleAdd, onToggleLike }: {
                 <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileText className="size-3.5" />{t("skillMarket.card.files", { count: skill.fileCount })}</span>
                 <div className="flex items-center gap-2">
                     <Button type="text" size="small" onClick={onOpen} data-testid="market-card-detail">{t("skillMarket.card.detail")}</Button>
-                    {skill.builtin ? (
+                    {notInstalled ? (
+                        <Button size="small" type="primary" icon={<Download className="size-3.5" />} onClick={onInstall} data-testid="market-card-install">{t("skillMarket.install")}</Button>
+                    ) : isCatalog ? (
+                        <Button size="small" type="primary" icon={<MessageSquareText className="size-3.5" />} onClick={onUse} data-testid="market-card-use">{t("skillMarket.useSkill.button")}</Button>
+                    ) : skill.builtin ? (
                         <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Check className="size-3.5" />{t("skillMarket.card.added")}</span>
                     ) : (
                         <Button size="small" type={skill.added ? "default" : "primary"} icon={skill.added ? <Check className="size-3.5" /> : <Plus className="size-3.5" />} onClick={onToggleAdd} data-testid="market-card-add">
@@ -61,6 +77,46 @@ function SkillCard({ skill, onOpen, onToggleAdd, onToggleLike }: {
                 </div>
             </div>
         </article>
+    );
+}
+
+function SlotMapView({ map, skills, onUse, onOpenSkill, onInstall }: {
+    map: SkillSlotMap; skills: MarketSkill[];
+    onUse: (skill: MarketSkill) => void;
+    onOpenSkill: (skill: MarketSkill) => void;
+    onInstall: (skill: MarketSkill) => void;
+}) {
+    const { t } = useTranslation();
+    if (!map) return <Empty className="py-24" description={t("skillMarket.slotMap.empty")} />;
+    const byName = new Map(skills.map(skill => [skill.name, skill]));
+    const stageOrder = ["topic", "outline", "outlineCheck", "characterProfile", "sceneProfile", "propProfile", "standingProfile", "characterPrompt", "scenePrompt", "scenePlan", "propPrompt", "standingPrompt", "scriptWrite", "scriptRevise", "boardSplit", "boardAdd", "boardRevise", "shotVideo", "episodeVideo", "framePrompt", "assetImage", "characterGap", "sceneGap", "propGap", "standingGap", "sceneAngle", "refLayout"];
+    const ordered = [...map.slots].sort((a, b) => {
+        const ai = stageOrder.indexOf(a.key), bi = stageOrder.indexOf(b.key);
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+    });
+    return (
+        <div data-testid="market-slot-map">
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {ordered.map(slot => {
+                    const skill = byName.get(slot.defaultSkill);
+                    return (
+                        <div key={slot.key} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5" data-testid="market-slot-row" data-slot={slot.key}>
+                            <div className="min-w-0">
+                                <div className="text-xs font-medium">{t(`skillMarket.slot.${slot.key}`)}</div>
+                                <button type="button" onClick={() => skill && onOpenSkill(skill)} className="mt-0.5 block max-w-full truncate text-left text-[11px] text-primary hover:underline" data-testid="market-slot-skill">
+                                    {skill?.title || slot.defaultSkill}
+                                </button>
+                            </div>
+                            {skill ? (
+                                skill.installed
+                                    ? <Button size="small" type="primary" icon={<MessageSquareText className="size-3.5" />} onClick={() => onUse(skill)} data-testid="market-slot-use">{t("skillMarket.useSkill.button")}</Button>
+                                    : <Button size="small" icon={<Download className="size-3.5" />} onClick={() => onInstall(skill)} data-testid="market-slot-install">{t("skillMarket.install")}</Button>
+                            ) : <span className="shrink-0 text-[10px] text-muted-foreground">{t("skillMarket.slotMap.missing")}</span>}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
     );
 }
 
@@ -140,7 +196,10 @@ function InstallModal({ open, onClose, onInstalled }: { open: boolean; onClose: 
     );
 }
 
-function SkillDetailDrawer({ skill, onClose, onChanged }: { skill: MarketSkill | null; onClose: () => void; onChanged: (skill: MarketSkill, revision: string) => void }) {
+function SkillDetailDrawer({ skill, onClose, onChanged, onInstall, onUse, installing }: {
+    skill: MarketSkill | null; onClose: () => void; onChanged: (skill: MarketSkill, revision: string) => void;
+    onInstall: () => void; onUse: () => void; installing: boolean;
+}) {
     const { t } = useTranslation();
     const { message, modal } = App.useApp();
     const [detail, setDetail] = useState<{ content: string; files: string[] } | null>(null);
@@ -177,11 +236,21 @@ function SkillDetailDrawer({ skill, onClose, onChanged }: { skill: MarketSkill |
     return (
         <Drawer open={Boolean(skill)} onClose={onClose} title={skill?.title || t("skillMarket.detail.title")} width={760}
             extra={skill ? <div className="flex items-center gap-2">
-                <Button size="small" icon={<Download className="size-3.5" />} onClick={() => void patch({ added: true })} data-testid="market-detail-add">{t(skill.added ? "skillMarket.detail.installed" : "skillMarket.detail.notInstalled")}</Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={skill.builtin} title={skill.builtin ? t("skillMarket.detail.uninstallBuiltin") : undefined} onClick={uninstall} data-testid="market-detail-uninstall">{t("skillMarket.card.uninstall")}</Button>
+                {skill.source === "catalog" && !skill.installed ? (
+                    <Button size="small" type="primary" loading={installing} icon={<Download className="size-3.5" />} onClick={onInstall} data-testid="market-detail-install">{t("skillMarket.install")}</Button>
+                ) : skill.source === "catalog" ? (
+                    <Button size="small" type="primary" icon={<MessageSquareText className="size-3.5" />} onClick={onUse} data-testid="market-detail-use">{t("skillMarket.useSkill.button")}</Button>
+                ) : (
+                    <Button size="small" icon={<Download className="size-3.5" />} onClick={() => void patch({ added: true })} data-testid="market-detail-add">{t(skill.added ? "skillMarket.detail.installed" : "skillMarket.detail.notInstalled")}</Button>
+                )}
+                {skill.source !== "catalog" && <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={skill.builtin} title={skill.builtin ? t("skillMarket.detail.uninstallBuiltin") : undefined} onClick={uninstall} data-testid="market-detail-uninstall">{t("skillMarket.card.uninstall")}</Button>}
             </div> : null}>
             {skill ? <>
                 <p className="mb-4 text-sm leading-6 text-muted-foreground">{skill.description}</p>
+                {skill.catalog ? <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                    <Tag bordered={false}>{skill.catalog.group}</Tag>
+                    {skill.catalog.slots.map(slot => <Tag key={slot} bordered={false} color={skill.catalog?.defaultSlots.includes(slot) ? "blue" : "default"}>{t(`skillMarket.slot.${slot}`)}</Tag>)}
+                </div> : null}
                 <div className="mb-4 flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs">
                     <span className="text-muted-foreground">{t("skillMarket.detail.autoUpdate")} · {t("skillMarket.detail.autoUpdateHint")}</span>
                     <Switch size="small" checked={skill.autoUpdate} onChange={checked => void patch({ autoUpdate: checked })} data-testid="market-detail-auto" />
@@ -213,13 +282,17 @@ export function SkillMarket() {
     const [query, setQuery] = useState("");
     const [selected, setSelected] = useState<MarketSkill | null>(null);
     const [installOpen, setInstallOpen] = useState(false);
+    const [installingName, setInstallingName] = useState("");
+    const [view, setView] = useState<"skills" | "slots">("skills");
+    const [slotMap, setSlotMap] = useState<SkillSlotMap>(null);
 
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const result = await fetchMarketSkills();
+            const [result, map] = await Promise.all([fetchMarketSkills(), fetchSkillSlotMap()]);
             setSkills(result.skills);
             setRevision(result.revision);
+            setSlotMap(map);
         } catch (error) { message.error(error instanceof Error ? error.message : t("skillMarket.loadFailed")); }
         finally { setLoading(false); }
     }, [message, t]);
@@ -258,6 +331,26 @@ export function SkillMarket() {
         } catch (error) { message.error(error instanceof Error ? error.message : t("skillMarket.stateFailed")); }
     };
 
+    const installFromCatalog = async (skill: MarketSkill) => {
+        if (installingName) return;
+        setInstallingName(skill.name);
+        try {
+            const installed = await installCatalogSkill(skill.name, skill.tag);
+            message.success(t("skillMarket.installSuccess", { name: installed.title }));
+            await load();
+            setSelected(previous => previous && previous.name === skill.name ? installed : previous);
+        } catch (error) { message.error(error instanceof Error ? error.message : t("skillMarket.installModal.failed")); }
+        finally { setInstallingName(""); }
+    };
+
+    const useSkill = (skill: MarketSkill) => {
+        publishUseMarketSkill({
+            name: skill.title,
+            slug: skill.name,
+            prompt: t("skillMarket.useSkill.prompt", { name: skill.title }),
+        });
+    };
+
     return (
         <div className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8" data-testid="skill-market">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -265,16 +358,20 @@ export function SkillMarket() {
                     <h1 className="flex items-center gap-2 text-xl font-semibold"><Boxes className="size-5 text-primary" />{t("skillMarket.title")}</h1>
                     <p className="mt-1 text-xs text-muted-foreground">{t("skillMarket.subtitle")}</p>
                 </div>
-                <div className="flex items-center gap-2">
-                    <Input allowClear value={query} onChange={event => setQuery(event.target.value)} prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("skillMarket.search")} className="w-56" data-testid="market-search" />
-                    <Select value={sort} onChange={setSort} className="w-32" data-testid="market-sort" options={(["popular", "newest", "updated"] as Sort[]).map(value => ({ value, label: t(`skillMarket.sort.${value}`) }))} />
+                <div className="flex flex-wrap items-center gap-2">
+                    <Segmented value={view} onChange={value => setView(value as "skills" | "slots")}
+                        options={[{ label: t("skillMarket.view.skills"), value: "skills" }, { label: t("skillMarket.view.slots"), value: "slots" }]} data-testid="market-view" />
+                    {view === "skills" ? <>
+                        <Input allowClear value={query} onChange={event => setQuery(event.target.value)} prefix={<Search className="size-4 text-muted-foreground" />} placeholder={t("skillMarket.search")} className="w-56" data-testid="market-search" />
+                        <Select value={sort} onChange={setSort} className="w-32" data-testid="market-sort" options={(["popular", "newest", "updated"] as Sort[]).map(value => ({ value, label: t(`skillMarket.sort.${value}`) }))} />
+                    </> : null}
                     <Button icon={<RefreshCw className="size-3.5" />} onClick={() => void load()} loading={loading} aria-label={t("skillMarket.refresh")} />
                     <Button type="primary" icon={<Plus className="size-3.5" />} onClick={() => setInstallOpen(true)} data-testid="market-install-open">{t("skillMarket.install")}</Button>
                 </div>
             </div>
 
             <div className="mt-5 flex gap-5">
-                <aside className="hidden w-44 shrink-0 lg:block" aria-label={t("skillMarket.category.all")}>
+                <aside className={`${view === "slots" ? "hidden" : "hidden lg:block"} w-44 shrink-0`} aria-label={t("skillMarket.category.all")}>
                     <p className="mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">{t("skillMarket.scope.all")}</p>
                     <nav className="space-y-0.5">
                         {(["all", "mine", "created", "favorites"] as Scope[]).map(value => (
@@ -296,28 +393,39 @@ export function SkillMarket() {
                 </aside>
 
                 <section className="min-w-0 flex-1">
-                    <div className="mb-3 flex gap-1.5 lg:hidden">
-                        <Segmented size="small" value={scope} onChange={value => setScope(value as Scope)}
-                            options={(["all", "mine", "created", "favorites"] as Scope[]).map(value => ({ value, label: t(`skillMarket.scope.${value}`) }))} />
-                    </div>
-                    <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><Bookmark className="size-3.5" />{t("skillMarket.count", { count: visible.length })}</div>
-                    {loading ? <div className="grid place-items-center py-24"><Spin /></div>
-                        : visible.length ? (
-                            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" data-testid="market-grid">
-                                {visible.map(skill => <SkillCard key={skill.name} skill={skill}
-                                    onOpen={() => setSelected(skill)}
-                                    onToggleAdd={() => void changeState(skill, { added: !skill.added })}
-                                    onToggleLike={() => void changeState(skill, { liked: !skill.liked })} />)}
-                            </div>
-                        ) : <Empty className="py-24" description={t(query ? "skillMarket.card.noMatch" : "skillMarket.card.empty")} />}
+                    {view === "slots" ? (
+                        loading ? <div className="grid place-items-center py-24"><Spin /></div>
+                            : <SlotMapView map={slotMap} skills={skills} onUse={useSkill}
+                                onOpenSkill={skill => setSelected(skill)} onInstall={skill => void installFromCatalog(skill)} />
+                    ) : <>
+                        <div className="mb-3 flex gap-1.5 lg:hidden">
+                            <Segmented size="small" value={scope} onChange={value => setScope(value as Scope)}
+                                options={(["all", "mine", "created", "favorites"] as Scope[]).map(value => ({ value, label: t(`skillMarket.scope.${value}`) }))} />
+                        </div>
+                        <div className="mb-3 flex items-center gap-2 text-xs text-muted-foreground"><Bookmark className="size-3.5" />{t("skillMarket.count", { count: visible.length })}</div>
+                        {loading ? <div className="grid place-items-center py-24"><Spin /></div>
+                            : visible.length ? (
+                                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" data-testid="market-grid">
+                                    {visible.map(skill => <SkillCard key={skill.name} skill={skill}
+                                        onOpen={() => setSelected(skill)}
+                                        onToggleAdd={() => void changeState(skill, { added: !skill.added })}
+                                        onToggleLike={() => void changeState(skill, { liked: !skill.liked })}
+                                        onInstall={() => void installFromCatalog(skill)}
+                                        onUse={() => useSkill(skill)} />)}
+                                </div>
+                            ) : <Empty className="py-24" description={t(query ? "skillMarket.card.noMatch" : "skillMarket.card.empty")} />}
+                    </>}
                 </section>
             </div>
 
             <InstallModal open={installOpen} onClose={() => setInstallOpen(false)} onInstalled={() => void load()} />
-            <SkillDetailDrawer skill={selected} onClose={() => setSelected(null)} onChanged={(updated, nextRevision) => {
-                setRevision(nextRevision);
-                setSkills(previous => previous.map(item => item.name === updated.name ? updated : item));
-            }} />
+            <SkillDetailDrawer skill={selected} onClose={() => setSelected(null)} installing={installingName === selected?.name}
+                onInstall={() => { if (selected) void installFromCatalog(selected); }}
+                onUse={() => { if (selected) useSkill(selected); }}
+                onChanged={(updated, nextRevision) => {
+                    setRevision(nextRevision);
+                    setSkills(previous => previous.map(item => item.name === updated.name ? updated : item));
+                }} />
         </div>
     );
 }

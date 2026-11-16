@@ -1,7 +1,12 @@
 import { request } from "@/services/backend-api";
 
 export type SkillCategory = "drama" | "ecommerce" | "creative" | "social" | "others";
-export type SkillSource = "builtin" | "markdown" | "zip";
+export type SkillSource = "builtin" | "markdown" | "zip" | "catalog";
+
+export type MarketSkillCatalog = {
+    id: string; stage: string; group: string; tier: string; slots: string[]; defaultSlots: string[];
+    author: string; license: string; notice: string;
+};
 
 export type MarketSkill = {
     name: string;
@@ -20,7 +25,12 @@ export type MarketSkill = {
     version: string;
     path: string;
     glyph: string;
+    installed: boolean;
+    catalog?: MarketSkillCatalog;
 };
+
+export type SkillSlot = { key: string; label: string; defaultSkill: string; skills: string[]; installed: boolean };
+export type SkillSlotMap = { bundleId: string; notice: string; slots: SkillSlot[] } | null;
 
 export type SkillDetail = { name: string; content: string; revision: string; files: string[] };
 export type UploadFileEntry = { path: string; contentBase64: string };
@@ -47,11 +57,22 @@ export async function updateSkillState(input: {
 
 export async function installMarketSkill(input: {
     name: string;
-    source: "markdown" | "zip";
+    source: "markdown" | "zip" | "catalog";
     tag: SkillCategory;
-    files: UploadFileEntry[];
+    files?: UploadFileEntry[];
 }): Promise<MarketSkill> {
     const response = await request<{ ok: boolean; data: MarketSkill }>("POST", "/api/skill-market/install", input);
+    return response.data;
+}
+
+/** 从 catalog 源一键安装（导演大师技能包）。 */
+export function installCatalogSkill(name: string, tag: SkillCategory): Promise<MarketSkill> {
+    return installMarketSkill({ name, source: "catalog", tag });
+}
+
+/** 功能槽→推荐技能映射，供画布阶段入口标注。 */
+export async function fetchSkillSlotMap(): Promise<SkillSlotMap> {
+    const response = await request<{ ok: boolean; data: SkillSlotMap }>("GET", "/api/skill-market/slot-map");
     return response.data;
 }
 

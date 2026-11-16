@@ -48,17 +48,17 @@ export function planningStepStates(input: {
     outline: string;
     worldContext: string;
     episodeCount: number;
-    episodesWithSynopsis: number;
     episodesWithScript: number;
     assetCount: number;
-    episodeCanvasCount: number;
 }): PlanningStepState[] {
     const done: Record<PlanningStepKey, boolean> = {
         topic: (input.topic.themes?.length || 0) > 0 || Boolean(String(input.topic.theme || "").trim()),
         outline: Boolean(String(input.outline || "").trim()) && Boolean(String(input.worldContext || "").trim()),
         script: input.episodeCount > 0 && input.episodesWithScript >= input.episodeCount,
         assets: input.assetCount > 0,
-        shots: input.episodeCanvasCount > 0,
+        // 分镜与导演包在分集制作里，剧目级拿不到真实镜头数；
+        // 这里只当入口，不能拿「有分集画布」冒充分镜已完成（建集就带画布，会永远假绿）。
+        shots: false,
         package: false,
     };
     return PLANNING_STEPS.map((key) => ({

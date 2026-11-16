@@ -958,12 +958,18 @@ export function shotStoryboardKeyframe<T extends { anchor?: unknown; requiredFor
 /** 分集简介长到这个字数，说明它本身就是一份完整本集剧本/需求，不再算「待写」。 */
 export const SCRIPT_SYNOPSIS_THRESHOLD = 200;
 
+/** 拆章建集时把该集原文写进 synopsis，并加这个前缀标记「这是原文，不是剧本」。 */
+export const SOURCE_SCRIPT_SYNOPSIS_PREFIX = "【章】";
+
 /**
  * 这一集算不算已有剧本大纲：优先看 fullPlot；
  * 老数据把整份剧本塞在 synopsis 里，够长也算写过，避免重复生成覆盖。
  * 网页的「剧本」步骤与 agent 的 drama_get_planning 共用这一条判定。
+ * 但拆章建集写进 synopsis 的原文（带「【章】」前缀）是原文不是剧本，不能算已写。
  */
 export function episodeHasScript(episode: { fullPlot?: string | null; synopsis?: string | null }): boolean {
     if (String(episode.fullPlot || "").trim()) return true;
-    return String(episode.synopsis || "").trim().length >= SCRIPT_SYNOPSIS_THRESHOLD;
+    const synopsis = String(episode.synopsis || "").trim();
+    if (synopsis.startsWith(SOURCE_SCRIPT_SYNOPSIS_PREFIX)) return false;
+    return synopsis.length >= SCRIPT_SYNOPSIS_THRESHOLD;
 }

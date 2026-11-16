@@ -33,3 +33,16 @@ export function readinessCounts(targets: ReadonlyArray<{ status: string }> | nul
     }
     return { ready, blocked, review, total: list.length };
 }
+
+export type ReadinessKindCounts = { asset: number; keyframe: number; segment: number };
+
+/**
+ * 按类别数「可用」目标：ready 与 complete 都算可用，与 readinessCounts 同一口径。
+ * 不能再只数 ready——资产做完就变 complete，只数 ready 会显示「资产 0」而总数却是 11/11。
+ */
+export function readinessKindCounts(targets: ReadonlyArray<{ kind?: string; status: string }> | null | undefined): ReadinessKindCounts {
+    const list = targets || [];
+    const usable = (item: { status: string }) => item.status === "ready" || item.status === "complete";
+    const count = (kind: string) => list.filter(item => item.kind === kind && usable(item)).length;
+    return { asset: count("asset"), keyframe: count("keyframe"), segment: count("segment") };
+}

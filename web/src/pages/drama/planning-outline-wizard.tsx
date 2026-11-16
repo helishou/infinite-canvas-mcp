@@ -1,5 +1,5 @@
 import { App, Button, Input, Select, Tag } from "antd";
-import { Check, Loader2, Sparkles } from "lucide-react";
+import { Check, ChevronDown, Loader2, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { requestDramaOutlineProposal } from "@/services/backend-api";
@@ -42,6 +42,10 @@ export function OutlineWizard({ dramaId, plan, outline, episodeCount, registryCh
     const { t } = useTranslation();
     const states = outlineStepStates({ plan, outline, episodeCount, registryCharacters });
     const current = firstPendingStep(states);
+    // 这块是「按顺序生成大纲」的工具，不是大纲页的常驻内容：
+    // 还有没写的步骤时默认展开；六步都写完（或正在生成）时收起，点标题可再展开。
+    const [manualOpen, setManualOpen] = useState<boolean | null>(null);
+    const expanded = manualOpen ?? Boolean(current);
     const [openStep, setOpenStep] = useState<OutlineWizardStep | null>(current);
     const [mode, setMode] = useState<"rewrite" | "fill">("fill");
     const [depth, setDepth] = useState<"brief" | "standard" | "detailed">("standard");
@@ -80,19 +84,22 @@ export function OutlineWizard({ dramaId, plan, outline, episodeCount, registryCh
         }
     };
 
-    return <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/[0.12]" data-outline-wizard>
+    return <section className="overflow-hidden rounded-xl border border-border/70 bg-muted/[0.12]" data-outline-wizard data-collapsed={expanded ? "false" : "true"}>
         <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-border/60 bg-muted/[0.18] px-4 py-2">
-            <Sparkles className="size-3.5 shrink-0 text-primary" />
-            <h3 className="text-[13px] font-semibold tracking-tight">{t("outlineWizard.title")}</h3>
-            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${current ? "bg-primary/15 text-primary" : "bg-emerald-500/10 text-emerald-400"}`}>
-                {current ? t("outlineWizard.current", { step: t(`outlineWizard.step.${current}`) }) : t("outlineWizard.allDone")}
-            </span>
+            <button type="button" className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left hover:bg-muted/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary" onClick={() => setManualOpen(!expanded)} aria-expanded={expanded} data-outline-wizard-toggle>
+                <Sparkles className="size-3.5 shrink-0 text-primary" />
+                <h3 className="text-[13px] font-semibold tracking-tight">{t("outlineWizard.title")}</h3>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${current ? "bg-primary/15 text-primary" : "bg-emerald-500/10 text-emerald-400"}`}>
+                    {current ? t("outlineWizard.current", { step: t(`outlineWizard.step.${current}`) }) : t("outlineWizard.allDone")}
+                </span>
+                <ChevronDown className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
+            </button>
             <span className="min-w-0 flex-1" />
             <span className="hidden text-[11px] text-muted-foreground sm:inline">{t("outlineWizard.model")}</span>
             <ModelPicker config={config} capability="text" className="w-52" value={model} onChange={onModelChange} placeholder={t("outlineWizard.modelDefault")} />
             {onAskDirector ? <Button size="small" disabled={askDisabled} onClick={onAskDirector} data-planning-ask="outline">{t("planningAsk.director")}</Button> : null}
         </header>
-        <div className="px-4 py-3">
+        {expanded ? <div className="px-4 py-3">
         <p className="mb-2 text-[11px] text-muted-foreground">{t("outlineWizard.orderHint")}</p>
         <ol className="space-y-2">
             {states.map((state, index) => {
@@ -137,6 +144,6 @@ export function OutlineWizard({ dramaId, plan, outline, episodeCount, registryCh
             })}
         </ol>
         <p className="mt-3 text-[11px] text-muted-foreground">{t("productionCanvas.writing.saveHint")}</p>
-        </div>
+        </div> : null}
     </section>;
 }

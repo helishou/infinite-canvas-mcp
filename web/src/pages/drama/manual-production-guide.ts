@@ -10,7 +10,7 @@ export function manualWorkspaceProgress(workspace: Workspace, source: Row, targe
     const firstBlockedTarget = blocked[0];
     const issue = firstBlockedTarget ? `${firstBlockedTarget.title || firstBlockedTarget.targetId}：${firstBlockedTarget.blockers[0]}` : "";
     if (workspace === "story") {
-        const scripts = rows(source.script_scenes).filter(scene => String(scene.text || "").trim());
+        const scripts = rows(source.script_scenes).filter(scene => Boolean(String(scene.text || "").trim()) || rows(scene.blocks).length > 0);
         return { status: scripts.length ? "saved" : "waiting", summaryKey: scripts.length ? "storySaved" : "storyEmpty", values: { count: scripts.length }, actionKey: "editScript", firstBlockedTarget };
     }
     if (workspace === "assets") {

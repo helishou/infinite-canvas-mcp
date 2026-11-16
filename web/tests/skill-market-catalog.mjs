@@ -29,14 +29,14 @@ try {
     assert.ok((await fresh.locator("[data-testid='market-card-slots']").count()) >= 1, "catalog card shows slot tags");
     console.log(`PASS: catalog card shows ${installCount ? "install" : "use"} + slot tags`);
 
-    // 详情：版权声明 + 中文标题
+    // 详情：中文标题，且界面不再展示版权提示条
     await fresh.locator("[data-testid='market-card-detail']").click();
     await page.locator("[data-testid='market-detail-preview']").waitFor({ timeout: 10000 });
-    assert.match(await page.locator("[data-testid='market-detail-license']").innerText(), /版权/, "detail shows copyright notice");
+    assert.equal(await page.locator("[data-testid='market-detail-license']").count(), 0, "detail has no copyright notice banner");
     assert.equal((await page.locator(".ant-drawer-title").last().innerText()).trim(), "拆分镜表-简洁版", "Chinese frontmatter name as title");
     await page.locator(".ant-drawer-close").last().click();
     await page.waitForTimeout(300);
-    console.log("PASS: catalog detail shows copyright + Chinese title");
+    console.log("PASS: catalog detail shows Chinese title without copyright banner");
 
     // 功能槽映射视图：27 行
     await page.locator("[data-testid='market-view'] .ant-segmented-item").filter({ hasText: "创作环节" }).first().click();

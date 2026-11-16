@@ -60,6 +60,7 @@ import { productionNavigationGroups, productionTargetTitle, productionWorkspaceQ
 import { ProductionWorkspaceBreadcrumb, ProductionWorkspaceNavigation } from "./production-workspace-navigation";
 import { continuityDiagnosticLocations, frameTimecode } from "./continuity-diagnostic-context";
 import { createManualDirectorAsset } from "./manual-director-assets";
+import { assetCanvasScope } from "./asset-scope";
 
 type PendingCommand = { operationId: string; expectedRevision: number; status: "unknown" | "rejected"; error?: string; errorSummary?: string; httpStatus?: number; errorCode?: string; workspace?: DirectorWorkspace } & (
   { kind: "scene"; command: ProductionSceneAction } | { kind: "edit"; ops: ProductionOperation[] } | { kind: "publish"; stage: "director" } | { kind: "restore"; version: number }
@@ -2017,7 +2018,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           voice: { url: String(metadata.characterVoiceUrl || ""), name: String(metadata.characterVoiceName || ""), storageKey: String(metadata.characterVoiceStorageKey || ""), assetId: String(metadata.characterVoiceAssetId || "") },
         } : {}),
         prompt: String(metadata.sceneColorCardPrompt || description || name), purpose: description || name,
-        canvasScope: "episode", registerSubject: isSubjectPromptAssembly(source), ownerKind: "episode", ownerId: productionOwner.id,
+        canvasScope: assetCanvasScope(productionContext), registerSubject: isSubjectPromptAssembly(source), ownerKind: "episode", ownerId: productionOwner.id,
       });
       const operations: ProductionOperation[] = [{
         type: "create_manual_director_asset",
@@ -2529,7 +2530,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                 const description = String(node.metadata?.[`${kind}Description`] || "");
                 const source = createManualDirectorAsset(production.draft.director.source as Record<string, any>, {
                   id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${sharedIdentity}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
-                  canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: episode.id,
+                  canvasScope: assetCanvasScope(productionContext), registerSubject: true, ownerKind: "episode", ownerId: episode.id,
                   sharedSource: { dramaId: String(episode.dramaId), assetId, sourceProjectId: sharedCanvasNodes.id, sourceNodeId: node.id },
                 });
                 const includeOperation = { type: "create_manual_director_asset" as const, assetPlan: source.assetPlan, assetCard: source.assetCard,
@@ -2547,7 +2548,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
                 const description = String(node.metadata?.[`${kind}Description`] || "");
                 const source = createManualDirectorAsset(production.draft.director.source as Record<string, any>, {
                   id: assetId, ...(entityId ? { entityId } : {}), subjectId: `SUBJECT_${sharedIdentity}`, kind, name, description, prompt: "", purpose: "剧目共享资产",
-                  canvasScope: "episode", registerSubject: true, ownerKind: "episode", ownerId: episode.id,
+                  canvasScope: assetCanvasScope(productionContext), registerSubject: true, ownerKind: "episode", ownerId: episode.id,
                   sharedSource: { dramaId: String(episode.dramaId), assetId, sourceProjectId: sharedCanvasNodes.id, sourceNodeId: node.id },
                 });
                 const operation = { type: "create_manual_director_asset" as const, assetPlan: source.assetPlan, assetCard: source.assetCard,

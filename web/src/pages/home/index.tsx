@@ -13,6 +13,7 @@ import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
+import { WorkspaceViewSwitcher } from "@/components/production/workspace-view-switcher";
 import { cn } from "@/lib/utils";
 import { CreativeLaunchPad } from "./creative-launch-pad";
 import { CreativeGenerationFeed } from "./creative-generation-feed";
@@ -90,6 +91,8 @@ function HomeWorkbench() {
     const [tasksOpen, setTasksOpen] = useState(false);
     const [outputsOpen, setOutputsOpen] = useState(false);
     const [creatingCanvas, setCreatingCanvas] = useState(false);
+    // 首页画布覆盖层里没有制作台工作台，记录当前打开的画布以便「切回制作台视图」按归属导航。
+    const [overlayProjectId, setOverlayProjectId] = useState("");
     const openDestinationRequest = useRef(0);
     // 「最近生成」取独立的一段媒体日志（见 use-workbench-data），避免被最近的纯文本对话挤空；
     // 对话阶段还没落画布的成果从任务详情补进来，点「新建画布」写日志后会自动去重。
@@ -119,9 +122,16 @@ function HomeWorkbench() {
     const date = (value: string) => (Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(i18n.resolvedLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
     const openDestination = async (destination: string) => {
         const requestId = ++openDestinationRequest.current;
+        // 从「最近生成」的预览弹窗点「源画布」（或结果列表里跳画布）时，先收起结果浮层，
+        // 否则路由/画布覆盖层切换后旧弹窗仍挂在首页 DOM 上，看起来像没跳过去。
+        setPreviewOutput(null);
+        setOutputsOpen(false);
         const target = canvasHostLocation(destination, "");
         if (target) {
-            const openInOverlay = () => canvasHost?.openCanvas({ projectId: target.projectId, nodeId: target.search.get("nodeId") || undefined, segmentId: target.search.get("segmentId") || undefined });
+            const openInOverlay = () => {
+                setOverlayProjectId(target.projectId);
+                canvasHost?.openCanvas({ projectId: target.projectId, nodeId: target.search.get("nodeId") || undefined, segmentId: target.search.get("segmentId") || undefined });
+            };
             if (data.canvasOwners.has(target.projectId)) {
                 openInOverlay();
                 return;
@@ -420,8 +430,20 @@ function HomeWorkbench() {
         document.body.style.overflow = "hidden";
         return () => { document.body.style.overflow = previous; };
     }, [threadOverlayOpen]);
+    // 画布覆盖层（z-900）打开时同样给出制作台/画布视图切换器：首页没有制作台工作台，
+    // 「切回制作台视图」按当前画布归属导航——分集画布进分集制作台，共享资产画布进剧目规划。
+    const overlayOwner = overlayProjectId ? data.canvasOwners.get(overlayProjectId) : undefined;
+    const overlayEpisode = overlayProjectId ? data.canvasEpisodes.get(overlayProjectId) : undefined;
+    const canSwitchToProduction = Boolean(canvasHost?.visible && overlayProjectId && (overlayOwner || overlayEpisode));
+    const switchToProduction = () => {
+        if (!overlayProjectId) return;
+        canvasHost?.collapse?.();
+        if (overlayEpisode) navigate(dramaWorkbenchPath(overlayEpisode.dramaId, overlayEpisode.episodeId));
+        else if (overlayOwner) navigate(`/production?${new URLSearchParams({ dramaId: overlayOwner.id, workspace: "series", seriesView: "planning" })}`);
+    };
     return (
         <main className="ui-controls min-h-full bg-background text-foreground" data-testid="home-workbench">
+            {canSwitchToProduction && <WorkspaceViewSwitcher mode="canvas" onSelect={next => { if (next === "production") switchToProduction(); }} />}
             {threadOverlayOpen && (
                 <div className="fixed inset-0 z-[70] flex flex-col bg-background" data-testid="home-thread-overlay">
                     <div className="flex min-h-0 w-full flex-1 flex-col px-4 py-5 sm:px-6">

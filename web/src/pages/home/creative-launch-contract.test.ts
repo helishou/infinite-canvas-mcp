@@ -332,6 +332,25 @@ test("recent outputs read a dedicated media log window, not the 30-log feed wind
     assert.match(data, /mediaLogCount < 180/);
 });
 
+test("jumping to a canvas from a recent-output modal closes the result overlays", () => {
+    const home = read("./index.tsx");
+    const openDestination = home.slice(home.indexOf("const openDestination = "), home.indexOf("const openProject = "));
+    assert.match(openDestination, /setPreviewOutput\(null\)/, "跳画布时未关闭结果预览弹窗");
+    assert.match(openDestination, /setOutputsOpen\(false\)/, "跳画布时未关闭查看结果弹窗");
+});
+
+test("home canvas overlay exposes the production/canvas view switcher", () => {
+    const home = read("./index.tsx");
+    assert.match(home, /import \{ WorkspaceViewSwitcher \}/, "首页未引入视图切换器");
+    assert.match(home, /canSwitchToProduction/, "切换器没有按画布归属判定是否显示");
+    // 切换器挂在画布覆盖层可见时；切回制作台先收覆盖层，再按剧目/分集归属导航。
+    const switchBlock = home.slice(home.indexOf("const switchToProduction = "), home.indexOf("return (\n        <main"));
+    assert.match(switchBlock, /canvasHost\?\.collapse\?\.\(\)/, "切回制作台未收起画布覆盖层");
+    assert.match(switchBlock, /dramaWorkbenchPath/, "分集画布未导航到分集制作台");
+    assert.match(switchBlock, /workspace: "series"/, "共享资产画布未导航到剧目规划");
+    assert.match(home, /<WorkspaceViewSwitcher mode="canvas" onSelect=/, "覆盖层里没有渲染 canvas 态切换器");
+});
+
 test("generation results show the full media and the rerun action is explicit", () => {
     const feed = read("./creative-generation-feed.tsx");
     const media = read("./workbench-media.tsx");

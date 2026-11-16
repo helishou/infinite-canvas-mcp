@@ -1,114 +1,118 @@
 {
-  "name": "@basketikun/canvas-agent",
-  "version": "0.6.0",
-  "license": "MIT",
-  "type": "module",
-  "main": "./dist/index.js",
-  "exports": {
-    "./shared-asset-reference": "./dist/canvas/shared-asset-reference.js",
-    "./agent/work-package": "./dist/agent/work-package.js",
-    "./agent/hermes-agent": "./dist/agent/hermes-agent.js",
-    "./agent/hermes-client": "./dist/agent/hermes-client.js",
-    "./agent/tool-result": "./dist/agent/tool-result.js",
-    "./agent/codex-text": "./dist/agent/codex-text.js",
-    "./agent/image-input": "./dist/agent/image-input.js",
-    "./agent/vision-capability": "./dist/agent/vision-capability.js",
-    "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
-    "./drama/asset-card-contract": "./dist/drama/asset-card-contract.js",
-    "./drama/clip-freshness": "./dist/drama/clip-freshness.js",
-    "./drama/subject-assembly": "./dist/drama/subject-assembly.js",
-    "./agent/delegation": "./dist/agent/delegation.js",
-    "./agent/production": "./dist/agent/production.js",
-    ".": "./dist/index.js",
-    "./http": "./dist/server/http.js",
-    "./plugin-mcp": "./dist/server/plugin-mcp.js",
-    "./schemas": "./dist/canvas/schemas.js",
-    "./canvas/node-sizes": "./dist/canvas/node-sizes.js",
-    "./state-summary": "./dist/canvas/state-summary.js",
-    "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
-    "./runtime-fields": "./dist/canvas/runtime-fields.js",
-    "./drama/production-tools": "./dist/drama/production-tools.js",
-    "./drama/topic-options": "./dist/drama/topic-options.js",
-    "./drama/art-style": "./dist/drama/art-style.js",
-    "./drama/production-contract": "./dist/drama/production-contract.js",
-    "./drama/novel-chapters": "./dist/drama/novel-chapters.js",
-    "./drama/chapter-storyboard": "./dist/drama/chapter-storyboard.js",
-    "./drama/chapter-demand": "./dist/drama/chapter-demand.js",
-    "./drama/chapter-episodes": "./dist/drama/chapter-episodes.js",
-    "./drama/demand-beats": "./dist/drama/demand-beats.js",
-    "./drama/field-authority": "./dist/drama/field-authority.js",
-    "./skills/acheng": "./dist/skills/acheng.js",
-    "./drama/production-validation": "./dist/drama/production-validation.js",
-    "./operations": "./dist/canvas/operations.js",
-    "./generation-contract": "./dist/canvas/generation-contract.js",
-    "./generation-api": "./dist/canvas/generation-api.js",
-    "./reference-contract": "./dist/canvas/reference-contract.js",
-    "./model-workflow": "./dist/canvas/model-workflow.js",
-    "./runtime/model-catalog": "./dist/runtime/model-catalog.js",
-    "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
-    "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
-    "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",
-    "./plugins/minimax-h3/character-groups": "./dist/plugins/minimax-h3/character-groups.js",
-    "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
-    "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js",
-    "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js",
-    "./tool-profiles": "./dist/canvas/tool-profiles.js",
-    "./drama/production-edit-disclosure": "./dist/drama/production-edit-disclosure.js",
-    "./server/mcp-arg-integrity": "./dist/server/mcp-arg-integrity.js",
-    "./drama/stage-contract": "./dist/drama/stage-contract.js",
-    "./drama/asset-spec": "./dist/drama/asset-spec.js"
-  },
-  "types": "./dist/index.d.ts",
-  "bin": {
-    "canvas-agent": "dist/index.js"
-  },
-  "files": [
-    "dist",
-    "agent-instructions.md",
-    "instructions",
-    "README.md"
-  ],
-  "scripts": {
-    "dev": "tsx src/index.ts",
-    "debug": "tsx src/index.ts --debug",
-    "test": "node ../scripts/test.mjs",
-    "build": "node scripts/build-tsc.mjs && node --stack-size=8000 scripts/bundle-production-sop.mjs",
-    "check": "node --stack-size=8000 node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
-    "start": "node dist/index.js",
-    "prepack": "node ../../scripts/pnpm.mjs run build"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@noble/hashes": "1.8.0",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
-    "express": "^5.1.0",
-    "gray-matter": "^4.0.3",
-    "sharp": "^0.35.4",
-    "strip-ansi": "7.2.0",
-    "winston": "^3.19.0",
-    "yaml": "^2.9.0",
-    "yjs": "^13.6.32",
-    "zod": "^3.25.76"
-  },
-  "peerDependencies": {
-    "@openai/codex": "0.160.0"
-  },
-  "peerDependenciesMeta": {
-    "@openai/codex": {
-      "optional": true
+    "name": "@basketikun/canvas-agent",
+    "version": "0.6.0",
+    "license": "MIT",
+    "type": "module",
+    "main": "./dist/index.js",
+    "exports": {
+        "./shared-asset-reference": "./dist/canvas/shared-asset-reference.js",
+        "./agent/work-package": "./dist/agent/work-package.js",
+        "./agent/hermes-agent": "./dist/agent/hermes-agent.js",
+        "./agent/hermes-client": "./dist/agent/hermes-client.js",
+        "./agent/tool-result": "./dist/agent/tool-result.js",
+        "./agent/codex-text": "./dist/agent/codex-text.js",
+        "./agent/image-input": "./dist/agent/image-input.js",
+        "./agent/vision-capability": "./dist/agent/vision-capability.js",
+        "./drama/compilation-scope": "./dist/drama/compilation-scope.js",
+        "./drama/asset-card-contract": "./dist/drama/asset-card-contract.js",
+        "./drama/clip-freshness": "./dist/drama/clip-freshness.js",
+        "./drama/subject-assembly": "./dist/drama/subject-assembly.js",
+        "./agent/delegation": "./dist/agent/delegation.js",
+        "./agent/production": "./dist/agent/production.js",
+        ".": "./dist/index.js",
+        "./http": "./dist/server/http.js",
+        "./plugin-mcp": "./dist/server/plugin-mcp.js",
+        "./schemas": "./dist/canvas/schemas.js",
+        "./canvas/node-sizes": "./dist/canvas/node-sizes.js",
+        "./state-summary": "./dist/canvas/state-summary.js",
+        "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
+        "./runtime-fields": "./dist/canvas/runtime-fields.js",
+        "./drama/production-tools": "./dist/drama/production-tools.js",
+        "./drama/topic-options": "./dist/drama/topic-options.js",
+        "./drama/art-style": "./dist/drama/art-style.js",
+        "./drama/production-contract": "./dist/drama/production-contract.js",
+        "./drama/novel-chapters": "./dist/drama/novel-chapters.js",
+        "./drama/chapter-storyboard": "./dist/drama/chapter-storyboard.js",
+        "./drama/chapter-demand": "./dist/drama/chapter-demand.js",
+        "./drama/chapter-episodes": "./dist/drama/chapter-episodes.js",
+        "./drama/demand-beats": "./dist/drama/demand-beats.js",
+        "./drama/field-authority": "./dist/drama/field-authority.js",
+        "./skills/acheng": "./dist/skills/acheng.js",
+        "./drama/production-validation": "./dist/drama/production-validation.js",
+        "./operations": "./dist/canvas/operations.js",
+        "./generation-contract": "./dist/canvas/generation-contract.js",
+        "./generation-api": "./dist/canvas/generation-api.js",
+        "./reference-contract": "./dist/canvas/reference-contract.js",
+        "./model-workflow": "./dist/canvas/model-workflow.js",
+        "./runtime/model-catalog": "./dist/runtime/model-catalog.js",
+        "./runtime/comfy-client": "./dist/runtime/comfy-client.js",
+        "./runtime/agent-runtime": "./dist/runtime/agent-runtime.js",
+        "./plugins/minimax-h3/node-factory": "./dist/plugins/minimax-h3/node-factory.js",
+        "./plugins/minimax-h3/character-groups": "./dist/plugins/minimax-h3/character-groups.js",
+        "./plugins/minimax-h3/prompt-sections": "./dist/plugins/minimax-h3/prompt-sections.js",
+        "./plugins/minimax-h3/style-templates": "./dist/plugins/minimax-h3/style-templates.js",
+        "./plugins/minimax-h3/runtime-params": "./dist/plugins/minimax-h3/runtime-params.js",
+        "./tool-profiles": "./dist/canvas/tool-profiles.js",
+        "./drama/production-edit-disclosure": "./dist/drama/production-edit-disclosure.js",
+        "./server/mcp-arg-integrity": "./dist/server/mcp-arg-integrity.js",
+        "./drama/stage-contract": "./dist/drama/stage-contract.js",
+        "./drama/asset-spec": "./dist/drama/asset-spec.js",
+        "./canvas/turnaround-layout": {
+            "types": "./dist/canvas/turnaround-layout.d.ts",
+            "default": "./dist/canvas/turnaround-layout.js"
+        }
+    },
+    "types": "./dist/index.d.ts",
+    "bin": {
+        "canvas-agent": "dist/index.js"
+    },
+    "files": [
+        "dist",
+        "agent-instructions.md",
+        "instructions",
+        "README.md"
+    ],
+    "scripts": {
+        "dev": "tsx src/index.ts",
+        "debug": "tsx src/index.ts --debug",
+        "test": "node ../scripts/test.mjs",
+        "build": "node scripts/build-tsc.mjs && node --stack-size=8000 scripts/bundle-production-sop.mjs",
+        "check": "node --stack-size=8000 node_modules/typescript/bin/tsc -p tsconfig.json --noEmit --incremental --tsBuildInfoFile .tsbuildinfo/check.tsbuildinfo",
+        "start": "node dist/index.js",
+        "prepack": "node ../../scripts/pnpm.mjs run build"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.30.0",
+        "@noble/hashes": "1.8.0",
+        "ajv": "^8.20.0",
+        "ajv-formats": "^3.0.1",
+        "express": "^5.1.0",
+        "gray-matter": "^4.0.3",
+        "sharp": "^0.35.4",
+        "strip-ansi": "7.2.0",
+        "winston": "^3.19.0",
+        "yaml": "^2.9.0",
+        "yjs": "^13.6.32",
+        "zod": "^3.25.76"
+    },
+    "peerDependencies": {
+        "@openai/codex": "0.160.0"
+    },
+    "peerDependenciesMeta": {
+        "@openai/codex": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.0",
+        "@types/node": "^22.0.0",
+        "tsx": "^4.19.0",
+        "typescript": "^5.8.0"
+    },
+    "engines": {
+        "node": ">=22.5"
+    },
+    "publishConfig": {
+        "access": "public"
     }
-  },
-  "devDependencies": {
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.8.0"
-  },
-  "engines": {
-    "node": ">=22.5"
-  },
-  "publishConfig": {
-    "access": "public"
-  }
 }

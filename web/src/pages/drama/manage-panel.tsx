@@ -209,6 +209,58 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         return () => { disposed = true; };
     }, [folder?.sharedAssetCanvasId, sharedAssetsReload, view]);
 
+    // hooks 必须无条件执行：以下逻辑依赖 folder，但即使 folder 尚未加载也要走相同的 hook 序列，
+    // 否则首次渲染（folder=null 提前返回）与后续渲染（folder 有值）的 hook 数量不同，React 会抛
+    // "Rendered more hooks than during the previous render."。故统一放在提前返回之前，内部做空值保护。
+    const pendingStyleAnchorNodeId = String(folder?.productionPlan?.styleAnchorNodeId || "");
+    const patchSharedStyle = async (patch: Record<string, unknown>) => {
+        if (!folder?.sharedAssetCanvasId || !sharedProduction || styleSaving) return false;
+        setStyleSaving(true);
+        try {
+            const result = await editEpisodeProduction({ projectId: folder.sharedAssetCanvasId }, sharedProduction.revision, [{ type: "patch_director_source", entity: "style", patch }], nanoid());
+            setSharedProduction(result.production);
+            setStyleWaiverDraft(String((result.production.draft.director?.source as Record<string, any> | undefined)?.style_policy_reason || ""));
+            return true;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+            return false;
+        } finally { setStyleSaving(false); }
+    };
+    const clearPendingStyleAnchor = async (nodeId: string) => {
+        const latest = await fetchBackendCanvasFolders();
+        const current = (latest.folders || []).find(item => String(item.id || "") === dramaId) as unknown as CanvasFolder | undefined;
+        if (!current || String(current.productionPlan?.styleAnchorNodeId || "") !== nodeId) return;
+        const productionPlan = { ...current.productionPlan, styleAnchorNodeId: undefined };
+        const saved = await upsertBackendCanvasFolder({ ...current, productionPlan, expectedPlanningUpdatedAt: current.updatedAt || current.createdAt, updatedAt: new Date().toISOString() });
+        if (saved.folder) {
+            useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === dramaId ? saved.folder as unknown as CanvasFolder : item) }));
+            setDraft(value => value ? { ...value, productionPlan: { ...value.productionPlan, styleAnchorNodeId: undefined }, expectedPlanningUpdatedAt: String((saved.folder as Record<string, unknown>).updatedAt || value.expectedPlanningUpdatedAt) } : value);
+        }
+    };
+    useEffect(() => {
+        if (!pendingStyleAnchorNodeId || !folder?.sharedAssetCanvasId || !sharedProduction?.draft.director) return;
+        const source = sharedProduction.draft.director.source as Record<string, unknown>;
+        const currentAnchor = String(source.style_anchor_node_id || "");
+        if (currentAnchor && currentAnchor !== pendingStyleAnchorNodeId) return;
+        if (pendingStyleTransfer.current === pendingStyleAnchorNodeId) return;
+        pendingStyleTransfer.current = pendingStyleAnchorNodeId;
+        void (async () => {
+            try {
+                const transferred = currentAnchor === pendingStyleAnchorNodeId || await patchSharedStyle({
+                    anchor_asset_id: "",
+                    style_anchor_node_id: pendingStyleAnchorNodeId,
+                    style_policy: "waived",
+                    style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: t("drama.createProjectStyleNode") }),
+                });
+                if (transferred) await clearPendingStyleAnchor(pendingStyleAnchorNodeId);
+                else pendingStyleTransfer.current = "";
+            } catch (error) {
+                pendingStyleTransfer.current = "";
+                message.error(error instanceof Error ? error.message : String(error));
+            }
+        })();
+    }, [pendingStyleAnchorNodeId, folder?.sharedAssetCanvasId, sharedProduction, styleSaving, t, message]);
+
     if (!folder) return <div className="py-12 text-center text-sm text-muted-foreground">{t("canvas.loading")}</div>;
 
     const produceEpisode = onProduceEpisode || ((episode: DramaEpisode) => navigate(dramaWorkbenchPath(dramaId, episode.id)));
@@ -240,55 +292,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         ...styleAssets.map(item => ({ value: `asset:${String(item.asset_id || item.id || "")}`, label: String(item.asset_name || item.name || item.title || item.asset_id || item.id || "") })),
         ...sharedStyleNodes.map(node => ({ value: `node:${node.id}`, label: t("director.workspace.styleCanvasNode", { title: node.title || node.id }) })),
     ];
-    const pendingStyleAnchorNodeId = String(folder.productionPlan?.styleAnchorNodeId || "");
     const styleValue = styleAnchorNodeId ? `node:${styleAnchorNodeId}` : styleAnchorAssetId ? `asset:${styleAnchorAssetId}` : pendingStyleAnchorNodeId ? `node:${pendingStyleAnchorNodeId}` : undefined;
-    const patchSharedStyle = async (patch: Record<string, unknown>) => {
-        if (!folder.sharedAssetCanvasId || !sharedProduction || styleSaving) return false;
-        setStyleSaving(true);
-        try {
-            const result = await editEpisodeProduction({ projectId: folder.sharedAssetCanvasId }, sharedProduction.revision, [{ type: "patch_director_source", entity: "style", patch }], nanoid());
-            setSharedProduction(result.production);
-            setStyleWaiverDraft(String((result.production.draft.director?.source as Record<string, any> | undefined)?.style_policy_reason || ""));
-            return true;
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : String(error));
-            return false;
-        } finally { setStyleSaving(false); }
-    };
-    const clearPendingStyleAnchor = async (nodeId: string) => {
-        const latest = await fetchBackendCanvasFolders();
-        const current = (latest.folders || []).find(item => String(item.id || "") === dramaId) as unknown as CanvasFolder | undefined;
-        if (!current || String(current.productionPlan?.styleAnchorNodeId || "") !== nodeId) return;
-        const productionPlan = { ...current.productionPlan, styleAnchorNodeId: undefined };
-        const saved = await upsertBackendCanvasFolder({ ...current, productionPlan, expectedPlanningUpdatedAt: current.updatedAt || current.createdAt, updatedAt: new Date().toISOString() });
-        if (saved.folder) {
-            useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === dramaId ? saved.folder as unknown as CanvasFolder : item) }));
-            setDraft(value => value ? { ...value, productionPlan: { ...value.productionPlan, styleAnchorNodeId: undefined }, expectedPlanningUpdatedAt: String((saved.folder as Record<string, unknown>).updatedAt || value.expectedPlanningUpdatedAt) } : value);
-        }
-    };
-    useEffect(() => {
-        if (!pendingStyleAnchorNodeId || !folder.sharedAssetCanvasId || !sharedProduction?.draft.director) return;
-        const source = sharedProduction.draft.director.source as Record<string, unknown>;
-        const currentAnchor = String(source.style_anchor_node_id || "");
-        if (currentAnchor && currentAnchor !== pendingStyleAnchorNodeId) return;
-        if (pendingStyleTransfer.current === pendingStyleAnchorNodeId) return;
-        pendingStyleTransfer.current = pendingStyleAnchorNodeId;
-        void (async () => {
-            try {
-                const transferred = currentAnchor === pendingStyleAnchorNodeId || await patchSharedStyle({
-                    anchor_asset_id: "",
-                    style_anchor_node_id: pendingStyleAnchorNodeId,
-                    style_policy: "waived",
-                    style_policy_reason: t("director.workspace.styleCanvasNodeReason", { title: t("drama.createProjectStyleNode") }),
-                });
-                if (transferred) await clearPendingStyleAnchor(pendingStyleAnchorNodeId);
-                else pendingStyleTransfer.current = "";
-            } catch (error) {
-                pendingStyleTransfer.current = "";
-                message.error(error instanceof Error ? error.message : String(error));
-            }
-        })();
-    }, [pendingStyleAnchorNodeId, folder.sharedAssetCanvasId, sharedProduction, styleSaving, t, message]);
     const goToPlanning = () => navigate(`${location.pathname}?${productionWorkspaceQuery(new URLSearchParams(location.search), "series", { seriesView: "planning" }).toString()}`);
     const openSharedCanvas = async () => {
         if (openingSharedCanvas) return;
@@ -406,7 +410,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         if (step === "worldContext") { setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, worldContext: text.trim() } } }); return; }
         setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail: { ...detail, ending: text.trim() } } });
     };
-    const stepInput = draft ? { topic: draft.productionPlan.topic, outline: draft.outline, worldContext: draft.productionPlan.outlineDetail.worldContext, episodeCount: episodes.length, episodesWithSynopsis: episodes.filter(episode => String(episode.synopsis || "").trim()).length, episodesWithScript: episodes.filter(episode => episodeHasScript(episode)).length, assetCount: sharedAssets.length, episodeCanvasCount: episodes.filter(episode => episode.canvasId).length } : null;
+    const stepInput = draft ? { topic: draft.productionPlan.topic, outline: draft.outline, worldContext: draft.productionPlan.outlineDetail.worldContext, episodeCount: episodes.length, episodesWithScript: episodes.filter(episode => episodeHasScript(episode)).length, assetCount: sharedAssets.length } : null;
     const stepStates = stepInput ? planningStepStates(stepInput) : [];
     /** 步骤条：只有能派生的完成度才报，分镜/导演包在分集制作里，点过去即入口。 */
     const openPlanningStep = (key: PlanningStepKey) => {

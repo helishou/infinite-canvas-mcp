@@ -54,3 +54,51 @@ test("中英文案覆盖广场、范围、分类、安装与详情", () => {
         }
     }
 });
+
+test("导演大师技能包作为可安装 catalog 源导入，正文与版权声明原样保留", () => {
+    const catalogUrl = new URL("../../../../.canvas-runtime/skill-market/catalog/dm-v0.7.2/catalog.json", import.meta.url);
+    const catalog = JSON.parse(readFileSync(catalogUrl, "utf8")) as {
+        id: string; notice: string; skills: Array<{ slug: string; title: string; group: string; slots: string[] }>;
+        functionSlots: Record<string, { label: string; defaultSkill: string; skills: string[] }>;
+    };
+    assert.equal(catalog.id, "dm-v0.7.2");
+    assert.equal(catalog.skills.length, 45, "45 个技能全部导入");
+    assert.match(catalog.notice, /版权/, "保留版权声明");
+    assert.equal(Object.keys(catalog.functionSlots).length, 27, "27 个功能槽映射");
+    assert.ok(catalog.skills.every(skill => /^[a-z0-9-]+$/.test(skill.slug)), "slug 符合技能名规范");
+    assert.ok(catalog.skills.some(skill => skill.title === "选题立项"), "中文 frontmatter 名保留");
+    assert.ok(catalog.skills.some(skill => skill.slots.includes("boardSplit")), "技能带功能槽标注");
+    // 抽查正文版权声明未被改写
+    const topicSkill = readFileSync(new URL("../../../../.canvas-runtime/skill-market/catalog/dm-v0.7.2/drama-topic/SKILL.md", import.meta.url), "utf8");
+    assert.match(topicSkill, /license: proprietary/);
+    assert.match(topicSkill, /redistribution: forbidden/);
+    assert.match(topicSkill, /版权声明/);
+});
+
+test("后端支持 catalog 源安装、列表合并未安装项、功能槽映射端点", () => {
+    const routes = read("../../../../backend/src/server/skill-market-routes.ts");
+    assert.match(routes, /source !== "markdown" && source !== "zip" && source !== "catalog"/, "安装来源支持 catalog");
+    assert.match(routes, /\/api\/skill-market\/slot-map/, "功能槽映射端点存在");
+    assert.match(routes, /installed: false/, "未安装 catalog 项有标记");
+    assert.match(routes, /findCatalogEntry/, "未安装技能详情从 catalog 源读取");
+    assert.match(routes, /function effectiveBuiltin/, "catalog 安装的技能不被误判为内置（可卸载、显示对话按钮）");
+    assert.match(routes, /isUserInstalled\(name, state\)/, "按 state.source 区分用户安装与内置");
+});
+
+test("广场可安装技能标功能槽、一键安装与用此技能对话（跨页面总线）", () => {
+    const market = read("./market.tsx");
+    const api = read("../../services/api/skill-market.ts");
+    const bus = read("../../lib/market-skill-bus.ts");
+    const panel = read("../../components/agent/local-agent-panel.tsx");
+    assert.match(api, /type SkillSource = "builtin" \| "markdown" \| "zip" \| "catalog"/);
+    assert.match(api, /installCatalogSkill/);
+    assert.match(api, /fetchSkillSlotMap/);
+    assert.match(market, /data-testid="market-card-install"/, "未安装 catalog 技能显示安装按钮");
+    assert.match(market, /data-testid="market-card-use"/, "已安装技能显示对话按钮");
+    assert.match(market, /data-testid="market-slot-map"/, "功能槽映射视图");
+    assert.doesNotMatch(market, /data-testid="market-detail-license"/, "详情不再显示版权提示");
+    assert.doesNotMatch(market, /\{map\.notice\}/, "功能槽映射视图不再展示 notice");
+    assert.match(bus, /USE_MARKET_SKILL_EVENT/, "跨页面用技能总线");
+    assert.match(panel, /subscribeUseMarketSkill/, "Agent 面板监听用技能事件");
+    assert.match(panel, /selectSkill\(matched/, "选中对应技能而非改生成 prompt");
+});

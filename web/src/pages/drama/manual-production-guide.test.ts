@@ -9,6 +9,16 @@ test("saved manual content is not blocked by historical director receipt, approv
     assert.equal(manualWorkspaceProgress("shots", source, []).status, "saved");
     assert.equal(manualWorkspaceProgress("continuity", source, [], "stale").status, "optional");
 });
+test("分场剧本只有 blocks 没有 text 时也算剧本已写，不能提示先填写剧本", () => {
+    // 导演的正式分场稿结构是 { scene_name, blocks: [{kind,text}] }，没有 scene.text。
+    const source = { script_scenes: [{ id: "scene-1", scene_name: "场1 重圆之后", blocks: [{ kind: "action", text: "夜，洞府石桌。" }, { kind: "dialogue", text: "崇良：你又食人了。" }] }] };
+    const progress = manualWorkspaceProgress("story", source, []);
+    assert.equal(progress.status, "saved");
+    assert.equal(progress.summaryKey, "storySaved");
+    assert.equal(progress.values.count, 1);
+    // 真的空场次仍然报空。
+    assert.equal(manualWorkspaceProgress("story", { script_scenes: [{ id: "scene-2", blocks: [] }] }, []).summaryKey, "storyEmpty");
+});
 test("current empty Clip prompt provides a direct Shot editor action rather than a director-only action", () => {
     const target = { kind: "segment" as const, targetId: "clip", status: "blocked", blockers: ["提示词为空"] };
     const source = { segments: [{ id: "clip", shot_ids: ["shot"] }] };
