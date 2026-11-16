@@ -7,7 +7,7 @@ try {
 }
 if (-not $hasLock) {
     Write-Host "[dev-local] Another local development stack is already running."
-    Write-Host "[dev-local] If its terminal is unavailable, run: corepack pnpm run dev:stop"
+    Write-Host "[dev-local] If its terminal is unavailable, run: npm run dev:stop"
     $mutex.Dispose()
     exit 0
 }
@@ -42,9 +42,11 @@ foreach ($processId in $pids) {
     Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
 }
 Start-Sleep -Seconds 2
-Write-Host "[dev-local] Starting backend, agent and web..."
+Write-Host "[dev-local] Starting engine (8300), backend, agent and web..."
 try {
-    corepack pnpm run dev:services
+    # 用仓库自带的 pnpm 包装器：本机 corepack 的 sh shim 在 git-bash/PS 下会直接报 Node 错误，
+    # 之前这里写 corepack pnpm 导致整个 dev:local 起不来（引擎面板也就永远不启动）。
+    node "$PSScriptRoot\pnpm.mjs" run dev:services
 } finally {
     try { $mutex.ReleaseMutex() } catch { }
     $mutex.Dispose()
