@@ -20,7 +20,7 @@ const LegacyDirectorPage = lazy(() => import("@/pages/director"));
 const ConfigPage = lazy(() => import("@/pages/config"));
 const HomePage = lazy(() => import("@/pages/home"));
 const NotFound = lazy(() => import("@/pages/not-found"));
-const WorkflowsPage = lazy(() => import("@/pages/workflows"));
+const EngineConsolePage = lazy(() => import("@/pages/engine-console"));
 const PromptsPage = lazy(() => import("@/pages/prompts"));
 const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
@@ -87,7 +87,8 @@ export const appRoutes = [
     { path: "/drama", element: lazyPage(ProductionAliasRedirect) },
     { path: "/drama/episodes/:episodeId/production", element: lazyPage(EpisodeProductionRedirect) },
     { path: "/drama/scenes/:sceneId/production", element: lazyPage(SceneProductionRedirect) },
-    { path: "/workflows", element: lazyPage(WorkflowsPage) },
+    // 工作流管理已迁移到执行引擎控制台，画布这个路由只做跳转
+    { path: "/workflows", element: lazyPage(EngineConsolePage) },
     { path: "/config", element: lazyPage(ConfigPage) },
     { path: "/diagnostics/mcp", element: lazyPage(McpObservabilityPage) },
     { path: "/analytics/local", element: lazyPage(LocalAnalyticsPage) },
