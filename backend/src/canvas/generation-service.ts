@@ -8,6 +8,9 @@ import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import { CanvasH3Runner } from "./h3-runner.js";
 import { CanvasImageDispatcher, type CanvasImageGenerationInput } from "./image-dispatcher.js";
+import type { BackendDatabase } from "../db.js";
+import { resolveProjectArtProfile } from "../drama/art-style.js";
+import { withArtStyle } from "@basketikun/canvas-agent/drama/art-style";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import {
     isMaskOverlayNode,
@@ -49,6 +52,8 @@ export class CanvasGenerationService {
         private readonly video?: CanvasVideoDispatcher,
         private readonly audio?: CanvasAudioDispatcher,
         private readonly browserScript?: CanvasBrowserScriptDispatcher,
+        /** 剧目级设置（画风）解析用；未注入时按无画风处理，行为与旧版一致。 */
+        private readonly db?: BackendDatabase,
     ) {}
 
     async start(command: CanvasGenerationCommand, options?: { productionManaged: boolean; executionProject?: CanvasProject; executionDefaults?: Record<string, unknown> }) {
@@ -150,7 +155,13 @@ export class CanvasGenerationService {
 
     private startImage(command: CanvasGenerationCommand) {
         if (!command.model) throw new Error("画布图片生成缺少 model");
-        const resolved = this.resolveImageReferences(command);
+        const referenced = this.resolveImageReferences(command);
+        // 画风是剧目级的全剧统一约束（选题页 topic.artStyle）：
+        // 所有图片请求在最终提示词上拼一次，资产 / 关键帧 / 分镜图 / 道具图自动沿用。
+        const profile = this.db ? resolveProjectArtProfile(this.db, command.projectId) : { artStyle: "", language: "" };
+        const resolved = profile.artStyle
+            ? { ...referenced, prompt: withArtStyle(String(referenced.prompt || ""), profile.artStyle, profile.language) }
+            : referenced;
         // 图片与 H3/视频统一：调用方重试同一个幂等键时复用原任务，
         // 不允许因为图片执行器内部字段名不同而再次触发模型。
         const input = {
@@ -416,7 +427,9 @@ function requiresBrowserProvider(value: unknown, command: CanvasGenerationComman
     if (!channel) return false;
     const kind = String(channel.kind || "api");
     const apiFormat = String(channel.apiFormat || config.apiFormat || "openai");
-    if (command.mode === "image") return kind !== "comfyui" && (apiFormat === "gemini" || !/^gpt-image(?:-|$)/i.test(model));
+    // OpenAI 协议（含本地引擎这种「标准 OpenAI + 额外自定义参数」的变体）走 HTTP 直连，
+    // 只有 gemini 和画布需要驱动网页的模型才交给浏览器执行器。
+    if (command.mode === "image") return kind !== "comfyui" && apiFormat === "gemini";
     if (command.mode === "text") return kind === "comfyui" || !["openai", "openai-chat"].includes(apiFormat);
     if (command.mode === "audio") return kind !== "comfyui" && apiFormat !== "openai";
     if (command.mode === "video") return kind !== "comfyui" && apiFormat !== "openai";

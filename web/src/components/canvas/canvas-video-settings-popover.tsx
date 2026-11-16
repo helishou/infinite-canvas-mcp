@@ -11,6 +11,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
+import { useChannelModelFields } from "./use-channel-model-fields";
 
 type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
@@ -78,12 +79,21 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
     }, [workflowName]);
 
     const activeWorkflowDetail = workflowDetail?.name === workflowName ? workflowDetail : null;
-    const customFields = (activeWorkflowDetail?.config?.fields || []).filter((field) =>
+    // 引擎（OpenAI 兼容渠道）模型没有画布工作流，字段从 /v1/models/{id} 取，默认值一并铺进去
+    const { fields: channelFields } = useChannelModelFields({
+        config,
+        open,
+        comfyParams,
+        onParamsChange: onComfyParamsChange,
+        excludeTypes: ["image", "video", "audio"],
+    });
+    const workflowFields = (activeWorkflowDetail?.config?.fields || []).filter((field) =>
         !isWorkflowImageField(field, activeWorkflowDetail?.workflow)
         && !isWorkflowVideoField(field, activeWorkflowDetail?.workflow)
         && !isWorkflowAudioField(field, activeWorkflowDetail?.workflow)
         && !field.isPrompt,
     );
+    const customFields = workflowFields.length ? workflowFields : channelFields;
     const hasRunningHubBinding = Boolean(activeWorkflowDetail?.config?.runningHubProfileId);
     const runTarget = runTargetOverride || activeWorkflowDetail?.config?.runTarget || "local";
 

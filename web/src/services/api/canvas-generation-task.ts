@@ -27,7 +27,7 @@ export async function observeCanvasGenerationTask(input: CanvasGenerationCommand
             if (!task) throw new Error(`画布${label}任务查询没有返回任务`);
             if (task.status === "succeeded" || task.status === "awaiting_confirmation") return task;
             if (task.status === "failed" || task.status === "cancelled") throw new Error(task.error || `画布${label}任务${task.status}`);
-            await wait(pollMs, signal);
+            await wait(pollMs, signal, started.taskId);
         }
     } finally {
         signal.removeEventListener("abort", cancel);
@@ -35,12 +35,23 @@ export async function observeCanvasGenerationTask(input: CanvasGenerationCommand
     }
 }
 
-function wait(ms: number, signal: AbortSignal) {
+/**
+ * 等一个轮询间隔；期间如果 SSE 推来同一个任务的事件就立刻醒来。
+ * 轮询保留为兜底（SSE 断流时仍然能收敛），但正常路径不再白等 1s。
+ */
+function wait(ms: number, signal: AbortSignal, taskId?: string) {
     return new Promise<void>((resolve, reject) => {
         const timer = window.setTimeout(done, ms);
-        const abort = () => { window.clearTimeout(timer); signal.removeEventListener("abort", abort); reject(signal.reason || new DOMException("Aborted", "AbortError")); };
-        function done() { signal.removeEventListener("abort", abort); resolve(); }
+        const onEvent = (event: Event) => {
+            const detail = (event as CustomEvent<{ type?: string; entityId?: string }>).detail;
+            if (!detail || !taskId || detail.entityId !== taskId) return;
+            if (detail.type && !detail.type.startsWith("task.")) return;
+            done();
+        };
+        const abort = () => { window.clearTimeout(timer); signal.removeEventListener("abort", abort); window.removeEventListener("backend-event", onEvent); reject(signal.reason || new DOMException("Aborted", "AbortError")); };
+        function done() { window.clearTimeout(timer); signal.removeEventListener("abort", abort); window.removeEventListener("backend-event", onEvent); resolve(); }
         signal.addEventListener("abort", abort, { once: true });
+        if (taskId) window.addEventListener("backend-event", onEvent);
         if (signal.aborted) abort();
     });
 }

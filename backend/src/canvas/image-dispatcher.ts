@@ -20,6 +20,7 @@ import {
   usesWorkflowExecutor,
   workflowResolutionMessage,
 } from "./model-workflow.js";
+import { findChannelConfig, findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
 import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
@@ -35,7 +36,7 @@ import { commandFingerprint } from "./collaboration.js";
 import { generationSettingsSnapshot, workflowGenerationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
 import { bridgeLocalWorkflowValues } from "./workflow-field-bridge.js";
 import type { ProductionImageInput } from "@basketikun/canvas-agent/reference-contract";
-import { CanvasEngineClient, importEngineMedia } from "./engine-client.js";
+import { CanvasEngineClient, generateImagesOpenAI, importEngineMedia } from "./engine-client.js";
 
 export type { CanvasImageReference } from "@basketikun/media-engine/contracts";
 import type { CanvasImageReference } from "@basketikun/media-engine/contracts";
@@ -66,6 +67,8 @@ export type CanvasImageGenerationInput = {
 
 type CanvasImageExecutionPlan = {
   executor: CanvasExecutorId;
+  /** 引擎渠道目标：executor 为 engine-image 时必填。 */
+  engine?: EngineChannelTarget;
   input: CanvasImageGenerationInput;
   workflow?: string;
   preset?: string;
@@ -103,7 +106,7 @@ type DispatcherHooks = {
 export class CanvasImageDispatcher {
   private readonly childTasks = new Map<string, Set<string>>();
   /** 本地子任务 id → 引擎任务 id（配置了执行引擎时才有值）。 */
-  private readonly engineTasks = new Map<string, string>();
+  private readonly engineTasks = new Map<string, { taskId: string; target: EngineChannelTarget }>();
   private readonly styleTransfer = new StyleTransferRunner();
   constructor(
     private readonly config: ResolvedConfig,
@@ -115,11 +118,6 @@ export class CanvasImageDispatcher {
     private readonly events?: BackendEventBus,
     /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
     private readonly runningHub?: RunningHubBackend,
-    /**
-     * 可选注入：配置了独立执行引擎时，本地工作流执行改走 HTTP（`/v1/images/generations`）。
-     * 未注入或该工作流需要画布侧改图（蒙版编辑等）时仍走本地执行器。
-     */
-    private readonly engineClient?: CanvasEngineClient,
   ) {}
 
   private get logs(): GenerationLogStore {
@@ -503,7 +501,7 @@ export class CanvasImageDispatcher {
     if (!input.nodeId) return null; // 仅带 projectId 的请求仍可用于日志归属，不绑定节点。
     if (!input.projectId) throw new Error("画布图片任务指定 nodeId 时必须提供 projectId");
     const project = this.stores.projects.get(input.projectId);
-    if (!project || !Array.isArray(project.nodes) || !project.nodes.some((node) => (node as Record<string, unknown>).id === input.nodeId)) throw new Error("画布图片生成目标不存在，未启动模型");
+    if (!project || !Array.isArray(project.nodes) || !project.nodes.some((node) => (node as Record<string, unknown>).id === input.nodeId)) throw new Error("画布图片生成目标不存在（画布可能尚未保存到后端），未启动模型；请重试");
     if (input.imageIds) {
       const node = project.nodes.find((node) => (node as Record<string, unknown>).id === input.nodeId) as Record<string, any>;
       const isSmartGenerationNode = node.type === "config" && node.metadata?.smart === true;
@@ -550,6 +548,12 @@ export class CanvasImageDispatcher {
       model,
       ...(Object.keys(params).length ? { params } : {}),
     };
+    // 引擎渠道：这个模型是 media-engine 的模型，执行交给引擎的 /v1/images/generations。
+    // 蒙版编辑与 flux2-klein 仍需要画布侧改图，留在本地执行器。
+    const engineTarget = findEngineChannel(aiConfig, selectedModel);
+    if (engineTarget && !input.maskEdit && !/klein/i.test(model)) {
+      return { executor: "engine-image", input: normalized, engine: engineTarget };
+    }
     if (usesWorkflowExecutor(aiConfig, selectedModel)) {
       const resolved = resolveWorkflowBindingForModel(
         aiConfig,
@@ -635,6 +639,8 @@ export class CanvasImageDispatcher {
     taskId: string,
   ): Promise<CanvasImageGenerationResult> {
     plan = { ...plan, input: this.prepareFrozenReferences(plan.input) };
+    if (plan.executor === "engine-image" && plan.engine)
+      return this.dispatchEngineImage(plan.input, taskId, plan.engine);
     if (plan.executor === "direct-image")
       return this.dispatchDirect(plan.input, taskId);
     if (plan.executor === "local-style-transfer")
@@ -673,10 +679,34 @@ export class CanvasImageDispatcher {
     const childTaskId = `image-child-${taskId}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
-    const provider = configuredProvider(
-      this.stores.settings.get("ai.config"),
-      input.params?.channelId,
-    );
+    const aiConfig = this.stores.settings.get("ai.config");
+    const provider = configuredProvider(aiConfig, input.params?.channelId);
+    // OpenAI 兼容渠道（含引擎渠道）：走画布自己的 /v1/images/*，不再依赖引擎包的 provider
+    const channel = findChannelConfig(aiConfig, input.model);
+    if (channel && channel.apiFormat === "openai") {
+      const baseUrl = channel.baseUrl || provider?.baseUrl || "";
+      if (!baseUrl) throw new Error(`渠道「${channel.channelId || input.model}」没有配置 baseUrl`);
+      const result = await generateImagesOpenAI({
+        baseUrl,
+        token: channel.apiKey || provider?.apiKey,
+        model: modelOptionName(input.model).trim(),
+        prompt: input.prompt,
+        size: input.size || sizeFromDimensions(input.width, input.height),
+        quality: input.quality,
+        count: input.count,
+        references: references.map((reference) => ({ mimeType: reference.mimeType, data: reference.data })),
+        ...(channel.extraBody ? { extra: channel.extraBody } : {}),
+      });
+      const media: Array<{ url: string; storageKey?: string; mimeType: string; filename?: string; bytes?: number }> = result.blobs.map((blob) => {
+        const file = this.stores.media.store(blob.data, { name: "openai-image.png", mimeType: blob.mimeType, category: "output" });
+        return { url: this.stores.media.url(file), storageKey: file.storageKey, mimeType: blob.mimeType, filename: "openai-image.png", bytes: blob.data.length };
+      });
+      if (result.urls.length) {
+        const imported = await importEngineMedia(this.stores.media, result.urls.map((url) => ({ url })), (target) => fetch(target));
+        media.push(...imported.map((file) => ({ url: file.url, storageKey: file.storageKey, mimeType: file.mimeType, filename: file.filename, bytes: file.bytes })));
+      }
+      return { taskId, media };
+    }
     try {
     const task = this.directImage.run(
       {
@@ -755,8 +785,10 @@ export class CanvasImageDispatcher {
   cancel(id: string) {
     const childIds = [...(this.childTasks.get(id) || [])];
     for (const childId of childIds) {
-      const engineTaskId = this.engineTasks.get(childId);
-      if (engineTaskId && this.engineClient) void this.engineClient.cancel(engineTaskId);
+      const engineTask = this.engineTasks.get(childId);
+      if (engineTask) {
+        void new CanvasEngineClient(engineTask.target.baseUrl, engineTask.target.token).cancel(engineTask.taskId);
+      }
       try {
         this.directImage.cancel(childId);
       } catch {
@@ -846,9 +878,6 @@ export class CanvasImageDispatcher {
     workflowName: string,
     suffix = "",
   ) {
-    if (this.shouldDispatchToEngine(input)) {
-      return this.dispatchWorkflowViaEngine(input, taskId, workflowName, suffix);
-    }
     const detail = await this.workflows.get(workflowName);
     if (Array.isArray(detail.workflow.nodes)) detail.workflow = convertComfyWorkflowToApi(detail.workflow);
     const fields = detail.config?.fields || [];
@@ -908,26 +937,14 @@ export class CanvasImageDispatcher {
     }
   }
 
-  /**
-   * 走独立执行引擎的条件：配了引擎、且这条请求不需要画布侧改图。
-   * 蒙版编辑（maskReferenceWorkflow）与 flux2-klein 图适配目前都在画布本地改图，
-   * 引擎还接不了，先明确回落到本地执行器——不做「大概等价」的假迁移。
-   */
-  private shouldDispatchToEngine(input: CanvasImageGenerationInput) {
-    if (!this.engineClient) return false;
-    if (input.maskEdit) return false;
-    if (/klein/i.test(input.model || "")) return false;
-    return true;
-  }
-
   /** 引擎路径：画布只发协议请求，能力（字段、图片槽位）由 `/v1/models/{id}` 提供。 */
-  private async dispatchWorkflowViaEngine(
+  private async dispatchEngineImage(
     input: CanvasImageGenerationInput,
     taskId: string,
-    workflowName: string,
-    suffix = "",
+    target: EngineChannelTarget,
   ) {
-    const engine = this.engineClient!;
+    const engine = new CanvasEngineClient(target.baseUrl, target.token);
+    const workflowName = target.model;
     const info = await engine.modelInfo(workflowName);
     const { fieldValues } = imageWorkflowFieldValues(input, info.fields, input.params || {});
     const references = executionImageInputs(input);
@@ -943,17 +960,27 @@ export class CanvasImageDispatcher {
       images.push(await this.referenceDataUrl(await this.modelReference(reference, taskId)));
     }
 
-    const childTaskId = `engine-child-${taskId}${suffix}`;
+    const childTaskId = `engine-child-${taskId}`;
     this.assertNotCancelled(taskId);
     this.trackChild(taskId, childTaskId);
     try {
+      // 尺寸/质量这类标准参数必须一起发：只发 fields 的话，引擎只能套工作流默认值，
+      // 用户在画布上选 16:9 会毫无效果（工作流里 width/height 还是默认的 1280x1920）。
+      const size = /^\d+\s*x\s*\d+$/i.test(String(input.size || "").trim())
+        ? String(input.size).replace(/\s/g, "")
+        : input.width && input.height
+          ? `${input.width}x${input.height}`
+          : undefined;
       const started = await engine.generateImages({
         model: workflowName,
         prompt: input.prompt,
         fields: fieldValues,
         images,
+        ...(size ? { size } : {}),
+        ...(input.quality ? { quality: input.quality } : {}),
+        ...(input.count ? { count: input.count } : {}),
       });
-      if (started.taskId) this.engineTasks.set(childTaskId, started.taskId);
+      if (started.taskId) this.engineTasks.set(childTaskId, { taskId: started.taskId, target });
       this.assertNotCancelled(taskId);
       const media = await importEngineMedia(this.stores.media, started.media, (url) => engine.fetchMedia(url));
       if (!media.length) throw new Error(`执行引擎没有回传任何产物（${workflowName}）`);

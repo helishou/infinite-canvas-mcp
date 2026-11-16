@@ -43,7 +43,14 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
     }));
     const incompatible = new Set(candidates.filter(model => compatibility.get(model) === 'unsupported'));
     const options = useMemo(() => {
-        const unique = Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model))));
+        // 已标记 hidden 的模型不进列表，但当前已选中的那个要留着，否则下拉框会显示空。
+        const unique = Array.from(
+            new Set(
+                [...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability), ...(value ? [value] : [])].filter(
+                    (model): model is string => Boolean(model),
+                ),
+            ),
+        );
         const originalOrder = new Map(unique.map((model, index) => [model, index]));
         const usageByName = new Map<string, number>();
         const usageByChannelModel = new Map<string, number>();

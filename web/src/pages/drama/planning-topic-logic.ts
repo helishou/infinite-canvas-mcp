@@ -5,17 +5,16 @@ import type { DramaTopic } from "@basketikun/canvas-agent/drama/production-contr
  * 不含 React，方便直接跑 node:test。
  */
 
-export const TOPIC_OPTIONS = {
-    themes: ["霸道总裁", "甜宠", "复仇", "穿越", "重生", "悬疑", "宫斗", "都市", "玄幻", "末日", "校园", "职场", "古装言情"],
-    gender: ["不限", "女性", "男性"],
-    age: ["全龄", "幼儿", "儿童", "少年", "青年", "中年", "老年"],
-    tones: ["甜", "虐", "甜虐", "爽", "燃", "搞笑", "暗黑", "温情"],
-    ending: ["HE 好结局", "BE 坏结局", "OE 开放结局"],
-    language: ["中文", "English"],
-    artStyle: ["日系赛璐璐", "日系半厚涂", "新海诚", "吉卜力", "韩漫", "韩系唯美", "国风水墨", "新国风", "古风工笔", "国潮", "3D国漫", "半写实厚涂"],
-    episodePresets: [1, 10, 30, 60, 80, 100],
-    minutePresets: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-} as const;
+/** 选项表与默认值的唯一真值在 canvas-agent（后端自动填写也读它）；这里只做转出。 */
+import { TOPIC_OPTIONS } from "@basketikun/canvas-agent/drama/topic-options";
+
+export { TOPIC_OPTIONS };
+export { TOPIC_DEFAULTS } from "@basketikun/canvas-agent/drama/topic-options";
+
+/** 「模型决定」不是空字符串的语义占位：时长 0 = 由模型按原文剧情决定（导演大师也是这么存）。 */
+export function episodeDurationLabel(minutes: number): string {
+    return minutes > 0 ? `${minutes} 分钟` : "模型决定";
+}
 
 /** 题材最多两个；再点已选中的取消。 */
 export function toggleThemes(current: readonly string[], value: string): string[] {

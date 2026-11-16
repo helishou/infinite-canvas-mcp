@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Button, Input, Modal, Select, message } from "antd";
 import { ImagePlus, Save, Trash2, Upload as UploadIcon, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { AssetSpecFields } from "./asset-spec-fields";
+import { fetchAssetSpec, updateAssetSpec, type AssetSpecKind } from "@/services/backend-api";
+import { ASSET_KIND_SKILL, assetSpecReadiness, buildAssetImagePrompt, missingAssetSpecFields, type AssetSpec } from "@basketikun/canvas-agent/drama/asset-spec";
 
 import { MediaImage } from "@/components/media/media-image";
 import { VoiceAssetSelect } from "@/components/assets/voice-asset-select";
@@ -20,6 +23,8 @@ type PropImage = SceneImage;
 
 export type CanvasAssetEditPayload = {
     title: string;
+    /** 节点本地设定卡（共享资产时改为写资产自身）。 */
+    assetSpec?: AssetSpec;
     characterName?: string;
     characterDescription?: string;
     characterImages?: CharacterImage[];
@@ -72,6 +77,12 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
     const [voiceStorageKey, setVoiceStorageKey] = useState("");
     const [voiceAssetId, setVoiceAssetId] = useState("");
     const [saving, setSaving] = useState(false);
+    const specKind: AssetSpecKind | null = nodeType === "character" || nodeType === "scene" || nodeType === "prop" ? nodeType as AssetSpecKind : null;
+    const sharedOrigin = metadata.sharedAssetOrigin as { assetId?: string } | undefined;
+    const sharedAssetId = typeof sharedOrigin?.assetId === "string" ? sharedOrigin.assetId : "";
+    const [spec, setSpec] = useState<AssetSpec | null>(null);
+    const [specSkill, setSpecSkill] = useState("");
+    const [specSaving, setSpecSaving] = useState(false);
     const [uploading, setUploading] = useState(false);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const voiceInputRef = useRef<HTMLInputElement>(null);
@@ -98,6 +109,18 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
         setVoiceAssetId(typeof metadata.characterVoiceAssetId === "string" ? metadata.characterVoiceAssetId : "");
         setSaving(false);
         setUploading(false);
+        setSpec(null);
+        setSpecSkill("");
+        if (sharedAssetId && specKind) {
+            void fetchAssetSpec(sharedAssetId).then((result) => {
+                setSpec(result.spec as unknown as AssetSpec | null);
+                setSpecSkill(result.readiness?.skill?.path || "");
+            }).catch(() => undefined);
+        } else if (specKind) {
+            const local = metadata.assetSpec;
+            if (local && typeof local === "object") setSpec(local as AssetSpec);
+            setSpecSkill(ASSET_KIND_SKILL[specKind].path);
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open, item.node.id]);
 
@@ -189,6 +212,16 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                 payload.propDescription = description.trim();
                 payload.propImage = propImage;
             }
+            if (spec && specKind && !sharedAssetId) payload.assetSpec = spec;
+            if (spec && specKind && sharedAssetId) {
+                setSpecSaving(true);
+                try {
+                    const bucket = (spec as Record<string, unknown>)[specKind] as Record<string, unknown> | undefined;
+                    await updateAssetSpec(sharedAssetId, { kind: specKind, spec: (bucket || {}) as Record<string, unknown>, wantPrompt: true });
+                } finally {
+                    setSpecSaving(false);
+                }
+            }
             if (await onSave(payload)) onCancel();
         } finally {
             setSaving(false);
@@ -236,6 +269,25 @@ export function CanvasAssetEditModal({ open, item, busy, onCancel, onSave }: Pro
                 <span className={labelClass}>{t("director.crud.descriptionLabel")}</span>
                 <Input.TextArea rows={3} value={description} onChange={event => setDescription(event.target.value)} placeholder={t("director.crud.descriptionPlaceholder")} />
             </label>
+
+            {specKind ? <section className="space-y-2 rounded-lg border border-border p-3" data-node-asset-spec={specKind}>
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[13px] font-semibold">{t("assetSpec.nodeTitle")}</span>
+                    <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{ASSET_KIND_SKILL[specKind].imageKind}</span>
+                    <span className="min-w-0 flex-1" />
+                    <span className="truncate font-mono text-[10px] text-muted-foreground/70" data-node-asset-spec-skill>{specSkill}</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">{sharedAssetId ? t("assetSpec.nodeSharedHint") : t("assetSpec.nodeLocalHint")}</p>
+                {missingAssetSpecFields(specKind, spec).length ? <div className="flex flex-wrap gap-1.5" data-node-asset-spec-missing>
+                    {missingAssetSpecFields(specKind, spec).map((field) => <span key={field} className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-500">{t("assetSpec.missingField", { field })}</span>)}
+                </div> : null}
+                <AssetSpecFields kind={specKind} spec={spec} onChange={(next) => setSpec(next as never)} disabled={busy || specSaving} />
+                <details className="rounded-lg border border-border/60 bg-background/40 p-2">
+                    <summary className="cursor-pointer text-[11px] text-muted-foreground">{t("assetSpec.promptPreview")}（{spec ? (specSkill ? t("assetSpec.nodeReadyHint") : "") : ""}{assetSpecReadiness(specKind, spec).hint}）</summary>
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-foreground/80" data-node-asset-spec-prompt>{buildAssetImagePrompt(specKind, spec || { kind: specKind }, title || name || item.node.title || "")}</pre>
+                    <p className="mt-1 text-[10px] text-muted-foreground/80">{t("assetSpec.styleAppended")}</p>
+                </details>
+            </section> : null}
 
             {nodeType === "character" && <div className="space-y-2">
                 <div className="flex items-center justify-between">

@@ -5,6 +5,7 @@ import express, {
   type Express,
 } from "express";
 import crypto from "node:crypto";
+import { gzip } from "node:zlib";
 import { summarizeCanvasState, validateCanvasStateInput, type StateInput } from "@basketikun/canvas-agent/state-summary";
 import fs from "node:fs";
 import path from "node:path";
@@ -74,6 +75,7 @@ import { safeOperationPath, watchHttpOperation } from "@basketikun/media-engine/
 import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";
+import { registerSkillMarketRoutes } from "./server/skill-market-routes.js";
 
 const logger = createLogger("backend");
 
@@ -125,6 +127,37 @@ export function startServer(
     for (const update of commit.productionUpdates || []) events.publish({ type: "drama-production.updated", entityId: update.entityId, payload: { revision: update.revision, ...(update.reason ? { reason: update.reason } : {}) } });
   });
   const app = express();
+  /**
+   * JSON 响应 gzip：画布列表接口会带全部节点（实测 107 个项目 ≈ 22 MB），
+   * 不压缩时浏览器解析 + 传输都是秒级。这里只压 >=1KB 的 JSON，
+   * gzip 走 zlib 线程池，不阻塞事件循环。
+   */
+  app.use((req, res, next) => {
+    if (!String(req.headers["accept-encoding"] || "").includes("gzip")) return next();
+    const sendJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      let text: string;
+      try {
+        text = JSON.stringify(body);
+      } catch {
+        return sendJson(body);
+      }
+      if (!text || text.length < 1024) return sendJson(body);
+      gzip(Buffer.from(text, "utf8"), (error, buffer) => {
+        if (error) {
+          sendJson(body);
+          return;
+        }
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.setHeader("content-encoding", "gzip");
+        res.setHeader("content-length", String(buffer.length));
+        res.setHeader("vary", "Accept-Encoding");
+        res.end(buffer);
+      });
+      return res;
+    }) as typeof res.json;
+    return next();
+  });
   const eventStreams = new Set<Response>();
   let drainingConnections = false;
   if (deps.devReloadMiddleware) app.use(deps.devReloadMiddleware);
@@ -283,6 +316,7 @@ export function startServer(
   registerLocalModelProxyRoutes(app);
   registerCameraLibraryRoutes(app);
   registerAchengSkillsRoutes(app);
+  registerSkillMarketRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =
@@ -569,7 +603,9 @@ export function startServer(
     } else if (typeof req.query.id === "string" && req.query.id) {
       filter = { id: req.query.id };
     }
-    const useSummary = req.query.summary === "true";
+    // 默认摘要：全量列表实测 22 MB（107 个画布、2882 个节点），摘要只要 10 KB。
+    // 需要节点的调用方显式传 ?full=true 或 ?summary=false。
+    const useSummary = req.query.full !== "true" && req.query.summary !== "false";
     const projects = useSummary
       ? filter
         ? db.listCanvasProjectSummaries(filter)
@@ -1117,69 +1153,6 @@ export function startServer(
       title: row.title, sourceHash: row.source_hash, status: row.status,
       canvasId: row.canvas_id ?? null, createdAt: row.created_at, updatedAt: row.updated_at,
     } });
-  });
-  // 剧目级自定义资产：LUT、字体、参考文档、压缩包等任意二进制文件。
-  app.get("/drama/projects/:dramaId/assets", (req, res) => {
-    const dramaId = String(req.params.dramaId || "");
-    const drama = stores.canvasFolders.list().find((item) => item.id === dramaId);
-    if (!drama)
-      return void res.status(404).json({ ok: false, error: "剧目不存在" });
-    const assets = stores.assets.list({ kind: "drama-file", dramaId });
-    res.json({ ok: true, dramaId, assets });
-  });
-  app.post(
-    "/drama/projects/:dramaId/assets",
-    express.raw({ type: "*/*", limit: "100mb" }),
-    (req, res) => {
-      const dramaId = String(req.params.dramaId || "");
-      const drama = stores.canvasFolders.list().find((item) => item.id === dramaId);
-      if (!drama)
-        return void res.status(404).json({ ok: false, error: "剧目不存在" });
-      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-      if (!body.length)
-        return void res.status(400).json({ ok: false, error: "资产文件为空" });
-      const encodedName = String(req.headers["x-asset-name"] || "asset.bin");
-      let fileName = "asset.bin";
-      try { fileName = path.basename(decodeURIComponent(encodedName)) || "asset.bin"; }
-      catch { return void res.status(400).json({ ok: false, error: "资产文件名无效" }); }
-      const mimeType = String(req.headers["content-type"] || "application/octet-stream").split(";", 1)[0];
-      let media: ReturnType<Stores["media"]["store"]> | null = null;
-      try {
-        media = stores.media.store(body, { name: fileName, mimeType, category: "library" });
-        const now = new Date().toISOString();
-        const asset = stores.assets.upsert({
-          id: `drama-file-${crypto.randomUUID()}`,
-          kind: "drama-file",
-          title: fileName,
-          coverUrl: "",
-          tags: [],
-          folderId: null,
-          dramaId,
-          data: { dramaId, storageKey: media.storageKey, fileName, mimeType: media.mimeType, bytes: media.bytes },
-          note: null,
-          source: "drama-upload",
-          metadata: { extension: path.extname(fileName).toLowerCase() },
-          createdAt: now,
-          updatedAt: now,
-        });
-        events.publish({ type: "asset.updated", entityId: asset.id, payload: asset });
-        res.status(201).json({ ok: true, asset });
-      } catch (error) {
-        if (media) stores.media.delete(media.storageKey);
-        res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
-      }
-    },
-  );
-  app.delete("/drama/projects/:dramaId/assets/:assetId", (req, res) => {
-    const dramaId = String(req.params.dramaId || "");
-    const asset = stores.assets.get(String(req.params.assetId || ""));
-    if (!asset || asset.kind !== "drama-file" || asset.dramaId !== dramaId)
-      return void res.status(404).json({ ok: false, error: "剧目资产不存在" });
-    const storageKey = typeof asset.data.storageKey === "string" ? asset.data.storageKey : "";
-    const deleted = stores.assets.delete(asset.id);
-    if (storageKey) stores.media.delete(storageKey);
-    events.publish({ type: "asset.updated", entityId: asset.id, payload: { deleted } });
-    res.json({ ok: true, deleted });
   });
   app.post("/drama/projects/:dramaId/episodes", (req, res) => {
     const dramaId = String(req.params.dramaId || "");

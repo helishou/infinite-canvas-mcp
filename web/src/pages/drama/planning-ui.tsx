@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { Input } from "antd";
+import { useState, type ReactNode } from "react";
 
 /**
  * 剧目策划几块内容共用的视觉件：
@@ -65,4 +66,17 @@ export function PlanningEmpty({ text, action }: { text: string; action?: ReactNo
 /** 每块内容最上面的操作条：模型选择 + 交给导演 + 主操作，右对齐，不跟正文混在一起。 */
 export function PlanningToolbar({ children }: { children: ReactNode }) {
     return <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/60 bg-muted/[0.12] px-3 py-2">{children}</div>;
+}
+
+/** 导演大师每个字段右侧都有「输入…回车添加」：规划页沿用同一入口，别只在新建向导里有。 */
+export function ChipAdder({ placeholder, onAdd }: { placeholder: string; onAdd: (value: string) => void }) {
+    const [draft, setDraft] = useState("");
+    const commit = () => {
+        const value = draft.trim();
+        if (!value) return;
+        onAdd(value);
+        setDraft("");
+    };
+    return <Input size="small" className="w-40" allowClear value={draft} placeholder={placeholder}
+        onChange={(event) => setDraft(event.target.value)} onPressEnter={commit} />;
 }

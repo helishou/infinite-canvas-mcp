@@ -19,3 +19,19 @@ export function launchPlanningDirector(text: string): PlanningLaunchBlocked {
     });
     return "ok";
 }
+
+const HANDOFF_PREFIX = "drama:handoff:";
+
+/** 新建剧目时勾了「交给导演」，把提示词暂存到本地，等规划页挂载后再送进对话。 */
+export function stashPlanningHandoff(dramaId: string, text: string) {
+    try { sessionStorage.setItem(`${HANDOFF_PREFIX}${dramaId}`, text); } catch { /* 隐私模式忽略 */ }
+}
+
+export function takePlanningHandoff(dramaId: string): string {
+    try {
+        const key = `${HANDOFF_PREFIX}${dramaId}`;
+        const value = sessionStorage.getItem(key) || "";
+        if (value) sessionStorage.removeItem(key);
+        return value;
+    } catch { return ""; }
+}

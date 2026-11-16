@@ -21,8 +21,8 @@ export type WorkspaceViewSwitcherProps = {
 export function WorkspaceViewSwitcher({ mode, onSelect }: WorkspaceViewSwitcherProps) {
     const { t } = useTranslation();
     const items = [
-        { value: "canvas" as const, Icon: Workflow, label: t("workspaceViewSwitcher.canvas") },
         { value: "production" as const, Icon: PanelsTopLeft, label: t("workspaceViewSwitcher.production") },
+        { value: "canvas" as const, Icon: Workflow, label: t("workspaceViewSwitcher.canvas") },
     ];
     const tooltipFor = (value: WorkspaceViewMode) => {
         if (mode === value) return t(value === "canvas" ? "workspaceViewSwitcher.currentCanvas" : "workspaceViewSwitcher.currentProduction");

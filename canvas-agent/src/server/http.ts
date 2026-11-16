@@ -18,6 +18,7 @@ import express, {
 } from "express";
 
 import { runClaudeTurn } from "../agent/claude.js";
+import { refreshDramaStageContext, withDramaStageContext } from "../agent/stage-hint.js";
 import { HermesAgent, isHermesThread, type HermesSettings } from "../agent/hermes-agent.js";
 import {
   archiveCodexThread,
@@ -1322,8 +1323,9 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
         const runTurn = hermes && isHermesThread(threadId)
           ? (prompt: string, lifecycleEmit: AgentEmit, attachments: AgentAttachment[] = [], options: Parameters<typeof runCodexTurn>[3] = {}) => hermes.run(prompt, lifecycleEmit, attachments, options, String(session.canvasStateForClient(clientId)?.projectId || "") || undefined)
           : runCodexTurn;
+        const stageContext = await refreshDramaStageContext(String(session.canvasStateForClient(clientId)?.projectId || ""));
         void runTurn(
-          withAttachmentContext(prompt, attachmentRefs),
+          withDramaStageContext(withAttachmentContext(prompt, attachmentRefs), stageContext),
           lifecycleEmit,
           attachments,
           {

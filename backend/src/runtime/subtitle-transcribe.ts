@@ -135,15 +135,30 @@ export function parseWhisperJson(raw: unknown): Pick<ClipTranscript, "text" | "l
     };
 }
 
-function runProcess(command: string, args: readonly string[], onSpawn?: (child: ChildProcess) => void): Promise<{ stdout: string; stderr: string }> {
+/**
+ * Shared external-process runner. `timeoutMs` is opt-in so long subtitle jobs keep their
+ * original behaviour while short interactive transcriptions cannot hang a request forever.
+ */
+export function runProcess(command: string, args: readonly string[], onSpawn?: (child: ChildProcess) => void, timeoutMs?: number): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
         const child = spawn(command, [...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         onSpawn?.(child);
         let stdout = "", stderr = "";
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const clearTimer = () => { if (timer) clearTimeout(timer); };
+        if (timeoutMs && timeoutMs > 0) {
+            timer = setTimeout(() => {
+                child.kill();
+                reject(new Error(`${path.basename(command)} 执行超过 ${Math.round(timeoutMs / 1000)} 秒，已终止`));
+            }, timeoutMs);
+        }
         child.stdout?.on("data", chunk => { stdout = (stdout + String(chunk)).slice(-64_000); });
         child.stderr?.on("data", chunk => { stderr = (stderr + String(chunk)).slice(-64_000); });
-        child.once("error", error => reject(error));
-        child.once("exit", code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${path.basename(command)} 退出码 ${code}: ${stderr.slice(-600) || stdout.slice(-600)}`)));
+        child.once("error", error => { clearTimer(); reject(error); });
+        child.once("exit", code => {
+            clearTimer();
+            code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${path.basename(command)} 退出码 ${code}: ${stderr.slice(-600) || stdout.slice(-600)}`));
+        });
     });
 }
 

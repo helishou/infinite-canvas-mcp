@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { CanvasGenerationCommand } from "@basketikun/canvas-agent/generation-contract";
 
 import type { CanvasProject, RuntimeTask, WorkflowConfig, WorkflowField } from "../db.js";
+import { findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
 import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import type { RunningHubBackend } from "@basketikun/media-engine/runtime/runninghub";
 import { validateVideoTrimRange, type VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
@@ -47,19 +48,19 @@ export type CanvasVideoGenerationInput = {
     loopOutput?: CanvasGenerationCommand["loopOutput"];
 };
 
-type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "workflow" | "preset" | "direct" | "runninghub-workflow"; workflow?: string; preset?: string; runninghubProfileId?: string };
+type Plan = { input: CanvasVideoGenerationInput; kind: "concat" | "trim" | "workflow" | "preset" | "direct" | "runninghub-workflow" | "engine"; workflow?: string; preset?: string; runninghubProfileId?: string; engine?: EngineChannelTarget };
 
 /** Backend 权威的普通视频任务；H3 连续 Clip 仍由专用 runner 管理。 */
 export class CanvasVideoDispatcher {
     private readonly children = new Map<string, Set<string>>();
     /** 本地子任务 id → 引擎任务 id（配置了执行引擎时才有值）。 */
-    private readonly engineTasks = new Map<string, string>();
+    private readonly engineTasks = new Map<string, { taskId: string; target: EngineChannelTarget }>();
     constructor(private readonly stores: Stores, private readonly comfy: ComfyUiBackend, private readonly workflows: WorkflowStore,
         private readonly workflowExecutor: WorkflowExecutor, private readonly concat: VideoConcatBackend, private readonly directVideo?: DirectVideoBackend,
         /** 可选注入：未配置 RunningHub 时该能力整体不可用，不影响本地执行器。 */
         private readonly runningHub?: RunningHubBackend,
         /** 可选注入：配置了独立执行引擎时，本地工作流视频执行改走 `/v1/videos`。 */
-        private readonly engineClient?: CanvasEngineClient) {}
+    ) {}
 
     /** H3 父日志记录自选模型实际工作流输入，沿用执行器字段过滤和显示名映射。 */
     generationSettings(input: CanvasVideoGenerationInput) {
@@ -191,8 +192,8 @@ export class CanvasVideoDispatcher {
         const task = this.stores.tasks.get(id);
         if (!task || !["queued", "running"].includes(task.status)) throw new Error(`任务状态 ${task?.status || "unknown"} 不可取消`);
         for (const child of this.children.get(id) || []) {
-            const engineTaskId = this.engineTasks.get(child);
-            if (engineTaskId && this.engineClient) void this.engineClient.cancel(engineTaskId);
+            const engineTask = this.engineTasks.get(child);
+            if (engineTask) void new CanvasEngineClient(engineTask.target.baseUrl, engineTask.target.token).cancel(engineTask.taskId);
             try { this.workflowExecutor.cancel(child); } catch {}
             try { this.comfy.cancel(child); } catch {}
             try { this.concat.cancel(child); } catch {}
@@ -345,7 +346,7 @@ export class CanvasVideoDispatcher {
                 return firstMedia(await waitForTask(this.stores.tasks, child.id));
             } finally { this.untrack(taskId, childId); }
         }
-        if (this.engineClient && plan.workflow && !plan.input.comfyUrl) {
+        if (plan.kind === "engine" && plan.engine) {
             return this.dispatchVideoViaEngine(plan, taskId);
         }
         const detail = await this.workflows.get(plan.workflow!);
@@ -417,8 +418,9 @@ export class CanvasVideoDispatcher {
 
     /** 引擎路径：画布只发协议请求；字段与媒体槽位由 `/v1/models/{id}` 提供，时长由引擎注入。 */
     private async dispatchVideoViaEngine(plan: Plan, taskId: string): Promise<Record<string, unknown>> {
-        const engine = this.engineClient!;
-        const workflowName = plan.workflow!;
+        const target = plan.engine!;
+        const engine = new CanvasEngineClient(target.baseUrl, target.token);
+        const workflowName = target.model;
         const info = await engine.modelInfo(workflowName);
         const values = workflowValues(plan.input, workflowName);
         if (values.seconds === undefined && plan.input.seconds !== undefined) values.seconds = plan.input.seconds;
@@ -447,7 +449,7 @@ export class CanvasVideoDispatcher {
                 seconds: plan.input.seconds,
                 size: plan.input.size,
             });
-            this.engineTasks.set(childId, created.taskId);
+            this.engineTasks.set(childId, { taskId: created.taskId, target });
             const finished = await engine.waitVideo(created.taskId);
             if (finished.status !== "succeeded") throw new Error(finished.error || `执行引擎返回 ${finished.status}`);
             this.assertActive(taskId);
@@ -470,6 +472,9 @@ export class CanvasVideoDispatcher {
         }
         if (input.model === CANVAS_VIDEO_CONCAT_MODEL) return { input, kind: "concat" };
         const config = this.stores.settings.get("ai.config");
+        // 引擎渠道：模型属于 media-engine，执行走 /v1/videos 异步协议（自定义 comfyUrl 仍本地）
+        const engineTarget = input.comfyUrl ? null : findEngineChannel(config, input.model);
+        if (engineTarget) return { input, kind: "engine", engine: engineTarget };
         if (usesWorkflowExecutor(config, input.model)) {
             const resolved = resolveWorkflowBindingForModel(config, input.model, Number.isSafeInteger(input.workflowReferenceCount) ? Number(input.workflowReferenceCount) : (input.references || []).length);
             if (!resolved.ok) throw new Error(`${workflowResolutionMessage(resolved)}（模型=${input.model}）`);

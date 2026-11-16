@@ -31,6 +31,12 @@ try {
 
     assert.equal(await productionButton.getAttribute("aria-pressed"), "true");
     assert.equal(await canvasButton.getAttribute("aria-pressed"), "false");
+    // 顺序：制作台在左、画布在右（用户指定）。
+    const order = await page.evaluate(() => {
+        const box = (id) => document.querySelector(`[data-testid='workspace-view-${id}']`).getBoundingClientRect().left;
+        return { left: box("production"), right: box("canvas") };
+    });
+    assert.ok(order.left < order.right, `production button must sit left of the canvas button, got ${JSON.stringify(order)}`);
     assert.equal(await page.locator("[data-test-mode]").innerText(), "production");
     assert.equal(await page.locator("[data-test-overlay]").count(), 0);
 

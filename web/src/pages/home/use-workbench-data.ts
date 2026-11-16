@@ -46,6 +46,12 @@ export function useWorkbenchData() {
     const [errors, setErrors] = useState<string[]>([]);
     const [logCount, setLogCount] = useState(30);
     const [hasMore, setHasMore] = useState(false);
+    // 「最近生成」只展示图片/视频/音频：单独取更长的一段日志。首页的 30 条窗口会被
+    // 纯文本对话（导演、分镜描述）刷满，导致媒体结果被挤出列表、区块显示空态。
+    const [mediaLogCount, setMediaLogCount] = useState(60);
+    const [mediaLogs, setMediaLogs] = useState<BackendGenerationLog[]>([]);
+    const [mediaLoading, setMediaLoading] = useState(false);
+    const [mediaHasMore, setMediaHasMore] = useState(false);
     const [refreshKey, setRefreshKey] = useState(0);
     const queryClient = useQueryClient();
     const dramas = folders.filter((folder) => folder.isDrama);
@@ -109,12 +115,14 @@ export function useWorkbenchData() {
             do {
                 pending = false;
                 setLoading(true);
+                setMediaLoading(true);
                 const readSettings = needsSettings;
                 needsSettings = false;
-                const [logResult, taskResult, settingsResult] = await Promise.allSettled([
+                const [logResult, taskResult, settingsResult, mediaResult] = await Promise.allSettled([
                     fetchBackendGenerationLogs({ limit: logCount, summary: true }),
                     fetchBackendTasks({ limit: 30, summary: true }),
                     readSettings ? request<{ settings: FrontendSettings }>("GET", "/settings") : Promise.resolve(null),
+                    fetchBackendGenerationLogs({ limit: mediaLogCount, summary: true }),
                 ]);
                 if (disposed) return;
                 const failed: string[] = [];
@@ -138,6 +146,17 @@ export function useWorkbenchData() {
                     needsSettings = true;
                     if (!isBackendAvailabilityError(settingsResult.reason)) failed.push("settings");
                 }
+                if (mediaResult.status === "fulfilled") {
+                    const nextMediaLogs = mediaResult.value.logs || [];
+                    setMediaLogs(nextMediaLogs);
+                    setMediaHasMore(nextMediaLogs.length === mediaLogCount);
+                    // 整段仍是纯文本时自动向后扩展（上限 180），避免「最近生成」被文本刷屏挤空。
+                    // mediaLogCount 进入下方 effect 依赖，扩展会触发一次新的 load，最多两轮。
+                    if (!collectOutputs(nextMediaLogs).length && nextMediaLogs.length === mediaLogCount && mediaLogCount < 180) {
+                        setMediaLogCount(count => Math.min(count + 60, 180));
+                    }
+                } else if (!isBackendAvailabilityError(mediaResult.reason)) failed.push("media-logs");
+                setMediaLoading(false);
                 setErrors(failed);
                 setLoading(false);
             } while (pending && !disposed);
@@ -163,7 +182,7 @@ export function useWorkbenchData() {
             window.removeEventListener("backend-connected", onReconnect);
             window.removeEventListener("backend-retry", onReconnect);
         };
-    }, [connected, backendUrl, logCount, refreshKey]);
+    }, [connected, backendUrl, logCount, mediaLogCount, refreshKey]);
     const togglePin = async (projectId: string) => {
         if (pinning || !settingsReady || !connected) return;
         const key = `homePinnedProject:${projectId}` as const,
@@ -176,5 +195,5 @@ export function useWorkbenchData() {
             setPinning(false);
         }
     };
-    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, canvasOwners, canvasEpisodes, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
+    return { connected, backendUrl, logs, tasks, settings, settingsReady, loading, errors, hasMore, refresh, mediaLogs, mediaLoading, mediaHasMore, loadMoreMedia: () => setMediaLogCount((count) => count + 60), canvasOwners, canvasEpisodes, dramaReady, dramaError, pinning, togglePin, loadMore: () => setLogCount((count) => count + 30) };
 }

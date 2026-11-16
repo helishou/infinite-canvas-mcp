@@ -307,8 +307,58 @@ export function createBackendDramaEpisode(dramaId: string, input: { episodeNumbe
 }
 
 /** 大纲单步生成：只拿候选文本，写入仍走剧目规划保存。 */
+export type DramaTopicProposal = {
+    title: string; themes: string[]; tones: string[]; gender: string; age: string; ending: string; language: string;
+    artStyle: string; episodes: number; episodeMinutes: number; logline: string;
+};
+
+/** 粘贴剧本 → 自动填好选题（创建前就能调，不依赖 dramaId）。 */
+export function requestDramaTopicProposal(input: { source: string; model?: string; instruction?: string }) {
+    return request<{ ok: boolean; topic: DramaTopicProposal; model: string; raw?: string; error?: string }>("POST", "/drama/topic-proposal", input);
+}
+
 export function requestDramaOutlineProposal(dramaId: string, input: { step: string; model?: string; instruction?: string }) {
     return request<{ ok: boolean; step: string; text: string; model: string; error?: string }>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/outline-proposal`, input);
+}
+
+export type AssetSpecKind = "character" | "scene" | "prop";
+export type AssetSpec = { kind: AssetSpecKind; character?: Record<string, unknown>; scene?: Record<string, unknown>; prop?: Record<string, unknown>; updatedAt?: string };
+export type AssetSpecResponse = {
+    ok: boolean;
+    assetId: string;
+    title: string;
+    kind: AssetSpecKind;
+    spec: AssetSpec | null;
+    summary: string;
+    missing: string[];
+    readiness: { ready: boolean; missing: string[]; hint: string; skill: { skill: string; path: string; section: string; imageKind: string } };
+    prompt: string;
+};
+
+/** 角色/场景/道具设定卡：真值在 asset.metadata.assetSpec。 */
+export function fetchAssetSpec(assetId: string) {
+    return request<AssetSpecResponse>("GET", `/assets/${encodeURIComponent(assetId)}/spec`);
+}
+
+export function updateAssetSpec(assetId: string, input: { kind: AssetSpecKind; spec: Record<string, unknown>; wantPrompt?: boolean }) {
+    return request<AssetSpecResponse>("PATCH", `/assets/${encodeURIComponent(assetId)}/spec`, input);
+}
+
+export type DramaStageState = { key: "topic" | "outline" | "script" | "assets" | "shots" | "video"; done: boolean; gaps: string[]; doneCount: number; total: number };
+export type DramaStageReport = {
+    ok: boolean;
+    dramaId: string;
+    name: string;
+    states: DramaStageState[];
+    next: { stage: DramaStageState["key"] | null; action: string; skill: string; skillPath: string; gaps: string[]; line: string };
+    context: string;
+    activity: { stage: DramaStageState["key"]; label: string; tool: string; at: number } | null;
+    episodes: Array<{ episodeNumber: number; stage: string | null; done: string[] }>;
+};
+
+/** 剧目阶段（选题→大纲→剧本→资产→分镜→视频）的派生状态，判定在 canvas-agent/drama/stage-contract。 */
+export function fetchDramaStage(dramaId: string) {
+    return request<DramaStageReport>("GET", `/drama/${encodeURIComponent(dramaId)}/stage`);
 }
 
 /** 单集剧本大纲（分场）生成：同样只回候选文本，写入走 updateBackendDramaEpisode。 */
@@ -446,37 +496,6 @@ export function pauseProductionBatch(target: ProductionTarget, runId: string) { 
 export function resumeProductionBatch(target: ProductionTarget, runId: string) { return request<{ ok: boolean; run: ProductionBatch }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/resume`, {}); }
 export function retireProductionBatch(target: ProductionTarget, runId: string, reason: string) { return request<{ ok: boolean; run: ProductionBatch; mediaSubmitted: false }>("POST", `${productionPath(target)}/batches/${encodeURIComponent(runId)}/retire`, { reason }); }
 export function exportEpisodeProductionMarkdown(episodeId: ProductionTarget, stage: "script" | "shots" | "director", version?: number) { return request<{ ok: boolean; fileName: string; markdown: string }>("GET", `${productionPath(episodeId)}/export?stage=${stage}${version ? `&version=${version}` : ""}`); }
-
-export type DramaCustomAsset = {
-    id: string;
-    title: string;
-    dramaId?: string | null;
-    data: { dramaId: string; storageKey: string; fileName: string; mimeType: string; bytes: number };
-    metadata?: { extension?: string };
-    createdAt: string;
-    updatedAt: string;
-};
-
-export function fetchBackendDramaAssets(dramaId: string) {
-    return request<{ ok: boolean; dramaId: string; assets?: DramaCustomAsset[] }>("GET", `/drama/projects/${encodeURIComponent(dramaId)}/assets`);
-}
-
-export async function uploadBackendDramaAsset(dramaId: string, file: File) {
-    const token = getBackendTokenShared();
-    const url = `${getBackendUrl().replace(/\/$/, "")}/drama/projects/${encodeURIComponent(dramaId)}/assets?token=${encodeURIComponent(token)}`;
-    const response = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": file.type || "application/octet-stream", "x-asset-name": encodeURIComponent(file.name) },
-        body: file,
-    });
-    const data = await response.json().catch(() => ({})) as { ok?: boolean; asset?: DramaCustomAsset; error?: string };
-    if (!response.ok || !data.asset) throw new BackendApiError(`上传剧目资产失败：${data.error || `HTTP ${response.status}`}`, response.status, data);
-    return data.asset;
-}
-
-export function deleteBackendDramaAsset(dramaId: string, assetId: string) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(dramaId)}/assets/${encodeURIComponent(assetId)}`);
-}
 
 export function createBackendProject(project: Record<string, unknown>) {
     return request<{ ok: boolean; project: Record<string, unknown>; created: boolean }>("POST", "/canvas/projects", project);
@@ -666,6 +685,59 @@ export async function uploadBackendMediaDataUrl(options: {
 }): Promise<BackendMediaResult> {
     const data = await request<{ ok: boolean; media: BackendMediaResult }>("POST", "/media/upload", options);
     return data.media;
+}
+
+// ── Voice ASR (Backend-owned local Whisper) ────────────────────────────
+
+export const AUDIO_TRANSCRIBE_PATH = "/agent/audio-transcribe";
+
+export type AudioTranscribeStatus = {
+    ok: boolean;
+    available: boolean;
+    engine?: string;
+    /** Actionable reason returned when the local ASR runtime is not available. */
+    reason?: string;
+    model?: string;
+    maxBytes?: number;
+    maxSeconds?: number;
+};
+
+export type AudioTranscribeOutcome = {
+    ok: true;
+    text: string;
+    language: string;
+    model: string;
+    durationSeconds: number;
+    noSpeechProbability: number;
+};
+
+/**
+ * Capability probe decides whether the voice button records audio or falls back to Web Speech.
+ * Uses a plain fetch so a transient reload/503 silently degrades instead of raising the global
+ * "backend unavailable" banner for a purely optional feature.
+ */
+export function fetchAudioTranscribeStatus(signal?: AbortSignal): Promise<AudioTranscribeStatus> {
+    const url = `${getBackendUrl().replace(/\/$/, "")}${AUDIO_TRANSCRIBE_PATH}/status?token=${encodeURIComponent(getBackendTokenShared())}`;
+    return fetch(url, { signal }).then(async res => {
+        const data = (await res.json().catch(() => ({}))) as AudioTranscribeStatus;
+        if (!res.ok) throw new Error(data.reason || `HTTP ${res.status}`);
+        return data;
+    });
+}
+
+/** Raw binary upload; the clip is never persisted as a media asset or project node. */
+export async function transcribeAudioClip(blob: Blob, options: { language?: string; signal?: AbortSignal } = {}): Promise<AudioTranscribeOutcome> {
+    const url = `${getBackendUrl().replace(/\/$/, "")}${AUDIO_TRANSCRIBE_PATH}?token=${encodeURIComponent(getBackendTokenShared())}`;
+    const headers: Record<string, string> = { "content-type": blob.type || "application/octet-stream" };
+    if (options.language) headers["x-audio-language"] = options.language;
+    const res = await fetch(url, { method: "POST", headers, body: blob, signal: options.signal });
+    const data = (await res.json().catch(() => ({}))) as AudioTranscribeOutcome & { ok?: boolean; error?: string; code?: string };
+    if (!res.ok || !data.ok) {
+        throw new BackendApiError(`Backend POST ${AUDIO_TRANSCRIBE_PATH} failed: HTTP ${res.status} ${data.error || ""}`, res.status, {
+            method: "POST", path: AUDIO_TRANSCRIBE_PATH, code: data.code || "", detail: data.error || "",
+        });
+    }
+    return data;
 }
 
 export function backendMediaUrl(storageKey: string): string {

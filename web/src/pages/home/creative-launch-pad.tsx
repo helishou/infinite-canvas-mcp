@@ -1,6 +1,6 @@
 import { App, Button, Select, Tooltip } from "antd";
-import { ArrowUp, AudioLines, Bot, Clapperboard, History, Image as ImageIcon, LayoutGrid, Plus, Sparkles, Type, Video, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { ArrowUp, ArrowUpRight, AudioLines, Bot, Clapperboard, History, Image as ImageIcon, ImagePlus, LayoutGrid, Plus, Sparkles, Type, Video, WandSparkles, X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
@@ -25,11 +25,23 @@ import { CreativeConfigMissingError, startCreativeGeneration } from "@/lib/creat
 import { fetchSettings } from "@/services/settings-api";
 import { getGenerationCount } from "@/lib/canvas/canvas-generation-helpers";
 import { normalizeVideoSizeValue } from "@/lib/video-size";
+import { mediaRatioOptions, parsePixelSize } from "@/lib/media-size";
 import { cn } from "@/lib/utils";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { defaultConfig, resolveModelForCapability, useConfigStore, type AiConfig } from "@/stores/use-config-store";
-import type { CreativeLaunch } from "./workbench-data";
+import { CreativeVoiceButton } from "./creative-voice-button";
+import type { CreativeLaunch, CreativeLaunchReference } from "./workbench-data";
+
+/**
+ * 语音输入总开关（暂时停用）。
+ * 本地 Whisper 每次请求都要冷加载 torch / 模型并预热 CUDA（约 20s），推理时还会占用显存，
+ * 与本机 ComfyUI 争用 GPU；常驻进程方案同样不可接受。因此首页不再渲染麦克风按钮，
+ * Backend 的 /agent/audio-transcribe 端点也同步停用，空闲时不会有任何模型进程或显存占用。
+ * 组件、通道决策、i18n 与 API 客户端代码全部原样保留；待接入云端 ASR 通道后把此开关与
+ * backend/src/server/audio-transcribe-routes.ts 的 VOICE_ASR_ENABLED 一同改回 true 即可恢复。
+ */
+const VOICE_INPUT_ENABLED: boolean = false;
 
 const MODE_ICONS = {
     canvas: LayoutGrid,
@@ -51,9 +63,21 @@ const THREAD_MODES: PadMode[] = ["image", "video", "text", "audio", "director"];
 const isPadMode = (value: string | null): value is PadMode => !!value && [...HERO_MODES, ...THREAD_MODES].includes(value as PadMode);
 
 /**
+ * 影策 composer 的回车提交语义（对齐 canvas-resource-mention-textarea 的 shouldSubmitOnEnter）：
+ * - 仅 Enter 提交；Shift+Enter 始终换行；Ctrl/Cmd+Enter 保持兼容（两种形态都提交）。
+ * - 输入法组字中的 Enter 必须放行：中文选词时 Enter 是「确认候选」，nativeEvent.isComposing /
+ *   keyCode 229 时若拦截会误发送未上屏的内容。textarea 受控组件无需 contentEditable 的 composingRef。
+ */
+function shouldSubmitOnEnter(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+    if (event.key !== "Enter" || event.shiftKey) return false;
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return false;
+    return true;
+}
+
+/**
  * 首页中央创作台：想法 + 参考素材一步进入一张新画布。
  * 图片 / 视频 / 文本 / 音频模式直接选用画布模型并提交 Backend 生成（与画布内生成同一条任务链路），
- * 提交后留在首页，进度与结果由「对话工作台」实时展示；自由画布 / 分镜模式把想法与图片附件写进全局 Agent 草稿。
+ * 提交后留在首页，进度与结果由「对话工作台」实时展示；对话阶段不创建画布，点「新建画布」才落地成果。
  * variant="home" 为完整创作台；variant="thread" 为对话工作台底部的停靠压缩形态（对齐影策 thread-composer）。
  */
 export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory, variant = "home", sharedProjectId, injectedDraft }: {
@@ -65,8 +89,8 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
     variant?: "home" | "thread";
     /** 会话内多轮共享生成上下文：传入活动会话的画布 id，本轮提交追加节点到该画布。 */
     sharedProjectId?: string;
-    /** 编辑并重发（影策）：nonce 变化即把 text 回填进输入框并聚焦。 */
-    injectedDraft?: { text: string; nonce: number };
+    /** 编辑并重发（影策）：nonce 变化即把 text 回填进输入框并聚焦；submit=true 时按同一模式直接再生成一次同款。 */
+    injectedDraft?: { text: string; nonce: number; submit?: boolean; mode?: PadMode; params?: CreativeLaunch["params"] };
 }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
@@ -146,8 +170,11 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
     const injectedText = injectedDraft?.text || "";
     useEffect(() => {
         if (!injectedNonce || !injectedText) return;
+        if (injectedDraft?.mode && isPadMode(injectedDraft.mode)) changeMode(injectedDraft.mode);
         setDraft(injectedText);
         textareaRef.current?.focus();
+        // 生成同款：回填后按该条消息的模式与参数直接再提交一次，用户无需再点发送。
+        if (injectedDraft?.submit) void startGeneration({ text: injectedText, mode: injectedDraft.mode ?? mode, params: injectedDraft.params });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [injectedNonce]);
     // 设置面板与画布节点共用同一套 popover：把本次生效的模型与标准项喂给它们，
@@ -170,70 +197,96 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
             void startGeneration();
             return;
         }
-        const text = withIdea ? draft.trim() : "";
-        const title = text ? creativeProjectTitle(text) : t("canvas.defaultTitle", { count: projects.length + 1 });
-        try {
+        // 带想法但当前模式不直接生成时，只把想法交给 Agent 对话：绝不自动建画布、绝不跳走。
+        // 画布只由用户显式点「新建空白画布」或会话工具栏的「新建画布」创建。
+        if (withIdea) {
+            const text = draft.trim();
             if (text) {
                 const agent = useAgentStore.getState();
                 agent.setAgentState({ prompt: text, attachments: toAgentAttachments(references), activeTab: "chat" });
                 agent.openPanel();
+                message.info(t("creativePad.conversationOnlyHint"));
             }
-            const id = createProject(title);
-            if (withIdea) {
-                setDraft("");
-                setReferences([]);
-            }
+            return;
+        }
+        try {
+            const id = createProject(t("canvas.defaultTitle", { count: projects.length + 1 }));
             navigate(`/canvas/${encodeURIComponent(id)}`);
-            if (text) message.success(t("creativePad.agentDraft"));
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));
         }
     };
 
-    // 与画布内生成共用 Backend 任务链路：先落画布与节点，再提交生成；结果节点由 Backend 依据 clientTaskId 创建。
-    // 提交后不跳转：进度与结果留在首页「对话工作台」里实时更新，进画布是用户的显式选择。
-    const startGeneration = async () => {
-        const text = draft.trim();
-        if (!text || !generates) return;
+    // 与画布内生成共用 Backend 任务链路，但首页走会话级生成（createCanvas=false）：不落画布、不建节点，
+    // 结果留在 task.result.media。提交后不跳转，进画布是用户点「新建画布」的显式选择。
+    const startGeneration = async (override?: { text: string; mode: PadMode; params?: CreativeLaunch["params"] }) => {
+        // 「生成同款」由历史消息直接触发：按该条消息的模式与参数重跑，不依赖 composer 当前选中的模式。
+        const runMode = override?.mode ?? mode;
+        const runCapability = runMode === "director" ? ("text" as const) : creativeCapabilityForMode(runMode);
+        const runGenerates = runMode === "director" ? true : creativeModeGenerates(runMode);
+        const runModelKey = creativeModelKey(runCapability);
+        const runModel = override
+            ? (runMode === "director" ? (directorModel || resolveModelForCapability(config, config[runModelKey], "text")) : resolveModelForCapability(config, config[runModelKey], runCapability))
+            : effectiveModel;
+        const text = (override?.text ?? draft).trim();
+        if (!text || !runGenerates) return;
+        // 参考素材在提交前快照：清空输入框后消息流仍要显示本轮引用缩略图；只留小体积 URL / storageKey。
+        const referenceSnapshot: CreativeLaunchReference[] = references.slice(0, 5).map(item => ({
+            id: item.id,
+            title: item.title,
+            url: item.storageKey || item.coverUrl.startsWith("data:") || item.coverUrl.length > 2000 ? "" : item.coverUrl,
+            ...(item.storageKey ? { storageKey: item.storageKey } : {}),
+            kind: item.mediaType === "image" ? "image" : item.mediaType === "video" ? "video" : item.mediaType === "audio" ? "audio" : "file",
+        }));
+        const runImageSize = runCapability === "image" && override?.params?.size ? override.params.size : imageSize;
+        const runImageCount = runCapability === "image" && override?.params?.count ? String(override.params.count) : imageCount;
+        const runVideoSize = runCapability === "video" && override?.params?.size ? normalizeVideoSizeValue(override.params.size) : videoSize;
+        const runVideoSeconds = runCapability === "video" && override?.params?.seconds ? override.params.seconds : videoSeconds;
+        const runVideoResolution = runCapability === "video" && override?.params?.resolution ? override.params.resolution : videoResolution;
         setSubmitting(true);
         try {
             const { projectId, nodeId, taskId } = await startCreativeGeneration({
-                capability,
+                capability: runCapability,
                 prompt: text,
-                model: effectiveModel,
+                model: runModel,
                 projectId: sharedProjectId,
+                createCanvas: false,
                 references,
-                imageSize,
+                imageSize: runImageSize,
                 imageQuality,
-                imageCount,
-                videoSize,
-                videoSeconds,
-                videoResolution,
+                imageCount: runImageCount,
+                videoSize: runVideoSize,
+                videoSeconds: runVideoSeconds,
+                videoResolution: runVideoResolution,
                 videoGenerateAudio: overrides.videoGenerateAudio || undefined,
                 videoWatermark: overrides.videoWatermark || undefined,
                 comfyParams,
                 imageRunTarget,
                 videoRunTarget,
             });
-            setDraft("");
-            setReferences([]);
+            // 同款重生成不改动 composer 里正在编辑的内容。
+            if (!override) {
+                setDraft("");
+                setReferences([]);
+            }
             onGenerated?.({
                 taskId,
-                projectId,
-                nodeId,
-                mode: capability,
+                ...(projectId ? { projectId } : {}),
+                ...(nodeId ? { nodeId } : {}),
+                mode: runCapability,
                 prompt: text,
-                model: effectiveModel,
+                model: runModel,
                 createdAt: new Date().toISOString(),
-                params: capability === "image"
-                    ? { count: getGenerationCount(imageCount), size: imageSize }
-                    : capability === "video"
-                        ? { size: videoSize, seconds: videoSeconds, resolution: videoResolution }
+                params: runCapability === "image"
+                    ? { count: getGenerationCount(runImageCount), size: runImageSize }
+                    : runCapability === "video"
+                        ? { size: runVideoSize, seconds: runVideoSeconds, resolution: runVideoResolution }
                         : {},
+                ...(referenceSnapshot.length ? { references: referenceSnapshot } : {}),
             });
             message.success(t("creativePad.generationStarted"));
-            // 对齐影策：提交后不跳转，首页原地进入对话工作台（进度与结果实时更新）；
-            // 进入画布是用户点「继续在画布上编辑」的显式选择。
+            // 对齐影策：提交后不跳转、也不建画布，首页原地进入对话工作台（进度与结果实时更新）；
+            // 进入画布是用户点「新建画布」的显式选择。
         } catch (error) {
             if (error instanceof CreativeConfigMissingError) openConfigDialog(true);
             else message.error(error instanceof Error ? error.message : String(error));
@@ -263,7 +316,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
             value={effectiveModel}
             onChange={model => updateConfig(modelKey, model)}
             sortByCanvasUsage={generates}
-            className={variant === "thread" ? "min-w-[9rem] max-w-[13rem] flex-1" : "min-w-[12rem] flex-1"}
+            className={variant === "thread" ? "min-w-[9rem] max-w-[13rem] flex-1" : "min-w-[10rem] max-w-[230px] flex-1"}
             {...(capability === "image" ? { imageReferenceCount } : {})}
             onMissingConfig={() => openConfigDialog(true)}
         />
@@ -272,7 +325,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         <CanvasImageSettingsPopover
             config={settingsConfig}
             targetLabel={settingsTargetLabel}
-            placement="topRight"
+            placement="bottomRight"
             buttonClassName={settingsButtonClass}
             referenceCount={imageReferenceCount}
             comfyParams={comfyParams}
@@ -289,7 +342,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         <CanvasVideoSettingsPopover
             config={settingsConfig}
             targetLabel={settingsTargetLabel}
-            placement="topRight"
+            placement="bottomRight"
             buttonClassName={settingsButtonClass}
             referenceCount={imageReferenceCount}
             comfyParams={comfyParams}
@@ -308,7 +361,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         <CanvasAudioSettingsPopover
             config={settingsConfig}
             targetLabel={settingsTargetLabel}
-            placement="topRight"
+            placement="bottomRight"
             buttonClassName={settingsButtonClass}
             referenceCount={0}
             comfyParams={comfyParams}
@@ -319,13 +372,13 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         <CanvasTextSettingsPopover
             config={settingsConfig}
             targetLabel={settingsTargetLabel}
-            placement="topRight"
+            placement="bottomRight"
             buttonClassName={settingsButtonClass}
             onConfigChange={(_, value) => updateConfig("reasoningEffort", value)}
         />
     ) : null;
     const referenceChips = references.length > 0 ? (
-        <div className="flex flex-wrap gap-2 px-4 pb-3" data-testid="creative-reference-list">
+        <div className="flex flex-wrap gap-2 px-5 pb-3" data-testid="creative-reference-list">
             {references.map(item => (
                 <span key={item.id} data-testid="creative-reference-chip" className="inline-flex max-w-[220px] items-center gap-1.5 rounded-full border border-border bg-card py-1 pl-1 pr-2 text-xs">
                     {item.coverUrl
@@ -350,20 +403,21 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
             placeholder={t(`creativePad.placeholders.${mode}`)}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={event => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                    event.preventDefault();
-                    if (draft.trim() && hydrated) start(true);
-                }
+                if (!shouldSubmitOnEnter(event)) return;
+                event.preventDefault();
+                if (draft.trim() && hydrated && !submitting) start(true);
             }}
-            className={cn("block w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground", variant === "thread" ? "min-h-[56px]" : "min-h-[92px]")}
+            className={variant === "thread"
+                ? "block w-full resize-y bg-transparent px-4 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground min-h-[56px]"
+                : "ch-draft"}
         />
     );
     const submitButton = (
         <Tooltip title={generates ? t("creativePad.generateHint") : t("creativePad.startHint")}>
             <Button
                 type="primary"
-                size="small"
-                className={variant === "thread" ? "" : "ml-auto"}
+                size={variant === "thread" ? "small" : "middle"}
+                className={variant === "thread" ? "" : "ch-submit ml-auto"}
                 data-testid="creative-start"
                 icon={<ArrowUp className="size-3.5" />}
                 loading={submitting}
@@ -375,11 +429,64 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         </Tooltip>
     );
     const addReferenceButton = (
-        <Button type="text" size="small" icon={<Plus className="size-3.5" />} data-testid="creative-add-reference" onClick={() => setPickerOpen(true)}>
+        <Button type="text" size="small" className="ch-tool" icon={<Plus className="size-3.5" />} data-testid="creative-add-reference" onClick={() => setPickerOpen(true)}>
             {t("creativePad.referenceAdd")}
             {references.length > 0 ? ` · ${references.length}` : ""}
         </Button>
     );
+    // 影策 composer 的语音输入：Backend 本地 Whisper ASR 为首选、Web Speech 回退，识别结果追加到输入框。
+    // 暂时停用（见 VOICE_INPUT_ENABLED 注释）：不渲染按钮即不会有能力探测、录音或模型调用。
+    const voiceButton = VOICE_INPUT_ENABLED ? (
+        <CreativeVoiceButton
+            disabled={submitting}
+            onTranscribed={text => setDraft(current => current.trim() ? `${current.trim()} ${text}` : text)}
+        />
+    ) : null;
+    // 影策画幅 / 张数胶囊：与设置 popover 共用同一份 overrides / config state，不产生第二套权威值。
+    const ratioChips = (capability === "image" ? ["1:1", "4:3", "3:4", "16:9", "9:16"] : capability === "video" ? ["16:9", "9:16"] : [])
+        .map(value => mediaRatioOptions.find(option => option.value === value))
+        .filter((option): option is (typeof mediaRatioOptions)[number] => Boolean(option));
+    const ratioSelected = (option: (typeof mediaRatioOptions)[number]) => {
+        if (capability === "video") return normalizeVideoSizeValue(option.value) === videoSize;
+        if (imageSize === option.value) return true;
+        const pixels = parsePixelSize(imageSize);
+        return !!pixels && option.height > 0 && Math.abs(pixels.width / pixels.height - option.width / option.height) < 0.02;
+    };
+    const quickParams = ratioChips.length > 0 ? (
+        <div className="ch-params" data-testid="creative-quick-params">
+            <span className="ch-param-label">{t("creativePad.params.ratio")}</span>
+            {ratioChips.map(option => (
+                <button
+                    key={option.value}
+                    type="button"
+                    aria-pressed={ratioSelected(option)}
+                    data-testid={`creative-ratio-${option.value.replace(":", "x")}`}
+                    onClick={() => setOverride(capability === "video" ? "videoSize" : "imageSize", capability === "video" ? normalizeVideoSizeValue(option.value) : option.value)}
+                    className="ch-pill"
+                >
+                    {option.value}
+                </button>
+            ))}
+            {capability === "image" ? (
+                <>
+                    <span className="ch-param-divider" aria-hidden="true" />
+                    <span className="ch-param-label">{t("creativePad.params.count")}</span>
+                    {[1, 2, 4].map(count => (
+                        <button
+                            key={count}
+                            type="button"
+                            aria-pressed={Number(imageCount) === count}
+                            data-testid={`creative-count-${count}`}
+                            onClick={() => setOverride("imageCount", String(count))}
+                            className="ch-pill"
+                        >
+                            {count}
+                        </button>
+                    ))}
+                </>
+            ) : null}
+        </div>
+    ) : null;
 
     if (variant === "thread") {
         // 对话工作台底部停靠形态：模式 + 模型 + 参数 + 提交一行收纳，随时追问。
@@ -401,6 +508,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
                         options={THREAD_MODES.map(key => ({ value: key, label: t(`creativePad.modes.${key}`) }))}
                     />
                     {addReferenceButton}
+                    {voiceButton}
                     {modelPicker}
                     {settingsControl}
                     <span className="ml-auto" />
@@ -418,15 +526,16 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
     }
 
     return (
-        <section className="mb-6 rounded-[10px] border border-border bg-card px-5 py-6 sm:px-7" data-testid="creative-launch-pad" aria-labelledby="creative-pad-title">
-            <div className="relative mb-5 text-center">
-                <h1 id="creative-pad-title" className="text-xl font-semibold tracking-tight sm:text-2xl">{t("creativePad.title")}</h1>
-                <p className="ui-caption mt-1.5 text-muted-foreground">{t("creativePad.subtitle")}</p>
+        <section className="ch-hero" data-testid="creative-launch-pad" aria-labelledby="creative-pad-title">
+            <div className="ch-heading">
+                <span className="ch-eyebrow" aria-hidden="true"><Sparkles /></span>
+                <h1 id="creative-pad-title" className="ch-title">{t("creativePad.title")}</h1>
+                <p className="ch-subtitle">{t("creativePad.subtitle")}</p>
                 {historyCount > 0 && onOpenHistory ? (
                     <Button
                         type="text"
                         size="small"
-                        className="absolute right-0 top-1"
+                        className="ch-history"
                         data-testid="creative-history"
                         icon={<History className="size-3.5" />}
                         onClick={onOpenHistory}
@@ -436,8 +545,8 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
                 ) : null}
             </div>
 
-            <div className="mx-auto max-w-[880px] overflow-hidden rounded-xl border border-border bg-background/70">
-                <div className="flex flex-wrap items-end gap-1 bg-muted/50 px-2 pt-1.5" role="tablist" aria-label={t("creativePad.modeLabel")}>
+            <div className="ch-composer">
+                <div className="ch-tabs" role="tablist" aria-label={t("creativePad.modeLabel")}>
                     {HERO_MODES.map(key => {
                         const Icon = MODE_ICONS[key];
                         const active = mode === key;
@@ -449,12 +558,7 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
                                 aria-selected={active}
                                 data-testid={`creative-mode-${key}`}
                                 onClick={() => changeMode(key)}
-                                className={cn(
-                                    "flex min-w-[110px] flex-1 items-center justify-center gap-2 rounded-t-lg px-3 py-2 text-sm transition",
-                                    active
-                                        ? "bg-background font-medium text-foreground"
-                                        : "text-muted-foreground hover:bg-background/50 hover:text-foreground",
-                                )}
+                                className={cn("ch-tab", active && "font-semibold")}
                             >
                                 <Icon className="size-4" aria-hidden="true" />
                                 {t(`creativePad.modes.${key}`)}
@@ -465,56 +569,64 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
 
                 {textarea}
                 {referenceChips}
+                {quickParams}
 
-                <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2" data-testid="creative-generation-settings">
+                <div className="ch-actions" data-testid="creative-generation-settings">
                     {addReferenceButton}
+                    {voiceButton}
                     {modelPicker}
                     {settingsControl}
-                    <span className="ui-caption hidden min-w-0 flex-1 truncate text-muted-foreground lg:inline">{generates ? t("creativePad.generateHint") : t("creativePad.modeHint")}</span>
+                    <span className="ch-hint">{generates ? t("creativePad.generateHint") : t("creativePad.modeHint")}</span>
                     {submitButton}
                 </div>
             </div>
 
-            <div className="mx-auto mt-4 grid max-w-[880px] gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                {[0, 1].map(index => (
-                    <button
-                        key={`example-${index}`}
-                        type="button"
-                        data-testid={`creative-quick-example${index}`}
-                        onClick={() => fillExample(t(`creativePad.examples.${mode}.${index}.text`))}
-                        className="group flex items-start gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-muted/40"
-                    >
-                        <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
-                        <span className="min-w-0">
-                            <span className="block truncate text-xs font-medium">{t(`creativePad.examples.${mode}.${index}.label`)}</span>
-                            <span className="ui-caption mt-0.5 block truncate text-muted-foreground">{t(`creativePad.examples.${mode}.${index}.hint`)}</span>
-                        </span>
-                    </button>
-                ))}
+            <div className="ch-examples">
+                {[0, 1].map(index => {
+                    const Icon = index === 0 ? Sparkles : WandSparkles;
+                    return (
+                        <button
+                            key={`example-${index}`}
+                            type="button"
+                            data-testid={`creative-quick-example${index}`}
+                            onClick={() => fillExample(t(`creativePad.examples.${mode}.${index}.text`))}
+                            className="ch-example"
+                        >
+                            <span className="ch-example-icon" aria-hidden="true"><Icon /></span>
+                            <span className="min-w-0 flex-1">
+                                <span className="ch-example-title">{t(`creativePad.examples.${mode}.${index}.label`)}</span>
+                                <span className="ch-example-hint">{t(`creativePad.examples.${mode}.${index}.hint`)}</span>
+                            </span>
+                            <ArrowUpRight className="ch-example-arrow" aria-hidden="true" />
+                        </button>
+                    );
+                })}
                 <button
                     type="button"
                     data-testid="creative-quick-reference"
                     onClick={() => setPickerOpen(true)}
-                    className="group flex items-start gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-muted/40"
+                    className="ch-example"
                 >
-                    <ImageIcon className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
-                    <span className="min-w-0">
-                        <span className="block truncate text-xs font-medium">{t("creativePad.actions.fromReference.label")}</span>
-                        <span className="ui-caption mt-0.5 block truncate text-muted-foreground">{t("creativePad.actions.fromReference.hint")}</span>
+                    <span className="ch-example-icon" aria-hidden="true"><ImagePlus /></span>
+                    <span className="min-w-0 flex-1">
+                        <span className="ch-example-title">{t("creativePad.actions.fromReference.label")}</span>
+                        <span className="ch-example-hint">{t("creativePad.actions.fromReference.hint")}</span>
                     </span>
+                    <ArrowUpRight className="ch-example-arrow" aria-hidden="true" />
                 </button>
                 <button
                     type="button"
                     data-testid="creative-quick-blank"
                     disabled={!hydrated}
                     onClick={() => start(false)}
-                    className="group flex items-start gap-2.5 rounded-lg border border-border bg-card px-3 py-2.5 text-left transition hover:border-primary/50 hover:bg-muted/40 disabled:opacity-50"
+                    className="ch-example disabled:opacity-50"
                 >
-                    <LayoutGrid className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
-                    <span className="min-w-0">
-                        <span className="block truncate text-xs font-medium">{t("creativePad.actions.blankCanvas.label")}</span>
-                        <span className="ui-caption mt-0.5 block truncate text-muted-foreground">{t("creativePad.actions.blankCanvas.hint")}</span>
+                    <span className="ch-example-icon" aria-hidden="true"><LayoutGrid /></span>
+                    <span className="min-w-0 flex-1">
+                        <span className="ch-example-title">{t("creativePad.actions.blankCanvas.label")}</span>
+                        <span className="ch-example-hint">{t("creativePad.actions.blankCanvas.hint")}</span>
                     </span>
+                    <ArrowUpRight className="ch-example-arrow" aria-hidden="true" />
                 </button>
             </div>
 

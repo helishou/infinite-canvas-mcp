@@ -3,6 +3,7 @@ import type { NavigateFunction } from "react-router-dom";
 
 import i18n from "@/i18n";
 import { startCreativeGeneration } from "@/lib/creative-generation";
+import { publishCreativeLaunch } from "@/lib/creative-conversation-bus";
 import { fetchPrompts } from "@/services/api/prompts";
 import { fetchBackendTasks } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
@@ -185,7 +186,26 @@ async function runImageWorkbench(input: SiteToolInput, navigate: NavigateFunctio
         return { ok: true, navigated: "/?mode=image", prompt: prompt || undefined, run, applied, note: siteText("imageConfigApplied") };
     }
     if (!prompt) throw new Error(siteText("promptRequired"));
-    const { projectId, taskId } = await startCreativeGeneration({ capability: "image", prompt });
+    // 默认「对话里生成」：不建画布、不跳转，任务登记到首页创作会话（与创作台完全一致）。
+    // 只有调用方显式传 createCanvas=true 才沿用旧的「建画布 → 生成 → 跳进画布」。
+    const explicitCanvas = input.createCanvas === true;
+    const { projectId, taskId } = await startCreativeGeneration({
+        capability: "image",
+        prompt,
+        ...(explicitCanvas ? {} : { createCanvas: false }),
+    });
+    if (!explicitCanvas) {
+        const config = useConfigStore.getState().config;
+        publishCreativeLaunch({
+            taskId,
+            mode: "image",
+            prompt,
+            model: config.imageModel || config.model || "",
+            createdAt: new Date().toISOString(),
+            params: { count: Number(config.canvasImageCount || config.count || 1), size: config.size || "1:1" },
+        });
+        return { ok: true, run, taskId, prompt, applied, conversationOnly: true, note: siteText("conversationGenerationStarted") };
+    }
     const destination = `/canvas/${encodeURIComponent(projectId)}`;
     navigate(destination);
     return { ok: true, navigated: destination, projectId, prompt, run, taskId, applied, note: siteText("imageGenerationStarted") };
@@ -246,7 +266,24 @@ async function runVideoWorkbench(input: SiteToolInput, navigate: NavigateFunctio
         return { ok: true, navigated: "/?mode=video", prompt: prompt || undefined, run, applied, note: siteText("videoConfigApplied") };
     }
     if (!prompt) throw new Error(siteText("promptRequired"));
-    const { projectId, taskId } = await startCreativeGeneration({ capability: "video", prompt });
+    const explicitCanvas = input.createCanvas === true;
+    const { projectId, taskId } = await startCreativeGeneration({
+        capability: "video",
+        prompt,
+        ...(explicitCanvas ? {} : { createCanvas: false }),
+    });
+    if (!explicitCanvas) {
+        const config = useConfigStore.getState().config;
+        publishCreativeLaunch({
+            taskId,
+            mode: "video",
+            prompt,
+            model: config.videoModel || config.model || "",
+            createdAt: new Date().toISOString(),
+            params: { size: config.size || "16:9", seconds: config.videoSeconds || "5", resolution: config.vquality || "720p" },
+        });
+        return { ok: true, run, taskId, prompt, applied, conversationOnly: true, note: siteText("conversationGenerationStarted") };
+    }
     const destination = `/canvas/${encodeURIComponent(projectId)}`;
     navigate(destination);
     return { ok: true, navigated: destination, projectId, prompt, run, taskId, applied, note: siteText("videoGenerationStarted") };

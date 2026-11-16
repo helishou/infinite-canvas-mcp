@@ -6,7 +6,7 @@
  */
 
 import { groupChaptersIntoEpisodes, episodeTitleForGroup, EPISODE_SOURCE_CHARS, type ChapterEpisodeGroup } from "@basketikun/canvas-agent/drama/chapter-episodes";
-import { analyzeNovelChapters, type NovelChapter, type NovelChapterIssue } from "@basketikun/canvas-agent/drama/novel-chapters";
+import { analyzeNovelChapters, type NovelChapter, type NovelChapterIssue, type NovelChapterSplit } from "@basketikun/canvas-agent/drama/novel-chapters";
 
 /** 一个镜头大约承载的正文字数，与 fallbackChapterDemand 的 beatChars 一致。 */
 export const BEAT_CHARS = 120;
@@ -71,7 +71,7 @@ export function formatSeconds(seconds: number) {
  */
 export function buildEpisodeGroups(
     rows: readonly AdaptChapterRow[],
-    options: { perEpisode: number; startNumber: number; existingTitles?: readonly string[]; clipSeconds?: number },
+    options: { perEpisode: number; startNumber: number; existingTitles?: readonly string[]; existingEpisodes?: readonly { episodeNumber: number; title: string }[]; clipSeconds?: number },
 ): EpisodeGroupRow[] {
     const selected = rows.filter(row => row.selected);
     const positions = new Map(rows.map((row, index) => [row, index]));
@@ -79,18 +79,34 @@ export function buildEpisodeGroups(
         selected.map(row => ({ position: positions.get(row) ?? 0, title: chapterTitleOf(row), chars: chapterCharsOf(row) })),
         options.perEpisode,
     );
-    const existing = new Set((options.existingTitles || []).map(title => title.trim()));
+    // 已建集按标题认：命中时沿用它的集号，避免"已存在"的行显示成下一个空位号。
+    const existing = new Map<string, number | undefined>();
+    (options.existingTitles || []).forEach(title => { if (!existing.has(title.trim())) existing.set(title.trim(), undefined); });
+    (options.existingEpisodes || []).forEach(episode => existing.set(episode.title.trim(), episode.episodeNumber));
+    // 新集从 startNumber 起跳过已被占用的集号，避免"第 3 集"前面只剩一个空位。
+    const used = new Set<number>((options.existingEpisodes || []).map(episode => episode.episodeNumber));
+    let cursor = options.startNumber;
     return grouping.groups.map((group, index) => {
         // 多章合并时用「首章名 等 N 章」，单章直接用章名；与影策的分集标题规则一致。
         const title = episodeTitleForGroup(group);
         const chars = group.chars;
+        const key = title.trim();
+        const known = existing.get(key);
+        let episodeNumber: number;
+        if (typeof known === "number") episodeNumber = known;
+        else if (existing.has(key)) episodeNumber = options.startNumber + index;
+        else {
+            while (used.has(cursor)) cursor += 1;
+            episodeNumber = cursor;
+            used.add(cursor);
+        }
         return {
             ...group,
             index: index + 1,
             title,
-            episodeNumber: options.startNumber + index,
+            episodeNumber,
             scale: estimateChapterScale(chars, options.clipSeconds ?? CLIP_SECONDS),
-            existing: existing.has(title),
+            existing: existing.has(key),
         };
     });
 }
@@ -143,4 +159,42 @@ export function episodeLinesFromSource(source: string, options: { perEpisode?: n
 export function sourceChapterCount(source: string, maxChars = NOVEL_MAX_CHARS) {
     if (!String(source || "").trim()) return 0;
     return analyzeNovelChapters(source, { maxChars, minChars: NOVEL_MIN_CHARS }).chapters.length;
+}
+
+/**
+ * 新建与改编共用一条拆章口径：原文 + 分集规则 → 章节行与编组。
+ * 界面显示几集就按同一份结果建几集，不在两处各算一遍。
+ */
+export function splitSourceIntoEpisodes(
+    source: string,
+    split: { excluded?: readonly number[]; perEpisode?: number; maxChars?: number } = {},
+    options: { startNumber?: number; existingTitles?: readonly string[] } = {},
+) {
+    const analysis = analyzeNovelChapters(source, { maxChars: split.maxChars || NOVEL_MAX_CHARS, minChars: NOVEL_MIN_CHARS });
+    const { rows, groups } = chaptersFromAnalysis(analysis, split, options);
+    return { analysis, rows, groups };
+}
+
+/**
+ * 已切好的章节 → 勾选后的行与编组。
+ * 原文只在文本变化时切一次；勾选、每集章数是这里按需重算的廉价派生。
+ */
+export function chaptersFromAnalysis(
+    analysis: NovelChapterSplit | null | undefined,
+    split: { excluded?: readonly number[]; perEpisode?: number } = {},
+    options: { startNumber?: number; existingTitles?: readonly string[] } = {},
+) {
+    const excluded = new Set(split.excluded || []);
+    const rows = toChapterRows(analysis?.chapters || []).map(row => ({ ...row, selected: !excluded.has(row.index) }));
+    const groups = buildEpisodeGroups(rows, { perEpisode: split.perEpisode ?? 1, startNumber: options.startNumber ?? 1, existingTitles: options.existingTitles });
+    return { rows, groups };
+}
+
+/**
+ * 生成的产出规模：每个镜头一张分镜图、每个剧情段一次视频生成。
+ * 参考图要等作品圣经给出角色/场景清单，这里不猜，只算能算准的部分。
+ */
+export function estimateProductionTasks(groups: readonly EpisodeGroupRow[]) {
+    const summary = summarizeGroups(groups);
+    return { ...summary, storyboardImages: summary.shots, videoTasks: summary.segments };
 }

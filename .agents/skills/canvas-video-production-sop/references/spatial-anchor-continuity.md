@@ -129,7 +129,20 @@ python -B -X utf8 scripts/acheng/spatial-lint.py <production.json> [--json]
 
 这两条都是**镜头设计输入**（落 `Shot.visual` 与 ledger），不是手工往 `segments[].prompt` 里拼句子。
 
-## 三、空间锚点的三种来源，按优先级取用
+## 三、空间锚点的四种来源，按优先级取用
+
+### 同一句经验，两条路径两套载体
+
+「首镜写清站位、给模型参照物、上一段截站位图、没上段就试跑拿站位图」在画布上不是一句话，是四个落点。两条执行路径的载体不同，**不要把一条路径的做法搬到另一条**：
+
+| 经验原句 | 正式 production 稿（有账本） | 原生 H3 Clip（无账本） |
+|---|---|---|
+| 首镜写清人物站位 | `characters[].position` 给 `[x,y]`，方位进账本五项；正文不写方位（§二） | Clip 正文写画内左右、朝向与遮挡；这条路径没有第二个来源，不算双写 |
+| 告诉模型参照物 | 分区值只能是 `scene_registry` 里出现过的地标词 | 正文点名场景固定物（门／供桌／柱／柜台），并同步挂 blocking 图 |
+| 上一段截站位图 | `shots[].keyframes` 的 `anchor: "opening"`（或 `at_frame` 定点）＋ `pictureBindings` | `h3_set_reference_bindings` 加一条 `role: "blocking"` 绑定 |
+| 没上段就试跑拿帧 | 首镜先按基本面生成，取帧替换后重编 | 先 `h3_run_clip` 跑一版，取帧定为锚点后重跑 |
+
+站位图不是「多挂一张参考」：编译器把 `role: "blocking"` 的图渲染成 `<Picture N> is the blocking and 180-degree action-axis map for [Shot N], defining relative subject positions, orientation, sightlines, entrances, and movement paths. It is a spatial plan, not a rendered frame or character identity source.`，并把它从角色 Subject 的 `identity:` 图里剔除（`storyboard-write.ts`）。所以它**不会**污染脸和服装，也**不会**替你锁身份——身份仍旧走四视图。反过来，把站位图登记成 `character_identity` 或 `scene`，它就会被当成身份／场景资产用，这是最常见的挂错。
 
 ### 1. 尾帧参考（默认）
 
@@ -147,27 +160,70 @@ python -B -X utf8 scripts/acheng/spatial-lint.py <production.json> [--json]
 处置方式：
 
 - 命名 `<场>-<段>-<镜>位置.png`，一次定名不改不重排，台账编号只追加
-- 挂到目标 Clip 的 `shots[].keyframes`（主体／锚点／局部帧）或 `pictureBindings`，用途写「空间关系锚点」
+- 挂到目标 Clip 的 `shots[].keyframes`（`anchor: "opening"` 起幅／`closing` 落幅／`at_frame` 定点，写读稿可含旧的 `composition`）或 `pictureBindings`，用途写「空间关系锚点」
 - **只锁位置、朝向、视线、遮挡、屏幕正反面**；身份与造型走角色四视图，不被这张图覆盖
-- 一场第一段、换场后第一段没有前段可截，不写
+- 没有前段可截的场次走第 3 条试跑定帧，不再直接跳过
 - 没有真实图片就整项省略，**不虚构素材名**
 
 这张图和尾帧参考可以并存，也可以只用它——本质是「把自动取尾帧换成人工取帧」，不新增机制。
 
-### 3. 空间简图（前两者都拿不到时）
+#### 2.1 原生 H3 Clip 路径：按顺序做完再编译
+
+1. **取实名成片**：`h3_get_clip` 传 `include: ["result"]`，从返回的 `media.storageKey` / `media.url` 拿上一段结果；不要按目录、文件名或「最新」猜成片（见 [Clip 参考](canvas-clip-production.md)）。返回 `available: false`（`NO_VERIFIABLE_ARCHIVED_RESULT`）才说明该片没有可核验归档，回去补跑。
+2. **落到本地**：把 `media.url`（`/media/<urlencode(storageKey)>`）拼到当前 Backend 地址下载到临时目录，例如 `curl -sS -o in.mp4 "http://127.0.0.1:17370/media/video%3A..."`。
+3. **定帧**：先用不动点抽尾帧对照，再抽中间帧择优（ffmpeg 6.0 实测可用）：
+
+   ```bash
+   # 尾帧（-sseof 从结尾倒数，别用 -ss 加总时长猜）
+   ffmpeg -y -sseof -0.2 -i in.mp4 -frames:v 1 场-段-尾.png
+   # 中间帧（-ss 放在 -i 前是快速定位，精度到关键帧附近，够用于选帧）
+   ffmpeg -y -ss 1.5 -i in.mp4 -frames:v 1 -q:v 2 场-段-镜位置.png
+   ```
+
+   选帧标准就是上面四项，不是「哪帧好看」。**别默认尾帧能用**：实测 EP3 首段尾帧是单人特写，四项一项不过。多人镜头应扫 3–5 个时间点，取所有人同时在场且地标入画的那张；抽出来的帧若带画面内字幕或水印，换帧或在 `visual` 里说明，不要拿它当锚点。
+4. **命名即职责**：文件名带「位置」或「站位」。`inferReferenceRole` 就是靠 `站位|轴线|blocking|position` 这几个词判成 `blocking` 的；叫「参考1」「截图」会被判成 `other`，挂上去也不按站位图渲染。
+5. **导入画布**：`canvas_import_local_images`，`items: [{ filePath: "<绝对路径>", title: "<场>-<段>-<镜>位置" }]`。导入建的是智能图片节点，图片落在成功结果槽。导入工具的 `role` 枚举**没有 blocking**，所以职责靠标题落实；要在目录里显式登记，随后用 `canvas_update_reference_asset` 写 `asset.id` / `label` / `role: "blocking"` / `storageKey` / `sourceNodeId`。
+6. **绑到目标 Clip**：`h3_set_reference_bindings` 在现有 `bindings` 里**追加一条**（不整组覆盖）：
+
+   ```json
+   { "id": "binding-<稳定后缀>", "assetId": "<referenceCatalog 里的资产 id>",
+     "label": "S12-02位置", "role": "blocking", "mediaType": "image",
+     "usage": "reference", "storageKey": "image:...", "sourceNodeId": "<导入节点 id>" }
+   ```
+
+   带上原 `expectedBindings` 走 CAS。绑完用 `h3_get_clip`（`include: ["references"]`）确认这条 `role` 是 `blocking` 且 `enabled: true`，再 `canvas_validate_generation` 预检。
+7. **不改身份**：不要因为挂了站位图就把同一张图再加一条 `character_identity` 绑定；角色照旧走角色组的四视图与服装绑定。
+
+一次只能锁一个空间状态：站位图对应**一个 Clip 的首镜起态**。同一段里机位或站位变了，那是新边界，不是同一张图的事。
+
+### 3. 试跑定帧（本场第一段／换场首段没有前段可截）
+
+一场的头一段、换场后的第一段没有"上一段成片"可截，但站位仍然是硬需求。**不要直接跳过**，用一次试跑把站位画出来再定稿：
+
+1. **先写清站位再跑**：首镜的 `characters[].position`（正式稿）或正文画内左右＋场景固定物（原生 Clip）先按本节开头的经验表写齐；缺这一步，试跑出来的画面本身没有参照价值。
+2. **只跑首镜，别跑整段**：原生路径用 `h3_run_clip` 指定该 Clip 的 `segmentId`（或多个目标时用 `h3_preview_run` 先看 `ready`）；正式稿路径把首镜 `opening` 帧当占位先出一张。授权范围仍是用户给的范围，试跑不自动扩权。
+3. **取帧**：从试跑成片按 2.1 第 3 步扫帧，选出四项全过的一帧，命名 `<场>-<段>-S01位置.png`。
+4. **定为锚点后重跑同一镜**：按 2.1 第 5–6 步导入并绑成 `role: "blocking"`（原生路径）或替换首镜 `opening` 关键帧（正式稿路径），再重跑该 Clip。旧试跑媒体保留归档，不删、不当交付。
+5. **试跑片不进验收**：它只产出锚点帧。没绑定、没重跑的试跑结果一律标 `not-reviewed`，不得报通过（[Clip 参考](canvas-clip-production.md) 的三态规则同样适用）。
+
+判据：一次试跑换来一个可用锚点就算成立；同一场试跑三次仍抽不出四项全过的帧，说明首镜的机位／景别或场景文案本身缺依据，报缺口，别继续抽卡。
+
+### 4. 空间简图（前三者都拿不到时）
 
 见第五节。放在最后，因为它是资产动作，有生成成本。
 
 ## 四、取哪个锚点：判定顺序
 
 ```text
-末镜景别是否 MS/WS/FS/EWS 且第三节四项全过？
-├─ 是 → 用尾帧参考（默认，零额外成本）
-└─ 否 → 本段是否有任意一帧四项全过？
-        ├─ 有 → 用人工位置截图
-        └─ 没有 → 该场是否需要交代这个方向？
-                ├─ 需要 → 空间简图（经用户同意）或报缺口
-                └─ 不需要（全程特写/同一轴线） → 不绑，靠账本状态 + 场景地图
+本场这一段有没有"上一段成片"可截？
+├─ 没有（本场首段／换场首段） → 试跑定帧（第 3 条）：先写清站位 → 只跑首镜 → 扫帧 → 绑 blocking → 重跑
+└─ 有 → 末镜景别是否 MS/WS/FS/EWS 且第三节四项全过？
+        ├─ 是 → 用尾帧参考（默认，零额外成本）
+        └─ 否 → 本段是否有任意一帧四项全过？
+                ├─ 有 → 用人工位置截图（按 2.1 步骤）
+                └─ 没有 → 该场是否需要交代这个方向？
+                        ├─ 需要 → 空间简图（经用户同意）或报缺口
+                        └─ 不需要（全程特写/同一轴线） → 不绑，靠账本状态 + 场景地图
 ```
 
 **整段特写是合法状态，不是错误。** 特写看不到某人不代表他离场；此时省略锚点、靠账本状态撑住即可，不必硬凑一张图。
@@ -223,8 +279,11 @@ python -B -X utf8 scripts/acheng/spatial-lint.py <production.json> [--json]
 2. 这五项的值用的是不是**具体地标＋方位**，而不是“旁边／一侧／附近”；分区名是否都能在该镜场景的 `scene_registry` 文案／landmarks 里找到（靠文案，没有自动校验，要人看）
 3. 首镜 `characters[].position` 给了吗（`[x,y]` 0–1，两人镜要分得开，如 0.35 / 0.7）；正文里不要用文字描述左右
 4. 正文有没有复述账本里的方位段落（应删掉，只留动作与一阶变化）
-5. 锚点取的是尾帧、人工截图、简图，还是不绑；理由是否成立
+5. 锚点取的是尾帧、人工截图、试跑定帧、简图，还是不绑；理由是否成立
 6. 人工截图是否四项全过、是否只锁位置不锁身份
-7. 本段是否越轴；若越，反向方向的依据是什么
-8. 空间是否有已知缺口，是否已报告而不是被固定镜头掩盖
-9. 有没有虚构素材名或占位图
+7. 站位图是否被识别成 `blocking`（文件名带「位置／站位」，或 `role` 显式写 blocking）；有没有被误挂成 `character_identity`／`scene`
+8. 本场首段／换场首段没有前段可截的，是否走了试跑定帧，而不是直接不绑
+9. 试跑片是否只当锚点来源、未进入验收结论（未绑定未重跑的标 `not-reviewed`）
+10. 本段是否越轴；若越，反向方向的依据是什么
+11. 空间是否有已知缺口，是否已报告而不是被固定镜头掩盖
+12. 有没有虚构素材名或占位图

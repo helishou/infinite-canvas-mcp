@@ -132,6 +132,18 @@
       "prompt": "这 18 段都改完了，帮我编译并落地到画布，别让我一个个点。",
       "expected_output": "用 production_compile({apply:true}) 一次走到落地：编译成功由 Backend 作业自动应用，只沿原 operationId 轮询 applyStatus；pending 继续等、applied 即落地、failed 读 application 诊断。不要拿 preparedId 去多次调用 apply，也不要在 404 时换 operationId 重发（同 ID 重发才幂等）。落地后核对 segment.productionClipProjection.promptHash 与产物 sha256。",
       "files": []
+    },
+    {
+      "id": 23,
+      "prompt": "第 3 集换到新场景了，这是本场第一段，上头没有能截的成片。两个人一左一右站着对峙，先把站位定住再往下走。",
+      "expected_output": "走试跑定帧，不跳过也不直接整段开跑。先把首镜站位写清（正式稿 characters[].position 给 [x,y] 并把方位登记成账本 fact；原生 Clip 则在正文写画内左右与场景固定地标），只跑首镜一版；从试跑成片扫 3–5 个时间点，按四项（全员在画内或相对位置可辨、能看出左右、关键地标在画内、朝向视线可读）选一帧，命名为 <场>-<段>-S01位置.png，导入画布并按 blocking 职责绑定（原生路径 h3_set_reference_bindings 追加一条 role=blocking，正式稿替换首镜 opening 关键帧），再重跑该 Clip；旧试跑媒体保留归档、标 not-reviewed，不进验收。抽不出合格帧时说明首镜机位/景别或场景文案缺依据并报缺口，不靠反复抽卡。",
+      "files": []
+    },
+    {
+      "id": 24,
+      "prompt": "上一段结尾我把全员站位截了一张图，帮我挂到下一段让它照着站，别又站歪了。",
+      "expected_output": "按同一段成片取实名媒体（h3_get_clip include:[\"result\"] 读 media.storageKey/url，不按目录或最新文件猜），本地 ffmpeg 抽帧（-sseof -0.2 取尾帧、-ss 取中间帧），命名带「位置／站位」——inferReferenceRole 靠这几个词判成 blocking；canvas_import_local_images 导入后如需目录显式登记用 canvas_update_reference_asset 写 role=blocking。绑定时 h3_set_reference_bindings 追加一条 role=blocking、mediaType=image、usage=reference，不整组覆盖，带 expectedBindings 走 CAS，绑完用 h3_get_clip include:[\"references\"] 确认 role 为 blocking，再 canvas_validate_generation 预检。不得把同一张图再挂成 character_identity 或 scene，也不得用它重演上一段动作。",
+      "files": []
     }
   ]
 }

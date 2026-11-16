@@ -51,6 +51,8 @@ type ImageSettingsPanelProps = {
     maxCount?: number;
     quickCount?: number;
     customFields?: WorkflowField[];
+    /** 自定义字段这一组的标题；默认是「工作流参数」，渠道上报的字段用「自定义参数」。 */
+    customFieldsTitle?: string;
     customFieldValues?: Record<string, unknown>;
     onCustomFieldChange?: (id: string, value: unknown) => void;
     showRunTarget?: boolean;
@@ -76,6 +78,7 @@ export function ImageSettingsPanel({
     maxCount = 15,
     quickCount = 10,
     customFields,
+    customFieldsTitle,
     customFieldValues,
     onCustomFieldChange,
     showRunTarget = false,
@@ -120,8 +123,8 @@ export function ImageSettingsPanel({
             >
                 {showTitle ? <div className={`${compact ? "text-sm" : "text-lg"} font-semibold`}>{t("settingsPanels.image.title")}</div> : null}
                 {customFields && customFields.length > 0 && onCustomFieldChange ? (
-                    <div className="space-y-2.5" role="group" aria-label={t("settingsPanels.image.workflowFields")}>
-                        <SettingTitle color={theme.node.muted} compact={compact}>{t("settingsPanels.image.workflowFields")}</SettingTitle>
+                    <div className="space-y-2.5" role="group" aria-label={customFieldsTitle || t("settingsPanels.image.workflowFields")}>
+                        <SettingTitle color={theme.node.muted} compact={compact}>{customFieldsTitle || t("settingsPanels.image.workflowFields")}</SettingTitle>
                         <WorkflowCustomFields fields={customFields} values={customFieldValues || {}} onChange={onCustomFieldChange} />
                     </div>
                 ) : null}

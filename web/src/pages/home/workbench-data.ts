@@ -71,15 +71,27 @@ export function projectCover(project: CanvasProject, outputs: WorkbenchOutput[],
     return null;
 }
 
+/** 本轮提交用到的参考素材（影策 creation-user-message-references）。只落小体积 URL / storageKey，不存 data URL。 */
+export type CreativeLaunchReference = {
+    id: string;
+    title: string;
+    url: string;
+    storageKey?: string;
+    kind: "image" | "video" | "audio" | "file";
+};
+
 export type CreativeLaunch = {
     taskId: string;
-    projectId: string;
-    nodeId: string;
+    /** 旧版本每条提交都会自动建画布；新版本对话阶段不建画布，只有点「新建画布」后才回填。 */
+    projectId?: string;
+    nodeId?: string;
     mode: "image" | "video" | "text" | "audio";
     prompt: string;
     model: string;
     createdAt: string;
     params: { count?: number; size?: string; seconds?: string; resolution?: string };
+    /** 用户消息下方的引用缩略图行，最多 5 项；历史记录没有该字段时静默降级为不显示。 */
+    references?: CreativeLaunchReference[];
 };
 
 export type CreativeConversation = {
@@ -87,7 +99,7 @@ export type CreativeConversation = {
     title: string;
     createdAt: string;
     updatedAt: string;
-    /** 会话内多轮共享生成上下文：第一条提交创建的画布，后续提交追加节点到同一张画布。 */
+    /** 用户显式点「新建画布」后落地的项目 id；对话阶段为空。 */
     canvasId?: string;
     launches: CreativeLaunch[];
 };
@@ -112,13 +124,18 @@ function isCreativeLaunch(value: unknown): value is CreativeLaunch {
     if (!value || typeof value !== "object") return false;
     const item = value as Record<string, unknown>;
     return typeof item.taskId === "string" && item.taskId.length > 0
-        && typeof item.projectId === "string" && item.projectId.length > 0
-        && typeof item.nodeId === "string"
+        && (item.projectId === undefined || (typeof item.projectId === "string" && item.projectId.length > 0))
+        && (item.nodeId === undefined || typeof item.nodeId === "string")
         && typeof item.prompt === "string"
         && typeof item.model === "string"
         && typeof item.createdAt === "string"
         && ["image", "video", "text", "audio"].includes(item.mode as string)
-        && (item.params === undefined || (typeof item.params === "object" && item.params !== null));
+        && (item.params === undefined || (typeof item.params === "object" && item.params !== null))
+        // 旧会话没有 references；带上时必须是最多 5 项且字段完整，避免脏数据把消息流渲染崩。
+        && (item.references === undefined || (Array.isArray(item.references) && item.references.length <= 5 && item.references.every((value: unknown) => {
+            const reference = value as Record<string, unknown> | null;
+            return !!reference && typeof reference.id === "string" && typeof reference.title === "string" && typeof reference.url === "string";
+        })));
 }
 
 export function readCreativeLaunches(storage: Pick<Storage, "getItem"> | undefined, now: number): CreativeLaunch[] {
@@ -224,6 +241,50 @@ export function launchStatus(task: BackendRuntimeTask | undefined, logs: Backend
     if (logs.some(log => log.status === "failed")) return "failed";
     if (logs.some(log => log.status === "cancelled")) return "cancelled";
     return "queued";
+}
+
+/** 会话级任务没有生成日志：给预览卡片补一份最小可用的日志形状（model / 时间 / outputs）。 */
+function conversationLog(launch: CreativeLaunch, outputs: Array<Record<string, unknown>>): BackendGenerationLog {
+    return {
+        id: `conversation:${launch.taskId}`,
+        projectId: launch.projectId || "",
+        ...(launch.nodeId ? { nodeId: launch.nodeId } : {}),
+        status: "success",
+        platform: launch.mode,
+        model: launch.model,
+        taskMode: launch.mode,
+        prompt: launch.prompt,
+        references: [],
+        inputCounts: {},
+        runtimeTaskId: launch.taskId,
+        startedAt: launch.createdAt,
+        finishedAt: launch.createdAt,
+        durationMs: 0,
+        outputs,
+        params: {},
+        createdAt: launch.createdAt,
+        updatedAt: launch.createdAt,
+    };
+}
+
+/**
+ * 兼容两代数据：旧会话按画布生成日志取结果；新会话（无画布）直接读任务详情的 result.media。
+ * 同一份媒体只保留一条，避免补日志后重复出现在「最近生成」里。
+ */
+export function resolveLaunchOutputs(task: BackendRuntimeTask | undefined, logs: BackendGenerationLog[], launch: CreativeLaunch): WorkbenchOutput[] {
+    const fromLogs = collectOutputs(logs);
+    const media = ((task?.result?.media || []) as unknown as Array<Record<string, unknown>>);
+    const seen = new Set(fromLogs.map(output => output.storageKey || output.url || ""));
+    const fromTask: WorkbenchOutput[] = [];
+    for (const [index, item] of media.entries()) {
+        const parsed = outputMedia(item);
+        if (!parsed) continue;
+        const key = parsed.storageKey || parsed.url || "";
+        if (seen.has(key)) continue;
+        seen.add(key);
+        fromTask.push({ ...parsed, id: `${launch.taskId}:${index}`, log: conversationLog(launch, media) });
+    }
+    return [...fromLogs, ...fromTask];
 }
 
 export function launchTextResults(task: BackendRuntimeTask | undefined, logs: BackendGenerationLog[]): string[] {

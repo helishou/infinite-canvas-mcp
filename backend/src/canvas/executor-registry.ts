@@ -1,6 +1,8 @@
 export type CanvasExecutorId =
   | "direct-text"
   | "direct-image"
+  | "engine-image"
+  | "engine-video"
   | "builtin-comfy"
   | "comfy-workflow"
   | "runninghub-workflow"

@@ -63,6 +63,28 @@ test("new episodes inherit only the explicitly confirmed drama background music 
     assert.equal(service.get("episode").draft.settings.backgroundMusicEnabled, true);
 });
 
+test("a new director draft inherits the confirmed drama media rhythm", async (t) => {
+    const { db, service } = fixture(t);
+    const folder = db.listCanvasFolders().find(item => item.id === "drama")!;
+    db.upsertCanvasFolder({ ...folder, outline: "Confirmed outline", expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
+        productionPlan: { requirements: "", imageModel: "", imageModelsByKind: {}, h3Model: "", mediaProductionMode: "prompt_only", sourceSplit: { excluded: [3], perEpisode: 2 }, confirmedOutline: "Confirmed outline", confirmedAt: new Date().toISOString() } });
+    // 分集口径随规划一起落库，读回来仍是同一份（改编面板据此判断预留章节）。
+    const stored = db.listCanvasFolders().find(item => item.id === "drama")!.productionPlan!;
+    assert.deepEqual(stored.sourceSplit, { excluded: [3], perEpisode: 2, maxChars: 0 });
+    assert.equal(stored.mediaProductionMode, "prompt_only");
+    const saved = await service.edit("episode", { operationId: "init-rhythm", expectedRevision: 0, ops: [{ type: "initialize_director_from_demand" }] });
+    assert.equal(saved.draft.director?.workflow.mediaProductionMode, "prompt_only");
+});
+
+test("an unconfirmed drama plan leaves the director media rhythm at its default", async (t) => {
+    const { db, service } = fixture(t);
+    const folder = db.listCanvasFolders().find(item => item.id === "drama")!;
+    db.upsertCanvasFolder({ ...folder, outline: "Draft outline", expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
+        productionPlan: { requirements: "", imageModel: "", imageModelsByKind: {}, h3Model: "", mediaProductionMode: "automatic" } });
+    const saved = await service.edit("episode", { operationId: "init-default-rhythm", expectedRevision: 0, ops: [{ type: "initialize_director_from_demand" }] });
+    assert.equal(saved.draft.director?.workflow.mediaProductionMode, "per_item");
+});
+
 test("current v2 draft remains usable with an older published snapshot, while restoring that snapshot is rejected without mutation", async (t) => {
     const { db, service } = fixture(t);
     await service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });

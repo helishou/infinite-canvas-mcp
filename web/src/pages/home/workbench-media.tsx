@@ -5,7 +5,15 @@ import { ensureImagePreview, previewUrlFor, subscribeImagePreview } from "@/serv
 import type { WorkbenchMedia } from "./workbench-data";
 
 /** Cards reuse the canvas preview cache; the explicit preview always opens original media. */
-export function WorkbenchMediaPreview({ media, label, controls = false }: { media: WorkbenchMedia | null; label: string; controls?: boolean }) {
+export function WorkbenchMediaPreview({ media, label, controls = false, fit = "cover", onImageSize }: {
+    media: WorkbenchMedia | null;
+    label: string;
+    controls?: boolean;
+    /** contain = 整幅显示不裁切；cover = 旧的缩略图裁切行为。 */
+    fit?: "cover" | "contain";
+    /** 图片加载后回报原始像素，用于把容器比例修正成真实画幅。 */
+    onImageSize?: (size: { width: number; height: number }) => void;
+}) {
     const src = media?.storageKey ? backendMediaUrl(media.storageKey) : media?.url || "";
     const container = useRef<HTMLDivElement>(null);
     const [visible, setVisible] = useState(false);
@@ -68,7 +76,7 @@ export function WorkbenchMediaPreview({ media, label, controls = false }: { medi
                     muted={!controls}
                     playsInline
                     preload="metadata"
-                    className={`h-full w-full ${controls ? "object-contain" : "object-cover"}`}
+                    className={`h-full w-full ${controls || fit === "contain" ? "object-contain" : "object-cover"}`}
                     onError={() => setFailedSource(src)}
                     onPointerEnter={(event) => {
                         if (!controls && event.pointerType === "mouse" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) void event.currentTarget.play().catch(() => {});
@@ -84,5 +92,13 @@ export function WorkbenchMediaPreview({ media, label, controls = false }: { medi
                 )}
             </div>
         );
-    return <img src={preview || src} alt={label} loading={controls ? "eager" : "lazy"} decoding="async" className={`h-full w-full ${controls ? "object-contain" : "object-cover"}`} onError={() => setFailedSource(src)} />;
+    return <img
+        src={preview || src}
+        alt={label}
+        loading={controls ? "eager" : "lazy"}
+        decoding="async"
+        className={`h-full w-full ${controls || fit === "contain" ? "object-contain" : "object-cover"}`}
+        onLoad={(event) => onImageSize?.({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+        onError={() => setFailedSource(src)}
+    />;
 }

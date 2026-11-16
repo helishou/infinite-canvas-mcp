@@ -14,5 +14,5 @@ const SCOPE_TASK: Record<PlanningLaunchScope, string> = {
 export function planningPrompt(scope: PlanningLaunchScope, input: { dramaId: string; name: string; pendingEpisodes?: number[] }) {
     const head = `【剧目策划】剧目「${input.name}」（dramaId=${input.dramaId}）`;
     const pending = input.pendingEpisodes?.length ? `；还没写剧本的集号：${input.pendingEpisodes.join("、")}` : "";
-    return `${head}${pending}。${SCOPE_TASK[scope]}先读 drama_get_planning 拿真值和完成度，写的时候用 drama_update_planning（剧本用 drama_update_episode 写 fullPlot），不要只把内容留在对话里，也不要写占位稿。完成后一句话回执：改了哪一步、写进哪个字段、还剩什么。`;
+    return `${head}${pending}。${SCOPE_TASK[scope]}先调用 drama_set_active_project（dramaId=${input.dramaId}）把当前剧目钉住，或每次调用 drama_* 工具都显式传 dramaId；不传会报 PROJECT_SELECTION_REQUIRED（那不是断线）。之后读 drama_get_planning 拿真值和完成度，写的时候用 drama_update_planning（剧本用 drama_update_episode 写 fullPlot），不要只把内容留在对话里，也不要写占位稿。完成后一句话回执：改了哪一步、写进哪个字段、还剩什么。`;
 }

@@ -1,10 +1,13 @@
 import type { Router } from "express";
 import { z } from "zod";
 import { dramaOutlineDetailSchema, dramaProductionPlanSchema, dramaTopicSchema, episodeHasScript } from "@basketikun/canvas-agent/drama/production-contract";
+import { dramaNextAction, dramaStageStates, renderDramaStageContext, type DramaStageEpisode } from "@basketikun/canvas-agent/drama/stage-contract";
+import { freshestStageActivity } from "../drama/stage-activity.js";
 
 import type { BackendDatabase } from "../db.js";
 import type { Stores } from "../stores/types.js";
 import { dramaOutlineSteps, proposeDramaOutlineStep, proposeEpisodeScript } from "../drama/outline-proposal.js";
+import { proposeTopicFromSource } from "../drama/topic-proposal.js";
 
 const proposalBodySchema = z.object({
     step: z.enum(dramaOutlineSteps),
@@ -16,6 +19,27 @@ const proposalBodySchema = z.object({
  * 剧目级大纲生成：一步一次请求，只返回候选文本。
  * 写入仍然走既有的剧目规划保存（upsertCanvasFolder + productionPlan），这里不落库、不改真值。
  */
+/** 「粘贴剧本 → 自动填好选题」：创建前就能用，所以挂在 /drama/topic-proposal（不带 dramaId）。 */
+const topicProposalSchema = z.object({
+    source: z.string().min(1).max(400000),
+    model: z.string().max(200).optional(),
+    instruction: z.string().max(2000).optional(),
+}).strict();
+
+export function registerDramaTopicProposalRoute(router: Router, stores: Pick<Stores, "settings">) {
+    router.post("/drama/topic-proposal", async (req, res) => {
+        const parsed = topicProposalSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ") });
+        if (parsed.data.source.replace(/\s/g, "").length < 100) return void res.status(400).json({ ok: false, error: "原剧本太短（至少 100 字），或者直接手填选题" });
+        try {
+            const result = await proposeTopicFromSource(stores, parsed.data);
+            res.json({ ok: true, ...result });
+        } catch (error) {
+            res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+    });
+}
+
 export function registerDramaPlanningRoutes(router: Router, db: BackendDatabase, stores: Pick<Stores, "settings">, base = "/drama/:dramaId/planning") {
     router.post<Record<string, string>>(`${base}/outline-proposal`, async (req, res) => {
         const parsed = proposalBodySchema.safeParse(req.body || {});
@@ -162,5 +186,59 @@ export function registerDramaPlanningStateRoutes(router: Router, db: BackendData
         } catch (error) {
             res.status(409).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
         }
+    });
+}
+
+
+/**
+ * 剧目阶段：选题 → 大纲 → 剧本 → 资产 → 分镜 → 视频。
+ * 只派生，不存第二份状态：预约前四段看剧目字段，后三段看每集既有的 productionStage 游标。
+ * 网页步骤条、agent 的 drama_stage_status、每轮注入的阶段块都用这一份。
+ */
+function stagePayload(db: BackendDatabase, folder: { id: string; name?: string | null; outline?: string | null; productionPlan?: unknown }) {
+    const plan = dramaProductionPlanSchema.parse(folder.productionPlan || {});
+    const episodes = db.listDramaEpisodes(folder.id);
+    const stages = db.listEpisodeProductionStages(episodes.map((episode) => episode.id));
+    const input = {
+        topic: plan.topic,
+        outline: String(folder.outline || ""),
+        outlineDetail: plan.outlineDetail,
+        episodes: episodes.map((episode) => ({
+            episodeNumber: episode.episodeNumber,
+            fullPlot: episode.fullPlot,
+            synopsis: episode.synopsis,
+            stage: stages[episode.id] || null,
+        })) as DramaStageEpisode[],
+    };
+    const states = dramaStageStates(input);
+    const next = dramaNextAction(states);
+    return {
+        ok: true,
+        dramaId: folder.id,
+        name: String(folder.name || ""),
+        states,
+        next,
+        context: renderDramaStageContext({ dramaName: String(folder.name || ""), dramaId: folder.id, states }),
+        activity: freshestStageActivity([folder.id, ...episodes.flatMap((episode) => [episode.id, String(episode.canvasId || "")])]),
+        episodes: input.episodes.map((episode) => ({
+            episodeNumber: episode.episodeNumber,
+            stage: episode.stage?.current || null,
+            done: episode.stage?.done || [],
+        })),
+    };
+}
+
+export function registerDramaStageRoutes(router: Router, db: BackendDatabase) {
+    router.get<Record<string, string>>("/drama/:dramaId/stage", (req, res) => {
+        const folder = db.listCanvasFolders(String(req.params.dramaId))[0];
+        if (!folder) return void res.status(404).json({ ok: false, error: "剧目不存在" });
+        res.json(stagePayload(db, folder));
+    });
+    router.get<Record<string, string>>("/drama/by-canvas/:canvasId/stage", (req, res) => {
+        const episode = db.getDramaEpisodeByCanvasId(String(req.params.canvasId));
+        if (!episode) return void res.status(404).json({ ok: false, error: "这个画布没有绑定分集" });
+        const folder = db.listCanvasFolders(episode.dramaId)[0];
+        if (!folder) return void res.status(404).json({ ok: false, error: "剧目不存在" });
+        res.json(stagePayload(db, folder));
     });
 }

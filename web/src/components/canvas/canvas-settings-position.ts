@@ -13,7 +13,13 @@ export function canvasSettingsPosition(anchor: SettingsAnchor, viewport: { width
     const above = Math.max(0, upperEdge - margin);
     const below = Math.max(0, viewport.height - margin - lowerEdge);
     const preferTop = placement.startsWith("top");
-    const top = preferTop ? above >= 260 || above >= below : !(below >= 260 || below >= above);
+    // bottom* 表示调用方希望向下弹：只要下方还有可用高度就照做。
+    // 首页创作台的参数按钮位于视口上半部，若沿用「下方不足就翻上去」的旧规则，
+    // 面板会被顶到视口最上沿、盖住页头标题（实测面板高 536px 而上方仅 526px）。
+    // 只有下方几乎放不下、且上方明显更宽裕时才回退向上，保留画布底部按钮的行为。
+    const top = preferTop
+        ? above >= 260 || above >= below
+        : below < 120 && above > below;
     return {
         width,
         left: clamp(left, margin, viewport.width - width - margin),

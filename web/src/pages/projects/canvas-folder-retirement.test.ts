@@ -45,14 +45,18 @@ test("desktop, mobile, selection and card surfaces expose no ordinary folder act
     assert.match(source, /replaceFolders\(\[\.\.\.foldersById.values\(\)\]\)/, "legacy archive metadata remains backward-readable");
 });
 
-test("Home uses actual drama ownership while retaining pins, recents and stable canvas routes", () => {
+test("Home uses actual drama ownership for recents after the project directory was retired", () => {
     const home = readFileSync(new URL("../home/index.tsx", import.meta.url), "utf8");
     const data = readFileSync(new URL("../home/use-workbench-data.ts", import.meta.url), "utf8");
     assert.match(home, /const folderFor = \(p: CanvasProject\) => data.canvasOwners.get\(p.id\)/);
     assert.match(home, /const isDrama = \(p: CanvasProject\) => data.canvasOwners.has\(p.id\)/);
     assert.doesNotMatch(home, /p\.folderId/);
     assert.match(data, /dramaCanvasOwners\(folders, episodesByDrama\)/);
-    assert.match(home, /homePinnedProject:\$\{entry.id\}/);
+    // 「剧目和画布」列表已从主页移除：筛选/搜索/卡片/加载骨架都不再渲染。
+    // Pin 存储与清理逻辑仍留在 useWorkbenchData，供其它页面与历史设置数据兼容。
+    assert.doesNotMatch(home, /homePinnedProject:\$\{entry.id\}/);
+    assert.doesNotMatch(home, /home\.workbench\.projects/);
+    assert.doesNotMatch(home, /home-projects-loading/);
     assert.match(data, /homePinnedProject:\$\{projectId\}/);
     assert.match(home, /const latest = sorted\[0\]/);
     // handoff（对齐影策）：openProject 支持可选 nodeId，画布加载后聚焦本次生成节点。

@@ -28,15 +28,19 @@ for (const [pathname, area] of [
     });
 }
 
-test("primary navigation keeps the merged workspaces without a standalone generate entry", () => {
+test("primary navigation has no workbench tab — the logo is the home entry", () => {
+    // 首页导航项已移除：左上角 logo 即回主页入口，顶栏不再重复放一个「工作台」tab。
+    // workbench 仍是合法 area（见路由解析 / 上方 URL 用例），只是不作为可见导航项渲染。
     assert.deepEqual(
         navigationTools.map((item) => item.slug),
-        ["workbench", "projects", "freeCanvas", "resources", "workflows", "skills"],
+        ["projects", "freeCanvas", "resources", "workflows", "skills"],
     );
     assert.deepEqual(
         navigationTools.map((item) => item.href),
-        ["/", "/projects", "/projects?type=canvas", "/assets", "/workflows", "/skills"],
+        ["/projects", "/projects?type=canvas", "/assets", "/workflows", "/skills"],
     );
+    // slug 类型里仍保留 workbench（路由 area 用），但不可作为可见 tab：转成字符串再断言，避免无意义的字面量比较。
+    assert.ok(!navigationTools.some((item) => (item.slug as string) === "workbench"), "no visible workbench tab");
 });
 
 test("retired quick generate URLs classify as the home workbench and keep no secondary tab", () => {

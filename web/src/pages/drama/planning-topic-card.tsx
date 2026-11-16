@@ -3,7 +3,7 @@ import { Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { DramaTopic } from "@basketikun/canvas-agent/drama/production-contract";
 import { TOPIC_OPTIONS, artStyleOptions, toggleThemes, toggleValue } from "./planning-topic-logic";
-import { PlanningChip, PlanningChipRow, PlanningField, PlanningSection } from "./planning-ui";
+import { ChipAdder, PlanningChip, PlanningChipRow, PlanningField, PlanningSection } from "./planning-ui";
 
 /**
  * 选题卡：chip 点选，不再让用户手打字段。
@@ -35,6 +35,7 @@ export function TopicCard({ topic, onChange, onAskDirector, askDisabled }: { top
         <PlanningSection title={t("topic.genres")} hint={t("topic.genresHint")}>
             <div className="flex flex-wrap gap-1.5">
                 {TOPIC_OPTIONS.themes.map((value) => <PlanningChip key={value} group="themes" active={(topic.themes || []).includes(value)} onClick={() => set({ themes: toggleThemes(topic.themes || [], value) })}>{value}</PlanningChip>)}
+                <ChipAdder placeholder={t("newDrama.addCustomTheme")} onAdd={(value) => set({ themes: toggleThemes(topic.themes || [], value) })} />
             </div>
         </PlanningSection>
 
@@ -46,6 +47,7 @@ export function TopicCard({ topic, onChange, onAskDirector, askDisabled }: { top
         <PlanningSection title={t("topic.tone")} hint={t("topic.optionalHint")}>
             <div className="flex flex-wrap gap-1.5">
                 {TOPIC_OPTIONS.tones.map((value) => <PlanningChip key={value} group="tones" active={(topic.tones || []).includes(value)} onClick={() => set({ tones: toggleValue(topic.tones || [], value) })}>{value}</PlanningChip>)}
+                <ChipAdder placeholder={t("newDrama.addCustomTone")} onAdd={(value) => set({ tones: toggleValue(topic.tones || [], value) })} />
             </div>
         </PlanningSection>
 
@@ -64,6 +66,7 @@ export function TopicCard({ topic, onChange, onAskDirector, askDisabled }: { top
         <PlanningSection title={t("topic.artStyle")} hint={t("topic.artStyleHint")}>
             <div className="flex flex-wrap gap-1.5">
                 {artStyleOptions(topic.artStyle || "").map((value) => <PlanningChip key={value} group="artStyle" active={topic.artStyle === value} onClick={() => set({ artStyle: topic.artStyle === value ? "" : value })}>{value}</PlanningChip>)}
+                <ChipAdder placeholder={t("newDrama.addCustomStyle")} onAdd={(value) => set({ artStyle: value })} />
             </div>
         </PlanningSection>
 

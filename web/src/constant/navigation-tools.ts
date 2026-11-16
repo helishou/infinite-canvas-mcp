@@ -1,8 +1,11 @@
-import { Clapperboard, FileText, FolderOpen, House, Images, LayoutGrid, Workflow, WandSparkles } from "lucide-react";
+import { Clapperboard, FileText, FolderOpen, Images, LayoutGrid, Workflow, WandSparkles } from "lucide-react";
 
-/** Primary workspaces. Existing tool URLs remain the canonical destinations. */
+/**
+ * Primary workspaces. Existing tool URLs remain the canonical destinations.
+ * 首页（workbench）不在此渲染：左上角 logo 即回主页入口，避免与导航项重复占一栏；
+ * "workbench" 仍保留在 slug 类型里，主页时没有任何 tab 高亮，解析路由也不报错。
+ */
 export const navigationTools = [
-    { slug: "workbench", href: "/", icon: House },
     { slug: "projects", href: "/projects", icon: FolderOpen },
     { slug: "freeCanvas", href: "/projects?type=canvas", icon: LayoutGrid },
     { slug: "resources", href: "/assets", icon: Images },
@@ -10,7 +13,7 @@ export const navigationTools = [
     { slug: "skills", href: "/skills", icon: WandSparkles },
 ] as const;
 
-export type NavigationToolSlug = (typeof navigationTools)[number]["slug"];
+export type NavigationToolSlug = (typeof navigationTools)[number]["slug"] | "workbench";
 
 export const workspaceSecondaryNavigation = {
     projects: [

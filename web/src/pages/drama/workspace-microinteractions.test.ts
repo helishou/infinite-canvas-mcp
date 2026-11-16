@@ -15,7 +15,7 @@ test("all asset lists share normalized search and its clear affordance", () => {
 });
 
 test("episodes without a legacy canvas remain visibly actionable", () => {
-  const card = manage.slice(manage.indexOf("function EpisodeCard"), manage.indexOf("function formatBytes"));
+  const card = manage.slice(manage.indexOf("function EpisodeCard"));
   assert.doesNotMatch(card, /opacity-70|canOpen|onOpen/);
   assert.match(card, /min-h-48 min-w-0/);
   assert.match(card, /flex flex-wrap items-start/);

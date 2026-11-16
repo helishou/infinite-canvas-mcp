@@ -10,9 +10,9 @@ test("series navigation separates real shared canvas management from current-epi
     // 下拉里剧目规划与共享资产画布合并为一项，导航只剩两项。
     assert.deepEqual(groups[0].items.map(item => item.seriesView), ["planning", "episodes"]);
     assert.equal(groups[0].items[0].labelKey, "director.workspaceHierarchy.planningAssets");
-    // 子 Tab 栏展开共享资产画布与小说改编，规划项回到「剧目规划」。
+    // 子 Tab 栏展开共享资产画布；小说改编已并入剧目规划的「原剧本」页签。
     const subtabs = productionNavigationGroups({ hasSeries: true, scope: "episode", seriesSubviews: true });
-    assert.deepEqual(subtabs[0].items.map(item => item.seriesView), ["planning", "shared", "adapt", "episodes"]);
+    assert.deepEqual(subtabs[0].items.map(item => item.seriesView), ["planning", "shared", "episodes"]);
     assert.equal(subtabs[0].items[0].labelKey, "director.workspaceHierarchy.planning");
     assert.equal(groups[0].items.some(item => item.workspace === "assets"), false);
     assert.equal(groups[1].items.find(item => item.workspace === "assets")?.labelKey, "director.workspaceHierarchy.episodeAssets");

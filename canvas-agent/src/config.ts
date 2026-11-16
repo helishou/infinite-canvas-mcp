@@ -14,7 +14,7 @@ export const CONFIG_FILE = path.join(CONFIG_DIR, "canvas-agent.json");
 export const VERSION = readPackageVersion();
 export const AGENT_PROMPT = fs.readFileSync(new URL("../agent-instructions.md", import.meta.url), "utf8");
 const INSTRUCTIONS_DIR = fileURLToPath(new URL("../instructions/", import.meta.url));
-const INSTRUCTION_MODULES = ["director-delegation.md", "production-authoring.md", "canvas-operations.md"];
+const INSTRUCTION_MODULES = ["director-delegation.md", "drama-planning.md", "production-authoring.md", "canvas-operations.md"];
 export const AGENT_PROMPT_FULL = AGENT_PROMPT + "\n\n" + INSTRUCTION_MODULES.map(name => fs.readFileSync(path.join(INSTRUCTIONS_DIR, name), "utf8")).join("\n\n");
 const initializedWorkspaces = new Set<string>();
 

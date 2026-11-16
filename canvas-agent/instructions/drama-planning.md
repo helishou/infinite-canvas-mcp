@@ -4,6 +4,7 @@
 
 ## 真值在哪（工具）
 
+- `drama_stage_status`：读六段阶段（选题→大纲→剧本→资产→分镜→视频）的完成度、缺口、下一步动作和该读的技能文件。**每次开工先读它**，按 `next` 里的动作推进，不跨段抢做。
 - `drama_get_planning`：读选题卡 `topic`、全剧故事线 `outline`、大纲补充段 `outlineDetail`（时空背景 / 角色名单 / 三幕与节奏 / 结局和卡点）、原剧本字节数，以及三步完成度（剧本步会列出还没写的集号）。原剧本全文加 `includeSourceScript: true`。
 - `drama_update_planning`：只传要改的键，其余保持原值。写入前用刚读到的 `updatedAt` 当 `expectedUpdatedAt`，冲突会被拒绝，不要改成盲写。
 - 分集剧本大纲用 `drama_update_episode` 的 `fullPlot`；分场正文（Shot 级）走制作稿工具，两者不是一回事。
@@ -21,3 +22,8 @@
 - 一次只推进当前缺的那一步；用户没有要求就不要再往下写（选题没定不写大纲，大纲没定不写剧本）。
 - 长文本一次写成完整可用稿再写入，不要写占位符（如「待补」）或只写提纲让用户自己补。
 - 写完给出简短回执：改了哪一步、写进哪个字段、还剩哪几集没写。不要复述全文。
+
+## 调用纪律
+
+- 所有 `drama_*` 工具都要显式传 `dramaId`；或先调 `drama_set_active_project` 钉住剧目。
+- 报 `PROJECT_SELECTION_REQUIRED` 不是断线，是没选剧目：补 `dramaId` 重试，不要改成猜内容。

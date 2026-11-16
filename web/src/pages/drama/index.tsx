@@ -1,19 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Input, Modal, Radio, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Plus, Search, Trash2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 
-import { applyBackendCanvasOperations, ensureSharedAssetCanvas, startCanvasGeneration, upsertBackendCanvasFolder, type DramaEpisode } from "@/services/backend-api";
+import { applyBackendCanvasOperations, createBackendDramaEpisode, ensureSharedAssetCanvas, startCanvasGeneration, upsertBackendCanvasFolder, type DramaEpisode } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
 import { ModelPicker } from "@/components/model-picker";
 import { PageSectionHeader } from "@/components/layout/page-header";
 import { useConfigStore } from "@/stores/use-config-store";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
+import { splitSourceIntoEpisodes, chaptersFromAnalysis, NOVEL_MAX_CHARS, NOVEL_MIN_CHARS } from "@/lib/drama/adapt";
+import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
+import { analyzeNovelChapters } from "@basketikun/canvas-agent/drama/novel-chapters";
 import { cn } from "@/lib/utils";
 
+import { NewDramaFooter, NewDramaWizard, NEW_DRAMA_STEPS, newDramaStepValid } from "./new-drama-wizard";
+import { clearNewDramaDraft, newDramaDraftHasContent, readNewDramaDraft, writeNewDramaDraft } from "./new-drama-draft";
+import { planningPrompt, stashPlanningHandoff } from "./planning-director-launch";
+import { TOPIC_DEFAULTS } from "./planning-topic-logic";
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
@@ -45,19 +52,68 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
     const [styleImageFile, setStyleImageFile] = useState<File>();
     const [stylePrompt, setStylePrompt] = useState("");
     const [creatingDrama, setCreatingDrama] = useState(false);
+    const [wizardStep, setWizardStep] = useState(0);
+    const [restoredDraft, setRestoredDraft] = useState("");
+    const [autoEpisodes, setAutoEpisodes] = useState(true);
+    const [handoff, setHandoff] = useState(true);
     const creationRef = useRef<{ folderId: string; image?: UploadedImage; imageNodeId: string; operationId: string; taskKey: string; mode: "upload" | "prompt" | "none"; prompt: string; plan: DramaProductionPlan } | undefined>(undefined);
-    const openCreateDrama = () => {
-        setNewDramaName(t("drama.defaultProjectName"));
-        setNewDramaPlan(dramaProductionPlanSchema.parse({}));
-        setStyleMode("upload");
-        setStyleImageFile(undefined);
-        setStylePrompt("");
+    const openCreateDrama = async () => {
+        const blank = dramaProductionPlanSchema.parse({});
+        const restored = await readNewDramaDraft().catch(() => null);
+        if (restored && newDramaDraftHasContent(restored)) {
+            // 上次没填完的草稿整份回填；上传的参考图留不住，回来要重选。
+            setNewDramaName(restored.name);
+            setNewDramaPlan(restored.plan);
+            setStyleMode(restored.styleMode);
+            setStyleImageFile(undefined);
+            setStylePrompt(restored.stylePrompt);
+            setWizardStep(Math.min(Math.max(0, restored.step), NEW_DRAMA_STEPS.length - 1));
+            setAutoEpisodes(restored.autoEpisodes);
+            setHandoff(restored.handoff);
+            setRestoredDraft(restored.savedAt);
+        } else {
+            setNewDramaName(t("drama.defaultProjectName"));
+            // 默认值与导演大师一致：女性 / 全龄 / 甜虐 / HE / 60 集 / 中文 / 时长交给模型。
+            setNewDramaPlan({ ...blank, topic: { ...blank.topic, ...TOPIC_DEFAULTS, tones: [...TOPIC_DEFAULTS.tones] } });
+            setStyleMode("none");
+            setStyleImageFile(undefined);
+            setStylePrompt("");
+            setWizardStep(0);
+            setAutoEpisodes(true);
+            setHandoff(true);
+            setRestoredDraft("");
+        }
         creationRef.current = undefined;
         setCreateOpen(true);
+    };
+    /** 关弹窗时留一份草稿：原文与设置都在里面，下次打开接着填（空表单不留）。 */
+    const closeCreateDrama = () => {
+        if (creatingDrama) return;
+        const draft = { name: newDramaName, plan: newDramaPlan, styleMode, stylePrompt, autoEpisodes, handoff, step: wizardStep };
+        if (newDramaDraftHasContent(draft)) void writeNewDramaDraft(draft);
+        else void clearNewDramaDraft();
+        setCreateOpen(false);
+    };
+    const discardDraft = () => {
+        void clearNewDramaDraft();
+        const blank = dramaProductionPlanSchema.parse({});
+        setRestoredDraft("");
+        setNewDramaName(t("drama.defaultProjectName"));
+        setNewDramaPlan({ ...blank, topic: { ...blank.topic, ...TOPIC_DEFAULTS, tones: [...TOPIC_DEFAULTS.tones] } });
+        setStyleMode("none");
+        setStyleImageFile(undefined);
+        setStylePrompt("");
+        setWizardStep(0);
     };
     const createDrama = async () => {
         const name = newDramaName.trim();
         if (!name || creatingDrama || styleMode === "upload" && !styleImageFile || styleMode === "prompt" && !stylePrompt.trim()) return;
+        // 单集原文超上限时先减章：超限的集写不进一次提示词，建出来也做不下去。
+        if (splitBlocked) {
+            message.error(t("newDrama.split.oversize", { label: splitBlocked.label, chars: splitBlocked.chars, limit: EPISODE_SOURCE_CHARS }));
+            setWizardStep(1);
+            return;
+        }
         setCreatingDrama(true);
         try {
             let creation = creationRef.current;
@@ -87,13 +143,53 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                     await startCanvasGeneration({ mode: "image", projectId: String(project.id), nodeId: creation.imageNodeId, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, prompt: creation.prompt, count: 1, clientTaskId: creation.taskKey, idempotencyKey: creation.taskKey });
                 }
             }
+            const episodeCount = autoEpisodes ? Number(creation.plan.topic?.episodes || 0) : 0;
+            // 原文拆集不在建剧时做：原文与分集口径只进规划契约，建集统一在
+            // 「剧目规划 · 原剧本」点「批量建集」，用的是同一份拆章结果，不做第二套。
+            const split = splitSourceIntoEpisodes(creation.plan.sourceScript || "", creation.plan.sourceSplit);
+            if (!split.groups.length) {
+                for (let number = 1; number <= episodeCount; number += 1) {
+                    try {
+                        await createBackendDramaEpisode(creation.folderId, { episodeNumber: number });
+                    } catch (error) {
+                        message.warning(`${t("newDrama.episodeFailed", { number })}：${error instanceof Error ? error.message : String(error)}`);
+                        break;
+                    }
+                }
+            }
+            void clearNewDramaDraft();
+            if (handoff) {
+                stashPlanningHandoff(creation.folderId, planningPrompt("outline", {
+                    dramaId: creation.folderId,
+                    name: creation.plan.topic?.logline ? `${name}` : name,
+                    pendingEpisodes: Array.from({ length: episodeCount }, (_, index) => index + 1),
+                }));
+            }
             setCreateOpen(false);
             creationRef.current = undefined;
-            navigate(dramaProjectDestination(creation.folderId, query.toString()));
+            // 有原文时落到「原剧本」页签：分集列表与批量建集就在那里，省掉找入口。
+            const destination = split.groups.length
+                ? `${dramaProjectDestination(creation.folderId, query.toString())}&workspace=series&seriesView=planning&seriesTab=source`
+                : handoff
+                    ? `${dramaProjectDestination(creation.folderId, query.toString())}&workspace=series&seriesView=planning`
+                    : dramaProjectDestination(creation.folderId, query.toString());
+            navigate(destination);
         } catch (error) {
             message.error(error instanceof Error ? error.message : String(error));
         } finally { setCreatingDrama(false); }
     };
+
+    // 建集与界面用同一份拆章结果：原文只在文本变化时切一次，勾选与每集章数是廉价派生。
+    const sourceAnalysis = useMemo(() => {
+        const source = newDramaPlan.sourceScript || "";
+        if (!source.trim()) return null;
+        return analyzeNovelChapters(source, { maxChars: newDramaPlan.sourceSplit?.maxChars || NOVEL_MAX_CHARS, minChars: NOVEL_MIN_CHARS });
+    }, [newDramaPlan.sourceScript, newDramaPlan.sourceSplit?.maxChars]);
+    const splitPreview = useMemo(
+        () => chaptersFromAnalysis(sourceAnalysis, { excluded: newDramaPlan.sourceSplit?.excluded, perEpisode: newDramaPlan.sourceSplit?.perEpisode }),
+        [sourceAnalysis, newDramaPlan.sourceSplit],
+    );
+    const splitBlocked = splitPreview.groups.find(group => group.oversized);
 
     const updateAssetImageModel = (kind: keyof DramaProductionPlan["imageModelsByKind"], model: string) => setNewDramaPlan(current => ({
         ...current,
@@ -134,31 +230,49 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                 )}
             </section>
             <Modal
-                width={680}
+                width={760}
                 open={createOpen}
                 title={t("drama.createProject")}
-                okText={t("drama.createProject")}
-                cancelText={t("common.cancel")}
-                okButtonProps={{ disabled: !newDramaName.trim() || styleMode === "upload" && !styleImageFile || styleMode === "prompt" && !stylePrompt.trim() }}
-                confirmLoading={creatingDrama}
-                onOk={createDrama}
-                onCancel={() => { if (!creatingDrama) setCreateOpen(false); }}
+                footer={null}
+                maskClosable={false}
+                onCancel={closeCreateDrama}
             >
-                <div className="grid gap-5">
-                    <Input autoFocus aria-label={t("drama.createProjectPrompt")} placeholder={t("drama.createProjectPrompt")} value={newDramaName} onChange={event => setNewDramaName(event.target.value)} />
-                    <section className="grid gap-3">
-                        <div><h3 className="text-sm font-medium">{t("drama.createAssetImageModels")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("drama.createAssetImageModelsHint")}</p></div>
-                        <label className="grid gap-1.5 text-sm"><span>{t("productionCanvas.generalImageModel")}</span><ModelPicker config={modelConfig} capability="image" fullWidth value={newDramaPlan.imageModel || undefined} onChange={imageModel => setNewDramaPlan(current => ({ ...current, imageModel }))} /><Button type="link" className="justify-self-start px-0" size="small" disabled={!newDramaPlan.imageModel} onClick={() => setNewDramaPlan(current => ({ ...current, imageModel: "" }))}>{t("productionCanvas.inheritImageModel")}</Button></label>
-                        <div className="grid gap-3 sm:grid-cols-2">
-                            {(["character", "scene", "prop", "style", "keyframe"] as const).map(kind => <label key={kind} className="grid gap-1.5 text-sm"><span>{t(`productionCanvas.assetModel.${kind}`)}</span><ModelPicker config={modelConfig} capability="image" fullWidth placeholder={t("productionCanvas.inheritImageModel")} value={newDramaPlan.imageModelsByKind[kind]} onChange={model => updateAssetImageModel(kind, model)} /><Button type="link" className="justify-self-start px-0" size="small" disabled={!newDramaPlan.imageModelsByKind[kind]} onClick={() => updateAssetImageModel(kind, "")}>{t("productionCanvas.inheritImageModel")}</Button></label>)}
-                        </div>
-                    </section>
-                    <section className="grid gap-3">
-                        <div><h3 className="text-sm font-medium">{t("drama.createStyleReference")}</h3><p className="mt-1 text-xs text-muted-foreground">{t("drama.createStyleReferenceHint")}</p></div>
-                        <Radio.Group value={styleMode} onChange={event => setStyleMode(event.target.value as "upload" | "prompt" | "none")} options={[{ value: "upload", label: t("drama.uploadStyleReference") }, { value: "prompt", label: t("drama.generateStyleReference") }, { value: "none", label: t("drama.skipStyleReference") }]} />
-                        {styleMode === "upload" && <div className="flex flex-wrap items-center gap-3"><input type="file" accept="image/*" aria-label={t("drama.uploadStyleReference")} onChange={event => setStyleImageFile(event.target.files?.[0])} />{styleImageFile && <span className="text-xs text-muted-foreground">{styleImageFile.name}</span>}</div>}
-                        {styleMode === "prompt" && <Input.TextArea rows={3} value={stylePrompt} onChange={event => setStylePrompt(event.target.value)} placeholder={t("drama.styleReferencePrompt")} />}
-                    </section>
+                <div className="mb-4 flex flex-wrap items-center gap-2" data-new-drama-steps>
+                    {NEW_DRAMA_STEPS.map((key, index) => <span key={key} data-new-drama-step-tab={key} data-state={index === wizardStep ? "current" : index < wizardStep ? "done" : "todo"}
+                        className={index === wizardStep ? "rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground" : index < wizardStep ? "rounded-full border border-primary/40 px-2.5 py-1 text-[11px] text-primary" : "rounded-full border border-border px-2.5 py-1 text-[11px] text-muted-foreground"}>
+                        {index + 1} · {t(`newDrama.step.${key}`)}
+                    </span>)}
+                    {restoredDraft ? (
+                        <span className="flex items-center gap-2 text-[11px] text-muted-foreground" data-new-drama-draft>
+                            <span>{t("newDrama.draftRestored")}</span>
+                            <button type="button" className="underline hover:text-foreground" onClick={discardDraft}>{t("newDrama.draftDiscard")}</button>
+                        </span>
+                    ) : null}
+                </div>
+                <div className="min-h-[320px]">
+                <NewDramaWizard
+                    step={wizardStep}
+                    name={newDramaName} onName={setNewDramaName}
+                    plan={newDramaPlan} onPlan={(patch) => setNewDramaPlan((current) => typeof patch === "function" ? patch(current) : { ...current, ...patch })}
+                    styleMode={styleMode} onStyleMode={setStyleMode}
+                    styleImageFile={styleImageFile} onStyleImageFile={setStyleImageFile}
+                    stylePrompt={stylePrompt} onStylePrompt={setStylePrompt}
+                    autoEpisodes={autoEpisodes} onAutoEpisodes={setAutoEpisodes}
+                    handoff={handoff} onHandoff={setHandoff}
+                    config={modelConfig}
+                />
+                </div>
+                <div className="mt-5 border-t border-border pt-4">
+                    <NewDramaFooter
+                        step={wizardStep}
+                        busy={creatingDrama}
+                        valid={newDramaStepValid(wizardStep, { name: newDramaName, plan: newDramaPlan, styleMode, styleImageFile, stylePrompt }) && !splitBlocked}
+                        blockedHint={wizardStep === 0 ? t("newDrama.needName") : wizardStep === 1 ? t("newDrama.needStyle") : splitBlocked ? t("newDrama.split.oversize", { label: splitBlocked.label, chars: splitBlocked.chars, limit: EPISODE_SOURCE_CHARS }) : undefined}
+                        onPrev={() => setWizardStep((current) => Math.max(0, current - 1))}
+                        onNext={() => setWizardStep((current) => Math.min(NEW_DRAMA_STEPS.length - 1, current + 1))}
+                        onCreate={createDrama}
+                        onCancel={closeCreateDrama}
+                    />
                 </div>
             </Modal>
         </section>

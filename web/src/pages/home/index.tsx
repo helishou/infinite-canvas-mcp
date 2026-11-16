@@ -1,23 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, App, Button, Drawer, Empty, Input, Modal, Popconfirm, Progress, Segmented, Skeleton, Tag, Tooltip } from "antd";
-import { ArrowRight, Bookmark, BookmarkCheck, Clapperboard, ImagePlus, LayoutGrid, List, ListChecks, Pencil, Plus, RefreshCw, Search, Trash2, Workflow, Sparkles, Eye } from "lucide-react";
+import { Alert, App, Button, Drawer, Empty, Input, Modal, Popconfirm, Progress, Skeleton, Tag } from "antd";
+import { ArrowRight, Clapperboard, ImagePlus, LayoutGrid, Pencil, RefreshCw, Trash2, Workflow, Sparkles } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { fetchProductionCanvasContext, BackendApiError } from "@/services/backend-api";
-import { useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
-import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
+import { nanoid } from "nanoid";
+import { fetchProductionCanvasContext, BackendApiError, createBackendGenerationLog } from "@/services/backend-api";
+import { flushCanvasProjectBeforeGeneration, useCanvasStore, type CanvasProject } from "@/stores/canvas/use-canvas-store";
+import { creativeProjectTitle } from "@/lib/creative-pad";
+import { subscribeCreativeLaunches } from "@/lib/creative-conversation-bus";
+import type { CanvasConnection, CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
-import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
-import { PageHeader } from "@/components/layout/page-header";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { cn } from "@/lib/utils";
 import { CreativeLaunchPad } from "./creative-launch-pad";
 import { CreativeGenerationFeed } from "./creative-generation-feed";
+import { CreativeRecentCanvases } from "./creative-recent-canvases";
 import {
     appendConversationLaunch,
     collectOutputs,
+    launchTextResults,
+    resolveLaunchOutputs,
     CREATIVE_CONVERSATION_STORAGE_KEY,
     nextConversationId,
     pruneConversations,
@@ -32,8 +36,7 @@ import {
 import { WorkbenchMediaPreview } from "./workbench-media";
 import { useProjectCoverResults, useStableProjectCovers, useWorkbenchData } from "./use-workbench-data";
 
-type ProjectFilter = "all" | "canvas" | "drama" | "pinned";
-const surface = "rounded-[10px] border border-border bg-card";
+const surface = "ch-surface";
 
 export default function IndexPage() {
     return <WorkbenchCanvas><HomeWorkbench /></WorkbenchCanvas>;
@@ -48,19 +51,9 @@ function HomeWorkbench() {
     const folders = useCanvasStore((s) => s.folders);
     const hydrated = useCanvasStore((s) => s.hydrated);
     const createProject = useCanvasStore((s) => s.createProject);
-    const setDeleteProjectIds = useCanvasUiStore((s) => s.setDeleteProjectIds);
     const data = useWorkbenchData();
-    const [query, setQuery] = useState("");
-    const [filter, setFilter] = useState<ProjectFilter>("all");
-    const [view, setView] = useState<"grid" | "list">(() => {
-        try {
-            return localStorage.getItem("home-project-view") === "list" ? "list" : "grid";
-        } catch {
-            return "grid";
-        }
-    });
-    const [visibleCount, setVisibleCount] = useState(12);
-    const [previewProject, setPreviewProject] = useState<CanvasProject | null>(null);
+    // 「剧目和画布」项目列表已下线：筛选/搜索/网格/预览等状态随模块一并移除，
+    // 项目入口统一收敛到页头的「剧目」「画布」和下方最近画布卡片。
     const [previewOutput, setPreviewOutput] = useState<WorkbenchOutput | null>(null);
     const homeStorage = typeof localStorage !== "undefined" ? localStorage : undefined;
     // 对齐影策：多会话 + 活动会话 + 对话形态开关，全部持久化；空会话不入库。
@@ -77,7 +70,7 @@ function HomeWorkbench() {
     const [renamingConversation, setRenamingConversation] = useState<CreativeConversation | null>(null);
     const [renameText, setRenameText] = useState("");
     // 编辑并重发（影策）：nonce 变化即回填追问输入条。
-    const [editRequest, setEditRequest] = useState<{ text: string; nonce: number }>({ text: "", nonce: 0 });
+    const [editRequest, setEditRequest] = useState<{ text: string; nonce: number; submit?: boolean; mode?: CreativeLaunch["mode"]; params?: CreativeLaunch["params"] }>({ text: "", nonce: 0 });
     const persistConversations = (next: CreativeConversation[]) => {
         const pruned = pruneConversations(next, Date.now());
         setConversations(pruned);
@@ -96,10 +89,24 @@ function HomeWorkbench() {
     const otherConversationCount = Math.max(0, conversations.length - (activeConversation ? 1 : 0));
     const [tasksOpen, setTasksOpen] = useState(false);
     const [outputsOpen, setOutputsOpen] = useState(false);
-    const [creating, setCreating] = useState(false);
-    const [name, setName] = useState("");
+    const [creatingCanvas, setCreatingCanvas] = useState(false);
     const openDestinationRequest = useRef(0);
-    const outputs = useMemo(() => collectOutputs(data.logs), [data.logs]);
+    // 「最近生成」取独立的一段媒体日志（见 use-workbench-data），避免被最近的纯文本对话挤空；
+    // 对话阶段还没落画布的成果从任务详情补进来，点「新建画布」写日志后会自动去重。
+    const outputs = useMemo(() => {
+        const archived = collectOutputs(data.mediaLogs);
+        const seen = new Set(archived.map(output => output.storageKey || output.url || ""));
+        const conversationOutputs = activeLaunches.flatMap(launch => {
+            const task = data.tasks.find(item => item.id === launch.taskId);
+            return resolveLaunchOutputs(task, [], launch);
+        }).filter(output => {
+            const key = output.storageKey || output.url || "";
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        return [...conversationOutputs, ...archived].sort((a, b) => Date.parse(b.log.createdAt) - Date.parse(a.log.createdAt));
+    }, [data.mediaLogs, data.tasks, activeLaunches]);
     const folderFor = (p: CanvasProject) => data.canvasOwners.get(p.id);
     const isDrama = (p: CanvasProject) => data.canvasOwners.has(p.id);
     const dramaDestination = (p: CanvasProject) => {
@@ -107,19 +114,9 @@ function HomeWorkbench() {
         return episode ? dramaWorkbenchPath(episode.dramaId, episode.episodeId) : `/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`;
     };
     const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-    const ordinaryProjects = sorted.filter((p) => !isDrama(p));
-    const entries = [
-        ...ordinaryProjects.map((project) => ({ kind: "canvas" as const, id: project.id, title: project.title, updatedAt: project.updatedAt, project })),
-        ...folders.filter((folder) => folder.isDrama).map((folder) => ({ kind: "drama" as const, id: folder.id, title: folder.name, updatedAt: folder.updatedAt || folder.createdAt, folder })),
-    ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-    const filtered = entries.filter((entry) => entry.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) && (filter === "all" || (filter === "pinned" ? entry.kind === "canvas" && data.settings[`homePinnedProject:${entry.id}`] : entry.kind === filter)));
     const latest = sorted[0];
     const projectIds = new Set(projects.map((p) => p.id));
     const date = (value: string) => (Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString(i18n.resolvedLanguage, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
-    const stats = (project: CanvasProject) => t("canvas.project.stats", {
-        nodes: project.summary?.nodeCount ?? project.nodes.length,
-        connections: project.summary?.connectionCount ?? project.connections.length,
-    });
     const openDestination = async (destination: string) => {
         const requestId = ++openDestinationRequest.current;
         const target = canvasHostLocation(destination, "");
@@ -156,6 +153,9 @@ function HomeWorkbench() {
     };
     const openProject = (id: string, nodeId?: string) => openDestination(`/canvas/${encodeURIComponent(id)}${nodeId ? `?nodeId=${encodeURIComponent(nodeId)}` : ""}`);
     const totalLaunchCount = conversations.reduce((count, item) => count + item.launches.length, 0);
+    // Agent 面板的站点工具也走无画布生成：把任务登记到当前创作会话，避免「每轮对话自动建一张画布」。
+    const recordLaunchRef = useRef<(launch: CreativeLaunch) => void>(() => {});
+    useEffect(() => subscribeCreativeLaunches(launch => recordLaunchRef.current(launch)), []);
     const recordLaunch = (launch: CreativeLaunch) => {
         const targetId = activeConversation?.id || nextConversationId();
         if (!activeConversation) {
@@ -171,6 +171,22 @@ function HomeWorkbench() {
         // （轮询在每次 load 完成后才会排下一轮；若页面空闲，只有主动 refresh 才能让它接管）。
         data.refresh();
         window.requestAnimationFrame(() => document.getElementById("creative-generation-feed")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    };
+    recordLaunchRef.current = recordLaunch;
+    // 影策「生成同款」：按该条消息的模式与参数再提交一次；nonce 驱动 composer 回填并直接生成。
+    const regenerateLaunch = (launch: CreativeLaunch) => {
+        setEditRequest(current => ({ text: launch.prompt, nonce: current.nonce + 1, submit: true, mode: launch.mode, params: launch.params }));
+        setThreadActivePersisted(true);
+    };
+    // 最近画布首卡：与创作台「新建空白画布」一致，建完直接进入。
+    const createBlankCanvas = () => {
+        if (!hydrated) return;
+        try {
+            const id = createProject(t("canvas.defaultTitle", { count: projects.length + 1 }));
+            openProject(id);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        }
     };
     const dismissLaunch = (taskId: string) => {
         const next = conversations
@@ -188,7 +204,8 @@ function HomeWorkbench() {
             homeStorage?.setItem(CREATIVE_CONVERSATION_STORAGE_KEY, JSON.stringify(pruneConversations([conversation, ...conversations], Date.now())));
         } catch { /* 可选持久化 */ }
         setThreadActivePersisted(true);
-        window.requestAnimationFrame(() => document.getElementById("creative-generation-feed")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        // 空会话回到创作台（此处不渲染对话工作台），滚回顶部让用户直接看到输入框。
+        window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: "smooth" }));
     };
     const selectConversation = (id: string) => {
         setActiveConversationId(id);
@@ -206,6 +223,130 @@ function HomeWorkbench() {
         const title = renameText.trim();
         if (title) persistConversations(conversations.map(item => item.id === renamingConversation.id ? { ...item, title } : item));
         setRenamingConversation(null);
+    };
+    // 对话阶段零画布：只有用户点「新建画布」才把已完成的成果落成一张真实画布。
+    const canCreateCanvas = activeLaunches.some(launch => {
+        const task = data.tasks.find(item => item.id === launch.taskId);
+        return task?.status === "succeeded" || data.logs.some(log => log.runtimeTaskId === launch.taskId && log.status === "success");
+    }) || Boolean(activeConversation?.canvasId);
+    const createCanvasFromConversation = async () => {
+        if (!hydrated || !activeConversation || creatingCanvas) return;
+        // 会话已经建过画布时直接回到那张画布，不重复创建。
+        if (activeConversation.canvasId && projects.some(project => project.id === activeConversation.canvasId)) {
+            await continueEditing(activeConversation.canvasId);
+            return;
+        }
+        const results = activeLaunches.flatMap(launch => {
+            const task = data.tasks.find(item => item.id === launch.taskId);
+            if (!task || task.status !== "succeeded") return [];
+            const media = (task.result?.media || []).map(item => ({
+                url: item.url,
+                storageKey: item.storageKey,
+                mimeType: item.mimeType,
+                width: item.width,
+                height: item.height,
+                bytes: item.bytes,
+            }));
+            const texts = launch.mode === "text" ? launchTextResults(task, []) : [];
+            return media.length || texts.length ? [{ launch, media, texts }] : [];
+        });
+        if (!results.length) {
+            message.info(t("home.workbench.threadCanvasPending"));
+            return;
+        }
+        setCreatingCanvas(true);
+        try {
+            const id = createProject(creativeProjectTitle(activeConversation.title || results[0].launch.prompt));
+            const nodes: CanvasNodeData[] = [];
+            const connections: CanvasConnection[] = [];
+            const logEntries: Array<{ nodeId: string; launch: CreativeLaunch; outputs: Array<Record<string, unknown>> }> = [];
+            results.forEach(({ launch, media, texts }, row) => {
+                const configId = nanoid();
+                const y = 40 + row * 380;
+                const configMetadata = {
+                    smart: true,
+                    generationMode: launch.mode,
+                    prompt: launch.prompt,
+                    composerContent: launch.prompt,
+                    model: launch.model,
+                    status: "success",
+                    generationType: "generation",
+                    generationEngine: "backend",
+                } as CanvasNodeMetadata;
+                nodes.push({ id: configId, type: "config", title: creativeProjectTitle(launch.prompt, 18), position: { x: 40, y }, width: 380, height: 300, metadata: configMetadata });
+                media.forEach((item, index) => {
+                    const nodeId = nanoid();
+                    const mimeType = String(item.mimeType || "");
+                    const kind = mimeType.startsWith("video/") || /\.(mp4|webm|mov|m4v)$/i.test(item.url || "") ? "video"
+                        : mimeType.startsWith("audio/") || /\.(mp3|wav|m4a|ogg|flac)$/i.test(item.url || "") ? "audio" : "image";
+                    const metadata = {
+                        content: item.url,
+                        storageKey: item.storageKey,
+                        status: "success",
+                        mimeType,
+                        prompt: launch.prompt,
+                        model: launch.model,
+                        generationEngine: "backend",
+                        ...(item.width ? { naturalWidth: item.width } : {}),
+                        ...(item.height ? { naturalHeight: item.height } : {}),
+                        ...(item.bytes ? { bytes: item.bytes } : {}),
+                    } as CanvasNodeMetadata;
+                    nodes.push({ id: nodeId, type: kind, title: creativeProjectTitle(launch.prompt, 18), position: { x: 480 + index * 380, y }, width: 340, height: kind === "audio" ? 140 : 190, metadata });
+                    connections.push({ id: nanoid(), fromNodeId: configId, toNodeId: nodeId });
+                });
+                texts.forEach((text, index) => {
+                    const nodeId = nanoid();
+                    nodes.push({
+                        id: nodeId, type: "text", title: creativeProjectTitle(launch.prompt, 18),
+                        position: { x: 480 + index * 380, y }, width: 340, height: 220,
+                        metadata: { content: text, status: "success", prompt: launch.prompt, model: launch.model, generationEngine: "backend" } as CanvasNodeMetadata,
+                    });
+                    connections.push({ id: nanoid(), fromNodeId: configId, toNodeId: nodeId });
+                });
+                if (media.length) logEntries.push({ nodeId: configId, launch, outputs: media.map(item => ({ url: item.url, storageKey: item.storageKey, mimeType: item.mimeType })) });
+            });
+            useCanvasStore.getState().updateProject(id, { nodes, connections });
+            // 后台同步是 best-effort：节点已经落在本地 store，即使同步慢或后端暂时不可达，
+            // 也不该把用户卡在对话里；恢复连接后自动同步会补上。
+            try {
+                await Promise.race([
+                    flushCanvasProjectBeforeGeneration(id),
+                    new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("画布同步超时，已保留本地草稿")), 1800)),
+                ]);
+            } catch (error) {
+                console.warn("新建画布同步未完成，节点仍保留在本地草稿中", error);
+            }
+            // 补一条生成日志：让「最近生成」与画布封面立刻能看到这批刚落地的成果。
+            await Promise.allSettled(logEntries.map(entry => createBackendGenerationLog({
+                projectId: id,
+                nodeId: entry.nodeId,
+                status: "success",
+                platform: `${entry.launch.mode}-canvas`,
+                model: entry.launch.model,
+                prompt: entry.launch.prompt,
+                runtimeTaskId: entry.launch.taskId,
+                startedAt: entry.launch.createdAt,
+                finishedAt: entry.launch.createdAt,
+                durationMs: 0,
+                outputs: entry.outputs,
+                references: [],
+                inputCounts: {},
+                params: {},
+            })));
+            const stamped = new Set(results.map(item => item.launch.taskId));
+            persistConversations(conversations.map(conversation => conversation.id !== activeConversation.id ? conversation : {
+                ...conversation,
+                canvasId: id,
+                launches: conversation.launches.map(launch => stamped.has(launch.taskId) ? { ...launch, projectId: id } : launch),
+            }));
+            data.refresh();
+            message.success(t("home.workbench.threadCanvasCreated"));
+            await continueEditing(id);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+        } finally {
+            setCreatingCanvas(false);
+        }
     };
     // 影策 handoff：进画布时带上生成节点，画布加载后自动聚焦到本次成果。
     const continueEditing = async (projectId: string, nodeId?: string) => {
@@ -228,25 +369,18 @@ function HomeWorkbench() {
         }
         if (requestId === openDestinationRequest.current) openProject(projectId, nodeId);
     };
-    const visibleProjects = (data.dramaReady ? filtered.slice(0, visibleCount) : []).flatMap((entry) => entry.kind === "canvas" ? [entry.project] : []);
-    const coverProjects = latest && !visibleProjects.some((p) => p.id === latest.id) ? [latest, ...visibleProjects] : visibleProjects;
+    // 仍为「最近画布」与「继续编辑」卡提供真实封面，但不再依赖已下线的筛选/分页状态。
+    const coverProjects = sorted.slice(0, 4);
     const extraCover = useProjectCoverResults(coverProjects.filter((p) => !projectCover(p, outputs, folderFor(p))).map((p) => [p.id, p.updatedAt]));
     const coverKey = (p: CanvasProject) => JSON.stringify([data.backendUrl, p.id, p.updatedAt]);
     const stableCovers = useStableProjectCovers(coverProjects.map((p) => ({ key: coverKey(p), media: projectCover(p, outputs, folderFor(p)) || extraCover(p.id, p.updatedAt) })));
     const cover = (p: CanvasProject) => stableCovers[coverKey(p)] || null;
-    const hasWork = Boolean(latest || entries.length);
+    const hasWork = Boolean(latest || folders.some((folder) => folder.isDrama));
     const latestCover = latest ? cover(latest) : null;
     const outputTitle = (o: WorkbenchOutput) => projects.find((p) => p.id === o.log.projectId)?.title || o.log.model || t("home.workbench.result");
-    const pin = (id: string) => void data.togglePin(id).catch((error) => message.error(error instanceof Error ? error.message : t("home.workbench.saveFailed")));
-    const create = () => {
-        if (!hydrated || !data.connected || !name.trim()) return;
-        const id = createProject(name.trim());
-        setCreating(false);
-        openProject(id);
-    };
     const outputCard = (o: WorkbenchOutput) => (
-        <button key={o.id} type="button" className="group min-w-0 cursor-pointer text-left" onClick={() => setPreviewOutput(o)} aria-label={t("home.workbench.previewNamed", { name: outputTitle(o) })}>
-            <div className="h-28 overflow-hidden rounded-lg border border-border bg-muted transition-colors group-hover:border-foreground/40">
+        <button key={o.id} type="button" className="ch-output-card group min-w-0 cursor-pointer text-left" onClick={() => setPreviewOutput(o)} aria-label={t("home.workbench.previewNamed", { name: outputTitle(o) })}>
+            <div className="ch-output-cover">
                 <WorkbenchMediaPreview media={o} label={t(`home.workbench.${o.kind}`)} />
             </div>
             <p className="ui-group-title mt-2 truncate">{outputTitle(o)}</p>
@@ -277,27 +411,6 @@ function HomeWorkbench() {
         </section>
     );
 
-    const pageActions = (
-        <>
-            {hasWork ? creationActions : null}
-            <Button icon={<ListChecks className="size-4" />} onClick={() => setTasksOpen(true)}>
-                {t("home.workbench.tasks")}
-            </Button>
-            <Button
-                type="primary"
-                disabled={!hydrated || !data.connected}
-                icon={<Plus className="size-4" />}
-                onClick={() => {
-                    setName(t("canvas.defaultTitle", { count: projects.length + 1 }));
-                    setCreating(true);
-                }}
-            >
-                {t("canvas.create")}
-            </Button>
-        </>
-    );
-
-    const flatLaunches = useMemo(() => conversations.flatMap(item => item.launches).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)), [conversations]);
     // 对齐影策：对话形态是全屏页（fixed 覆盖层），有活动会话且已有消息时接管整个视口；
     // 「返回」或「新对话」（空会话）退出覆盖层，回到创作台。
     const threadOverlayOpen = threadActive && Boolean(activeConversation) && activeLaunches.length > 0;
@@ -319,64 +432,50 @@ function HomeWorkbench() {
                             threadActive
                             composer={<CreativeLaunchPad variant="thread" onGenerated={recordLaunch} sharedProjectId={activeConversation?.canvasId} injectedDraft={editRequest} />}
                             onDismiss={dismissLaunch}
-                            onOpenProject={openProject}
+                            onOpenProject={(id) => { if (id) openProject(id); else void createCanvasFromConversation(); }}
                             onPreview={setPreviewOutput}
                             onNewThread={startNewConversation}
                             onOpenHistory={() => setHistoryOpen(true)}
                             hasOtherConversations={otherConversationCount > 0}
                             onEditPrompt={(text) => setEditRequest(current => ({ text, nonce: current.nonce + 1 }))}
-                            onContinueCanvas={(projectId, nodeId) => void continueEditing(projectId, nodeId)}
+                            onCreateCanvas={() => void createCanvasFromConversation()}
+                            canCreateCanvas={canCreateCanvas || creatingCanvas}
                             onBack={() => setThreadActivePersisted(false)}
+                            onRegenerate={regenerateLaunch}
                         />
                     </div>
                 </div>
             )}
             <div className="mx-auto max-w-[1440px] px-4 pt-6 pb-24 sm:px-6 lg:px-8">
-                <PageHeader
-                    className="mb-5"
-                    width="gallery"
-                    title={t(hasWork ? "home.workbench.title" : "productionCanvas.entryTitle")}
-                    description={!hasWork ? t("landing.canvasSubtitle") : undefined}
-                    actions={pageActions}
-                />
+                {/* 页头整块已下线（对齐影策的极简首页）：剧目/画布/任务入口在全局顶栏与导航中已有，
+                    新建画布走创作台快捷卡「新建空白画布」；页面直接从创作台开始，不再有红框标题条。 */}
                 {/* 影策 isEmpty 分支：非对话形态或活动会话还没有消息时，显示完整创作台（含示例与快捷入口）。 */}
                 {(!threadActive || !activeConversation || activeLaunches.length === 0) && (
-                    <CreativeLaunchPad
-                        onGenerated={recordLaunch}
-                        historyCount={totalLaunchCount}
-                        sharedProjectId={activeConversation?.canvasId}
-                        onOpenHistory={() => {
-                            setThreadActivePersisted(true);
-                            setHistoryOpen(true);
-                        }}
-                    />
+                    <>
+                        <CreativeLaunchPad
+                            onGenerated={recordLaunch}
+                            historyCount={totalLaunchCount}
+                            sharedProjectId={activeConversation?.canvasId}
+                            injectedDraft={editRequest}
+                            onOpenHistory={() => {
+                                setThreadActivePersisted(true);
+                                setHistoryOpen(true);
+                            }}
+                        />
+                        {!threadOverlayOpen && (
+                            <CreativeRecentCanvases
+                                projects={sorted}
+                                cover={cover}
+                                onOpen={(id) => void continueEditing(id)}
+                                onCreate={createBlankCanvas}
+                                loading={!hydrated}
+                            />
+                        )}
+                    </>
                 )}
-                {threadOverlayOpen ? null : threadActive ? (
-                    <CreativeGenerationFeed
-                        launches={activeLaunches}
-                        tasks={data.tasks}
-                        logs={data.logs}
-                        threadActive
-                        composer={activeLaunches.length > 0 ? <CreativeLaunchPad variant="thread" onGenerated={recordLaunch} sharedProjectId={activeConversation?.canvasId} injectedDraft={editRequest} /> : undefined}
-                        onDismiss={dismissLaunch}
-                        onOpenProject={openProject}
-                        onPreview={setPreviewOutput}
-                        onNewThread={startNewConversation}
-                        onOpenHistory={() => setHistoryOpen(true)}
-                        hasOtherConversations={otherConversationCount > 0}
-                        onEditPrompt={(text) => setEditRequest(current => ({ text, nonce: current.nonce + 1 }))}
-                        onContinueCanvas={(projectId, nodeId) => void continueEditing(projectId, nodeId)}
-                    />
-                ) : totalLaunchCount > 0 ? (
-                    <CreativeGenerationFeed
-                        launches={flatLaunches}
-                        tasks={data.tasks}
-                        logs={data.logs}
-                        onDismiss={dismissLaunch}
-                        onOpenProject={openProject}
-                        onPreview={setPreviewOutput}
-                    />
-                ) : null}
+                {/* 「生成动态」历史卡片网格已下线；对话工作台统一由上面的全屏覆盖层承载：
+                    有消息 → 全屏对话页；空会话（点「新对话」）→ 回到创作台输入，绝不在创作台里再挂一个
+                    没有输入框的空对话壳。故这里不再内联渲染 CreativeGenerationFeed。 */}
                 {!hasWork && creationActions}
                 {data.connected && (data.errors.length > 0 || data.dramaError) && (
                     <Alert
@@ -420,140 +519,15 @@ function HomeWorkbench() {
                         </> : <div className="flex items-start gap-4 p-5"><Workflow className="mt-0.5 size-6 shrink-0 text-muted-foreground" /><div><h2 className="ui-panel-title">{t("home.workbench.firstProject")}</h2><p className="ui-body mt-1 text-muted-foreground">{t("home.workbench.firstProjectHint")}</p></div></div>}
                     </div>
                 </section>
-                <section aria-label={t("home.workbench.recentProjects")}>
-                    <div className="mb-4 flex flex-wrap items-center gap-3 border-b border-border pb-3">
-                        <h2 className="ui-panel-title mr-1">{t("home.workbench.projects")}</h2>
-                        <Segmented
-                            value={filter}
-                            options={["all", "canvas", "drama", "pinned"].map((value) => ({ value, label: t(`home.workbench.${value}`) }))}
-                            onChange={(value) => {
-                                setFilter(value as ProjectFilter);
-                                setVisibleCount(12);
-                            }}
-                        />
-                        <Input
-                            className="!w-full sm:!ml-auto sm:!w-52"
-                            allowClear
-                            prefix={<Search className="mr-1 size-4 text-muted-foreground" />}
-                            placeholder={t("home.workbench.search")}
-                            aria-label={t("home.workbench.search")}
-                            value={query}
-                            onChange={(event) => {
-                                setQuery(event.target.value);
-                                setVisibleCount(12);
-                            }}
-                        />
-                        <div className="flex gap-1">
-                            {(["grid", "list"] as const).map((mode) => (
-                                <Tooltip key={mode} title={t(`home.workbench.${mode}`)}>
-                                    <Button
-                                        aria-label={t(`home.workbench.${mode}`)}
-                                        aria-pressed={view === mode}
-                                        className="ui-icon-button"
-                                        type={view === mode ? "default" : "text"}
-                                        icon={mode === "grid" ? <LayoutGrid className="size-4" /> : <List className="size-4" />}
-                                        onClick={() => {
-                                            setView(mode);
-                                            try {
-                                                localStorage.setItem("home-project-view", mode);
-                                            } catch {
-                                                /* optional view preference */
-                                            }
-                                        }}
-                                    />
-                                </Tooltip>
-                            ))}
-                        </div>
-                    </div>
-                    {!hydrated || (!data.dramaReady && !data.dramaError) ? (
-                        <div aria-busy="true" data-testid="home-projects-loading" className={cn(view === "grid" ? "grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" : "flex flex-col gap-2")}>
-                            {Array.from({ length: 3 }, (_, index) => <div key={index} className={cn(surface, "overflow-hidden", view === "list" && "flex items-center")}>
-                                <div className={cn("shrink-0 animate-pulse bg-muted", view === "grid" ? "aspect-[16/9] w-full" : "h-24 w-24 sm:w-36")} />
-                                <div className="flex-1 p-3.5"><Skeleton active title={{ width: "60%" }} paragraph={{ rows: 2 }} /></div>
-                            </div>)}
-                        </div>
-                    ) : !data.dramaReady ? (
-                        <div className={cn(surface, "py-10")}><Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t("home.workbench.loadFailed", { sections: t("home.workbench.drama") })} /></div>
-                    ) : !filtered.length ? (
-                        <div className={cn(surface, "py-10")}>
-                            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t(query || filter !== "all" ? "home.workbench.noMatches" : "home.workbench.noProjects")} />
-                        </div>
-                    ) : (
-                        <div className={cn(view === "grid" ? "grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3" : "flex flex-col gap-2")}>
-                            {filtered.slice(0, visibleCount).map((entry) => {
-                                if (entry.kind === "drama") {
-                                    const folder = entry.folder;
-                                    return (
-                                        <Link key={`drama:${folder.id}`} to={`/production?dramaId=${encodeURIComponent(folder.id)}`} className={cn(surface, "group overflow-hidden text-foreground transition-colors hover:border-foreground/30", view === "list" && "flex items-center")}>
-                                            <div className={cn("relative shrink-0 overflow-hidden bg-muted", view === "grid" ? "aspect-[16/9] w-full" : "h-24 w-24 sm:w-36")}>
-                                                <WorkbenchMediaPreview media={folder.coverStorageKey ? { kind: "image", storageKey: folder.coverStorageKey } : null} label={folder.name} />
-                                                {view === "grid" && <span className="absolute left-3 top-3 ui-caption rounded bg-background/95 px-2 py-1">{t("home.workbench.drama")}</span>}
-                                            </div>
-                                            <div className="min-w-0 flex-1 p-3.5">
-                                                <h3 className="ui-panel-title line-clamp-2" title={folder.name}>{folder.name}</h3>
-                                                <p className="ui-caption mt-1.5 truncate text-muted-foreground">{t("home.workbench.drama")}</p>
-                                                <p className="ui-caption mt-1 text-muted-foreground">{date(entry.updatedAt)}</p>
-                                            </div>
-                                        </Link>
-                                    );
-                                }
-                                const p = entry.project;
-                                const pinned = Boolean(data.settings[`homePinnedProject:${p.id}`]);
-                                return (
-                                    <article key={p.id} className={cn(surface, "group overflow-hidden transition-colors hover:border-foreground/30", view === "list" && "flex flex-wrap items-center")}>
-                                        <button
-                                            type="button"
-                                            className={cn("relative block shrink-0 cursor-pointer overflow-hidden bg-muted", view === "grid" ? "aspect-[16/9] w-full" : "h-24 w-24 sm:w-36")}
-                                            onClick={() => openProject(p.id)}
-                                            aria-label={t("landing.openCanvasNamed", { name: p.title })}
-                                        >
-                                            <WorkbenchMediaPreview media={cover(p)} label={cover(p) ? p.title : t("landing.noPreview")} />
-                                            {view === "grid" && <span className="absolute left-3 top-3 ui-caption rounded bg-background/95 px-2 py-1 text-foreground">{t("home.workbench.canvas")}</span>}
-                                        </button>
-                                        <div className="flex min-w-0 flex-1 items-center gap-2 p-3.5">
-                                            <button type="button" className="min-w-0 flex-1 cursor-pointer text-left" onClick={() => openProject(p.id)}>
-                                                <h3 className="ui-panel-title line-clamp-2" title={p.title}>
-                                                    {p.title}
-                                                </h3>
-                                                <p className="ui-caption mt-1.5 truncate text-muted-foreground">{folderFor(p)?.name || t("home.workbench.canvas")}</p>
-                                                <p className="ui-caption mt-1 text-muted-foreground">{date(p.updatedAt)}</p>
-                                            </button>
-                                            <Tooltip title={t(pinned ? "home.workbench.unpin" : "home.workbench.pin")}>
-                                                <Button
-                                                    type="text"
-                                                    size="small"
-                                                    aria-pressed={pinned}
-                                                    className="ui-icon-button"
-                                                    aria-label={t(pinned ? "home.workbench.unpin" : "home.workbench.pin")}
-                                                    disabled={!data.connected || !data.settingsReady || data.pinning}
-                                                    icon={pinned ? <BookmarkCheck className="size-4" /> : <Bookmark className="size-4 text-muted-foreground" />}
-                                                    onClick={() => pin(p.id)}
-                                                />
-                                            </Tooltip>
-                                        </div>
-                                        <div className={cn("flex items-center justify-between gap-2 border-t border-border px-3.5 py-2.5", view === "list" && "w-full")}>{isDrama(p) && <Link className="ui-caption inline-flex items-center gap-1.5 text-muted-foreground hover:text-foreground" to={dramaDestination(p)}>{t("productionCanvas.backDrama")}<ArrowRight className="size-3" /></Link>}<Button type="text" size="small" icon={<Eye className="size-4" />} aria-label={t("home.workbench.previewNamed", { name: p.title })} onClick={() => setPreviewProject(p)}>{t("landing.preview")}</Button></div>
-                                    </article>
-                                );
-                            })}
-                        </div>
-                    )}
-                    <div className="mt-4 flex items-center justify-between gap-3">
-                        <Button type="text" onClick={() => navigate("/canvas")}>
-                            {t("home.workbench.manageProjects")}
-                            <ArrowRight className="size-4" />
-                        </Button>
-                        {visibleCount < filtered.length && <Button onClick={() => setVisibleCount((count) => count + 12)}>{t("home.workbench.moreProjects")}</Button>}
-                    </div>
-                </section>
                 <section className="mt-6 border-t border-border pt-6" aria-label={t("home.workbench.recentOutputs")}>
                     <div className="mb-4 flex items-center justify-between gap-3">
-                        <h2 className="ui-panel-title">{t("home.workbench.recentOutputs")}</h2>
+                        <h2 className="ui-panel-title inline-flex items-center gap-2"><Sparkles className="size-3.5 text-muted-foreground" aria-hidden="true" />{t("home.workbench.recentOutputs")}</h2>
                         <Button type="text" onClick={() => setOutputsOpen(true)}>
                             {t("home.workbench.viewResults")}
                             <ArrowRight className="size-4" />
                         </Button>
                     </div>
-                    {data.loading && !data.logs.length ? (
+                    {data.mediaLoading && !data.mediaLogs.length ? (
                         <Skeleton active paragraph={{ rows: 2 }} />
                     ) : outputs.length ? (
                         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">{outputs.slice(0, 6).map(outputCard)}</div>
@@ -562,50 +536,13 @@ function HomeWorkbench() {
                     )}
                 </section>
             </div>
-            <Modal open={creating} title={t("canvas.create")} onCancel={() => setCreating(false)} onOk={create} okText={t("home.workbench.createOpen")} okButtonProps={{ disabled: !name.trim() || !data.connected }} destroyOnHidden>
-                <label className="ui-group-title mb-2 block" htmlFor="home-project-name">
-                    {t("home.workbench.projectName")}
-                </label>
-                <Input id="home-project-name" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={create} autoFocus />
-            </Modal>
-            <Modal
-                open={Boolean(previewProject)}
-                title={previewProject?.title}
-                onCancel={() => setPreviewProject(null)}
-                footer={
-                    previewProject ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                            <Button danger type="text" icon={<Trash2 className="size-4" />} onClick={() => { setDeleteProjectIds([previewProject.id]); setPreviewProject(null); }}>
-                                {t("common.delete")}
-                            </Button>
-                            <Button type="primary" onClick={() => openProject(previewProject.id)}>
-                                {t("home.workbench.continue")}
-                                <ArrowRight className="size-4" />
-                            </Button>
-                        </div>
-                    ) : null
-                }
-                width={800}
-                destroyOnHidden
-            >
-                {previewProject && (
-                    <>
-                        <div className="h-[min(50vh,420px)] overflow-hidden rounded-lg bg-muted">
-                            <WorkbenchMediaPreview media={cover(previewProject)} label={stats(previewProject)} controls />
-                        </div>
-                        <p className="ui-body mt-3 text-muted-foreground">
-                            {stats(previewProject)} · {date(previewProject.updatedAt)}
-                        </p>
-                    </>
-                )}
-            </Modal>
             <Modal
                 open={outputsOpen}
                 title={t("home.workbench.recentOutputs")}
                 onCancel={() => setOutputsOpen(false)}
                 footer={
-                    data.hasMore ? (
-                        <Button loading={data.loading} onClick={data.loadMore}>
+                    data.mediaHasMore ? (
+                        <Button loading={data.mediaLoading} onClick={data.loadMoreMedia}>
                             {t("home.workbench.moreResults")}
                         </Button>
                     ) : null
@@ -627,12 +564,12 @@ function HomeWorkbench() {
                         </Button>
                     ) : null
                 }
-                width={900}
+                width={1100}
                 destroyOnHidden
             >
                 {previewOutput && (
                     <>
-                        <div className="flex h-[min(55vh,480px)] items-center justify-center overflow-hidden rounded-lg bg-muted">
+                        <div className="flex h-[min(70vh,640px)] items-center justify-center overflow-hidden rounded-lg bg-muted">
                             <WorkbenchMediaPreview media={previewOutput} label={outputTitle(previewOutput)} controls />
                         </div>
                         <p className="ui-caption mt-3 text-muted-foreground">
@@ -728,7 +665,6 @@ function HomeWorkbench() {
             >
                 <Input value={renameText} onChange={event => setRenameText(event.target.value)} onPressEnter={renameConversation} autoFocus maxLength={60} />
             </Modal>
-            <CanvasDeleteProjectsDialog />
         </main>
     );
 }

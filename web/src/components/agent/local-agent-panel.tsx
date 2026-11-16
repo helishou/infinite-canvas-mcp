@@ -46,7 +46,6 @@ import {
     agentErrorView,
     attachmentPayloadBytes,
     compactText,
-    eventUsage,
     formatAgentActivity,
     formatAgentEvent,
     formatAgentEventLog,
@@ -59,6 +58,7 @@ import {
     isReasoningSummary,
     mergeAgentMessages,
     mergeStreamText,
+    mergeUsage,
     normalizeHistoryMessages,
     normalizeText,
     parseEventData,
@@ -1735,7 +1735,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     };
 
     const handleAgentEvent = async (event: AgentEventPayload) => {
-        if (event.type === "usage.updated") setAgentState({ tokenUsage: eventUsage(event) });
+        if (event.type === "usage.updated") setAgentState({ tokenUsage: mergeUsage(useAgentStore.getState().tokenUsage, event) });
         const log = event.replayed ? null : formatAgentEventLog(event);
         const activity = formatAgentActivity(event);
         if (log) addEventLog(log.title, log.text);

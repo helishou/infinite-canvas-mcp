@@ -1,11 +1,12 @@
 import { Children, isValidElement, useMemo, useState, useEffect, type ReactNode } from "react";
-import { App, Button, Empty, Input, Modal, Switch, Tag } from "antd";
-import { Clapperboard, FileText, Pencil, Search, Sparkles } from "lucide-react";
+import { App, Button, Empty, Input, Modal, Segmented, Switch, Tag } from "antd";
+import { Blocks, Clapperboard, FileText, Pencil, Search, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Streamdown } from "streamdown";
 
 import { PageHeader } from "@/components/layout/page-header";
 import { request } from "@/services/backend-api";
+import { SkillMarket } from "./market";
 
 type SkillFile = { path: string; content: string; revision: string; group: string; title: string; description: string };
 type SkillFileResponse = { ok: boolean; path: string; content: string; revision: string };
@@ -41,7 +42,7 @@ function markdownText(node: ReactNode): string {
     }).join("").trim();
 }
 
-export default function SkillsPage() {
+function AchengSkillManager() {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const [skills, setSkills] = useState<SkillFile[]>([]);
@@ -148,8 +149,8 @@ export default function SkillsPage() {
     };
 
     return (
-        <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
-            <main className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
+        <div className="bg-background text-foreground">
+            <main className="px-4 py-6 sm:px-6 lg:px-8">
                 <div className="mx-auto max-w-[1440px]">
                     <PageHeader
                         title={<span className="inline-flex items-center gap-2"><Sparkles className="size-5 text-primary" />{t("achengSkillManager.title")}</span>}
@@ -229,6 +230,25 @@ export default function SkillsPage() {
                 } }}>{file.content}</Streamdown></div> : null}
                 {file && editing ? <Input.TextArea value={draft} onChange={(event) => setDraft(event.target.value)} autoSize={{ minRows: 22 }} className="font-mono text-xs leading-5" /> : null}
             </Modal>
+        </div>
+    );
+}
+
+export default function SkillsPage() {
+    const { t } = useTranslation();
+    const [view, setView] = useState<"market" | "acheng">("market");
+    return (
+        <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
+            <div className="shrink-0 border-b border-border px-4 pt-4 sm:px-6 lg:px-8">
+                <div className="mx-auto max-w-[1440px]">
+                    <Segmented value={view} onChange={(value) => setView(value as "market" | "acheng")}
+                        options={[{ label: <span className="inline-flex items-center gap-1.5"><Blocks className="size-3.5" />{t("skillMarket.title")}</span>, value: "market" }, { label: <span className="inline-flex items-center gap-1.5"><Sparkles className="size-3.5" />{t("achengSkillManager.title")}</span>, value: "acheng" }]}
+                        data-testid="skills-view-switch" />
+                </div>
+            </div>
+            <main className="min-h-0 flex-1 overflow-y-auto">
+                {view === "market" ? <SkillMarket /> : <AchengSkillManager />}
+            </main>
         </div>
     );
 }

@@ -11,6 +11,7 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowAudioField, type WorkflowDetail } from "@/services/api/workflows";
+import { useChannelModelFields } from "./use-channel-model-fields";
 import { reconcileWorkflowParams } from "@/lib/canvas/canvas-workflow-params";
 
 export type CanvasAudioSettingKey = "audioVoice" | "audioFormat" | "audioSpeed" | "audioInstructions";
@@ -112,7 +113,15 @@ export function CanvasAudioSettingsPopover({
         };
     }, [open, workflowName]);
 
-    const customFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowAudioField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const { fields: channelFields } = useChannelModelFields({
+        config,
+        open,
+        comfyParams,
+        onParamsChange: onComfyParamsChange,
+        excludeTypes: ["image", "video", "audio"],
+    });
+    const workflowFields = (workflowDetail?.config?.fields || []).filter((field) => !isWorkflowAudioField(field, workflowDetail?.workflow) && !field.isPrompt);
+    const customFields = workflowFields.length ? workflowFields : channelFields;
 
     useEffect(() => {
         if (!workflowDetail || workflowDetail.name !== workflowName || !onComfyParamsChange) return;

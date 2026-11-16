@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEpisodeGroups, chapterTitleOf, episodeLinesFromSource, estimateChapterScale, formatSeconds, groupSynopsis, sourceChapterCount, summarizeGroups, toChapterRows } from "./adapt.js";
+import { buildEpisodeGroups, chapterTitleOf, chaptersFromAnalysis, episodeLinesFromSource, estimateChapterScale, estimateProductionTasks, formatSeconds, groupSynopsis, sourceChapterCount, splitSourceIntoEpisodes, summarizeGroups, toChapterRows } from "./adapt.js";
 import type { NovelChapter } from "@basketikun/canvas-agent/drama/novel-chapters";
 
 const chapter = (index: number, chars: number): NovelChapter => ({
@@ -50,6 +50,14 @@ test("标题改过之后编组用新标题，已存在判断据此比对", () =>
     assert.equal(groups[0].title, "山雨欲来");
     assert.equal(groups[0].existing, true);
     assert.equal(groups[1].existing, false);
+});
+
+test("已建集命中时沿用它的集号，不再显示成下一个空位号", () => {
+    const rows = toChapterRows([chapter(1, 500), chapter(2, 500)]);
+    rows[0].titleOverride = "第 1 段";
+    // 已有第 1 集《第 1 段》：命中行保留 1，新行才从 startNumber 顺延。
+    const groups = buildEpisodeGroups(rows, { perEpisode: 1, startNumber: 2, existingEpisodes: [{ episodeNumber: 1, title: "第 1 段" }] });
+    assert.deepEqual(groups.map(group => [group.episodeNumber, group.existing]), [[1, true], [2, false]]);
 });
 
 test("批次汇总合计集数、镜头、段数与时长", () => {

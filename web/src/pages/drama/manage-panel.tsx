@@ -5,12 +5,12 @@ import { useProductionFollowStore } from "@/stores/use-production-follow-store";
 import { productionWorkspaceQuery, type SeriesWorkspaceView } from "./production-workspace";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { App, Button, Input, Modal, Select, Switch, Tabs, Tag } from "antd";
-import { ArrowUpRight, Clapperboard, Download, FileArchive, ImagePlus, Images, PencilLine, Plus, Trash2, Upload } from "lucide-react";
+import { ArrowUpRight, Clapperboard, ImagePlus, Images, PencilLine, Plus, Trash2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaAsset, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendAssets, fetchBackendCanvasFolders, fetchBackendDramaAssets, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, updateBackendDramaEpisode, uploadBackendDramaAsset, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaCustomAsset, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
+import { backendMediaUrl, createBackendDramaEpisode, deleteBackendDramaEpisode, editEpisodeProduction, fetchBackendAssets, fetchBackendCanvasFolders, fetchBackendDramaEpisodes, fetchBackendProject, fetchEpisodeProduction, updateBackendDramaEpisode, ensureSharedAssetCanvas, ensureEpisodeCanvas, upsertBackendCanvasFolder, type DramaEpisode, type EpisodeProduction } from "@/services/backend-api";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { MediaImage } from "@/components/media/media-image";
 import { nanoid } from "nanoid";
@@ -22,18 +22,23 @@ import { ModelPicker } from "@/components/model-picker";
 import { useConfigStore } from "@/stores/use-config-store";
 
 import { SceneProductionSettings } from "./scene-production-settings";
-import { OutlineTab, SourceScriptTab } from "./planning-writing-tabs";
+import { OutlineTab } from "./planning-writing-tabs";
+import { PlanningSourceTab } from "./planning-source-tab";
+import { AdaptStoryboardPanel } from "./adapt-storyboard-panel";
 import { TopicCard } from "./planning-topic-card";
 import { PlanningScriptTab } from "./planning-script-tab";
 import { episodeHasScript, pendingScriptEpisodes } from "./planning-script-queue";
 import { launchPlanningDirector, planningPrompt, type PlanningLaunchScope } from "./planning-director-launch";
 import { PlanningStepBar } from "./planning-step-bar";
+import { PlanningNextStep } from "./planning-next-step";
+import { AssetSpecPanel } from "./asset-spec-panel";
+import { takePlanningHandoff } from "./planning-director-launch";
 import { nextPlanningStep, planningStepStates, topicFromLegacy, type PlanningStepKey } from "./planning-topic-logic";
 import { OutlineWizard, parseEpisodeLines, proposalLines } from "./planning-outline-wizard";
 import type { OutlineWizardStep } from "./planning-outline-wizard";
 
 /** 剧目规划的标签页：原剧本 / 选题 / 大纲 三个写作分区 + 信息 / 设置。 */
-export type PlanningTab = "source" | "topic" | "outline" | "script" | "info" | "settings";
+export type PlanningTab = "source" | "topic" | "outline" | "script" | "assets" | "info" | "settings";
 
 
 type DramaDraft = {
@@ -73,7 +78,7 @@ function sharedAssetImageSource(asset: Asset) {
 }
 
 /**
- * 剧目管理面板：剧目规划、共享资产画布、分集列表与自定义资产。
+ * 剧目管理面板：剧目规划、共享资产画布与分集列表。
  * 按全剧规划、分集与共享素材分区，也兼容旧入口的完整管理视图。
  */
 export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode, view, initialPlanningTab, navigationTitleVisible = false }: {
@@ -96,6 +101,11 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [openingSharedCanvas, setOpeningSharedCanvas] = useState(false);
     const [draft, setDraft] = useState<DramaDraft | null>(null);
     const [planningTab, setPlanningTab] = useState<PlanningTab>(initialPlanningTab || "info");
+    // 新建剧目时勾了「交给导演」：进入规划页第一件事就是把提示词送进对话（只消费一次）。
+    useEffect(() => {
+        const pending = takePlanningHandoff(dramaId);
+        if (pending) launchPlanningDirector(pending);
+    }, [dramaId]);
     /** 把当前这一步交给导演 agent：只给目标，怎么写由 agent 按策划合同决定。 */
     const askDirectorForPlanning = (scope: PlanningLaunchScope) => {
         if (!folder || !draft) return;
@@ -115,8 +125,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [episodeEditorOpen, setEpisodeEditorOpen] = useState(false);
     const [episodeDraft, setEpisodeDraft] = useState<EpisodeDraft | null>(null);
     const [episodeSaving, setEpisodeSaving] = useState(false);
-    const [assets, setAssets] = useState<DramaCustomAsset[]>([]);
-    const [uploadingAssets, setUploadingAssets] = useState(false);
     const [sharedAssets, setSharedAssets] = useState<Asset[]>([]);
     const [sharedAssetsError, setSharedAssetsError] = useState(false);
     const [sharedAssetsReload, setSharedAssetsReload] = useState(0);
@@ -126,7 +134,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
     const [styleWaiverDraft, setStyleWaiverDraft] = useState("");
     const pendingStyleTransfer = useRef("");
     const coverInputRef = useRef<HTMLInputElement>(null);
-    const assetInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => { setPlanningTab(initialPlanningTab || "info"); }, [dramaId, initialPlanningTab]);
 
@@ -163,14 +170,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             coverUrl: activeCoverUrl,
         });
     }, [folder, dramaId, activeCoverUrl]);
-    useEffect(() => {
-        if (!folder) return;
-        let disposed = false;
-        void fetchBackendDramaAssets(folder.id)
-            .then((result) => { if (!disposed) setAssets(result.assets || []); })
-            .catch((error) => { if (!disposed) message.error(error instanceof Error ? error.message : t("drama.customAssets.loadFailed")); });
-        return () => { disposed = true; };
-    }, [folder?.id, message]);
     useEffect(() => {
         const sharedCanvasId = folder?.sharedAssetCanvasId;
         let disposed = false;
@@ -442,6 +441,24 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         } catch (error) { message.error(String(error)); }
         finally { setSavingPlan(false); }
     };
+    /**
+     * 原剧本页签建集前静默保存：原文与这次的分集口径一起落库，不弹成功提示。
+     * 用显式 patch 而不是等 setDraft 刷新，避免"集建好了、原件还是旧的"。
+     */
+    const saveSourcePlan = async (patch: Partial<DramaProductionPlan["sourceSplit"]>): Promise<boolean> => {
+        if (!draft) return false;
+        const productionPlan = { ...draft.productionPlan, sourceSplit: { ...draft.productionPlan.sourceSplit, ...patch } };
+        setSavingPlan(true);
+        try {
+            const result = await upsertBackendCanvasFolder({ ...folder, name: draft.name.trim() || folder.name, productionPlan, expectedPlanningUpdatedAt: draft.expectedPlanningUpdatedAt, updatedAt: new Date().toISOString() });
+            useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === folder.id ? result.folder as unknown as CanvasFolder : item) }));
+            setDraft({ ...draft, productionPlan, expectedPlanningUpdatedAt: String(result.folder?.updatedAt || draft.expectedPlanningUpdatedAt) });
+            return true;
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : String(error));
+            return false;
+        } finally { setSavingPlan(false); }
+    };
     const deleteDrama = () => {
         modal.confirm({
             title: t("drama.deleteProject"),
@@ -473,47 +490,28 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             setUploadingCover(false);
         }
     };
-    const handleAssetUpload = async (event: ChangeEvent<HTMLInputElement>) => {
-        const files = Array.from(event.target.files || []);
-        event.target.value = "";
-        if (!files.length) return;
-        try {
-            setUploadingAssets(true);
-            const uploaded: DramaCustomAsset[] = [];
-            for (const file of files) uploaded.push(await uploadBackendDramaAsset(dramaId, file));
-            setAssets((current) => [...uploaded, ...current]);
-            message.success(t("drama.customAssets.uploaded", { count: uploaded.length }));
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : t("drama.customAssets.uploadFailed"));
-        } finally {
-            setUploadingAssets(false);
-        }
-    };
-    const removeDramaAsset = (asset: DramaCustomAsset) => {
-        modal.confirm({
-            title: t("drama.customAssets.deleteTitle"),
-            content: t("drama.customAssets.deleteDescription", { name: asset.data.fileName || asset.title }),
-            okType: "danger",
-            okText: "删除",
-            cancelText: t("common.cancel"),
-            onOk: async () => {
-                await deleteBackendDramaAsset(dramaId, asset.id);
-                setAssets((current) => current.filter((item) => item.id !== asset.id));
-                message.success(t("drama.customAssets.deleted"));
-            },
-        });
-    };
 
     return (
         <div>
             {(!view || view === "planning") && <section className="mb-5 space-y-3">
                 <ProductionPageHeading titleAlreadyVisible={navigationTitleVisible} title={t("productionCanvas.dramaPlanning")} summary={t(folder.productionPlan?.confirmedAt && folder.productionPlan.confirmedOutline === folder.outline ? "productionCanvas.planConfirmed" : "productionCanvas.planUnconfirmed")} help={<p>{t("productionCanvas.dramaPlanningHint")}</p>} actions={<div className="flex flex-wrap justify-end gap-2"><Button disabled={savingPlan || uploadingCover} loading={uploadingCover} onClick={() => void saveFolder(false)}>{t("sceneProduction.saveDraft")}</Button><Button type="primary" loading={savingPlan} disabled={uploadingCover} onClick={() => void saveFolder()}>{t("productionCanvas.confirmPlan")}</Button></div>} />
-                {draft ? <PlanningStepBar states={stepStates} next={nextPlanningStep(stepStates)} onOpen={openPlanningStep} /> : null}
+                {draft ? <div className="space-y-2">
+                    <PlanningStepBar states={stepStates} next={nextPlanningStep(stepStates)} onOpen={openPlanningStep} />
+                    <PlanningNextStep dramaId={String(folder?.id || "")} onRefreshToken={episodes.length} />
+                </div> : null}
                 {draft ? <Tabs activeKey={planningTab} onChange={key => setPlanningTab(key as PlanningTab)} items={[
-                    { key: "source", label: t("productionCanvas.writing.tabs.source"), children: <SourceScriptTab value={draft.productionPlan.sourceScript} onChange={sourceScript => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, sourceScript } })} /> },
+                    { key: "source", label: t("productionCanvas.writing.tabs.source"), children: <PlanningSourceTab
+                        dramaId={dramaId}
+                        source={draft.productionPlan.sourceScript}
+                        onSourceChange={sourceScript => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, sourceScript } })}
+                        split={draft.productionPlan.sourceSplit}
+                        episodes={episodes}
+                        onSaveSource={saveSourcePlan}
+                        onEpisodesCreated={fresh => { setEpisodes(fresh); onEpisodesChanged?.(fresh); }} /> },
                     { key: "topic", label: t("productionCanvas.writing.tabs.topic"), children: <TopicCard topic={topicFromLegacy(draft.productionPlan.topic)} onChange={topic => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, topic } })} onAskDirector={() => askDirectorForPlanning("topic")} /> },
                     { key: "outline", label: t("productionCanvas.writing.tabs.outline"), children: <div className="space-y-5 pt-1"><OutlineWizard dramaId={dramaId} plan={draft.productionPlan} outline={draft.outline} episodeCount={episodes.length} registryCharacters={outlineCharacterNames(sharedProduction).length} model={draft.productionPlan.outlineModel} config={modelConfig} onModelChange={outlineModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineModel } })} onApply={applyOutlineStep} onAskDirector={() => askDirectorForPlanning("outline")} /><OutlineTab outline={draft.outline} detail={draft.productionPlan.outlineDetail} characters={draft.productionPlan.outlineDetail.characters.length ? draft.productionPlan.outlineDetail.characters : outlineCharacterNames(sharedProduction)} episodes={episodes} onOutline={outline => setDraft({ ...draft, outline })} onDetail={outlineDetail => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineDetail } })} /></div> },
-                    { key: "script", label: t("productionCanvas.writing.tabs.script"), children: <PlanningScriptTab onAskDirector={() => askDirectorForPlanning("script")} episodes={episodes} model={draft.productionPlan.outlineModel} config={modelConfig} onModelChange={outlineModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineModel } })} onSaved={fresh => { setEpisodes(fresh); onEpisodesChanged?.(fresh); }} /> },
+                    { key: "script", label: t("productionCanvas.writing.tabs.script"), children: <div className="space-y-6 pt-1"><PlanningScriptTab onAskDirector={() => askDirectorForPlanning("script")} episodes={episodes} model={draft.productionPlan.outlineModel} config={modelConfig} onModelChange={outlineModel => setDraft({ ...draft, productionPlan: { ...draft.productionPlan, outlineModel } })} onSaved={fresh => { setEpisodes(fresh); onEpisodesChanged?.(fresh); }} /><AdaptStoryboardPanel dramaId={dramaId} episodes={episodes} onWritten={() => { void fetchBackendDramaEpisodes(dramaId).then(result => { if (result.episodes) { setEpisodes(result.episodes); onEpisodesChanged?.(result.episodes); } }).catch(() => undefined); }} /></div> },
+                    { key: "assets", label: t("productionCanvas.writing.tabs.assets"), children: <AssetSpecPanel assets={sharedAssets} /> },
                     { key: "info", label: t("productionCanvas.planningOverviewTab"), children: <div className="space-y-5 pt-1">
                 <div className="grid gap-5 sm:grid-cols-[180px_minmax(0,1fr)]">
                     <button type="button" className="group relative min-h-40 overflow-hidden rounded-xl border border-dashed border-border bg-muted text-left dark:bg-muted" onClick={() => coverInputRef.current?.click()}>
@@ -654,30 +652,6 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
                 )}
             </section>}
 
-            {(!view || view === "shared" || view === "planning") && <section className="mt-10 rounded-2xl border border-border bg-background p-5 ">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                        <p className="text-xs font-medium uppercase tracking-[0.16em] text-orange-600 dark:text-orange-400">{t("drama.customAssets.eyebrow")}</p>
-                        <h3 className="mt-1 text-lg font-semibold">{t("drama.customAssets.title")}</h3>
-                        <p className="mt-1 text-xs text-muted-foreground">{t("drama.customAssets.description")}</p>
-                    </div>
-                    <Button icon={<Upload className="size-4" />} loading={uploadingAssets} onClick={() => assetInputRef.current?.click()}>{t("drama.customAssets.upload")}</Button>
-                    <input ref={assetInputRef} type="file" multiple className="hidden" onChange={(event) => void handleAssetUpload(event)} />
-                </div>
-                {assets.length ? (
-                    <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                        {assets.map((asset) => (
-                            <div key={asset.id} className="flex min-w-0 items-center gap-3 rounded-xl border border-border px-3 py-3 ">
-                                <div className="grid size-10 shrink-0 place-items-center rounded-lg bg-muted text-muted-foreground dark:bg-muted"><FileArchive className="size-5" /></div>
-                                <div className="min-w-0 flex-1"><div className="truncate text-sm font-medium" title={asset.data.fileName}>{asset.data.fileName || asset.title}</div><div className="mt-1 text-xs text-muted-foreground">{formatBytes(asset.data.bytes)} · {(asset.metadata?.extension || "file").replace(/^\./, "").toUpperCase()}</div></div>
-                                <a href={backendMediaUrl(asset.data.storageKey)} download={asset.data.fileName} className="grid size-8 shrink-0 place-items-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground dark:hover:bg-muted dark:hover:text-foreground" aria-label={t("drama.customAssets.download")}><Download className="size-4" /></a>
-                                <Button type="text" size="small" danger className="!px-1.5" onClick={() => removeDramaAsset(asset)} aria-label={t("drama.customAssets.delete")}><Trash2 className="size-4" /></Button>
-                            </div>
-                        ))}
-                    </div>
-                ) : <div className="mt-4 rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground ">{t("drama.customAssets.empty")}</div>}
-            </section>}
-
             <Modal width={720} title={episodeDraft?.id ? t("drama.editEpisode") : t("drama.newEpisode")} open={episodeEditorOpen} onCancel={() => { if (!episodeSaving) { setEpisodeEditorOpen(false); setEpisodeDraft(null); } }} onOk={() => void saveEpisode()} okText={t("drama.saveEpisode")} cancelText={t("common.cancel")} confirmLoading={episodeSaving}>
                 {episodeDraft ? <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-1">
                     <div className="grid gap-5 sm:grid-cols-[140px_minmax(0,1fr)]">
@@ -718,9 +692,3 @@ function EpisodeCard({ episode, project, onProduce, onEdit, onDelete, t }: { epi
     </article>;
 }
 
-function formatBytes(bytes: number) {
-    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB"];
-    const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-    return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
-}

@@ -1359,6 +1359,19 @@ export class BackendDatabase {
         return { project: result.project, operations: result.operations };
     }
 
+    /**
+     * 画布 → 剧目：分集画布（drama_episodes.canvas_id）或剧目的共享资产画布。
+     * 画风这类剧目级设置只认这一条链，别去猜 canvas_projects 上的字段（它没有 folder_id）。
+     */
+    getDramaIdByCanvasId(canvasId: string): string {
+        const id = String(canvasId || "");
+        if (!id) return "";
+        const episode = this.getDramaEpisodeByCanvasId(id);
+        if (episode?.dramaId) return String(episode.dramaId);
+        const shared = this.db.prepare("SELECT folder_id FROM drama_projects WHERE shared_asset_canvas_id=?").get(id) as { folder_id?: string } | undefined;
+        return shared?.folder_id ? String(shared.folder_id) : "";
+    }
+
     deleteCanvasProject(id: string): number {
         if (this.getDramaEpisodeByCanvasId(id) || this.db.prepare("SELECT 1 FROM drama_projects WHERE shared_asset_canvas_id=?").get(id)) {
             throw new Error("画布仍绑定制作对象，不能从画布库删除");
@@ -1443,6 +1456,28 @@ export class BackendDatabase {
             "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, fullPlot, canvasId, createdAt, now);
         return this.getDramaEpisode(id)!;
+    }
+
+    /** 读一批分集既有的制作阶段游标（episode_productions.draft_json.settings.productionStage）。 */
+    listEpisodeProductionStages(episodeIds: readonly string[]): Record<string, { current?: string; done: string[] }> {
+        const ids = episodeIds.filter(Boolean);
+        if (!ids.length) return {};
+        const placeholders = ids.map(() => "?").join(",");
+        const rows = this.db.prepare(`SELECT episode_id, draft_json FROM episode_productions WHERE episode_id IN (${placeholders})`).all(...ids) as Array<{ episode_id: string; draft_json?: string | null }>;
+        const out: Record<string, { current?: string; done: string[] }> = {};
+        for (const row of rows) {
+            try {
+                const draft = row.draft_json ? JSON.parse(String(row.draft_json)) : {};
+                const stage = draft?.settings?.productionStage;
+                if (stage && typeof stage === "object") {
+                    out[row.episode_id] = {
+                        ...(typeof stage.current === "string" ? { current: stage.current } : {}),
+                        done: Array.isArray(stage.done) ? stage.done.map(String) : [],
+                    };
+                }
+            } catch { /* 坏数据当没游标 */ }
+        }
+        return out;
     }
 
     updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode | null {

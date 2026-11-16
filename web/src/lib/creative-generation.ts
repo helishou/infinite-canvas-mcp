@@ -22,8 +22,10 @@ export type CreativeGenerationOptions = {
     capability: "image" | "video" | "text" | "audio";
     prompt: string;
     model?: string;
-    /** 会话内多轮共享生成上下文（对齐影策 conversation.canvasId）：传入则把本轮节点追加到同一张画布。 */
+    /** 会话内多轮共享生成上下文：传入已存在的画布 id 时把本轮节点追加到该画布。 */
     projectId?: string;
+    /** 首页对话形态不建画布（默认 false）。Agent 站点工具仍按默认值保留原有的「建画布 → 生成」链路。 */
+    createCanvas?: boolean;
     references?: readonly ReferenceAsset[];
     imageSize?: string;
     imageQuality?: string;
@@ -40,9 +42,10 @@ export type CreativeGenerationOptions = {
 };
 
 /**
- * 首页启动台与 Agent 站点工具共用的「新建画布 → Backend 生成」链路：
- * 先落画布与智能配置节点，再提交生成；结果节点由 Backend 依据 clientTaskId 创建，
- * 进度与结果经 realtime ops 回到画布，与画布内生成是同一条任务链路。
+ * 首页启动台与 Agent 站点工具共用的生成链路。
+ * 默认（createCanvas=true / 传入 projectId）先落画布与智能配置节点，结果节点由 Backend 写回；
+ * 首页对话形态传 createCanvas=false 走「会话级生成」：不创建任何画布节点，command 不带
+ * projectId/nodeId，Backend 仍产出同一份 task.result.media，成果留到用户显式新建画布时再导入。
  */
 export async function startCreativeGeneration(options: CreativeGenerationOptions): Promise<{ projectId: string; nodeId: string; taskId: string }> {
     const { capability, references = [] } = options;
@@ -63,10 +66,11 @@ export async function startCreativeGeneration(options: CreativeGenerationOptions
     const videoResolution = options.videoResolution || config.vquality || defaultConfig.vquality;
 
     // 会话内多轮：显式传入 projectId 时复用同一张画布（节点追加，不重建、不改标题）；
-    // 未传时保持原行为——每次提交一张新画布。
+    // 首页对话形态（createCanvas=false）不创建任何画布，只在会话里留一份生成任务。
     const existingProject = options.projectId ? canvas.projects.find(item => item.id === options.projectId) : undefined;
     if (options.projectId && !existingProject) throw new Error(i18n.t("creativePad.conversationCanvasMissing"));
-    const id = existingProject ? existingProject.id : canvas.createProject(creativeProjectTitle(text));
+    const conversationOnly = options.createCanvas === false && !existingProject;
+    const id = existingProject ? existingProject.id : conversationOnly ? undefined : canvas.createProject(creativeProjectTitle(text));
     const imageRefs = references.filter(item => item.mediaType === "image" && (item.storageKey || item.url || item.dataUrl));
     const referenceNodes: CanvasNodeData[] = imageRefs.map((item, index) => ({
         id: nanoid(),
@@ -110,11 +114,13 @@ export async function startCreativeGeneration(options: CreativeGenerationOptions
         metadata: generationMetadata,
     };
     const connections: CanvasConnection[] = referenceNodes.map(node => ({ id: nanoid(), fromNodeId: node.id, toNodeId: configNodeId }));
-    canvas.updateProject(id, {
-        nodes: [...(existingProject?.nodes || []), ...referenceNodes, configNode],
-        connections: [...(existingProject?.connections || []), ...connections],
-    });
-    await flushCanvasProjectBeforeGeneration(id);
+    if (id) {
+        canvas.updateProject(id, {
+            nodes: [...(existingProject?.nodes || []), ...referenceNodes, configNode],
+            connections: [...(existingProject?.connections || []), ...connections],
+        });
+        await flushCanvasProjectBeforeGeneration(id);
+    }
 
     const commandReferences = imageRefs.map((item, index) => ({
         id: referenceNodes[index].id,
@@ -125,7 +131,12 @@ export async function startCreativeGeneration(options: CreativeGenerationOptions
         ...(item.storageKey ? { storageKey: item.storageKey } : {}),
     }));
     const clientTaskId = crypto.randomUUID();
-    const binding = { clientTaskId, idempotencyKey: clientTaskId, projectId: id, nodeId: configNodeId, sourceNodeId: configNodeId };
+    // 会话级任务不带画布绑定：Backend 仍会执行并把媒体落在 task.result.media，只是不回写节点、不写生成日志。
+    const binding = {
+        clientTaskId,
+        idempotencyKey: clientTaskId,
+        ...(id ? { projectId: id, nodeId: configNodeId, sourceNodeId: configNodeId } : {}),
+    };
     const command = capability === "image"
         ? (() => {
             const size = resolveComfyImageSize(imageSize);
@@ -158,7 +169,19 @@ export async function startCreativeGeneration(options: CreativeGenerationOptions
                     params: { ...audioParams, ...comfyParams },
                     ...binding,
                 };
-    const started = await startCanvasGeneration(command);
+    // Backend 刚重载（或写入尚未落盘）时，会出现「目标节点还没保存」的 400。
+    // 这种不是参数错误：重新 flush 一次再提交，用户不用自己重试。
+    const submit = async () => {
+        try {
+            return await startCanvasGeneration(command);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!/生成目标不存在|未启动模型/.test(message)) throw error;
+            if (id) await flushCanvasProjectBeforeGeneration(id);
+            return startCanvasGeneration(command);
+        }
+    };
+    const started = await submit();
     if (started.executor.startsWith("browser-") || started.task?.kind === "canvas-browser-script") kickCanvasBrowserTask(started.taskId);
-    return { projectId: id, nodeId: configNodeId, taskId: started.taskId };
+    return { projectId: id || "", nodeId: id ? configNodeId : "", taskId: started.taskId };
 }

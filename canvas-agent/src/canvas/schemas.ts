@@ -107,6 +107,9 @@ export const toolNames = [
   "drama_update_episode",
   "drama_delete_episode",
   "drama_get_planning",
+  "drama_stage_status",
+  "asset_spec_get",
+  "asset_spec_update",
   "drama_update_planning",
   "production_get_contract",
   "production_get_continuity",
@@ -835,6 +838,19 @@ export const toolInputSchemas = {
       .optional()
       .describe("新的画布 ID；传 null 解除绑定"),
   }),
+  asset_spec_get: z.object({
+    assetId: z.string().min(1).optional().describe("资产 ID；传它读单个资产的设定卡"),
+    dramaId: z.string().min(1).optional().describe("剧目 ID；传它列出该剧目下所有角色/场景/道具设定卡的完成度"),
+  }),
+  asset_spec_update: z.object({
+    assetId: z.string().min(1).describe("资产 ID"),
+    kind: z.enum(["character", "scene", "prop"]).describe("资产类型：角色 / 场景 / 道具"),
+    spec: z.record(z.unknown()).describe("只传要改的字段；按类型的字段见工具说明"),
+    wantPrompt: z.boolean().optional().describe("true 时顺手按该类型的技能模板拼出提示词一起返回"),
+  }).strict(),
+  drama_stage_status: z.object({
+    dramaId: z.string().min(1).optional().describe("剧目 ID；省略时取当前活动剧目"),
+  }),
   drama_get_planning: z.object({
     dramaId: z.string().min(1).optional().describe("剧目 ID；省略时读取当前活动剧目"),
     includeSourceScript: z.boolean().default(false).describe("是否一并返回原剧本全文；默认只返回字节数，避免大稿撑爆输出"),
@@ -965,6 +981,12 @@ export const toolDescriptions: Record<ToolName, string> = {
     "创建剧目下的一集。synopsis 和 fullPlot 分别保存梗概与完整剧情；可选绑定一个已有画布。",
   drama_update_episode:
     "更新分集梗概、完整剧情或画布绑定。传 canvasId=null 可解除绑定，不会删除画布或分集剧情。",
+  asset_spec_get:
+    "读角色/场景/道具设定卡。传 assetId 读单个（含缺哪些字段、生成的提示词）；传 dramaId 列出该剧目全部资产设定卡的完成度。三类字段不同：角色 age/gender/identity/personality/appearance/motivation/conflict/arc/tags/relationships；场景 lighting/landmarks/styleNotes；道具 material/sizeNote/styleNotes。",
+  asset_spec_update:
+    "写设定卡（合并，不清空其他字段）：assetId + kind + spec。角色字段 age、gender、identity、trueIdentity、personality、appearance、motivation、conflict、arc、tags[]、relationships[{name,relation}]；场景 lighting、landmarks、styleNotes；道具 material、sizeNote、styleNotes；三类都可带 negativePrompt。wantPrompt=true 时返回按该类型模板拼好的提示词（角色三视图 / 场景空镜主图 / 道具大特写+2×2 四角度）。写前先按对应技能文件写，不要凭空编造设定。",
+  drama_stage_status:
+    "读剧目六段阶段（选题 → 大纲 → 剧本 → 资产 → 分镜 → 视频）的派生状态：每段完成度、缺口清单、下一步该做什么、该读哪份技能文件。预约前四段看剧目字段，资产/分镜/视频看每集既有的 productionStage 游标。开工前先读它，按 next 里的动作顺序推进，不要跨段抢做；阶段游标由制作操作推进，不要手工改。",
   drama_get_planning:
     "读取剧目级策划真值：选题卡、全剧故事线、大纲补充段（时空背景/角色名单/三幕/结局）、原剧本字节数，以及「选题→大纲→剧本」三步各自的完成度（剧本会列出还没写的集号）。省略 dramaId 时读当前活动剧目；需要原剧本全文时传 includeSourceScript=true。只是读，不生成。",
   drama_update_planning:

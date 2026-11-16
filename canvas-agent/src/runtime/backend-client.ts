@@ -257,7 +257,8 @@ export class BackendClient {
   async listCanvasProjects(
     options: { episodeId?: string } = {},
   ): Promise<Record<string, unknown>[]> {
-    const params = new URLSearchParams();
+    // 后端列表默认只回摘要，这里需要 nodes 做定位，显式要全量。
+    const params = new URLSearchParams({ full: "true" });
     if (options.episodeId) params.set("episodeId", options.episodeId);
     const qs = params.toString();
     const data = await this.get<{
@@ -338,6 +339,26 @@ export class BackendClient {
       canvas?: Record<string, unknown> | null;
       nextAction?: Record<string, unknown>;
     }>(`/drama/episodes/${encodeURIComponent(episodeId)}${query}`);
+  }
+
+  async getAssetSpec(assetId: string) {
+    return this.get<Record<string, unknown>>(`/assets/${encodeURIComponent(assetId)}/spec`);
+  }
+
+  async updateAssetSpec(assetId: string, patch: Record<string, unknown>) {
+    return this.patch<Record<string, unknown>>(`/assets/${encodeURIComponent(assetId)}/spec`, patch);
+  }
+
+  async listDramaAssetSpecs(dramaId: string) {
+    return this.get<Record<string, unknown>>(`/drama/${encodeURIComponent(dramaId)}/asset-specs`);
+  }
+
+  async getDramaStage(dramaId: string) {
+    return this.get<Record<string, unknown>>(`/drama/${encodeURIComponent(dramaId)}/stage`);
+  }
+
+  async getDramaStageByCanvas(canvasId: string) {
+    return this.get<Record<string, unknown>>(`/drama/by-canvas/${encodeURIComponent(canvasId)}/stage`);
   }
 
   async getDramaPlanning(dramaId: string, includeSourceScript = false) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CREATIVE_LAUNCH_LIMIT, CREATIVE_LAUNCH_STORAGE_KEY, collectOutputs, launchStatus, launchTextResults, nextCreativeLaunches, outputMedia, projectCover, pruneCreativeLaunches, readCreativeLaunches, retainProjectCovers, taskDestination, writeCreativeLaunches, type CreativeLaunch } from "./workbench-data";
+import { CREATIVE_LAUNCH_LIMIT, CREATIVE_LAUNCH_STORAGE_KEY, collectOutputs, launchStatus, launchTextResults, nextCreativeLaunches, outputMedia, projectCover, pruneCreativeLaunches, readCreativeLaunches, resolveLaunchOutputs, retainProjectCovers, taskDestination, writeCreativeLaunches, type CreativeLaunch } from "./workbench-data";
 import type { BackendGenerationLog } from "../../services/backend-api";
 import type { CanvasProject } from "../../stores/canvas/use-canvas-store";
 
@@ -138,6 +138,23 @@ test("launch status falls back to generation logs when the task left the recent 
     assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "cancelled" })]), "cancelled");
     assert.equal(launchStatus(undefined, [generationLog({ id: "l", status: "running" })]), "queued");
     assert.equal(launchStatus(undefined, []), "queued");
+});
+
+test("canvas-free conversation launches persist and surface task media without a project", () => {
+    const canvasFree: CreativeLaunch = { taskId: "conversation-1", mode: "image", prompt: "a cat", model: "local-comfyui::2.1", createdAt: "2026-11-16T05:00:00.000Z", params: {} };
+    const storage = memoryStorage(JSON.stringify([canvasFree]));
+    assert.deepEqual(readCreativeLaunches(storage, Date.parse(canvasFree.createdAt) + 1000).map(item => item.taskId), ["conversation-1"]);
+    const task = {
+        id: "conversation-1", status: "succeeded" as const, progress: 1,
+        result: { media: [{ url: "/media/cat.png", storageKey: "image:cat", mimeType: "image/png", filename: "cat.png", bytes: 1, width: 1024, height: 1024, durationMs: null }] },
+    };
+    const outputs = resolveLaunchOutputs(task, [], canvasFree);
+    assert.equal(outputs.length, 1);
+    assert.equal(outputs[0].kind, "image");
+    assert.equal(outputs[0].log.projectId, "");
+    // 新建画布补日志后，同一份媒体同时出现在日志与任务详情里，只保留一条。
+    const log = generationLog({ id: "l", status: "success", createdAt: canvasFree.createdAt, outputs: [{ url: "/media/cat.png", storageKey: "image:cat", mimeType: "image/png" }] });
+    assert.equal(resolveLaunchOutputs(task, [log], canvasFree).length, 1);
 });
 
 test("text results prefer the task payload and only read completed text outputs", () => {

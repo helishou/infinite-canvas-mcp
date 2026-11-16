@@ -31,7 +31,10 @@ export type EngineImageRequest = {
     fields: Record<string, unknown>;
     /** data URL 或 http(s) 地址，按工作流图片槽位顺序。 */
     images?: string[];
+    /** OpenAI 标准参数：画布的尺寸/质量/张数也走这条，否则引擎只能用工作流默认值。 */
     size?: string;
+    quality?: string;
+    count?: number;
 };
 
 export type EngineVideoRequest = {
@@ -58,19 +61,9 @@ export class EngineRequestError extends Error {
 export class CanvasEngineClient {
     constructor(
         private readonly baseUrl: string,
-        private readonly token?: string,
+        readonly token?: string,
         private readonly timeoutMs = DEFAULT_TIMEOUT_MS,
     ) {}
-
-    /** 设置里配了 `engine.url`（或缺省时环境变量 `CANVAS_ENGINE_URL`）才启用；都没配时画布维持本地执行器。 */
-    static fromSettings(settings: SettingStore): CanvasEngineClient | null {
-        const url = String(settings.get("engine.url") ?? "").trim() || String(process.env.CANVAS_ENGINE_URL ?? "").trim();
-        if (!url) return null;
-        const token = String(settings.get("engine.token") ?? "").trim() || String(process.env.CANVAS_ENGINE_TOKEN ?? "").trim();
-        return new CanvasEngineClient(url.replace(/\/+$/, ""), token || undefined);
-    }
-
-    get url() { return this.baseUrl; }
 
     private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
         const controller = new AbortController();
@@ -155,8 +148,11 @@ export class CanvasEngineClient {
         while (Date.now() < deadline) {
             const body = await this.request<{ status?: string; media?: EngineMedia[]; error?: string | null }>(`/v1/videos/${encodeURIComponent(taskId)}`);
             const status = String(body.status ?? "");
-            if (["succeeded", "failed", "cancelled"].includes(status)) {
-                return { status, media: body.media ?? [], error: body.error ?? undefined };
+            // 引擎按 OpenAI 词表返回 queued/in_progress/completed/failed；
+            // 老代码只认内部词 succeeded，会一直等到超时（节点永远停在 loading）。
+            if (["succeeded", "completed", "failed", "cancelled", "canceled"].includes(status)) {
+                const normalized = status === "completed" ? "succeeded" : status === "canceled" ? "cancelled" : status;
+                return { status: normalized, media: body.media ?? [], error: body.error ?? undefined };
             }
             await new Promise((resolve) => setTimeout(resolve, pollMs));
         }
@@ -172,6 +168,8 @@ export class CanvasEngineClient {
                 fields: request.fields,
                 ...(request.images?.length ? { images: request.images } : {}),
                 ...(request.size ? { size: request.size } : {}),
+                ...(request.quality ? { quality: request.quality } : {}),
+                ...(request.count && request.count > 1 ? { n: request.count } : {}),
             }),
         });
         return { taskId: String(body.task_id ?? ""), media: (body.data ?? []).map((item) => ({ url: String(item.url ?? "") })) };
@@ -238,4 +236,76 @@ export async function importEngineMedia(
         });
     }
     return imported;
+}
+
+/**
+ * 通用 OpenAI 图片调用（不依赖引擎包里的 provider）。
+ *
+ * 画布对「任意 OpenAI 兼容服务」的图片能力就走这一条：有参考图打 `/v1/images/edits`，
+ * 没有打 `/v1/images/generations`；`data[].url` 与 `data[].b64_json` 都支持。
+ * 这样画布不再需要 import 引擎的 chatgpt-image，渠道填个 baseUrl 就能接。
+ */
+export type OpenAIImageInput = {
+    baseUrl: string;
+    token?: string;
+    model: string;
+    prompt?: string;
+    size?: string;
+    quality?: string;
+    count?: number;
+    references?: Array<{ mimeType: string; data: Buffer }>;
+    /** 渠道级额外参数：原样并进请求体（引擎认 params / overrides / 任意字段名；普通 OpenAI 服务会忽略未知键）。 */
+    extra?: Record<string, unknown>;
+};
+
+export async function generateImagesOpenAI(input: OpenAIImageInput): Promise<{ urls: string[]; blobs: Array<{ mimeType: string; data: Buffer }> }> {
+    const base = input.baseUrl.replace(/\/+$/, "").replace(/\/v1$/i, "");
+    const headers: Record<string, string> = input.token ? { authorization: `Bearer ${input.token}` } : {};
+    const count = Math.max(1, Math.min(4, Math.floor(input.count || 1)));
+    const references = input.references ?? [];
+
+    let response: Response;
+    if (references.length) {
+        const form = new FormData();
+        form.append("model", input.model);
+        if (input.prompt) form.append("prompt", input.prompt);
+        if (input.size) form.append("size", input.size);
+        if (input.quality) form.append("quality", input.quality);
+        form.append("n", String(count));
+        if (input.extra && Object.keys(input.extra).length) form.append("params", JSON.stringify(input.extra));
+        references.forEach((reference, index) => {
+            const ext = reference.mimeType.includes("jpeg") ? "jpg" : reference.mimeType.split("/").pop() || "png";
+            form.append("image", new Blob([new Uint8Array(reference.data)], { type: reference.mimeType || "image/png" }), `ref-${index}.${ext}`);
+        });
+        response = await fetch(`${base}/v1/images/edits`, { method: "POST", headers, body: form, signal: AbortSignal.timeout(600_000) });
+    } else {
+        response = await fetch(`${base}/v1/images/generations`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({
+                model: input.model,
+                prompt: input.prompt ?? "",
+                ...(input.size ? { size: input.size } : {}),
+                ...(input.quality ? { quality: input.quality } : {}),
+                n: count,
+                response_format: "url",
+                ...(input.extra && Object.keys(input.extra).length ? input.extra : {}),
+            }),
+            signal: AbortSignal.timeout(600_000),
+        });
+    }
+
+    if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`图片接口返回 ${response.status}：${text.slice(0, 300)}`);
+    }
+    const payload = await response.json() as { data?: Array<{ url?: string; b64_json?: string }> };
+    const urls: string[] = [];
+    const blobs: Array<{ mimeType: string; data: Buffer }> = [];
+    for (const item of payload.data ?? []) {
+        if (item.url) urls.push(item.url);
+        else if (item.b64_json) blobs.push({ mimeType: "image/png", data: Buffer.from(item.b64_json, "base64") });
+    }
+    if (!urls.length && !blobs.length) throw new Error("图片接口没有返回任何产物");
+    return { urls, blobs };
 }

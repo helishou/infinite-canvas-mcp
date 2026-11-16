@@ -171,6 +171,22 @@ test("storyboard image mode is an explicit production and drama-plan setting", (
     assert.equal(productionEditSchema.safeParse({ operationId: "stage-none", expectedRevision: 0, ops: [{ type: "set_settings", patch: { parallelScenes: true } }] }).success, true);
 });
 
+test("drama plan carries source split and media rhythm without breaking old plans", () => {
+    // 老规划没有这两个字段：解析后拿到默认值（全部章节、一章一集、逐项确认）。
+    const legacy = dramaProductionPlanSchema.parse({ sourceScript: "第一章 一" });
+    assert.deepEqual(legacy.sourceSplit, { excluded: [], perEpisode: 1, maxChars: 0 });
+    assert.equal(legacy.mediaProductionMode, "per_item");
+    // 用户选择：预留章、每 N 章一集、只跑文本。
+    const chosen = dramaProductionPlanSchema.parse({ sourceSplit: { excluded: [2, 5], perEpisode: 3, maxChars: 3000 }, mediaProductionMode: "prompt_only" });
+    assert.deepEqual(chosen.sourceSplit.excluded, [2, 5]);
+    assert.equal(chosen.sourceSplit.perEpisode, 3);
+    assert.equal(chosen.mediaProductionMode, "prompt_only");
+    // 边界：每集章数有上限 12，未知节奏被拒。
+    assert.equal(dramaProductionPlanSchema.safeParse({ sourceSplit: { perEpisode: 13 } }).success, false);
+    assert.equal(dramaProductionPlanSchema.safeParse({ sourceSplit: { excluded: [0] } }).success, false);
+    assert.equal(dramaProductionPlanSchema.safeParse({ mediaProductionMode: "auto" }).success, false);
+});
+
 test("new word policy accepts 2901 and 6500 words without truncation, while the historical policy retains its ceiling", () => {
     const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
     director.source.segments = [{ id: "segment", mode: "Ref2VA" }];

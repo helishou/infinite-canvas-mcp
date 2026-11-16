@@ -1,7 +1,10 @@
 /** 前端配置的读写 API（结构化数据统一存储在 backend SQLite）。 */
 import { request } from "./backend-api";
 
-export type StructuredSettingScope = "webdav" | "prompt-sources" | "custom-prompts" | "image-workbench-references";
+export type StructuredSettingScope = "webdav" | "prompt-sources" | "custom-prompts" | "image-workbench-references" | "engine";
+
+/** 独立执行引擎（media-engine）配置：填了 url 画布的图片/视频生成改走引擎的 OpenAI 协议。 */
+export type EngineSetting = { url?: string; token?: string };
 
 export type FrontendSettings = {
     /** Individual keys let concurrent windows pin different projects without replacing a shared list. */

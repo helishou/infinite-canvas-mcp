@@ -3,7 +3,7 @@ import { productionShots, shotTitle } from "@/lib/production-source";
 import type { EpisodeProduction } from "@/services/backend-api";
 import type { DirectorWorkspace } from "./director-panel";
 
-export type SeriesWorkspaceView = "planning" | "episodes" | "shared" | "adapt";
+export type SeriesWorkspaceView = "planning" | "episodes" | "shared";
 /** Episode selector sentinel: the first option routes back to the series planning view. */
 export const seriesPlanningOption = "series:planning";
 export type ProductionWorkspaceScope = "episode" | "canvas" | "shared-assets";
@@ -13,7 +13,9 @@ export type ProductionNavigationGroup = { id: string; labelKey: string; items: P
 export const productionWorkspaces: readonly DirectorWorkspace[] = ["series", "overview", "story", "assets", "shots", "continuity", "clips", "production", "advanced"];
 
 export function seriesWorkspaceView(value: string | null): SeriesWorkspaceView | undefined {
-    return value === "planning" || value === "episodes" || value === "shared" || value === "adapt" ? value : undefined;
+    // 旧链接 ?seriesView=adapt：小说改编已并入剧目规划的原剧本页签，落到规划页。
+    if (value === "adapt") return "planning";
+    return value === "planning" || value === "episodes" || value === "shared" ? value : undefined;
 }
 
 export function productionNavigationGroups({ hasSeries, scope, setup = false, seriesSubviews = false }: { hasSeries: boolean; scope: ProductionWorkspaceScope; setup?: boolean; seriesSubviews?: boolean }): ProductionNavigationGroup[] {
@@ -22,7 +24,6 @@ export function productionNavigationGroups({ hasSeries, scope, setup = false, se
     if (hasSeries) groups.push({ id: "series", labelKey: "director.workspaceHierarchy.fullSeries", items: [
         { id: "series:planning", workspace: "series", seriesView: "planning", labelKey: seriesSubviews ? "director.workspaceHierarchy.planning" : "director.workspaceHierarchy.planningAssets" },
         ...(seriesSubviews ? [{ id: "series:shared", workspace: "series" as const, seriesView: "shared" as const, labelKey: "director.workspaceHierarchy.sharedCanvas" }] : []),
-        ...(seriesSubviews ? [{ id: "series:adapt", workspace: "series" as const, seriesView: "adapt" as const, labelKey: "director.workspaceHierarchy.adapt" }] : []),
         { id: "series:episodes", workspace: "series", seriesView: "episodes", labelKey: "director.workspaceHierarchy.episodes" },
     ] });
     if (setup) return groups;
@@ -37,7 +38,7 @@ export function productionNavigationGroups({ hasSeries, scope, setup = false, se
 }
 
 /** Preserve owner and unrelated URL state; only the previous object's focus is cleared. */
-export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView; seriesTab?: "settings" } = {}) {
+export function productionWorkspaceQuery(search: URLSearchParams, workspace: DirectorWorkspace, options: { embedded?: boolean; target?: { kind: string; id: string }; seriesView?: SeriesWorkspaceView; seriesTab?: "settings" | "source" } = {}) {
     const next = new URLSearchParams(search);
     next.set("workspace", workspace);
     next.delete("target"); next.delete("nodeId"); next.delete("segmentId");

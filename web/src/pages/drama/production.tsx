@@ -16,6 +16,7 @@ import { diagnosticBlocksAction, isSubjectPromptAssembly, productionSceneEntries
 import { backendConnection } from "@/lib/backend-connection";
 import { ensureCanvasDraftLease, getCanvasDraftSessionId } from "@/lib/canvas/canvas-draft-session";
 import { exportAchengDeliveryBundle } from "@/lib/acheng-delivery-export";
+import { DirectorPackBar } from "@/pages/drama/director-pack-bar";
 import { productionSubtitleTracks } from "@/lib/production-subtitles";
 import { buildCalibrationBindings, calibrateSubtitleTracks, clearSubtitleCalibration, readSubtitleCalibration, writeSubtitleCalibration, type SubtitleCalibration } from "@/lib/subtitle-calibration";
 import { runSubtitleTranscribe } from "@/services/api/subtitle-transcribe";
@@ -345,7 +346,11 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
   const editorRootRef = useRef<HTMLElement>(null);
   const routeWorkspace = searchParams.get("workspace") as DirectorWorkspace | null;
   const seriesView = seriesWorkspaceView(searchParams.get("seriesView"));
-  const seriesTab = searchParams.get("seriesTab") === "settings" ? "settings" : undefined;
+  // 旧链接 ?seriesView=adapt：小说改编已并入原剧本页签，落到那里。
+  const rawSeriesTab = searchParams.get("seriesTab");
+  const seriesTab: "settings" | "source" | undefined = searchParams.get("seriesView") === "adapt" && !rawSeriesTab
+    ? "source"
+    : rawSeriesTab === "settings" || rawSeriesTab === "source" ? rawSeriesTab : undefined;
   const routeTarget = searchParams.get("target") || "";
   const routeNodeId = searchParams.get("nodeId") || "";
   const routeSegmentId = searchParams.get("segmentId") || "";
@@ -2135,16 +2140,19 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
           characterVoiceDescription: payload.characterVoiceDescription,
           characterVoiceStorageKey: payload.characterVoiceStorageKey,
           characterVoiceAssetId: payload.characterVoiceAssetId,
+          ...(payload.assetSpec ? { assetSpec: payload.assetSpec } : {}),
         }
         : authoritative.type === "scene" ? {
           sceneName: payload.sceneName ?? "",
           sceneDescription: payload.sceneDescription ?? "",
           sceneImage: payload.sceneImage,
+          ...(payload.assetSpec ? { assetSpec: payload.assetSpec } : {}),
         }
         : {
           propName: payload.propName ?? "",
           propDescription: payload.propDescription ?? "",
           propImage: payload.propImage,
+          ...(payload.assetSpec ? { assetSpec: payload.assetSpec } : {}),
         };
       useCanvasStore.getState().updateProject(canvasId, { nodes: project.nodes.map(node => node.id === target.id ? {
         ...node, title: payload.title.trim(), metadata: { ...node.metadata, ...metadataPatch },
@@ -2438,6 +2446,9 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       <WorkspaceViewSwitcher mode={canvasHost?.visible ? "canvas" : "production"} onSelect={next => { if (next === "canvas") void openWorkspaceCanvas(); else canvasHost?.collapse?.(); }} />
     <div className="mx-auto max-w-[1440px]">
       <ProductionWorkspaceBreadcrumb items={breadcrumbs} />
+      {episode && production && workspace !== "series" && (
+        <DirectorPackBar episode={episode} production={production as unknown as { revision: number; draft?: { director?: { source?: Record<string, unknown> } } }} onImported={() => void load(() => true, true).catch(fail)} />
+      )}
       {!embedded && <div data-production-workspace-heading className="mb-7 flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
         <div className="flex min-w-0 flex-wrap items-center gap-3"><Button type="text" icon={<ArrowLeft className="size-4" />} onClick={() => navigate(backPath)}>{t("director.back")}</Button><div><h1 className="text-xl font-medium tracking-tight sm:text-[26px]">{series ? seriesName || t("director.atomic.seriesWorkbench") : title || t("director.title")}</h1><p className="mt-2 text-xs text-muted-foreground">{episode ? `${t("director.episodeContext", { number: episode.episodeNumber })} · ${title}` : t("director.canvasContext")}</p></div>{series && <Select aria-label={t("director.atomic.chooseEpisode")} value={workspace === "series" ? ((seriesView || "planning") === "episodes" ? undefined : seriesPlanningOption) : episodeId} className="w-full min-w-44 sm:w-56" showSearch optionFilterProp="label" options={[{ value: seriesPlanningOption, label: t("director.workspaceHierarchy.planningAssets") }, ...[...series.episodes].sort((a, b) => a.episodeNumber - b.episodeNumber).map(item => ({ value: item.id, label: `${t("drama.episodeLabel", { number: item.episodeNumber })} · ${item.title}` }))]} onChange={async id => {
           try {

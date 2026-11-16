@@ -3,12 +3,13 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
 import { corsBlockedHint } from "@/lib/api-error";
-import { buildApiUrl, encodeChannelModel, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, encodeChannelModel, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, useConfigStore, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { shouldProxyLocalModelList } from "./local-models";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
+import type { WorkflowField } from "@/types/workflow";
 import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
@@ -1099,3 +1100,55 @@ const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "
     model: "",
     systemPrompt: "",
 };
+
+/**
+ * 拉取渠道模型（带能力提示）：协议仍是标准 `GET {baseUrl}/v1/models`。
+ * 对面回 `capability`（media-engine 会报 image/video/audio）就用它，否则交给调用方按名字判断。
+ * 本地地址没有 CORS，复用画布既有的 `/api/local-models` 代理，不新增接口。
+ */
+export async function fetchChannelModelItems(channel: ModelChannel): Promise<Array<{ name: string; capability?: string }>> {
+    if (channel.kind === "hermes" || channel.kind === "codex-cli") {
+        return (await fetchChannelModels(channel)).map((name) => ({ name }));
+    }
+    if (shouldProxyLocalModelList(channel.baseUrl, channel.apiFormat)) {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ models?: string[]; items?: Array<{ name: string; capability?: string }> }>("POST", "/api/local-models", {
+            baseUrl: channel.baseUrl,
+            apiKey: channel.apiKey,
+            apiFormat: channel.apiFormat,
+        });
+        if (Array.isArray(response.items) && response.items.length) return response.items;
+        return (response.models || []).map((name) => ({ name }));
+    }
+    return (await fetchChannelModels(channel)).map((name) => ({ name }));
+}
+
+/**
+ * 拉一个模型的参数清单（标准 `GET {baseUrl}/v1/models/{id}`）。
+ * 服务端会在详情里带上 `fields`（工作流字段）——本地引擎用它把「自定义参数」暴露给画布；
+ * 普通 OpenAI 服务没有这些扩展字段，返回空数组，界面自然只显示常用参数。
+ */
+export async function fetchChannelModelDetail(selectedModel: string): Promise<{ fields: WorkflowField[]; standardParams: unknown }> {
+    const { config } = useConfigStore.getState();
+    const channel = resolveModelChannel(config, selectedModel);
+    if (!channel?.baseUrl) return { fields: [], standardParams: null };
+    const model = modelOptionName(selectedModel).trim();
+    const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/i.test(channel.baseUrl);
+    if (loopback) {
+        const { request } = await import("@/services/backend-api");
+        const response = await request<{ ok?: boolean; fields?: WorkflowField[]; standardParams?: unknown }>("POST", "/api/local-model-detail", {
+            baseUrl: channel.baseUrl,
+            apiKey: channel.apiKey,
+            model,
+        });
+        return { fields: response.fields || [], standardParams: response.standardParams ?? null };
+    }
+    const detail = await fetchChannelModels(channel); // 远端先确认可达，再取详情
+    if (!detail.includes(model)) return { fields: [], standardParams: null };
+    const response = await fetch(`${channel.baseUrl.replace(/\/+$/, "").replace(/\/v1$/i, "")}/v1/models/${encodeURIComponent(model)}`, {
+        headers: channel.apiKey ? { authorization: `Bearer ${channel.apiKey}` } : {},
+    });
+    if (!response.ok) return { fields: [], standardParams: null };
+    const payload = await response.json() as { fields?: WorkflowField[]; standard_params?: unknown };
+    return { fields: payload.fields || [], standardParams: payload.standard_params ?? null };
+}

@@ -453,6 +453,30 @@
         box-shadow: 0 18px 54px rgba(0, 0, 0, 0.45);
     }
 
+    /* Tailwind preflight 给 legend 设了 1.5em（24px）、给 button/input 设了 inherit（16px），
+       会盖住设置面板组件上的 text-xs/text-sm 工具类，浮层里出现两倍大的标题与按钮。
+       这里只在设置浮层作用域内恢复紧凑层级，不影响画布侧栏其他区域。 */
+    .canvas-image-settings-popover legend.font-semibold {
+        font-size: 12.5px !important;
+    }
+
+    .canvas-image-settings-popover legend {
+        font-size: 11.5px !important;
+    }
+
+    .canvas-image-settings-popover button,
+    .canvas-image-settings-popover input {
+        font-size: 12.5px !important;
+    }
+
+    .canvas-image-settings-popover summary {
+        font-size: 12px !important;
+    }
+
+    .canvas-image-settings-popover .text-lg {
+        font-size: 15px !important;
+    }
+
     .canvas-node-info-modal .ant-modal-header {
         padding-right: 0;
     }
@@ -720,4 +744,457 @@ body { font-family: var(--font-sans); }
 .ant-message,
 .ant-message * {
     pointer-events: none !important;
+}
+
+/* ------------------------------------------------------------------ *
+ * 首页创作台视觉层（ch-* = creative home）
+ * 只负责明暗主题下的层次、留白、强调色与交互反馈；结构、语义与
+ * data-testid 全部由组件保留。颜色一律取自主题变量，浅色主题同样可用。
+ * ------------------------------------------------------------------ */
+
+:root,
+.dark {
+    --ch-accent-soft: color-mix(in srgb, var(--primary) 14%, transparent);
+    --ch-accent-line: color-mix(in srgb, var(--primary) 44%, transparent);
+    --ch-hairline: color-mix(in srgb, var(--border) 74%, transparent);
+    --ch-panel: color-mix(in srgb, var(--card) 92%, var(--background));
+    --ch-hero-glow: color-mix(in srgb, var(--primary) 14%, transparent);
+    --ch-shadow: 0 20px 48px -32px rgba(28, 25, 23, .40);
+    --ch-shadow-soft: 0 10px 30px -24px rgba(28, 25, 23, .45);
+    --ch-shadow-hover: 0 16px 36px -24px rgba(28, 25, 23, .55);
+}
+
+.dark {
+    --ch-hero-glow: color-mix(in srgb, var(--primary) 17%, transparent);
+    --ch-shadow: 0 26px 60px -34px rgba(0, 0, 0, .85);
+    --ch-shadow-soft: 0 12px 32px -24px rgba(0, 0, 0, .9);
+    --ch-shadow-hover: 0 18px 40px -24px rgba(0, 0, 0, .95);
+}
+
+/* Hero：对齐影策的极简首页——标题与输入区直接落在页面背景上，不再包一层卡片框。 */
+.ch-hero {
+    position: relative;
+    margin-bottom: 24px;
+    padding: 8px 0 0;
+}
+
+.ch-heading {
+    position: relative;
+    margin-bottom: 22px;
+    text-align: center;
+}
+
+.ch-eyebrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 14px;
+    color: var(--primary);
+}
+
+.ch-eyebrow::before,
+.ch-eyebrow::after {
+    content: "";
+    width: 36px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--primary) 62%, transparent));
+}
+
+.ch-eyebrow::after {
+    transform: rotate(180deg);
+}
+
+.ch-eyebrow svg {
+    width: 14px;
+    height: 14px;
+}
+
+.ch-title {
+    font-size: clamp(26px, 2.6vw, 34px);
+    line-height: 1.28;
+    font-weight: 650;
+    letter-spacing: -.02em;
+    background: linear-gradient(100deg, var(--foreground) 16%, color-mix(in srgb, var(--primary) 70%, var(--foreground)) 58%, var(--foreground) 94%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.ch-subtitle {
+    margin-top: 9px;
+    font-size: 13.5px;
+    line-height: 22px;
+    color: var(--muted-foreground);
+}
+
+.ch-history.ant-btn {
+    position: absolute;
+    top: -4px;
+    right: 0;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--ch-hairline);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--card) 68%, transparent);
+    color: var(--muted-foreground);
+    font-size: 12px;
+}
+
+.ch-history.ant-btn:hover {
+    color: var(--foreground);
+    border-color: var(--ch-accent-line);
+    background: var(--ch-accent-soft);
+}
+
+/* Composer：单层浮起卡片 + 聚焦光环 */
+.ch-composer {
+    position: relative;
+    max-width: 920px;
+    margin: 0 auto;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+    border-radius: 18px;
+    background: var(--ch-panel);
+    box-shadow: var(--ch-shadow);
+    transition: border-color .2s ease, box-shadow .2s ease;
+}
+
+.ch-composer:focus-within {
+    border-color: var(--ch-accent-line);
+    box-shadow: var(--ch-shadow), 0 0 0 3px color-mix(in srgb, var(--primary) 11%, transparent);
+}
+
+.ch-tabs {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--ch-hairline);
+}
+
+.ch-tab {
+    display: inline-flex;
+    flex: 1 1 0;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 0;
+    height: 38px;
+    padding: 0 12px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--muted) 42%, transparent);
+    color: var(--muted-foreground);
+    font-size: 13.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background .18s ease, color .18s ease, box-shadow .18s ease;
+}
+
+.ch-tab:hover {
+    background: color-mix(in srgb, var(--muted) 78%, transparent);
+    color: var(--foreground);
+}
+
+.ch-tab[aria-selected="true"] {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-weight: 600;
+    box-shadow: 0 8px 18px -10px color-mix(in srgb, var(--primary) 85%, transparent);
+}
+
+.ch-tab[aria-selected="true"]:hover {
+    background: var(--primary);
+    color: var(--primary-foreground);
+}
+
+.ch-tab svg {
+    width: 15px;
+    height: 15px;
+    flex: none;
+}
+
+.ch-draft {
+    display: block;
+    width: 100%;
+    min-height: 98px;
+    padding: 18px 22px 12px;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--foreground);
+    font-size: 15px;
+    line-height: 26px;
+    resize: none;
+}
+
+.ch-draft::placeholder {
+    color: color-mix(in srgb, var(--muted-foreground) 74%, transparent);
+}
+
+.ch-params {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    padding: 9px 18px;
+    border-top: 1px solid var(--ch-hairline);
+    background: color-mix(in srgb, var(--muted) 34%, transparent);
+}
+
+.ch-param-label {
+    margin-right: 5px;
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    letter-spacing: .08em;
+}
+
+.ch-param-divider {
+    width: 1px;
+    height: 16px;
+    margin: 0 8px;
+    background: var(--border);
+}
+
+.ch-pill {
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 13px;
+    line-height: 1;
+    transition: background .16s ease, color .16s ease, border-color .16s ease;
+}
+
+.ch-pill:hover {
+    border-color: var(--border);
+    background: color-mix(in srgb, var(--card) 70%, transparent);
+    color: var(--foreground);
+}
+
+.ch-pill[aria-pressed="true"] {
+    border-color: var(--ch-accent-line);
+    background: var(--ch-accent-soft);
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.ch-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 13px;
+    border-top: 1px solid var(--ch-hairline);
+}
+
+.ch-actions .ant-btn {
+    border-radius: 9px;
+}
+
+.ch-tool.ant-btn {
+    border-color: color-mix(in srgb, var(--border) 55%, transparent);
+    background: color-mix(in srgb, var(--muted) 72%, transparent);
+    color: var(--muted-foreground);
+}
+
+.ch-tool.ant-btn:hover {
+    color: var(--foreground);
+    background: var(--muted);
+}
+
+.ch-hint {
+    flex: 1 1 140px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--muted-foreground);
+    font-size: 12px;
+    line-height: 18px;
+    opacity: .78;
+}
+
+.ch-submit.ant-btn {
+    height: 38px;
+    min-width: 116px;
+    padding: 0 18px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    box-shadow: 0 10px 22px -12px color-mix(in srgb, var(--primary) 90%, transparent);
+}
+
+/* antd 把禁用的 primary 按钮刷成灰：这里保留主色只降透明度，主操作始终可见 */
+.ch-submit.ant-btn:disabled,
+.ch-submit.ant-btn[disabled] {
+    border-color: transparent !important;
+    background: var(--primary) !important;
+    color: var(--primary-foreground) !important;
+    opacity: .62;
+    box-shadow: none;
+}
+
+/* 快捷入口：四种柔和色标 + 抬升反馈 */
+.ch-examples {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    max-width: 920px;
+    margin: 16px auto 0;
+}
+
+.ch-example {
+    --ch-tint: var(--chart-1);
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-width: 0;
+    padding: 14px 14px 13px;
+    border: 1px solid var(--ch-hairline);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--card) 78%, transparent);
+    text-align: left;
+    transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.ch-example:nth-child(2) { --ch-tint: var(--chart-2); }
+.ch-example:nth-child(3) { --ch-tint: var(--chart-4); }
+.ch-example:nth-child(4) { --ch-tint: var(--chart-3); }
+
+.ch-example:hover {
+    transform: translateY(-2px);
+    border-color: var(--ch-accent-line);
+    background: var(--card);
+    box-shadow: var(--ch-shadow-hover);
+}
+
+.ch-example-icon {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--ch-tint) 18%, transparent);
+    color: var(--ch-tint);
+}
+
+.ch-example-icon svg { width: 16px; height: 16px; }
+
+.ch-example-title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--foreground);
+    font-size: 13.5px;
+    line-height: 19px;
+    font-weight: 600;
+}
+
+.ch-example-hint {
+    display: block;
+    overflow: hidden;
+    margin-top: 2px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted-foreground);
+    font-size: 11.5px;
+    line-height: 17px;
+}
+
+.ch-example-arrow {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    width: 13px;
+    height: 13px;
+    color: var(--ch-tint);
+    opacity: 0;
+    transform: translate(-3px, 3px);
+    transition: opacity .18s ease, transform .18s ease;
+}
+
+.ch-example:hover .ch-example-arrow { opacity: 1; transform: none; }
+
+/* 下半部分：与创作台同质的卡片表面 */
+.ch-surface {
+    border: 1px solid var(--ch-hairline);
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--card) 82%, transparent);
+    box-shadow: var(--ch-shadow-soft);
+}
+
+.ch-recent-tile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 78px;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--ch-hairline);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--card) 76%, transparent);
+    text-align: left;
+    transition: transform .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.ch-recent-tile:hover {
+    transform: translateY(-2px);
+    border-color: var(--ch-accent-line);
+    background: var(--card);
+    box-shadow: var(--ch-shadow-hover);
+}
+
+.ch-recent-thumb {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    overflow: hidden;
+    border-radius: 11px;
+    background: var(--muted);
+    color: var(--muted-foreground);
+}
+
+.ch-output-cover {
+    aspect-ratio: 4 / 3;
+    overflow: hidden;
+    border: 1px solid var(--ch-hairline);
+    border-radius: 12px;
+    background: var(--muted);
+    transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.ch-output-card:hover .ch-output-cover {
+    border-color: var(--ch-accent-line);
+    box-shadow: var(--ch-shadow-hover);
+}
+
+@media (max-width: 1023px) {
+    .ch-examples { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+    .ch-hero { padding: 8px 0 0; }
+    .ch-heading { margin-bottom: 20px; }
+    .ch-history.ant-btn { position: static; margin-top: 10px; }
+    .ch-hint { display: none; }
+    .ch-tab { gap: 5px; padding: 0 8px; font-size: 12.5px; }
+    .ch-tab svg { width: 13px; height: 13px; }
+}
+
+@media (max-width: 520px) {
+    .ch-examples { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ch-example:hover,
+    .ch-recent-tile:hover { transform: none; }
 }

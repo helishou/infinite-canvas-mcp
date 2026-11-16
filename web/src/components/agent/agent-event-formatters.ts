@@ -307,6 +307,21 @@ export function eventUsage(event: AgentEventPayload): AgentTokenUsage {
     };
 }
 
+/**
+ * usage.updated 可能只带部分字段：Hermes 的 ACP `usage_update` 只有本轮上下文占用（input），
+ * 输出/缓存只在回合结束的 PromptResponse.usage 里才有。缺失字段必须沿用上一次真实回执，
+ * 否则每轮一开始就被补成 0，界面上「缓存／输出」永远显示 0。
+ */
+export function mergeUsage(previous: AgentTokenUsage | null, event: AgentEventPayload): AgentTokenUsage {
+    const next = eventUsage(event);
+    const reported = (key: string) => typeof objectField(event.usage, key) === "number";
+    return {
+        input: reported("input_tokens") ? next.input : previous?.input ?? 0,
+        cached: reported("cached_input_tokens") ? next.cached : previous?.cached ?? 0,
+        output: reported("output_tokens") ? next.output : previous?.output ?? 0,
+    };
+}
+
 function shortId(value?: string) {
     return value ? value.slice(0, 8) : "";
 }

@@ -67,6 +67,7 @@ import { classifyErrorDisposition, taskFailureDisposition } from "./error-taxono
 import type { McpObservabilityStore } from "./stores/types.js";
 import { PreparedH3UpdateFiles } from "./canvas/prepared-h3-update-files.js";
 import { observeReadRequest, observeReadResult, observeTaskReadResult, isStaticRead } from "./mcp-read-observation.js";
+import { recordStageActivity } from "./drama/stage-activity.js";
 
 type McpProjectSource = "browser" | "session" | "automatic";
 type BrowserActiveProjectResolver = () => string | null;
@@ -161,6 +162,7 @@ async function createBackendMcpInstance(
   }, { instructions: `此会话工具集为 ${profile}，schema=${schemaMode}。未列出或禁用的工具不在此会话提供；需要完整工具集时使用新的 /mcp?profile=full 连接，需要完整参数声明时传 schema=full。工具集不代替用户授权。${schemaMode === "compact" ? "production_edit 使用精简声明，嵌套参数详情通过 production_get_contract 按需读取，提交仍严格校验；已读同版本合同可复用。" : ""}` });
   const visible = (name: string) => isToolInProfile(profile, name);
   installMcpToolProfile(server, profile);
+  installMcpStageActivity(server);
   const context = buildPluginMcpContext(directBackend, backendComfy);
   const registry = new PluginMcpRegistry(server, context, visible);
   const schemas = toolNames.filter(visible).map(name => ({ name, description: schemaMode === "compact" && name === "production_edit" ? COMPACT_EDIT_DESCRIPTION : toolDescriptions[name], schema: zodToolContract(schemaMode === "compact" && name === "production_edit" ? compactProductionEditSchema : toolInputSchemas[name]) }));
@@ -530,6 +532,9 @@ const BACKEND_OWNED_TOOL_NAMES = new Set<string>([
   "drama_update_episode",
   "drama_delete_episode",
   "drama_get_planning",
+  "drama_stage_status",
+  "asset_spec_get",
+  "asset_spec_update",
   "drama_update_planning",
   "production_compile",
   "production_get_compilation",
@@ -1804,6 +1809,40 @@ function registerBackendCanvasTools(
       });
     },
   );
+  server.registerTool("asset_spec_get", {
+    description: toolDescriptions.asset_spec_get,
+    inputSchema: toolInputSchemas.asset_spec_get,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.asset_spec_get.parse(rawInput);
+    if (input.assetId) return textResult(await backendApi.getAssetSpec(input.assetId.trim()));
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    return textResult(await backendApi.listDramaAssetSpecs(dramaId));
+  });
+  server.registerTool("asset_spec_update", {
+    description: toolDescriptions.asset_spec_update,
+    inputSchema: toolInputSchemas.asset_spec_update,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.asset_spec_update.parse(rawInput);
+    const result = await backendApi.updateAssetSpec(input.assetId.trim(), {
+      kind: input.kind,
+      spec: input.spec,
+      ...(input.wantPrompt ? { wantPrompt: true } : {}),
+    });
+    return textResult(result);
+  });
+  server.registerTool("drama_stage_status", {
+    description: toolDescriptions.drama_stage_status,
+    inputSchema: toolInputSchemas.drama_stage_status,
+  }, async (rawInput) => {
+    const input = toolInputSchemas.drama_stage_status.parse(rawInput);
+    const active = input.dramaId ? undefined : await resolveMcpDramaId(state, backendApi, getBrowserActiveProjectId);
+    const dramaId = String(input.dramaId || active?.dramaId || "").trim();
+    if (!dramaId) throw new Error("当前网页活动画布没有所属剧目；请打开剧目画布或调用 drama_set_active_project 显式选择");
+    const stage = await backendApi.getDramaStage(dramaId);
+    return textResult({ ...stage, activeDramaId: dramaId });
+  });
   server.registerTool("drama_get_planning", {
     description: toolDescriptions.drama_get_planning,
     inputSchema: toolInputSchemas.drama_get_planning,
@@ -2322,7 +2361,7 @@ export function buildCanvasImageRequest(
     ...recordOf(metadata.params || metadata.customFieldValues),
     ...recordOf(op.params),
   };
-  const size = normalizeGptImageSize(metadata.size);
+  const size = normalizeGptImageSize(metadata.size, model);
   const [width, height] = size.split("x").map(Number);
   return {
     projectId: String(project.id || "") || undefined,
@@ -2375,13 +2414,32 @@ function buildCanvasTextRequest(
   };
 }
 
-function normalizeGptImageSize(value: unknown) {
+/**
+ * 画布尺寸归一：gpt-image 只认它自己的三个档位（1024x1024 / 1536x1024 / 1024x1536），
+ * 而 1536x1024 实际是 3:2——本地引擎/ComfyUI 模型若照搬会把「16:9」画成 3:2，
+ * 所以只有 gpt-image 走档位换算，其它模型按真实比例算像素。
+ */
+function normalizeGptImageSize(value: unknown, model?: unknown) {
   const size = String(value || "1024x1024")
     .trim()
     .toLowerCase();
   if (/^\d+x\d+$/.test(size)) return size;
-  if (size === "16:9") return "1536x1024";
-  if (size === "9:16") return "1024x1536";
+  const gptImage = /^gpt-image/i.test(String(model || "").trim()) || /(^|[^a-z])gpt-image/i.test(String(model || ""));
+  const ratio = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(size);
+  if (ratio) {
+    if (gptImage) {
+      if (size === "16:9") return "1536x1024";
+      if (size === "9:16") return "1024x1536";
+      return "1024x1024";
+    }
+    const w = Number(ratio[1]);
+    const h = Number(ratio[2]);
+    if (w > 0 && h > 0) {
+      const shortSide = 1024;
+      const longSide = Math.round((shortSide * Math.max(w, h) / Math.min(w, h)) / 16) * 16;
+      return w >= h ? `${longSide}x${shortSide}` : `${shortSide}x${longSide}`;
+    }
+  }
   return "1024x1024";
 }
 
@@ -4328,6 +4386,24 @@ type McpToolRegistration = (
   options: unknown,
   handler: (input: Record<string, unknown>, extra: { signal: AbortSignal }) => unknown | Promise<unknown>,
 ) => ReturnType<McpServer["registerTool"]>;
+
+/**
+ * 记录「agent 正在跑哪一段」：任何工具调用落到阶段上就记一笔，
+ * 页面据此显示实时提示，不依赖模型自报。
+ */
+function installMcpStageActivity(server: McpServer) {
+  const target = server as unknown as { registerTool: McpToolRegistration };
+  const register = target.registerTool.bind(server);
+  target.registerTool = (name, options, handler) => register(name, options, async (rawInput, extra) => {
+    const result = await handler(rawInput, extra);
+    try {
+      const input = rawInput as Record<string, unknown>;
+      const key = String(input?.dramaId || input?.episodeId || input?.id || "").trim();
+      if (key) recordStageActivity(key, name, input);
+    } catch { /* 活动记录失败不影响工具结果 */ }
+    return result;
+  });
+}
 
 function installMcpToolProfile(server: McpServer, profile: McpProfile) {
   const target = server as unknown as { registerTool: McpToolRegistration };

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { defaultBaseUrlForApiFormat, guessCapability, MODEL_INPUT_SCENARIOS, MODEL_SCENARIO_LABELS, normalizeChannelModels, WORKFLOW_ROUTE_UNSUPPORTED, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
-import { fetchChannelModels } from "@/services/api/image";
+import { fetchChannelModelItems, fetchChannelModels } from "@/services/api/image";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -17,6 +17,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
     const [selectOpen, setSelectOpen] = useState(false);
     const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null);
     const [testingModels, setTestingModels] = useState<string[]>([]);
+    const [extraText, setExtraText] = useState("");
     const apiFormatOptions: Array<{ label: string; value: ApiCallFormat }> = [
         { label: "OpenAI", value: "openai" },
         { label: "OpenAI Chat", value: "openai-chat" },
@@ -27,6 +28,7 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
     useEffect(() => {
         if (open && channel) {
             setDraft(channel);
+            setExtraText(channel?.extraBody && Object.keys(channel.extraBody).length ? JSON.stringify(channel.extraBody, null, 2) : "");
             setTestingModels([]);
         }
     }, [open, channel]);
@@ -59,9 +61,21 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
     /** Codex 与 Hermes 都是原生引擎渠道：不需要 baseUrl/apiKey，模型只能是文本。 */
     const isCodex = draft.kind === "codex-cli" || draft.kind === "hermes";
 
-    const applySelection = (names: string[]) => {
+    const applySelection = async (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
-        setModels(names.map((name) => map.get(name) || { name, capability: isCodex ? "text" : guessCapability(name) }));
+        // 对面 /v1/models 带 capability 就用它（引擎会报 image/video/audio/text），否则按名字猜
+        const hints = new Map<string, string>();
+        try {
+            for (const item of await fetchChannelModelItems(draft)) {
+                if (item.capability) hints.set(item.name, item.capability);
+            }
+        } catch {
+            /* 拉不到提示不影响选模型 */
+        }
+        setModels(names.map((name) => map.get(name) || {
+            name,
+            capability: isCodex ? "text" : ((hints.get(name) as ModelCapability | undefined) ?? guessCapability(name)),
+        }));
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
@@ -71,7 +85,21 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
 
     const save = () => {
         if (isCodex && draft.models.some(model => model.capability !== "text" || model.script?.trim())) { message.error(t("config.channelEditor.codexModelsOnly")); return; }
-        onSave({ ...draft, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
+        let extraBody: Record<string, unknown> | undefined;
+        if (extraText.trim()) {
+            try {
+                const parsed = JSON.parse(extraText) as unknown;
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                    message.error("额外参数必须是 JSON 对象");
+                    return;
+                }
+                extraBody = parsed as Record<string, unknown>;
+            } catch {
+                message.error("额外参数不是合法 JSON");
+                return;
+            }
+        }
+        onSave({ ...draft, extraBody, name: draft.name.trim() || t("config.channels.unnamed"), models: normalizeChannelModels(draft.models) });
         onClose();
     };
 
@@ -107,6 +135,18 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                 {isCodex && <p className="text-sm text-muted-foreground md:col-span-2">{draft.kind === "hermes" ? "Hermes 渠道：模型名直接写 Hermes 的 modelId，形如 opencode-go:deepseek-v4.1-flash。对话由本机 hermes acp 执行，工具、技能、记忆都在 Hermes 侧。" : t("config.channelEditor.codexHint")}</p>}
                 {!isCodex && <label className="block md:col-span-2">
                     <span className="mb-1 block text-sm font-medium">{t("config.channelEditor.baseUrl")}</span>
+                    {draft.apiFormat === "openai" && !isCodex ? (
+                        <div className="mt-2">
+                            <div className="mb-1 text-xs text-muted-foreground">额外参数（JSON，原样并入 /v1/images/generations；本地引擎可传 params / overrides）</div>
+                            <Input.TextArea
+                                value={extraText}
+                                onChange={(event) => setExtraText(event.target.value)}
+                                placeholder='{"params": {"加速": true}, "overrides": {"11.megapixels": 2}}'
+                                autoSize={{ minRows: 2, maxRows: 6 }}
+                                spellCheck={false}
+                            />
+                        </div>
+                    ) : null}
                     <Input value={draft.baseUrl} onChange={(event) => patch({ baseUrl: event.target.value })} placeholder="https://api.example.com" />
                 </label>}
                 {!isCodex && <label className="block md:col-span-2">

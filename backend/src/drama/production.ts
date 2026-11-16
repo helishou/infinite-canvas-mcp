@@ -4198,7 +4198,20 @@ export class EpisodeProductionService {
         applyDirectorSourcePatch(director, entity, id, patch, { allowCreate: allowMissingSourceEntityCreate });
     }
 
-    private initializeDirector(data: EpisodeProductionData, brief: string, initialScriptScenes?: Record<string, unknown>[]) {
+    /**
+     * 新开稿的生成节奏沿用剧目规划里已确认的选择；规划未确认时不覆盖导演默认值，
+     * 避免旧规划悄悄改变这一集的做法。
+     */
+    private planMediaProductionMode(episodeId: string): "prompt_only" | "per_item" | "automatic" | undefined {
+        const dramaId = this.db.getDramaEpisode(episodeId)?.dramaId;
+        if (!dramaId) return undefined;
+        const drama = this.db.listCanvasFolders().find(folder => folder.id === dramaId);
+        const plan = drama?.productionPlan;
+        if (!plan?.confirmedAt || plan.confirmedOutline !== drama?.outline) return undefined;
+        return plan.mediaProductionMode;
+    }
+
+    private initializeDirector(data: EpisodeProductionData, brief: string, initialScriptScenes?: Record<string, unknown>[], mediaProductionMode?: "prompt_only" | "per_item" | "automatic") {
         const runtime = resolveAchengEngine();
         const source = { version: 2, prompt_assembly: { version: 2 }, background_music_enabled: data.settings.backgroundMusicEnabled === true, brief, fps_num: 24, fps_den: 1,
             script_scenes: initialScriptScenes || [], shots: [], utterances: [], subject_registry: [],
@@ -4211,7 +4224,7 @@ export class EpisodeProductionService {
             sourceHash: directorHash(source),
             modules: Object.fromEntries(directorModules.map(module => [module, { status: "planned" as const, evidence: [], unresolved: [] }])),
             artifacts: [], assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [],
-            workflow: { contentDeliveryMode: "auto_file_batch", mediaProductionMode: "per_item" },
+            workflow: { contentDeliveryMode: "auto_file_batch", mediaProductionMode: mediaProductionMode || "per_item" },
         };
     }
 
@@ -4912,14 +4925,15 @@ export class EpisodeProductionService {
             } else {
                 this.initializeDirector(draft,
                     `《${episode.title}》首版制作稿；以当前分集已保存需求为唯一正文来源。`,
-                    scriptScenes);
+                    scriptScenes,
+                    this.planMediaProductionMode(episodeId));
             }
             projectDirector(draft);
             return;
         }
         if (op.type === "set_director_brief") {
             if (draft.director) this.patchDirectorSource(draft.director, "brief", undefined, { value: op.brief });
-            else this.initializeDirector(draft, op.brief);
+            else this.initializeDirector(draft, op.brief, undefined, this.planMediaProductionMode(episodeId));
             projectDirector(draft);
             return;
         }

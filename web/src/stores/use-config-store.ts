@@ -29,6 +29,11 @@ export const MODEL_SCENARIO_LABELS: Record<ModelCapability, Record<ModelInputSce
 };
 
 export type ChannelModel = {
+    /**
+     * 暂时隐藏：模型还在渠道里（可随时恢复），但选择器里不列。
+     * 用于「已迁移到引擎、本地副本待删除」这类过渡期。
+     */
+    hidden?: boolean;
     name: string;
     capability: ModelCapability;
     script?: string;
@@ -59,6 +64,11 @@ export type ModelChannel = {
     apiFormat: ApiCallFormat;
     models: ChannelModel[];
     kind?: "api" | "local" | "comfyui" | "codex-cli" | "hermes";
+    /**
+     * 渠道级额外参数（仅 OpenAI 协议有意义）：原样并入 /v1/images/generations 请求体。
+     * 普通 OpenAI 服务忽略未知键；本地 media-engine 用它传 params / overrides 这类自定义参数。
+     */
+    extraBody?: Record<string, unknown>;
     /** 渠道自定义请求头（如 OpenCode Go 的 x-opencode-session）；内置鉴权头优先。 */
     headers?: Record<string, string>;
 };
@@ -238,7 +248,14 @@ export function resolveModelForCapability(config: AiConfig, currentModel: string
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
-    return [...(capability === "video" ? [VIDEO_CONCAT_MODEL] : []), ...config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)))];
+    return [
+        ...(capability === "video" ? [VIDEO_CONCAT_MODEL] : []),
+        ...config.channels.flatMap((channel) =>
+            channel.models
+                .filter((model) => model.capability === capability && !model.hidden)
+                .map((model) => encodeChannelModel(channel.id, model.name)),
+        ),
+    ];
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -305,6 +322,8 @@ function isAiConfigReady(config: AiConfig, model: string) {
     // codex-cli 与 hermes（本地 ACP 导演 agent）的鉴权都在 agent 进程侧，不需要渠道 apiKey。
     if (channel.kind === "codex-cli" || channel.kind === "hermes") return Boolean(model.trim());
     if (channel.kind === "comfyui") return Boolean(model.trim() && channel.baseUrl.trim());
+    // 本地服务（如 media-engine）默认不带鉴权，有 baseUrl 就算可用；远端才强制要 apiKey。
+    if (channel.kind === "local") return Boolean(model.trim() && channel.baseUrl.trim());
     return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
 }
 

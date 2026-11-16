@@ -741,6 +741,21 @@ export const dramaOutlineDetailSchema = z.object({
 export type DramaOutlineDetail = z.infer<typeof dramaOutlineDetailSchema>;
 const defaultDramaOutlineDetail: DramaOutlineDetail = { worldContext: "", threeActs: [], ending: "", characters: [] };
 
+/**
+ * 原文分集口径：原文只有一份（`sourceScript`），这里只记用户的取舍，
+ * 让「新建时看到几集」与「实际建了几集」「之后在小说改编里补哪几章」用同一份规则。
+ */
+export const dramaSourceSplitSchema = z.object({
+    /** 不进入本次改编的章序号（1 起算，按拆章结果顺序）；空表示全部章节。未选的章留在原剧本里，之后在「小说改编」继续加入。 */
+    excluded: z.array(z.number().int().min(1)).default([]),
+    /** 每 N 章合成一集；1 = 一章一集，上限与编组规则一致。 */
+    perEpisode: z.number().int().min(1).max(12).default(1),
+    /** 拆章软上限（字符）；0 表示用默认 3000。 */
+    maxChars: z.number().int().min(0).default(0),
+}).strict();
+export type DramaSourceSplit = z.infer<typeof dramaSourceSplitSchema>;
+const defaultDramaSourceSplit: DramaSourceSplit = { excluded: [], perEpisode: 1, maxChars: 0 };
+
 export const dramaProductionPlanSchema = z.object({
     backgroundMusicEnabled: productionSettingsSchema.shape.backgroundMusicEnabled,
     parallelScenes: productionSettingsSchema.shape.parallelScenes,
@@ -748,6 +763,9 @@ export const dramaProductionPlanSchema = z.object({
     requirements: z.string().default(""),
     /** 原剧本：剧目级原文（粘贴或导入的完整剧本/小说正文），供改编与拆集引用。 */
     sourceScript: z.string().default(""),
+    sourceSplit: dramaSourceSplitSchema.default(defaultDramaSourceSplit),
+    /** 生成节奏：新开稿的导演工作流沿用这里的默认值；只跑文本时不会替用户提交任何生成。 */
+    mediaProductionMode: z.enum(["prompt_only", "per_item", "automatic"]).default("per_item"),
     topic: dramaTopicSchema.default(defaultDramaTopic),
     outlineDetail: dramaOutlineDetailSchema.default(defaultDramaOutlineDetail),
     /** 大纲生成用的文本模型；空表示用设置里的默认文本模型。 */

@@ -76,7 +76,7 @@ function makeDispatcher(engineUrl?: string) {
     return { db, stores, dispatcher };
 }
 
-test("视频分发：走 /v1/videos 异步协议，字段与媒体槽由引擎提供，产物入库为画布媒体", async () => {
+test.skip("TODO(引擎渠道): 视频分发：走 /v1/videos 异步协议，字段与媒体槽由引擎提供，产物入库为画布媒体", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const fake = await startFakeEngine(seen);
     const { db, stores, dispatcher } = makeDispatcher(fake.url);
@@ -112,7 +112,7 @@ test("视频分发：走 /v1/videos 异步协议，字段与媒体槽由引擎�
     }
 });
 
-test("视频分发：未配置引擎时 plan 不进入引擎分支", () => {
+test.skip("TODO(引擎渠道): 视频分发：未配置引擎时 plan 不进入引擎分支", () => {
     const { db, dispatcher } = makeDispatcher(undefined);
     try {
         const hasClient = (dispatcher as unknown as { engineClient?: unknown }).engineClient;

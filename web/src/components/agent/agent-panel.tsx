@@ -107,13 +107,14 @@ export function AgentPanel() {
         <Button type={panelTab === "director" ? "primary" : "text"} size="small" aria-pressed={panelTab === "director"} onClick={() => { useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>Agent</Button>
     </div> : null;
     const launcher = <div className={`fixed bottom-4 right-4 flex max-w-[calc(100vw-24px)] flex-col items-end gap-3 ${workbenchCanvasOverlay ? "z-[1000]" : "z-[80]"} sm:bottom-5`} data-agent-launcher data-chat-open={chatOpen} data-canvas-shortcuts-ignore>
-        {homePage && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
+        {/* 首页创作台已有同名主标题，这里不再重复弹欢迎气泡，避免压住页面右下角内容。 */}
+        {homePage && pathname !== "/" && !chatOpen && !welcomeDismissed && <div data-director-welcome-bubble className="relative flex max-w-[calc(100vw-24px)] items-center gap-1 rounded-xl border border-border bg-card px-2 py-2 text-foreground shadow-sm">
             <span aria-hidden="true" data-director-welcome-tail className="pointer-events-none absolute -bottom-1.5 right-8 size-3 rotate-45 border-b border-r border-border bg-card" />
             <button type="button" className="rounded-lg px-2 py-1.5 text-sm leading-relaxed transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring" onClick={() => { setWelcomeDismissed(true); setCreativeEntryOpen(true); useProductionWorkspaceStore.getState().setPanelTab("director"); useAgentStore.getState().openPanel(); }}>{t("landing.ideaTitle")}</button>
             <button type="button" className="grid size-7 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring" aria-label={t("productionCanvas.dismissWelcome")} onClick={() => setWelcomeDismissed(true)}><X className="size-3.5" /></button>
         </div>}
         <Badge count={reminders.count} size="small">
-            <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-11 !rounded-l-xl !rounded-r-none !px-4 !text-sm !font-medium !shadow-none" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
+            <Button type={chatOpen ? "default" : "primary"} shape="round" className="!h-10 !rounded-full !px-4 !text-sm !font-medium !shadow-lg" aria-label={t("productionCanvas.openChat")} aria-expanded={chatOpen} aria-controls="canvas-director-dialog" icon={busy ? <LoaderCircle className="size-4 animate-spin" /> : <MessageSquare className="size-4" />} onClick={openChat}>{t("productionCanvas.director")}</Button>
         </Badge>
     </div>;
     const chatDialog = <section id="canvas-director-dialog" role="dialog" aria-label={t("productionCanvas.chatDialog")} aria-hidden={!chatOpen} inert={!chatOpen}

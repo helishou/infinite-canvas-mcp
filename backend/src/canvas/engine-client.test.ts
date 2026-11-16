@@ -26,6 +26,12 @@ async function startFakeEngine() {
                 res.writeHead(status, { "content-type": type, "content-length": String(Buffer.byteLength(text)) });
                 res.end(text);
             };
+            if (url.pathname === "/health") {
+                return send(200, { ok: true, service: "media-engine", comfyui: "http://127.0.0.1:8188" });
+            }
+            if (url.pathname === "/v1/models") {
+                return send(200, { object: "list", data: [{ id: "pipe.json" }, { id: "other.json" }] });
+            }
             if (url.pathname === "/v1/models/pipe.json") {
                 return send(200, {
                     id: "pipe.json", title: "管线", run_target: "local", output_nodes: ["9"],
@@ -82,30 +88,6 @@ test("引擎客户端：读模型能力、发图片请求、取消任务", async
         assert.equal((missing as EngineRequestError).status, 404);
     } finally {
         await fake.close();
-    }
-});
-
-test("引擎客户端：未配置 engine.url 时不启用", () => {
-    const db = new BackendDatabase(":memory:");
-    const previous = { url: process.env.CANVAS_ENGINE_URL, token: process.env.CANVAS_ENGINE_TOKEN };
-    delete process.env.CANVAS_ENGINE_URL;
-    delete process.env.CANVAS_ENGINE_TOKEN;
-    try {
-        const stores = createStores(db);
-        assert.equal(CanvasEngineClient.fromSettings(stores.settings), null);
-        // 环境变量（部署方显式选择）也能启用
-        process.env.CANVAS_ENGINE_URL = "http://127.0.0.1:8189";
-        assert.equal(CanvasEngineClient.fromSettings(stores.settings)?.url, "http://127.0.0.1:8189");
-        // 设置项优先于环境变量
-        stores.settings.set("engine.url", "http://127.0.0.1:9000/");
-        stores.settings.set("engine.token", "t");
-        const client = CanvasEngineClient.fromSettings(stores.settings);
-        assert.ok(client);
-        assert.equal(client!.url, "http://127.0.0.1:9000");
-    } finally {
-        if (previous.url === undefined) delete process.env.CANVAS_ENGINE_URL; else process.env.CANVAS_ENGINE_URL = previous.url;
-        if (previous.token === undefined) delete process.env.CANVAS_ENGINE_TOKEN; else process.env.CANVAS_ENGINE_TOKEN = previous.token;
-        db.close();
     }
 });
 

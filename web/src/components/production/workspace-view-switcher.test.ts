@@ -19,7 +19,7 @@ test("clicking the current view is a no-op, switching views is not", () => {
     assert.equal(shouldSwitchWorkspace("production", "production"), false);
     assert.equal(shouldSwitchWorkspace("canvas", "production"), true);
     assert.equal(shouldSwitchWorkspace("production", "canvas"), true);
-    assert.deepEqual([...WORKSPACE_VIEW_MODES], ["canvas", "production"]);
+    assert.deepEqual([...WORKSPACE_VIEW_MODES], ["production", "canvas"]);
 });
 
 test("the switcher is the single production/canvas entry point", () => {

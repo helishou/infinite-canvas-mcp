@@ -10,6 +10,8 @@ import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { modelScenarioUnsupported, resolveModelChannel, resolveModelWorkflow, resolveModelWorkflowParams, useConfigStore, type AiConfig } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField, workflowRequiresPrompt, type WorkflowDetail } from "@/services/api/workflows";
+import { fetchChannelModelDetail } from "@/services/api/image";
+import type { WorkflowField } from "@/types/workflow";
 import { migrateWorkflowParams, reconcileWorkflowParams, workflowAspectOption, workflowDimensionSize } from "@/lib/canvas/canvas-workflow-params";
 
 type CanvasImageSettingsPopoverProps = {
@@ -43,6 +45,10 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
     useCanvasTransientEscape(open, () => { setOpen(false); onOpenChange?.(false); });
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
     const [workflowDetail, setWorkflowDetail] = useState<WorkflowDetail | null>(null);
+    // OpenAI 兼容渠道（如本地 media-engine）在 /v1/models/{id} 里上报字段，用它渲染「自定义参数」。
+    const [channelFields, setChannelFields] = useState<WorkflowField[]>([]);
+    // 记录「哪个模型已经用默认值铺过」：只铺一次，用户清空后不再强行填回。
+    const seededChannelRef = useRef<string>("");
     const workflowDetailRef = useRef<WorkflowDetail | null>(null);
     const comfyParamsRef = useRef(comfyParams);
     const onComfyParamsChangeRef = useRef(onComfyParamsChange);
@@ -127,7 +133,55 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
     }, [onPromptRequiredChange, workflowDetail, workflowName]);
 
     const activeWorkflowDetail = workflowDetail?.name === workflowName ? workflowDetail : null;
-    const customFields = (activeWorkflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, activeWorkflowDetail?.workflow) && !field.isPrompt);
+    const openaiChannel = (() => {
+        const channel = resolveModelChannel(config, config.model);
+        if (!channel?.baseUrl) return null;
+        if (channel.kind === "comfyui" || channel.kind === "codex-cli" || channel.kind === "hermes") return null;
+        return (channel.apiFormat ?? "openai") === "openai" ? channel : null;
+    })();
+
+    useEffect(() => {
+        if (!open || !openaiChannel) {
+            setChannelFields([]);
+            return;
+        }
+        let cancelled = false;
+        fetchChannelModelDetail(config.model)
+            .then((detail) => {
+                if (cancelled) return;
+                // 提示词与素材槽由常用参数/参考图负责，这里只留可调数值与枚举
+                const fields = (detail.fields || []).filter(
+                    (field) => !field.isPrompt && !["image", "audio", "video"].includes(field.type),
+                );
+                setChannelFields(fields);
+                if (!fields.length || !onComfyParamsChange) return;
+                // 首次打开这个模型时用字段默认值铺一遍，否则输入框全是空的（默认值只存在于服务端）。
+                if (seededChannelRef.current === config.model) return;
+                seededChannelRef.current = config.model;
+                const defaults: Record<string, unknown> = {};
+                for (const field of fields) {
+                    if (field.default === undefined || field.default === "") continue;
+                    defaults[field.id] = field.default;
+                }
+                // 换过模型后残留的旧字段（属于别的渠道/工作流）要丢掉，否则会显示成这个模型的参数。
+                const known = new Set(fields.map((field) => field.id));
+                const carried = Object.fromEntries(Object.entries(comfyParamsRef.current || {}).filter(([key]) => known.has(key)));
+                const next = { ...defaults, ...carried };
+                if (Object.keys(next).length || Object.keys(comfyParamsRef.current || {}).length) {
+                    comfyParamsRef.current = next;
+                    onComfyParamsChange(next);
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setChannelFields([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, openaiChannel, config.model]);
+
+    const workflowFields = (activeWorkflowDetail?.config?.fields || []).filter((field) => !isWorkflowImageField(field, activeWorkflowDetail?.workflow) && !field.isPrompt);
+    const customFields = workflowFields.length ? workflowFields : channelFields;
     const hasRunningHubBinding = Boolean(activeWorkflowDetail?.config?.runningHubProfileId);
     const runTarget = runTargetOverride || activeWorkflowDetail?.config?.runTarget || "local";
     const aspectField = customFields.find((field) => field.input === "aspect_ratio" && field.type === "dropdown");
@@ -142,7 +196,7 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
     // 隐藏标准项的唯一依据是「本次真的要渲染工作流参数」。之前只判断渠道是不是 comfyui，
     // 于是取不到工作流字段时标准项也被一起藏掉，面板只剩透明背景和张数。
     const showsWorkflowParams = customFields.length > 0;
-    const hideStandardImageOptions = showsWorkflowParams;
+    const hideStandardImageOptions = showsWorkflowParams || channelFields.length > 0;
     // ComfyUI 模型但没解析出参数：明确说明原因，不再给一个看不出所以然的空面板。
     const workflowParamsMissing = isLocalCustomWorkflow && !showsWorkflowParams;
     // 缺参数有两种完全不同的原因：带参考图时该场景被配成「不支持」，以及真的读不到字段配置。
@@ -187,6 +241,7 @@ export function CanvasImageSettingsPopover({ config, targetLabel, onConfigChange
                     updateConfig(key, value);
                 }}
                 customFields={customFields}
+                customFieldsTitle={workflowFields.length ? undefined : "自定义参数"}
                 customFieldValues={comfyParams}
                 onCustomFieldChange={onComfyParamsChange ? (id, value) => {
                     const next = { ...(comfyParamsRef.current || {}), [id]: value };
@@ -239,6 +294,7 @@ function ImageSettingsPortal({
     config,
     onConfigChange,
     customFields,
+    customFieldsTitle,
     customFieldValues,
     onCustomFieldChange,
     hideStandardImageOptions,
@@ -256,6 +312,7 @@ function ImageSettingsPortal({
     config: AiConfig;
     onConfigChange: CanvasImageSettingsPopoverProps["onConfigChange"];
     customFields?: Parameters<typeof ImageSettingsPanel>[0]["customFields"];
+    customFieldsTitle?: Parameters<typeof ImageSettingsPanel>[0]["customFieldsTitle"];
     customFieldValues?: Parameters<typeof ImageSettingsPanel>[0]["customFieldValues"];
     onCustomFieldChange?: Parameters<typeof ImageSettingsPanel>[0]["onCustomFieldChange"];
     hideStandardImageOptions: boolean;
@@ -288,6 +345,7 @@ function ImageSettingsPortal({
                 className="space-y-2"
                 compact
                 customFields={customFields}
+                customFieldsTitle={customFieldsTitle}
                 customFieldValues={customFieldValues}
                 onCustomFieldChange={onCustomFieldChange}
                 hideStandardImageOptions={hideStandardImageOptions}

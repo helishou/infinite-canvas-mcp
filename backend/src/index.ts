@@ -20,6 +20,7 @@ import { holdUnknownSubmission, submissionDecision, submissionDiagnostic } from 
 import { VideoConcatBackend } from "@basketikun/media-engine/runtime/video-concat";
 import { SubtitleTranscribeBackend } from "./runtime/subtitle-transcribe.js";
 import { registerSubtitleTranscribeRoutes } from "./server/subtitle-transcribe-routes.js";
+import { registerAudioTranscribeRoutes } from "./server/audio-transcribe-routes.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
 import { HermesAgent, isHermesThread } from "@basketikun/canvas-agent/agent/hermes-agent";
@@ -31,9 +32,7 @@ import { registerWorkflowRoutes } from "./workflows/routes.js";
 import { registerBackendMcpHttpRoutes, startBackendMcpServer } from "./mcp.js";
 import { DirectImageBackend } from "@basketikun/media-engine/runtime/chatgpt-image";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
-import { CanvasEngineClient } from "./canvas/engine-client.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
-import { registerEngineProxy } from "./server/engine-proxy.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { boundH3ParentTaskIds, CanvasH3Runner } from "./canvas/h3-runner.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
@@ -55,7 +54,8 @@ import { SharedAssetCoordinator } from "./drama/shared-assets.js";
 import { NativeProductionGeneration } from "./drama/native-generation.js";
 import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
-import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes } from "./server/drama-planning-routes.js";
+import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes, registerDramaStageRoutes, registerDramaTopicProposalRoute } from "./server/drama-planning-routes.js";
+import { registerAssetSpecRoutes } from "./server/asset-spec-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import {
   applyNetworkSettings,
@@ -146,8 +146,7 @@ async function startBackendHttpServer() {
     runtime.stores.tasks,
     runtime.stores.media,
   );
-  // 独立执行引擎：设置里配了 engine.url 才启用，未配置时图片生成仍走本地执行器。
-  const engineClient = CanvasEngineClient.fromSettings(runtime.stores.settings);
+  // 执行引擎不再是一个全局开关：引擎作为 kind="engine" 的渠道配置，按模型走 /v1/*。
   const canvasImageDispatcher = new CanvasImageDispatcher(
     config,
     runtime.stores,
@@ -157,11 +156,10 @@ async function startBackendHttpServer() {
     workflowExecutor,
     runtime.events,
     runningHub,
-    engineClient ?? undefined,
   );
   const canvasTextDispatcher = new CanvasTextDispatcher(config, runtime.stores);
   const directVideo = new DirectVideoBackend(config, runtime.stores.settings, runtime.stores.tasks, runtime.stores.media);
-  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub, engineClient ?? undefined);
+  const canvasVideoDispatcher = new CanvasVideoDispatcher(runtime.stores, runtime.comfy, workflowStore, workflowExecutor, videoConcat, directVideo, runningHub);
   const canvasH3Runner = new CanvasH3Runner(
     runtime.stores,
     runtime.events,
@@ -183,6 +181,7 @@ async function startBackendHttpServer() {
     canvasVideoDispatcher,
     canvasAudioDispatcher,
     canvasBrowserScriptDispatcher,
+    runtime.db,
   );
   const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
   const devReload = process.env.INFINITE_CANVAS_DEV_WATCH === "1" && process.send ? createDevReloadGate() : null;
@@ -270,8 +269,6 @@ async function startBackendHttpServer() {
     },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
-  // 工作流管理面代理到独立执行引擎（配置了 engine.url 才启用；未配置时接口回 503，前端回落本地）。
-  registerEngineProxy(app, () => CanvasEngineClient.fromSettings(runtime.stores.settings) ?? undefined);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
   const productionHermes = new HermesAgent(runtime.stores.settings, config.url, config.token);
   // 画布文本任务打通导演 agent：模型选到 hermes 渠道时由它执行（structured 单轮，
@@ -323,9 +320,12 @@ async function startBackendHttpServer() {
   }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
+  registerDramaTopicProposalRoute(app, runtime.stores);
   registerDramaPlanningRoutes(app, runtime.db, runtime.stores);
   registerDramaScriptRoutes(app, runtime.db, runtime.stores);
   registerDramaPlanningStateRoutes(app, runtime.db);
+  registerDramaStageRoutes(app, runtime.db);
+  registerAssetSpecRoutes(app, runtime.db);
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
   const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionHermes.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
   directorSubagents.reconcileStartup();
@@ -346,6 +346,7 @@ async function startBackendHttpServer() {
     runtime.events,
   );
   registerSubtitleTranscribeRoutes(app, subtitleTranscriber, runtime.events);
+  registerAudioTranscribeRoutes(app);
   registerComfyRoutes(
     {
       app,
