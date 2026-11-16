@@ -49,8 +49,10 @@ export function registerCanvasGenerationRoutes(router: Router, service: CanvasGe
     router.post(H3_EXECUTION_PREVIEW_PATH, (req: Request, res: Response) => {
         const parsed = canvasGenerationCommandSchema.safeParse(req.body || {});
         if (!parsed.success || parsed.data.operation !== 'h3-run') return void res.status(400).json({ ok: false, error: 'H3 预检需要有效的 h3-run 请求' });
-        try { res.json({ ok: true, ...service.previewH3(parsed.data) }); }
-        catch (error) { res.status(400).json(generationErrorBody(error)); }
+        try {
+            const preview = service.previewH3(parsed.data);
+            res.json({ ok: true, ...((preview ?? {}) as unknown as Record<string, unknown>) });
+        } catch (error) { res.status(410).json(generationErrorBody(error)); }
     });
 
 }

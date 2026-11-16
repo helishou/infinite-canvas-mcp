@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { CanvasOperation } from "./canvas/project-ops.js";
-import type { EngineEvent, EngineEventSource } from "@basketikun/media-engine/events";
+import type { EngineEvent, EngineEventSource } from "./engine-contract/events.js";
 
-// 事件契约权威在 @basketikun/media-engine；画布沿用既有类型名。
+// 事件契约由画布自带类型定义；画布沿用既有类型名。
 export type BackendEvent = EngineEvent;
 export type CanvasEventSource = EngineEventSource;
 

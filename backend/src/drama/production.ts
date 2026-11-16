@@ -54,7 +54,7 @@ import {
 } from "@basketikun/canvas-agent/drama/production-contract";
 import { BASE_H3_NODE_METADATA, createH3NodeMetadata, isH3NodeType } from "@basketikun/canvas-agent/plugins/minimax-h3/node-factory";
 import { H3_DEFAULTS_KEY, H3_PARAM_KEYS } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
-import { generationSettingsSnapshot } from "@basketikun/media-engine/canvas/generation-settings";
+import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import { H3_RUNTIME_NODE_FIELDS, H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
 import { resolveAchengEngine } from "@basketikun/canvas-agent/skills/acheng";
 import { auditAchengContinuity, validateAchengSource, preflightCompilationDirector, type AchengRuntime } from "@basketikun/canvas-agent/skills/acheng";
@@ -4211,6 +4211,26 @@ export class EpisodeProductionService {
         return plan.mediaProductionMode;
     }
 
+    /** 选题缺什么（题材、一句话故事）。选题是本剧目唯一来源，这里只读不写。 */
+    private planningTopicMissing(episodeId: string): string[] {
+        const dramaId = this.db.getDramaEpisode(episodeId)?.dramaId;
+        const drama = dramaId ? this.db.listCanvasFolders().find(folder => folder.id === dramaId && folder.isDrama) : undefined;
+        const topic = drama?.productionPlan?.topic as { themes?: unknown; theme?: unknown; logline?: unknown } | undefined;
+        if (!topic) return [];
+        const missing: string[] = [];
+        const themes = Array.isArray(topic.themes) ? topic.themes.filter(item => String(item ?? "").trim()) : [];
+        if (!themes.length && !String(topic.theme ?? "").trim()) missing.push("题材");
+        if (!String(topic.logline ?? "").trim()) missing.push("一句话故事");
+        return missing;
+    }
+
+    /** 选题没填就先拦建资产与排镜：跳过这一步，剧本、资产、分镜都会建在空选题上，返工代价最大。 */
+    private assertPlanningTopic(episodeId: string, action: string) {
+        const missing = this.planningTopicMissing(episodeId);
+        if (!missing.length) return;
+        throw new Error(`PLANNING_TOPIC_REQUIRED: 选题还没填（缺 ${missing.join("、")}）。先到「剧目规划 · 选题」补齐再${action}；已写的内容和输入都保留。`);
+    }
+
     private initializeDirector(data: EpisodeProductionData, brief: string, initialScriptScenes?: Record<string, unknown>[], mediaProductionMode?: "prompt_only" | "per_item" | "automatic") {
         const runtime = resolveAchengEngine();
         const source = { version: 2, prompt_assembly: { version: 2 }, background_music_enabled: data.settings.backgroundMusicEnabled === true, brief, fps_num: 24, fps_den: 1,
@@ -5216,6 +5236,8 @@ export class EpisodeProductionService {
             return;
         }
         if (op.type === "create_manual_director_asset") {
+            // 共享源登记只是把共享画布已有资产引用进来，不算新建底稿，不受选题门禁约束。
+            if (!op.assetPlan?.sharedSource) this.assertPlanningTopic(episodeId, "建资产");
             if (!draft.director) throw new Error("DIRECTOR_NOT_INITIALIZED: 没有正式制作稿");
             const sharedSource = op.assetPlan.sharedSource;
             let assetOperation = op;
@@ -5986,6 +6008,7 @@ export class EpisodeProductionService {
         const shot = (id: string) => { const value = draft.shots.find((item) => item.id === id); if (!value) throw new Error(`镜头不存在：${id}`); return value; };
         if (op.type === "upsert_scene") {
             const index = draft.scenes.findIndex((item) => item.id === op.scene.id);
+            if (index < 0) this.assertPlanningTopic(episodeId, "排场次与分镜");
             if (index < 0) draft.scenes.push(op.scene); else draft.scenes[index] = op.scene;
         } else if (op.type === "delete_scene") {
             if (draft.shots.some((item) => item.sceneId === op.id)) throw new Error("场次仍有镜头，请先处理镜头");
@@ -6009,6 +6032,7 @@ export class EpisodeProductionService {
         } else if (op.type === "upsert_shot") {
             if (!draft.scenes.some((item) => item.id === op.shot.sceneId)) throw new Error("镜头所属场次不存在");
             const index = draft.shots.findIndex((item) => item.id === op.shot.id);
+            if (index < 0) this.assertPlanningTopic(episodeId, "排场次与分镜");
             if (index < 0) draft.shots.push(op.shot); else draft.shots[index] = op.shot;
             draft.shots = orderShotsByScene(draft);
         } else if (op.type === "delete_shot") {

@@ -8,6 +8,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { isMcpProfile, isToolInProfile, MCP_PROFILES, type McpProfile } from "@basketikun/canvas-agent/tool-profiles";
 import { compactProductionEditSchema, COMPACT_EDIT_DESCRIPTION, compactEditOperationForIssue, isMcpSchemaMode, MCP_SCHEMA_MODES, DEFAULT_MCP_SCHEMA_MODE, type McpSchemaMode } from "@basketikun/canvas-agent/drama/production-edit-disclosure";
 import { repairMcpToolArguments } from "@basketikun/canvas-agent/server/mcp-arg-integrity";
+import { isTurnaroundAsset, turnaroundAspectIssue, turnaroundLayoutIssues } from "@basketikun/canvas-agent/canvas/turnaround-layout";
 import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery, assertProductionSourceFields, canonicalProduction } from "@basketikun/canvas-agent/drama/production-contract";
@@ -21,7 +22,7 @@ import { nanoid } from "nanoid";
 import type { Express, Request, Response } from "express";
 
 import { loadConfig, type ResolvedConfig } from "./config.js";
-import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
+import { redactInlineMedia } from "./engine-contract/redact-inline-media.js";
 import {
   PluginMcpRegistry,
   buildPluginMcpContext,
@@ -1059,6 +1060,16 @@ async function executeDirectCanvasTool(
       if (manifest.issues.length) throw new Error(`图片参考预检失败：${manifest.issues.join("；")}`);
       const expectedHash = String(toolInput.expectedReferenceManifestHash || "");
       if (expectedHash && expectedHash !== manifest.manifestHash) throw new Error("图片参考输入已变化；请重新读取 canvas_image_input_manifest");
+      // 角色设定图按导演大师的资产卡排版硬性检查：正脸近景＋正面／侧面／背面全身，横版。
+      const nodeMeta = recordOf(node?.metadata);
+      const promptText = String(toolInput.prompt ?? nodeMeta.prompt ?? "");
+      if (isTurnaroundAsset(`${String(node?.title || "")} ${String(nodeMeta.role || "")} ${promptText}`)) {
+        const missing = turnaroundLayoutIssues(promptText || String(node?.title || ""));
+        if (missing.length) throw new Error(`角色四视图不合技能规范：缺 ${missing.join("、")}。按 .agents/skills/acheng-director/references/60-assets-and-keyframes.md，四视图要 2×2、等宽双列、顶行占 1/3 高：「正面脸及肩部」「右侧脸及肩部」；底行占 2/3：「无头正面全身」「完整背面全身」；双手空手下垂，先补提示词再提交。`);
+        const params = recordOf(toolInput.params);
+        const aspectIssue = turnaroundAspectIssue(Number(params.width || 0), Number(params.height || 0));
+        if (aspectIssue) throw new Error(aspectIssue);
+      }
     }
   }
   const request = buildCanvasToolRequest(name, toolInput, {

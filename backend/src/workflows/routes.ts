@@ -1,19 +1,15 @@
-import { workflowImageInputs } from "@basketikun/media-engine/workflows/image-input-capability";
 import type { Request, Response, Router } from "express";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { WorkflowStore } from "@basketikun/media-engine/workflows/store";
-import type { WorkflowExecutor } from "@basketikun/media-engine/workflows/executor";
+import type { WorkflowCatalog } from "../engine-contract/workflow-catalog.js";
 import type { WorkflowConfig } from "../db.js";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
-import { convertComfyWorkflowToApi } from "@basketikun/media-engine/workflows/comfyui-workflow-conversion";
-import { findUiWorkflowFile } from "@basketikun/media-engine/workflows/ui-workflow-file";
+import { findUiWorkflowFile } from "../engine-contract/ui-workflow-file.js";
 import {
   loadInstances,
   saveInstances,
   validateInstance,
-} from "@basketikun/media-engine/comfyui/instances";
+} from "../engine-contract/instances.js";
 
 type LocalComfyWorkflowFile = { id: string; instance: string; relativePath: string; name: string; bytes: number; modifiedAt: string };
 
@@ -96,9 +92,7 @@ async function readLocalComfyWorkflow(instance: string, relativePath: string) {
 
 export function registerWorkflowRoutes(
   router: Router,
-  store: WorkflowStore,
-  executor: WorkflowExecutor,
-  comfy?: ComfyUiBackend,
+  store: WorkflowCatalog,
   onImported?: (name: string) => void | Promise<void>,
   onDeleted?: (name: string) => void | Promise<void>,
 ) {
@@ -195,7 +189,7 @@ export function registerWorkflowRoutes(
       const input = req.body?.workflow;
       if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("缺少 workflow 对象");
       const uiWorkflow = Array.isArray((input as { nodes?: unknown }).nodes) ? input as Record<string, unknown> : undefined;
-      const workflow = convertComfyWorkflowToApi(input);
+      const workflow = await store.convertGraph(input);
       res.json({ workflow, ...(uiWorkflow ? { uiWorkflow } : {}) });
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -216,8 +210,8 @@ export function registerWorkflowRoutes(
           detail.source.syncState = "missing";
         }
       }
-      const imageInputs = workflowImageInputs(detail.workflow, detail.config?.fields || [], detail.config?.outputNodes);
-      res.json({ ...detail, imageInputCounts: imageInputs.counts, imageInputFieldIds: imageInputs.fields.map(field => field.id) });
+      // 参考图槽位由引擎算好后随详情一起返回（与 /v1/models/{id} 同源），画布不再本地重算。
+      res.json({ ...detail, imageInputCounts: detail.imageInputCounts ?? {}, imageInputFieldIds: detail.imageInputFieldIds ?? [] });
     } catch (error) {
       res
         .status(404)
@@ -365,17 +359,9 @@ export function registerWorkflowRoutes(
     async (req: Request, res: Response) => {
       try {
         const name = decodeURIComponent(req.params.name as string);
-        if (!comfy)
-          return res
-            .status(503)
-            .json({ options: {}, error: "ComfyUI backend not available" });
         const controller = new AbortController();
         req.on("close", () => controller.abort());
-        const options = await store.getComboOptions(
-          name,
-          comfy,
-          controller.signal,
-        );
+        const options = await store.getComboOptions(name);
         res.json({ options });
       } catch (error) {
         res
@@ -426,7 +412,7 @@ export function registerWorkflowRoutes(
         let pushError = "";
         try {
           // 磁盘保留 ComfyUI 原始画布格式；运行中的伴生扩展只接受 API/prompt 格式。
-          const apiGraph = convertComfyWorkflowToApi(detail.workflow);
+          const apiGraph = await store.convertGraph(detail.workflow);
           const resp = await fetch(`http://${instance}/infinite-canvas/open-workflow`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -499,16 +485,11 @@ export function registerWorkflowRoutes(
         const clientId = randomUUID();
         // 后台运行：立即返回 taskId，ComfyUI 执行在后台进行；前端轮询任务状态取结果。
         // 避免同步长连接被中断导致前端 "Failed to fetch" 而后端已提交 ComfyUI（重复点击堆积任务）。
-        const { taskId } = await executor.runBackground(
-          detail.workflow,
-          config,
-          fields,
-          clientId,
-          undefined,
+        // 执行在引擎里：画布只发 HTTP，拿回引擎任务 id 供前端轮询。
+        const { taskId } = await store.run(
           name,
-          typeof body.clientTaskId === "string" && body.clientTaskId
-            ? body.clientTaskId
-            : undefined,
+          fields,
+          typeof body.clientTaskId === "string" && body.clientTaskId ? body.clientTaskId : clientId,
         );
         res.json({ taskId });
       } catch (error) {

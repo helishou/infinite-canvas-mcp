@@ -26,7 +26,7 @@ const MAX_SKILL_BYTES = 2 * 1024 * 1024;
 const MAX_FILES_PER_SKILL = 64;
 const MAX_FILE_BYTES = 512 * 1024;
 
-type SkillSource = "builtin" | "markdown" | "zip";
+type SkillSource = "builtin" | "markdown" | "zip" | "catalog";
 type MarketEntry = {
     tag: MarketCategory;
     liked: boolean;
@@ -37,6 +37,17 @@ type MarketEntry = {
     installedAt: string;
 };
 type MarketState = { version: 1; entries: Record<string, MarketEntry> };
+
+type CatalogSlotMeta = { label: string; defaultSkill: string; skills: string[] };
+type CatalogSkillMeta = {
+    slug: string; key: string; title: string; description: string; stage: string; group: string;
+    tier: string; author: string; license: string; redistribution: string; slots: string[]; defaultSlots: string[];
+};
+type CatalogDocument = {
+    id: string; title: string; notice: string; source: string;
+    functionSlots: Record<string, CatalogSlotMeta>;
+    skills: CatalogSkillMeta[];
+};
 
 type MarketSkill = {
     name: string;
@@ -55,6 +66,10 @@ type MarketSkill = {
     version: string;
     path: string;
     glyph: string;
+    /** catalog 可安装源：是否已安装到 .agents/skills（未安装时显示"安装"按钮） */
+    installed: boolean;
+    /** 导演大师技能包元数据（仅 catalog 项有） */
+    catalog?: { id: string; stage: string; group: string; tier: string; slots: string[]; defaultSlots: string[]; author: string; license: string; notice: string };
 };
 
 const digest = (value: Buffer | string) => crypto.createHash("sha256").update(value).digest("hex");
@@ -163,7 +178,122 @@ function isBuiltin(name: string) {
     return fs.existsSync(projectSkill);
 }
 
-function loadSkill(workspacePath: string, name: string, state: MarketState): MarketSkill | null {
+/** catalog 安装的技能即使落在项目根，也属于"用户安装"而非内置（内置判定按项目根文件存在与否过于粗糙）。 */
+function isUserInstalled(name: string, state: MarketState) {
+    return state.entries[name]?.source === "catalog" || state.entries[name]?.source === "markdown" || state.entries[name]?.source === "zip";
+}
+function effectiveBuiltin(name: string, state: MarketState) {
+    return isBuiltin(name) && !isUserInstalled(name, state);
+}
+
+/** catalog 可安装源根目录：优先工作区，其次项目根（内置导入的导演大师技能包）。 */
+function catalogRoots(workspacePath: string): string[] {
+    return [
+        path.join(workspacePath, ".canvas-runtime", "skill-market", "catalog"),
+        path.join(repositoryRoot, ".canvas-runtime", "skill-market", "catalog"),
+    ];
+}
+
+/** 读取所有 catalog 文档，去重（工作区优先）。 */
+function readCatalogs(workspacePath: string): Array<{ root: string; document: CatalogDocument }> {
+    const seen = new Set<string>();
+    const result: Array<{ root: string; document: CatalogDocument }> = [];
+    for (const catalogsRoot of catalogRoots(workspacePath)) {
+        let bundles: fs.Dirent[];
+        try { bundles = fs.readdirSync(catalogsRoot, { withFileTypes: true }); }
+        catch { continue; }
+        for (const bundle of bundles) {
+            if (!bundle.isDirectory() || bundle.isSymbolicLink() || seen.has(bundle.name)) continue;
+            const file = path.join(catalogsRoot, bundle.name, "catalog.json");
+            try {
+                const document = JSON.parse(fs.readFileSync(file, "utf8")) as CatalogDocument;
+                if (!document || !Array.isArray(document.skills)) continue;
+                seen.add(bundle.name);
+                result.push({ root: path.join(catalogsRoot, bundle.name), document });
+            } catch { /* 跳过损坏的 catalog 文档 */ }
+        }
+    }
+    return result;
+}
+
+/** 全部 catalog 技能按 slug 去重索引（工作区优先）。 */
+function catalogBySlugAll(workspacePath: string): Map<string, { meta: CatalogSkillMeta; doc: { root: string; document: CatalogDocument } }> {
+    const index = new Map<string, { meta: CatalogSkillMeta; doc: { root: string; document: CatalogDocument } }>();
+    for (const doc of readCatalogs(workspacePath)) for (const meta of doc.document.skills) {
+        if (meta?.slug && NAME_PATTERN.test(meta.slug) && !index.has(meta.slug)) index.set(meta.slug, { meta, doc });
+    }
+    return index;
+}
+
+/** 在 catalog 源目录里按 slug 找 SKILL.md（用于未安装技能的详情）。 */
+function findCatalogEntry(workspacePath: string, slug: string): string | null {
+    if (!NAME_PATTERN.test(slug)) return null;
+    for (const doc of readCatalogs(workspacePath)) {
+        const entry = path.join(doc.root, slug, "SKILL.md");
+        if (fs.existsSync(entry) && !fs.lstatSync(entry).isSymbolicLink()) return entry;
+    }
+    return null;
+}
+
+/** 由 catalog 元数据构造一个"可安装但未安装"的广场条目。 */
+function catalogSkill(item: CatalogSkillMeta, doc: { root: string; document: CatalogDocument }): MarketSkill {
+    const entryFile = path.join(doc.root, item.slug, "SKILL.md");
+    let stats = { fileCount: 1, totalBytes: 0 };
+    try { stats = fs.existsSync(entryFile) ? { fileCount: 1, totalBytes: fs.statSync(entryFile).size } : stats; }
+    catch { /* 沿用默认值 */ }
+    const groupToTag: Record<string, MarketCategory> = {
+        "01-选题立项": "drama", "02-创作大纲": "drama", "03-角色画像": "drama", "04-场景道具站位信息": "drama",
+        "05-剧本": "drama", "06-分镜表": "drama", "07-视频与分镜图提示词": "drama", "08-定妆图提示词": "creative",
+        "09-出图与旧漫剧通道": "creative",
+    };
+    const title = item.title || item.slug;
+    return {
+        name: item.slug,
+        title,
+        description: item.description || "暂无描述",
+        tag: groupToTag[item.group] || "drama",
+        source: "catalog",
+        sourceRef: doc.document.id,
+        builtin: false,
+        liked: false,
+        added: false,
+        autoUpdate: false,
+        installedAt: "",
+        fileCount: stats.fileCount,
+        totalBytes: stats.totalBytes,
+        version: item.tier === "month" ? "month" : "",
+        path: `.canvas-runtime/skill-market/catalog/${doc.document.id}/${item.slug}/SKILL.md`,
+        glyph: Array.from(title.trim())[0] || "导",
+        installed: false,
+        catalog: {
+            id: doc.document.id, stage: item.stage, group: item.group, tier: item.tier,
+            slots: item.slots || [], defaultSlots: item.defaultSlots || [], author: item.author,
+            license: item.license, notice: doc.document.notice,
+        },
+    };
+}
+
+/** 功能槽映射汇总：给画布阶段入口标注推荐技能用。 */
+type SlotMapResult = {
+    bundleId: string;
+    notice: string;
+    slots: Array<{ key: string; label: string; defaultSkill: string; skills: string[]; installed: boolean }>;
+};
+function slotMap(workspacePath: string): SlotMapResult | null {
+    const doc = readCatalogs(workspacePath).find(entry => Object.keys(entry.document.functionSlots || {}).length > 0);
+    if (!doc) return null;
+    const installed = new Set(collectSkillNames(workspacePath));
+    return {
+        bundleId: doc.document.id,
+        notice: doc.document.notice,
+        slots: Object.entries(doc.document.functionSlots).map(([key, meta]) => ({
+            key, label: meta.label, defaultSkill: meta.defaultSkill, skills: meta.skills || [],
+            installed: Boolean((meta.skills || []).length && (installed.has(meta.defaultSkill) || (meta.skills || []).some(skill => installed.has(skill)))),
+        })),
+    };
+}
+
+function loadSkill(workspacePath: string, name: string, state: MarketState, catalogMeta?: CatalogSkillMeta): MarketSkill | null {
     const { absolute, relative } = safeDirectory(workspacePath, name, true);
     const entryFile = path.join(absolute, "SKILL.md");
     if (!fs.existsSync(entryFile)) return null;
@@ -175,14 +305,14 @@ function loadSkill(workspacePath: string, name: string, state: MarketState): Mar
     const description = frontmatter.description || "暂无描述";
     const version = frontmatter.version || "";
     const custom = state.entries[name];
-    const builtin = isBuiltin(name);
+    const builtin = effectiveBuiltin(name, state);
     const rawTag = custom?.tag;
     const tag: MarketCategory = rawTag && (CATEGORIES as readonly string[]).includes(rawTag) ? rawTag as MarketCategory : "creative";
     const stats = directoryStats(absolute);
     return {
         name, title, description, tag,
-        source: builtin ? "builtin" : custom?.source || "markdown",
-        sourceRef: custom?.sourceRef || "",
+        source: builtin ? "builtin" : custom?.source || (catalogMeta ? "catalog" : "markdown"),
+        sourceRef: custom?.sourceRef || (catalogMeta ? "dm-v0.7.2" : ""),
         builtin,
         liked: Boolean(custom?.liked),
         added: builtin || Boolean(custom?.added),
@@ -193,6 +323,15 @@ function loadSkill(workspacePath: string, name: string, state: MarketState): Mar
         version,
         path: relative,
         glyph: Array.from(title.trim())[0] || "技",
+        installed: true,
+        ...(catalogMeta ? {
+            catalog: {
+                id: "dm-v0.7.2", stage: catalogMeta.stage, group: catalogMeta.group, tier: catalogMeta.tier,
+                slots: catalogMeta.slots || [], defaultSlots: catalogMeta.defaultSlots || [], author: catalogMeta.author,
+                license: catalogMeta.license,
+                notice: readCatalogs(workspacePath)[0]?.document.notice || "",
+            },
+        } : {}),
     };
 }
 
@@ -234,34 +373,58 @@ function validRelativeFile(relative: unknown): string | null {
 }
 
 export function registerSkillMarketRoutes(app: Express) {
-    // 列表：内置 + 已安装 + 用户状态
+    // 列表：内置 + 已安装 + catalog 可安装源 + 用户状态
     app.get("/api/skill-market/skills", (req, res) => {
         try {
             const workspacePath = assertWorkspace(req);
             const { state, revision } = readState(workspacePath);
-            const skills = collectSkillNames(workspacePath).flatMap((name) => {
-                try { const skill = loadSkill(workspacePath, name, state); return skill ? [skill] : []; }
+            const installedNames = new Set(collectSkillNames(workspacePath));
+            const catalogBySlug = catalogBySlugAll(workspacePath);
+            const skills = [...installedNames].flatMap((name) => {
+                try { const skill = loadSkill(workspacePath, name, state, catalogBySlug.get(name)?.meta); return skill ? [skill] : []; }
                 catch { return []; }
             });
+            // 未安装的 catalog 项作为"可安装"条目并入列表；用户状态（收藏/分类）同样生效。
+            for (const [slug, { meta, doc }] of catalogBySlug) {
+                if (installedNames.has(slug)) continue;
+                const skill = catalogSkill(meta, doc);
+                const custom = state.entries[slug];
+                if (custom) {
+                    skill.liked = Boolean(custom.liked);
+                    if (custom.tag && (CATEGORIES as readonly string[]).includes(custom.tag)) skill.tag = custom.tag;
+                }
+                skills.push(skill);
+            }
+            skills.sort((a, b) => Number(b.installed) - Number(a.installed) || Number(b.liked) - Number(a.liked) || a.name.localeCompare(b.name, "zh-CN"));
             res.json({ ok: true, data: skills, revision });
         } catch (error) { errorResponse(res, error); }
     });
 
-    // 单个技能详情（含 SKILL.md 正文）
+    // 功能槽映射：给画布创作阶段入口标注推荐技能。
+    app.get("/api/skill-market/slot-map", (req, res) => {
+        try {
+            const workspacePath = assertWorkspace(req);
+            res.json({ ok: true, data: slotMap(workspacePath) });
+        } catch (error) { errorResponse(res, error); }
+    });
+
+    // 单个技能详情（含 SKILL.md 正文）；未安装的 catalog 项从源目录读取。
     app.get("/api/skill-market/detail", (req, res) => {
         try {
             const workspacePath = assertWorkspace(req);
-            const { absolute } = safeDirectory(workspacePath, req.query.name, true);
-            const entryFile = path.join(absolute, "SKILL.md");
-            if (!fs.existsSync(entryFile) || fs.lstatSync(entryFile).isSymbolicLink()) {
+            const name = String(req.query.name || "");
+            const installedDir = safeDirectory(workspacePath, name, false).absolute;
+            const entryFile = fs.existsSync(path.join(installedDir, "SKILL.md"))
+                ? path.join(installedDir, "SKILL.md") : findCatalogEntry(workspacePath, name);
+            if (!entryFile || fs.lstatSync(entryFile).isSymbolicLink()) {
                 return void res.status(404).json({ ok: false, error: "找不到技能入口 SKILL.md" });
             }
             const content = fs.readFileSync(entryFile, "utf8");
-            const files = fs.readdirSync(absolute, { withFileTypes: true })
-                .filter((item) => item.isFile() && !item.isSymbolicLink())
-                .map((item) => item.name)
-                .sort();
-            res.json({ ok: true, data: { name: String(req.query.name), content, revision: digest(content), files } });
+            const files = fs.existsSync(installedDir)
+                ? fs.readdirSync(installedDir, { withFileTypes: true })
+                    .filter((item) => item.isFile() && !item.isSymbolicLink()).map((item) => item.name).sort()
+                : ["SKILL.md"];
+            res.json({ ok: true, data: { name, content, revision: digest(content), files } });
         } catch (error) { errorResponse(res, error); }
     });
 
@@ -290,37 +453,54 @@ export function registerSkillMarketRoutes(app: Express) {
         } catch (error) { errorResponse(res, error); }
     });
 
-    // 安装：Markdown（单文件）或 ZIP（base64，文件清单由前端 fflate 解出）
+    // 安装：catalog（源目录复制）/ Markdown（单文件）/ ZIP（base64，文件清单由前端 fflate 解出）
     app.post("/api/skill-market/install", (req, res) => {
         let installedDir: string | null = null;
         try {
             const workspacePath = assertWorkspace(req);
             const name = String(req.body?.name || "");
             const source = String(req.body?.source || "");
-            if (source !== "markdown" && source !== "zip") return void res.status(400).json({ ok: false, error: "安装来源不合法" });
+            if (source !== "markdown" && source !== "zip" && source !== "catalog") return void res.status(400).json({ ok: false, error: "安装来源不合法" });
             const tagRaw = String(req.body?.tag || "creative");
             const tag: MarketCategory = (CATEGORIES as readonly string[]).includes(tagRaw) ? tagRaw as MarketCategory : "creative";
-            const files = req.body?.files;
-            if (!Array.isArray(files) || !files.length || files.length > MAX_FILES_PER_SKILL) return void res.status(400).json({ ok: false, error: `技能文件数量须在 1–${MAX_FILES_PER_SKILL} 之间` });
             const { absolute } = safeDirectory(workspacePath, name, false);
             if (fs.existsSync(absolute)) return void res.status(409).json({ ok: false, error: "同名技能已存在，请先卸载或更换名称" });
             if (isBuiltin(name)) return void res.status(409).json({ ok: false, error: "不能覆盖项目内置技能" });
 
-            let totalBytes = 0;
             const entries: Array<{ relative: string; bytes: Buffer }> = [];
-            for (const item of files) {
-                const relative = validRelativeFile(item?.path);
-                if (!relative) return void res.status(400).json({ ok: false, error: "技能文件路径不合法" });
-                if (typeof item?.contentBase64 !== "string") return void res.status(400).json({ ok: false, error: "技能文件内容缺失" });
-                const bytes = Buffer.from(item.contentBase64, "base64");
-                if (bytes.length > MAX_FILE_BYTES) return void res.status(413).json({ ok: false, error: "单个技能文件不能超过 512 KB" });
-                totalBytes += bytes.length;
-                entries.push({ relative, bytes });
+            if (source === "catalog") {
+                // 从 catalog 源目录递归复制该 slug 的全部文件；源目录是本地导入的只读真相。
+                const catalogEntry = findCatalogEntry(workspacePath, name);
+                if (!catalogEntry) return void res.status(404).json({ ok: false, error: "找不到该 catalog 技能" });
+                const sourceDir = path.dirname(catalogEntry);
+                const walk = (current: string, prefix: string) => {
+                    for (const item of fs.readdirSync(current, { withFileTypes: true })) {
+                        if (item.isSymbolicLink()) continue;
+                        const full = path.join(current, item.name);
+                        const relative = prefix ? `${prefix}/${item.name}` : item.name;
+                        if (item.isDirectory()) walk(full, relative);
+                        else if (item.isFile()) entries.push({ relative, bytes: fs.readFileSync(full) });
+                    }
+                };
+                walk(sourceDir, "");
+            } else {
+                const files = req.body?.files;
+                if (!Array.isArray(files) || !files.length || files.length > MAX_FILES_PER_SKILL) return void res.status(400).json({ ok: false, error: `技能文件数量须在 1–${MAX_FILES_PER_SKILL} 之间` });
+                for (const item of files) {
+                    const relative = validRelativeFile(item?.path);
+                    if (!relative) return void res.status(400).json({ ok: false, error: "技能文件路径不合法" });
+                    if (typeof item?.contentBase64 !== "string") return void res.status(400).json({ ok: false, error: "技能文件内容缺失" });
+                    entries.push({ relative, bytes: Buffer.from(item.contentBase64, "base64") });
+                }
+            }
+            let totalBytes = 0;
+            for (const entry of entries) {
+                if (entry.bytes.length > MAX_FILE_BYTES) return void res.status(413).json({ ok: false, error: "单个技能文件不能超过 512 KB" });
+                totalBytes += entry.bytes.length;
             }
             if (totalBytes > MAX_SKILL_BYTES) return void res.status(413).json({ ok: false, error: "技能包总大小不能超过 2 MB" });
-            if (!entries.some((entry) => entry.relative.toLowerCase() === "skill.md")) {
-                const entryWithSkillMd = entries.find((entry) => /(^|\/)SKILL\.md$/i.test(entry.relative));
-                if (!entryWithSkillMd) return void res.status(400).json({ ok: false, error: "技能包缺少 SKILL.md 入口文件" });
+            if (entries.length > MAX_FILES_PER_SKILL || !entries.some((entry) => /(^|\/)SKILL\.md$/i.test(entry.relative))) {
+                return void res.status(400).json({ ok: false, error: "技能包缺少 SKILL.md 入口文件或文件过多" });
             }
 
             const staging = `${absolute}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.staging`;
@@ -339,10 +519,11 @@ export function registerSkillMarketRoutes(app: Express) {
                 throw error;
             }
 
+            const catalogMeta = catalogBySlugAll(workspacePath).get(name)?.meta;
             const { state } = readState(workspacePath);
-            state.entries[name] = { tag, liked: false, added: true, autoUpdate: false, source, sourceRef: "", installedAt: nowIso() };
+            state.entries[name] = { tag, liked: false, added: true, autoUpdate: false, source, sourceRef: source === "catalog" ? "dm-v0.7.2" : "", installedAt: nowIso() };
             writeState(workspacePath, state);
-            const skill = loadSkill(workspacePath, name, state);
+            const skill = loadSkill(workspacePath, name, state, catalogMeta);
             res.json({ ok: true, data: skill });
         } catch (error) {
             if (installedDir) { try { fs.rmSync(installedDir, { recursive: true, force: true }); } catch { /* 保留原始错误 */ } }
@@ -355,7 +536,8 @@ export function registerSkillMarketRoutes(app: Express) {
         try {
             const workspacePath = assertWorkspace(req);
             const name = String(req.body?.name || "");
-            if (isBuiltin(name)) return void res.status(400).json({ ok: false, error: "内置技能不能卸载" });
+            const { state: currentState } = readState(workspacePath);
+            if (effectiveBuiltin(name, currentState)) return void res.status(400).json({ ok: false, error: "内置技能不能卸载" });
             const { absolute } = safeDirectory(workspacePath, name, true);
             fs.rmSync(absolute, { recursive: true, force: true });
             const { state } = readState(workspacePath);

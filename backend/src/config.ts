@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { setEngineDirs } from "@basketikun/media-engine/dirs";
+import { setEngineDirs } from "./engine-contract/dirs.js";
 
 export const DEFAULT_PORT = 17370;
 const DEFAULT_ORIGINS = ["http://127.0.0.1:3001", "http://localhost:3001"];

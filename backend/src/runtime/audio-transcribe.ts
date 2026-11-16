@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { mediaToolPath } from "@basketikun/media-engine/runtime/media-tools";
+import { mediaToolPath } from "../engine-contract/media-tools.js";
 import { parseWhisperJson, resolveWhisperRuntime, runProcess, type SubtitleTranscribeInput, type WhisperRuntime } from "./subtitle-transcribe.js";
 
 /**

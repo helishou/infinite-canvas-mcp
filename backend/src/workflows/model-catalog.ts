@@ -1,322 +1,40 @@
 import type { SettingStore } from "../stores/types.js";
-import type { WorkflowDetail, WorkflowStore } from "@basketikun/media-engine/workflows/store";
-import { WORKFLOW_ROUTE_UNSUPPORTED } from "../canvas/model-workflow.js";
+
+/**
+ * 工作流「模型化」目录已退役。
+ *
+ * 以前画布把每个 ComfyUI 工作流收进 `local-comfyui` 渠道、当成一个可选模型，由画布进程
+ * 自己执行工作流。现在执行统一交给 `comfyui2api` 引擎：引擎 `/v1/models` 就是模型清单，
+ * 画布不再合成模型，也不再自动创建本地 ComfyUI 渠道（本地 ComfyUI 渠道已下线）。
+ *
+ * 保留同名方法只为不动路由的调用形状：它们不再读写 `ai.config` 里的模型列表。
+ */
 
 const AI_CONFIG_KEY = "ai.config";
-const PROCESSED_WORKFLOWS_KEY = "workflow.model-catalog.v1";
 
-type ModelCapability = "image" | "video" | "text" | "audio";
-type ModelInputScenario = "text" | "single" | "multi";
 type ChannelModel = {
   name: string;
-  capability: ModelCapability;
-  workflows?: string[];
-  workflowRouting?: Partial<Record<ModelInputScenario, string>>;
-  workflowParams?: Partial<Record<ModelInputScenario, Record<string, unknown>>>;
-};
+  capability?: "image" | "video" | "text" | "audio";
+  hidden?: boolean;
+} & Record<string, unknown>;
+
 type ModelChannel = {
   id: string;
   name: string;
   baseUrl: string;
-  apiKey: string;
+  apiKey?: string;
   apiFormat: string;
   kind?: string;
   models: ChannelModel[];
-};
+} & Record<string, unknown>;
+
 type AiConfig = Record<string, unknown> & { channels: ModelChannel[] };
-type WorkflowReader = Pick<WorkflowStore, "list" | "get">;
 
-/** 把工作流收进模型目录；工作流文件仍是内部执行资源，不再作为生成入口。 */
-const stableSerialize = (value: unknown): string =>
-  Array.isArray(value)
-    ? `[${value.map(stableSerialize).join(",")}]`
-    : value && typeof value === "object"
-      ? `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableSerialize((value as Record<string, unknown>)[key])}`).join(",")}}`
-      : JSON.stringify(value);
-
-export class WorkflowModelCatalog {
-  private lastSyncedFingerprint: { inputHash: string; listHash: string } | null = null;
-
-  constructor(
-    private readonly workflows: WorkflowReader,
-    private readonly settings: Pick<SettingStore, "get" | "set">,
-  ) {}
-
-  async syncStoredConfig(): Promise<{ changed: boolean; added: string[] }> {
-    const current = this.settings.get(AI_CONFIG_KEY);
-    if (!isRecord(current)) return { changed: false, added: [] };
-    const result = await this.syncConfig(current);
-    if (result.changed) this.settings.set(AI_CONFIG_KEY, result.config);
-    return { changed: result.changed, added: result.added };
-  }
-
-  async syncConfig(
-    value: unknown,
-  ): Promise<{ config: AiConfig; changed: boolean; added: string[] }> {
-    const originalChannelCount = readChannelCount(value);
-    const config = normalizeConfig(value);
-    const items = await this.workflows.list();
-    // 前端每次保存配置都会走到这里：逐项 workflows.get() 读全量 JSON 实测 >1s。
-    // 输入与清单指纹都没变时直接复用上次同步结果，不重复扫盘。
-    const inputHash = stableSerialize(value);
-    const listHash = items.map((item) => `${item.name}|${item.title}|${item.fieldCount}`).join(";");
-    if (this.lastSyncedFingerprint && this.lastSyncedFingerprint.inputHash === inputHash && this.lastSyncedFingerprint.listHash === listHash) {
-      return { config, changed: false, added: [] };
-    }
-    const processed = new Set(
-      readStrings(this.settings.get(PROCESSED_WORKFLOWS_KEY)),
-    );
-    const channel = ensureLocalChannel(config);
-    const added: string[] = [];
-    let changed =
-      config.channels.length !== originalChannelCount ||
-      hasNonCanonicalLocalComfyuiChannel(value);
-    for (const item of items) {
-      const detail = await this.workflows.get(item.name);
-      const rawModels = channel.models.filter(
-        (model) => model.name === item.name,
-      );
-      let model = channel.models.find(
-        (candidate) =>
-          candidate.name !== item.name &&
-          modelUsesWorkflow(candidate, item.name),
-      );
-
-      if (!model && rawModels.length) {
-        model = rawModels[0];
-        const oldName = model.name;
-        const name = uniqueModelName(
-          config.channels,
-          preferredModelName(detail, item.title),
-          model,
-        );
-        Object.assign(model, workflowModel(name, detail));
-        replaceModelReferences(config, channel.id, oldName, name);
-        changed = true;
-      }
-      // Unbound workflows remain resources, never synthesize models during startup/settings sync.
-
-      if (model && hasBrokenName(model.name)) {
-        const oldName = model.name;
-        const name = uniqueModelName(
-          config.channels,
-          workflowBaseName(item.name),
-          model,
-        );
-        model.name = name;
-        replaceModelReferences(config, channel.id, oldName, name);
-        changed = true;
-      }
-
-      if (model) {
-        for (const raw of rawModels) {
-          if (raw === model) continue;
-          replaceModelReferences(config, channel.id, raw.name, model.name);
-          channel.models.splice(channel.models.indexOf(raw), 1);
-          changed = true;
-        }
-      }
-      processed.add(item.name);
-    }
-    this.settings.set(PROCESSED_WORKFLOWS_KEY, [...processed]);
-    this.lastSyncedFingerprint = { inputHash, listHash };
-    return { config, changed, added };
-  }
-
-  async exposeImportedWorkflow(
-    name: string,
-  ): Promise<{ changed: boolean; model?: string }> {
-    const current = this.settings.get(AI_CONFIG_KEY);
-    if (!isRecord(current)) return { changed: false };
-    const config = normalizeConfig(current);
-    const processed = new Set(
-      readStrings(this.settings.get(PROCESSED_WORKFLOWS_KEY)),
-    );
-    const existing = findWorkflowModel(config.channels, name);
-    if (existing) {
-      processed.add(name);
-      this.settings.set(PROCESSED_WORKFLOWS_KEY, [...processed]);
-      return { changed: false, model: existing.name };
-    }
-    const detail = await this.workflows.get(name);
-    const channel = ensureLocalChannel(config);
-    const modelName = uniqueModelName(
-      config.channels,
-      detail.config.title || workflowBaseName(name),
-    );
-    channel.models.push(workflowModel(modelName, detail));
-    processed.add(name);
-    this.settings.set(PROCESSED_WORKFLOWS_KEY, [...processed]);
-    this.settings.set(AI_CONFIG_KEY, config);
-    return { changed: true, model: modelName };
-  }
-
-  /** 删除工作流后解除模型引用，并将原本实际路由到它的场景标记为不支持。 */
-  detachDeletedWorkflow(name: string): boolean {
-    const current = this.settings.get(AI_CONFIG_KEY);
-    if (!isRecord(current)) return false;
-    const config = normalizeConfig(current);
-    let changed = false;
-
-    for (const channel of config.channels) {
-      for (const model of channel.models) {
-        const workflows = model.workflows || [];
-        const routing = { ...model.workflowRouting };
-        const params = { ...model.workflowParams };
-        let modelChanged = false;
-
-        for (const scenario of ["text", "single", "multi"] as const) {
-          const routed = routing[scenario] || workflows[0] || "";
-          if (routed !== name) continue;
-          routing[scenario] = WORKFLOW_ROUTE_UNSUPPORTED;
-          delete params[scenario];
-          modelChanged = true;
-        }
-
-        const remaining = workflows.filter((workflow) => workflow !== name);
-        if (remaining.length !== workflows.length) {
-          if (remaining.length) model.workflows = remaining;
-          else delete model.workflows;
-          modelChanged = true;
-        }
-        if (modelChanged) {
-          model.workflowRouting = Object.keys(routing).length ? routing : undefined;
-          model.workflowParams = Object.keys(params).length ? params : undefined;
-          changed = true;
-        }
-      }
-    }
-
-    if (changed) this.settings.set(AI_CONFIG_KEY, config);
-    return changed;
-  }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function workflowModel(name: string, detail: WorkflowDetail): ChannelModel {
-  const textOnlyImage =
-    String(detail.config.operation || "").toLowerCase() === "text-to-image";
-  return {
-    name,
-    capability: capabilityOf(detail),
-    workflows: [detail.name],
-    workflowRouting: {
-      text: detail.name,
-      single: textOnlyImage ? WORKFLOW_ROUTE_UNSUPPORTED : detail.name,
-      multi: textOnlyImage ? WORKFLOW_ROUTE_UNSUPPORTED : detail.name,
-    },
-  };
-}
-
-function capabilityOf(detail: WorkflowDetail): ModelCapability {
-  const operation = String(detail.config.operation || "").toLowerCase();
-  const fieldTypes = new Set(
-    (detail.config.fields || []).map((field) => field.type),
-  );
-  if (operation.includes("video") || fieldTypes.has("video")) return "video";
-  if (
-    /(audio|tts|speech|voice|music)/.test(operation) ||
-    fieldTypes.has("audio")
-  )
-    return "audio";
-  if (operation === "text-to-image") return "image";
-  if (/(text|chat|llm)/.test(operation)) return "text";
-  return "image";
-}
-
-function ensureLocalChannel(config: AiConfig): ModelChannel {
-  // The Web store normalizes this legacy provider kind to `local`. Match its
-  // stable id as well, or every catalog sync appends another same-id channel.
-  const existing =
-    config.channels.find((channel) => channel.kind === "comfyui") ||
-    config.channels.find((channel) => channel.id === "local-comfyui");
-  if (existing) {
-    existing.kind = "comfyui";
-    return existing;
-  }
-  const channel: ModelChannel = {
-    id: "local-comfyui",
-    name: "本地 ComfyUI",
-    baseUrl: "http://127.0.0.1:8188",
-    apiKey: "",
-    apiFormat: "openai",
-    kind: "comfyui",
-    models: [],
-  };
-  config.channels.push(channel);
-  return channel;
-}
-
-function findWorkflowModel(channels: ModelChannel[], workflow: string) {
-  return channels
-    .flatMap((channel) => channel.models)
-    .find((model) => modelUsesWorkflow(model, workflow));
-}
-
-function modelUsesWorkflow(model: ChannelModel, workflow: string) {
-  return (
-    model.workflows?.includes(workflow) ||
-    Object.values(model.workflowRouting || {}).includes(workflow)
-  );
-}
-
-function uniqueModelName(
-  channels: ModelChannel[],
-  preferred: string,
-  ignored?: ChannelModel,
-) {
-  const names = new Set(
-    channels.flatMap((channel) =>
-      channel.models
-        .filter((model) => model !== ignored)
-        .map((model) => model.name),
-    ),
-  );
-  const base = preferred.trim() || "本地模型";
-  if (!names.has(base)) return base;
-  let index = 2;
-  while (names.has(`${base} ${index}`)) index++;
-  return `${base} ${index}`;
-}
-
-function preferredModelName(detail: WorkflowDetail, itemTitle: string) {
-  for (const value of [detail.config.title, itemTitle]) {
-    const name = String(value || "").trim();
-    if (name && !hasBrokenName(name)) return name;
-  }
-  return workflowBaseName(detail.name);
-}
-
-function hasBrokenName(name: string) {
-  return name.includes("\uFFFD");
-}
-
-function replaceModelReferences(
-  config: AiConfig,
-  channelId: string,
-  oldName: string,
-  newName: string,
-) {
-  if (!oldName || oldName === newName) return;
-  const replace = (value: unknown) => {
-    if (value === oldName) return newName;
-    if (value === `${channelId}::${oldName}`)
-      return `${channelId}::${newName}`;
-    return value;
-  };
-  for (const key of [
-    "model",
-    "imageModel",
-    "videoModel",
-    "textModel",
-    "audioModel",
-  ]) {
-    config[key] = replace(config[key]);
-  }
-  if (Array.isArray(config.models)) {
-    config.models = [...new Set(config.models.map(replace))];
-  }
-}
-
+/** 只做结构归一，不增删渠道：渠道是用户的配置，画布不再往里塞东西。 */
 function normalizeConfig(value: unknown): AiConfig {
   const source = isRecord(value) ? value : {};
   const channels = Array.isArray(source.channels)
@@ -325,82 +43,42 @@ function normalizeConfig(value: unknown): AiConfig {
         id: String(channel.id || ""),
         name: String(channel.name || ""),
         baseUrl: String(channel.baseUrl || ""),
-        apiKey: String(channel.apiKey || ""),
+        apiKey: typeof channel.apiKey === "string" ? channel.apiKey : "",
         apiFormat: String(channel.apiFormat || "openai"),
         kind: typeof channel.kind === "string" ? channel.kind : undefined,
         models: Array.isArray(channel.models)
-          ? (channel.models
-              .filter(isRecord)
-              .map((model) => ({ ...model })) as ChannelModel[])
+          ? (channel.models.filter(isRecord).map((model) => ({ ...model })) as ChannelModel[])
           : [],
       }))
     : [];
-  return { ...source, channels: dedupeLocalComfyuiChannels(channels) };
+  return { ...source, channels };
 }
 
-function readChannelCount(value: unknown) {
-  const source = isRecord(value) ? value : {};
-  return Array.isArray(source.channels) ? source.channels.length : 0;
-}
+export class WorkflowModelCatalog {
+  constructor(
+    private readonly workflows: unknown,
+    private readonly settings: Pick<SettingStore, "get" | "set">,
+  ) {
+    void this.workflows;
+  }
 
-function hasNonCanonicalLocalComfyuiChannel(value: unknown) {
-  const source = isRecord(value) ? value : {};
-  return Array.isArray(source.channels) && source.channels.some((channel) =>
-    isRecord(channel) && channel.id === "local-comfyui" && channel.kind !== "comfyui"
-  );
-}
+  /** 启动/保存配置时的目录同步：没有工作流模型需要合成，直接回归一后的配置。 */
+  async syncStoredConfig(): Promise<{ changed: boolean; added: string[] }> {
+    return { changed: false, added: [] };
+  }
 
-function dedupeLocalComfyuiChannels(channels: ModelChannel[]) {
-  const duplicates = channels.filter((channel) => channel.id === "local-comfyui");
-  if (duplicates.length < 2) return channels;
+  async syncConfig(value: unknown): Promise<{ config: AiConfig; changed: boolean; added: string[] }> {
+    const stored = value === undefined ? this.settings.get(AI_CONFIG_KEY) : value;
+    return { config: normalizeConfig(stored), changed: false, added: [] };
+  }
 
-  const first = duplicates[0];
-  // Same-id records are only safe to merge when their provider settings agree.
-  // If they do not, retain them for manual repair rather than discarding data.
-  const settingsSignature = (channel: ModelChannel) => JSON.stringify(
-    Object.fromEntries(Object.entries(channel).filter(([key]) => key !== "models" && key !== "kind").sort(([a], [b]) => a.localeCompare(b)))
-  );
-  const firstSignature = settingsSignature(first);
-  const compatible = duplicates.every((channel) =>
-    settingsSignature(channel) === firstSignature &&
-    (channel.kind === "local" || channel.kind === "comfyui" || channel.kind === undefined)
-  );
-  if (!compatible) return channels;
+  /** 导入工作流不再自动变成模型；模型清单由引擎 `/v1/models` 提供。 */
+  async exposeImportedWorkflow(_name: string): Promise<{ changed: boolean; model?: string }> {
+    return { changed: false };
+  }
 
-  const canonical = duplicates.find((channel) => channel.kind === "comfyui") || first;
-  const seenModels = new Set<string>();
-  canonical.models = duplicates.flatMap((channel) => channel.models).filter((model) => {
-    if (seenModels.has(model.name)) return false;
-    seenModels.add(model.name);
-    return true;
-  });
-  canonical.kind = "comfyui";
-  let kept = false;
-  return channels.filter((channel) => {
-    if (channel.id !== "local-comfyui") return true;
-    if (!kept && channel === canonical) {
-      kept = true;
-      return true;
-    }
+  /** 删除工作流不需要清理模型引用（画布侧已无工作流模型）。 */
+  detachDeletedWorkflow(_name: string): boolean {
     return false;
-  });
-}
-
-function workflowBaseName(name: string) {
-  return (
-    name
-      .split("/")
-      .pop()
-      ?.replace(/\.json$/i, "") || name
-  );
-}
-
-function readStrings(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
 }

@@ -13,7 +13,6 @@ import { createStores } from "./stores/index.js";
 import { registerComfyRoutes } from "./server/comfy-routes.js";
 import { BackendEventBus } from "./events.js";
 import { createBackendRuntimeContext } from "./runtime/context.js";
-import { H3ExecutionQueue } from "@basketikun/media-engine/runtime/h3-queue";
 import { holdUnknownSubmission, submissionDecision, submissionDiagnostic } from "./engine-contract/submission-outcome.js";
 import { VideoConcatBackend } from "./engine-contract/video-concat.js";
 import { SubtitleTranscribeBackend } from "./runtime/subtitle-transcribe.js";
@@ -92,7 +91,6 @@ async function startBackendHttpServer() {
     if (task.params?.parentTaskId) return;
     await writeBackH3Task(stores, events, task);
   };
-  const h3Queue = new H3ExecutionQueue(stores.tasks, stores.settings, true);
   const runtime = createBackendRuntimeContext({ db, stores, events });
 
   const videoConcat = new VideoConcatBackend(
@@ -446,7 +444,6 @@ async function startBackendHttpServer() {
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
-  h3Queue.activate();
   void episodeProductionRunner.resumePending();
   void canvasProductionRunner.resumePending();
   markStartupStage("recoveryDispatch");

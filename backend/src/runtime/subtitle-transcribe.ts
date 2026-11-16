@@ -7,7 +7,7 @@ import fs from "node:fs";
 import type { RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { MediaStore, TaskStore } from "../stores/types.js";
-import { mediaToolPath } from "@basketikun/media-engine/runtime/media-tools";
+import { mediaToolPath } from "../engine-contract/media-tools.js";
 
 /** Word-level timestamps are the only thing the calibration layer consumes; segment text stays diagnostic. */
 export type TranscriptWord = {

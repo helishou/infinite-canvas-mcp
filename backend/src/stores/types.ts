@@ -7,9 +7,9 @@ import type {
 } from "../db.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 import type { CanvasCommandContext } from "../canvas/collaboration.js";
-import type { TaskStore, MediaStore, SettingStore, TaskPatch, MediaStats, MediaCategory, RuntimeMedia, NamedMedia, GenerationLogInput, GenerationLogFilter } from "@basketikun/media-engine/contracts";
+import type { TaskStore, MediaStore, SettingStore, TaskPatch, MediaStats, MediaCategory, RuntimeMedia, NamedMedia, GenerationLogInput, GenerationLogFilter } from "../engine-contract/contracts.js";
 
-// 任务 / 媒体 / 设置 store 契约的权威在 @basketikun/media-engine；此处 re-export 保持既有入口。
+// 任务 / 媒体 / 设置 store 契约由画布自带类型定义；此处 re-export 保持既有入口。
 export type { TaskStore, MediaStore, SettingStore, TaskPatch, MediaStats, MediaCategory, RuntimeMedia, NamedMedia, GenerationLogInput };
 export type LogFilter = GenerationLogFilter;
 

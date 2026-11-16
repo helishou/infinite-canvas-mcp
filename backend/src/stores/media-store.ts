@@ -6,7 +6,7 @@ import { pipeline } from "node:stream/promises";
 
 import type { BackendDatabase, MediaFile } from "../db.js";
 import { MEDIA_DIR } from "../config.js";
-import { needsProbe, probeMedia } from "@basketikun/media-engine/runtime/media-tools";
+import { needsProbe, probeMedia } from "../engine-contract/media-tools.js";
 import { extensionForMime, mediaKindForMime, type MediaCategory, type MediaStore, type MediaStats, type NamedMedia } from "./types.js";
 
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;

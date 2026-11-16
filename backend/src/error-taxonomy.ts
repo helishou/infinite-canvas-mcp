@@ -12,7 +12,7 @@
  * 不重试、不改业务、不留状态，纯函数，工具层与任务回执层共用同一张表。
  */
 
-import { retryClassForCode, type RetryClass } from "@basketikun/media-engine/runtime/submission-outcome";
+import { retryClassForCode, type RetryClass } from "./engine-contract/submission-outcome.js";
 
 export type ErrorScope = "environment" | "input" | "conflict" | "transient" | "content";
 

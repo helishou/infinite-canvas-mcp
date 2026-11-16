@@ -18,6 +18,16 @@ before(async () => {
     const builtinDir = path.join(workspace, ".agents", "skills", "builtin-skill");
     fs.mkdirSync(builtinDir, { recursive: true });
     fs.writeFileSync(path.join(builtinDir, "SKILL.md"), "---\nname: builtin-skill\ndescription: 内置\n---\n");
+    // 造一个 catalog 可安装源（模拟导演大师技能包）
+    const catalogDir = path.join(workspace, ".canvas-runtime", "skill-market", "catalog", "test-pack");
+    const catalogSkillDir = path.join(catalogDir, "catalog-drama-topic");
+    fs.mkdirSync(catalogSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(catalogSkillDir, "SKILL.md"), "---\nname: 选题立项\ndescription: 测试目录技能\nstage: topic\n---\n\n# 选题\n正文。");
+    fs.writeFileSync(path.join(catalogDir, "catalog.json"), JSON.stringify({
+        id: "test-pack", title: "测试技能包", notice: "版权归测试所有", source: "unit-test",
+        functionSlots: { topic: { label: "选题立项", defaultSkill: "catalog-drama-topic", skills: ["catalog-drama-topic"] } },
+        skills: [{ slug: "catalog-drama-topic", key: "topic", title: "选题立项", description: "测试目录技能", stage: "topic", group: "01-选题立项", tier: "free", author: "tester", license: "proprietary", redistribution: "forbidden", slots: ["topic"], defaultSlots: ["topic"] }],
+    }, null, 2));
     const app = express();
     app.use(express.json({ limit: "10mb" }));
     registerSkillMarketRoutes(app);
@@ -107,4 +117,45 @@ test("卸载用户技能后目录与状态一并清理", async () => {
     const removed = await api("POST", "/api/skill-market/uninstall", { workspacePath: workspace, name: "demo-skill" });
     assert.equal(removed.status, 200);
     assert.equal(fs.existsSync(path.join(workspace, ".agents", "skills", "demo-skill")), false);
+});
+
+test("统计：列表合并未安装 catalog 项，标记 installed=false 且带功能槽元数据", async () => {
+    const list = await api("GET", `/api/skill-market/skills?workspacePath=${encodeURIComponent(workspace)}`);
+    assert.equal(list.status, 200, list.payload.error);
+    const item = list.payload.data.find((skill: any) => skill.name === "catalog-drama-topic");
+    assert.ok(item, "未安装的 catalog 技能出现在列表");
+    assert.equal(item.installed, false);
+    assert.equal(item.source, "catalog");
+    assert.deepEqual(item.catalog.slots, ["topic"]);
+    assert.equal(item.title, "选题立项", "frontmatter 中文名作为标题");
+});
+
+test("功能槽映射接口返回槽→技能及安装状态", async () => {
+    const result = await api("GET", `/api/skill-market/slot-map?workspacePath=${encodeURIComponent(workspace)}`);
+    assert.equal(result.status, 200);
+    assert.equal(result.payload.data.bundleId, "test-pack");
+    const slot = result.payload.data.slots.find((s: any) => s.key === "topic");
+    assert.ok(slot);
+    assert.equal(slot.defaultSkill, "catalog-drama-topic");
+    assert.equal(slot.installed, false);
+});
+
+test("从 catalog 安装技能后落盘、可被发现、slot-map 标记已安装", async () => {
+    const installed = await api("POST", "/api/skill-market/install", {
+        workspacePath: workspace, name: "catalog-drama-topic", source: "catalog", tag: "drama",
+    });
+    assert.equal(installed.status, 200, installed.payload.error);
+    assert.equal(installed.payload.data.installed, true);
+    assert.equal(installed.payload.data.source, "catalog");
+    const skillFile = path.join(workspace, ".agents", "skills", "catalog-drama-topic", "SKILL.md");
+    assert.ok(fs.existsSync(skillFile), "catalog 技能复制落盘");
+    assert.match(fs.readFileSync(skillFile, "utf8"), /选题立项/, "中文 frontmatter name 原样保留");
+
+    const list = await api("GET", `/api/skill-market/skills?workspacePath=${encodeURIComponent(workspace)}`);
+    const item = list.payload.data.find((skill: any) => skill.name === "catalog-drama-topic");
+    assert.equal(item.installed, true, "安装后标记 installed=true");
+
+    const map = await api("GET", `/api/skill-market/slot-map?workspacePath=${encodeURIComponent(workspace)}`);
+    const slot = map.payload.data.slots.find((s: any) => s.key === "topic");
+    assert.equal(slot.installed, true, "安装后功能槽标记已安装");
 });

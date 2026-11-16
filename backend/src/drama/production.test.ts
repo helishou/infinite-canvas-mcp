@@ -85,6 +85,26 @@ test("an unconfirmed drama plan leaves the director media rhythm at its default"
     assert.equal(saved.draft.director?.workflow.mediaProductionMode, "per_item");
 });
 
+test("选题没填时不排场次与分镜，补齐后直接放行", async (t) => {
+    const { db, service } = fixture(t);
+    const folder = db.listCanvasFolders().find(item => item.id === "drama")!;
+    db.upsertCanvasFolder({ ...folder, expectedPlanningUpdatedAt: folder.updatedAt || folder.createdAt,
+        productionPlan: { requirements: "", imageModel: "", imageModelsByKind: {}, h3Model: "", topic: { themes: [], logline: "  " } } });
+    let gateMessage = "";
+    try {
+        await service.edit("episode", { operationId: "gate-scene", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });
+    } catch (error) { gateMessage = (error as Error).message; }
+    assert.match(gateMessage, /PLANNING_TOPIC_REQUIRED/);
+    assert.match(gateMessage, /题材/);
+    assert.match(gateMessage, /一句话故事/);
+    // 补齐选题后同一条操作直接通过，不需要另开流程。
+    const filled = db.listCanvasFolders().find(item => item.id === "drama")!;
+    db.upsertCanvasFolder({ ...filled, expectedPlanningUpdatedAt: filled.updatedAt || filled.createdAt,
+        productionPlan: { ...filled.productionPlan!, topic: { themes: ["古装"], logline: "持铁鞭的后生上山除蟒，娶了蟒妻。" } } });
+    const saved = await service.edit("episode", { operationId: "gate-scene", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });
+    assert.equal(saved.draft.scenes.length, 1);
+});
+
 test("current v2 draft remains usable with an older published snapshot, while restoring that snapshot is rejected without mutation", async (t) => {
     const { db, service } = fixture(t);
     await service.edit("episode", { operationId: "seed", expectedRevision: 0, ops: [{ type: "upsert_scene", scene }] });

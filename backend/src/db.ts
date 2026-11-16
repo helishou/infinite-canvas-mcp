@@ -24,7 +24,7 @@ import { completedImageSlots, dropImageSlots, imageSourceStatus, linkedCharacter
 import { applyCanvasProjectOperations, canonicalizeH3References, isH3CanvasNode, registerH3ReferenceAssets, type CanvasOperation, type CanvasOperationResult } from "./canvas/project-ops.js";
 import { prepareClientCanvasOperation, stripCanvasLocalViewState } from "./canvas/operation-authority.js";
 import { collaborationError, commandFingerprint, type CanvasCommandContext, type CanvasCommit } from "./canvas/collaboration.js";
-import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
+import { redactInlineMedia } from "./engine-contract/redact-inline-media.js";
 import * as Y from "yjs";
 import { textSuggestionInputSchema, type CanvasTextSuggestion } from "@basketikun/canvas-agent/schemas";
 import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
@@ -33,10 +33,10 @@ import { editedTextTargets, loadTextDocument, readText, replaceText, textKey, te
 import type { McpObservabilityReportOptions } from "./stores/types.js";
 import { reconstructCanvasHistory } from "./canvas/history-maintenance.js";
 import { canonicalSharedAssetIds, captureAssetEdits, deleteDramaAsset, normalizeAssetInsertion, projectAsset, propagateAssetChanges, purgeOrphanedSharedAssets, resolveProjectAssets, stripProjectAssets, syncSharedCanvasAssetRecords, validateAssetOperation, writeDramaAsset, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
-import type { RuntimeTask, RuntimeTaskStatus, RuntimeTaskEvent, GenerationLog, GenerationLogStatus, MediaFile, WorkflowFieldType, WorkflowField, WorkflowConfig, WorkflowRunTarget, WorkflowConfigRow } from "@basketikun/media-engine/contracts";
+import type { RuntimeTask, RuntimeTaskStatus, RuntimeTaskEvent, GenerationLog, GenerationLogStatus, MediaFile, WorkflowFieldType, WorkflowField, WorkflowConfig, WorkflowRunTarget, WorkflowConfigRow } from "./engine-contract/contracts.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-// 任务 / 媒体 / 工作流契约的权威在 @basketikun/media-engine；此处 re-export 保持既有入口。
+// 任务 / 媒体 / 工作流契约由画布自带的 engine-contract/ 与本地类型定义；此处 re-export 保持既有入口。
 
 export type { RuntimeTask, RuntimeTaskStatus, RuntimeTaskEvent, GenerationLog, GenerationLogStatus, MediaFile, WorkflowFieldType, WorkflowField, WorkflowConfig, WorkflowRunTarget, WorkflowConfigRow };
 

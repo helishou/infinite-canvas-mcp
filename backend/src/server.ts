@@ -33,7 +33,6 @@ import type {
   RuntimeTask,
   RuntimeTaskStatus,
 } from "./db.js";
-import type { ComfyUiBackend } from "@basketikun/media-engine/comfyui/bridge";
 import { createLogger } from "./logger.js";
 import { createStores } from "./stores/index.js";
 import type {
@@ -46,7 +45,6 @@ import type { CanvasOperation } from "./canvas/project-ops.js";
 import type { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import { diagnoseCanvasProject } from "./canvas/project-diagnostics.js";
 import { diagnoseH3Clips } from "./canvas/h3-diagnose.js";
-import { readWorkflowLivePreview } from "@basketikun/media-engine/workflows/live-preview";
 import { syncCharacterAssetsForProject } from "./canvas/character-asset-on-open.js";
 import {
   detectLineInset,
@@ -69,9 +67,9 @@ import { CanvasDraftSessionLeases } from "./canvas/draft-session-leases.js";
 import { registerMcpObservabilityRoutes } from "./server/mcp-observability-routes.js";
 import { registerMcpExportRoutes, type McpSnapshotExports } from "./server/mcp-export-routes.js";
 import { CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES, prepareCharacterVoiceUpload } from "./server/character-voice-compression.js";
-import { redactInlineMedia } from "@basketikun/media-engine/runtime/redact-inline-media";
+import { redactInlineMedia } from "./engine-contract/redact-inline-media.js";
 import { CANVAS_TRANSLATION_TARGETS, translateCanvasText, translateH3PromptBatch, type CanvasTranslationTarget } from "./canvas/translation.js";
-import { safeOperationPath, watchHttpOperation } from "@basketikun/media-engine/runtime/slow-operation";
+import { safeOperationPath, watchHttpOperation } from "./engine-contract/slow-operation.js";
 import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.js";
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";
@@ -83,7 +81,8 @@ const logger = createLogger("backend");
 export type ServerDeps = {
   devReloadMiddleware?: import("express").RequestHandler;
   snapshotExports?: McpSnapshotExports;
-  comfy?: ComfyUiBackend;
+  /** 可选的 ComfyUI 状态提供者：画布不再直连 8188，健康检查里只做透传展示。 */
+  comfy?: { status: () => Promise<unknown> };
   events?: BackendEventBus;
   stores?: Stores;
   cancelTask?: (task: RuntimeTask) => RuntimeTask;
@@ -2079,7 +2078,7 @@ export function startServer(
       ok: true,
       task,
       // 自定义工作流的预览桥帧：画布节点生成态按 runtimeTaskId 轮询这里。
-      preview: readWorkflowLivePreview(req.params.id) || null,
+      preview: null,
       events: stores.tasks.events(req.params.id, Number(req.query.after || 0)),
     });
   });

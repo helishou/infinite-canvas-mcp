@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { mediaToolPath } from "@basketikun/media-engine/runtime/media-tools";
+import { mediaToolPath } from "../engine-contract/media-tools.js";
 
 export const CHARACTER_VOICE_COMPRESSION_THRESHOLD_BYTES = 512 * 1024;
 

@@ -1,0 +1,257 @@
+/**
+ * 从执行引擎 `comfyui2api/src/runtime/video-concat.ts` 落地到画布。
+ * 这类能力属于画布自身（视频拼接、直连渠道上游 API、模型 id 解析），
+ * 放在画布内可以不再依赖引擎包；引擎侧改动时需手工同步。
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import { createReadStream } from "node:fs";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+import { engineDirs } from "./dirs.js";
+import type { RuntimeTask } from "./contracts.js";
+import type { TaskStore } from "./contracts.js";
+import type { MediaStore } from "./contracts.js";
+import type { EngineEventBus } from "./events.js";
+import { mediaToolPath } from "./media-tools.js";
+
+export function validateVideoTrimRange(start: unknown, end: unknown) {
+    if (typeof start !== "number" || typeof end !== "number" || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) {
+        throw new Error("视频裁剪时间无效：开始时间必须大于等于 0，结束时间必须大于开始时间");
+    }
+    return { start, end };
+}
+
+/** Backend 的 FFmpeg 视频拼接与裁剪服务；任务状态统一写入 TaskStore。 */
+export class VideoConcatBackend {
+    private readonly processes = new Map<string, ChildProcess>();
+    private readonly executing = new Set<string>();
+    constructor(private readonly tasks: TaskStore, private readonly ffmpeg = mediaToolPath("ffmpeg"), private readonly events?: EngineEventBus, private readonly media?: MediaStore) {}
+    /** 拼接布局：sequence = 首尾相接；adaptive 根据首路视频方向选用横向或纵向并排。 */
+    private static layout(value: unknown): "sequence" | "hstack" | "vstack" | "adaptive" { return value === "hstack" || value === "vstack" || value === "adaptive" ? value : "sequence"; }
+    status() { return new Promise<{ available: boolean; path: string; error?: string }>((resolve) => { const child = spawn(this.ffmpeg, ["-version"], { stdio: "ignore" }); child.once("error", (error) => resolve({ available: false, path: this.ffmpeg, error: error.message })); child.once("exit", (code) => resolve({ available: code === 0, path: this.ffmpeg, ...(code === 0 ? {} : { error: `ffmpeg exited with ${code}` }) })); }); }
+    async run(videos: string[], output = "", longEdge: number | "auto" = "auto", clientTaskId?: string, parentTaskId?: string, layout: unknown = "sequence") {
+        if (!videos.length) throw new Error("视频拼接至少需要一个视频"); if (videos.some((file) => !file.trim())) throw new Error("视频输入无效");
+        const mode = VideoConcatBackend.layout(layout);
+        if (["hstack", "vstack", "adaptive"].includes(mode) && videos.length < 2) throw new Error("并排拼接至少需要两个视频");
+        const existing = clientTaskId ? this.tasks.get(clientTaskId) : null;
+        if (existing && (!["queued", "running"].includes(existing.status) || this.executing.has(existing.id))) return existing;
+        const params = { output, longEdge, layout: mode, ...(parentTaskId ? { parentTaskId } : {}) };
+        const task = existing || (clientTaskId ? this.tasks.create(clientTaskId, "video-concat", { videos }, params) : this.tasks.create("video-concat", { videos }, params));
+        this.executing.add(task.id); void this.execute(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id)); return task;
+    }
+    async trim(storageKey: string, start: number, end: number, clientTaskId: string, parentTaskId: string) {
+        validateVideoTrimRange(start, end);
+        if (!this.media?.meta(storageKey)?.mimeType.startsWith("video/")) throw new Error("视频裁剪输入不是已归档的视频");
+        const existing = this.tasks.get(clientTaskId);
+        if (existing && (existing.kind !== "video-trim" || existing.input.storageKey !== storageKey || existing.params.start !== start || existing.params.end !== end || existing.params.parentTaskId !== parentTaskId)) {
+            throw new Error("视频裁剪任务 ID 已用于不同输入");
+        }
+        if (existing && (!["queued", "running"].includes(existing.status) || this.executing.has(existing.id))) return existing;
+        const task = existing || this.tasks.create(clientTaskId, "video-trim", { storageKey }, { start, end, parentTaskId });
+        this.executing.add(task.id);
+        void this.executeTrim(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id));
+        return task;
+    }
+
+    async extractAudio(storageKey: string, name: string, clientTaskId: string, projectId: string, nodeId: string) {
+        if (!storageKey || !this.media?.meta(storageKey)?.mimeType.startsWith("video/")) throw new Error("音频提取输入不是已归档的视频");
+        const existing = this.tasks.get(clientTaskId);
+        if (existing && (existing.kind !== "video-audio-extract" || existing.input.storageKey !== storageKey || existing.input.projectId !== projectId || existing.input.nodeId !== nodeId || existing.params.name !== name)) {
+            throw new Error("音频提取任务 ID 已用于不同输入");
+        }
+        if (existing && (!(["queued", "running"].includes(existing.status)) || this.executing.has(existing.id))) return existing;
+        const task = existing || this.tasks.create(clientTaskId, "video-audio-extract", { storageKey, projectId, nodeId }, { name });
+        this.executing.add(task.id);
+        void this.executeAudioExtract(task).catch((error) => this.fail(task.id, error)).finally(() => this.executing.delete(task.id));
+        return task;
+    }
+
+    private async executeAudioExtract(task: RuntimeTask) {
+        this.update(task.id, { status: "running", progress: 0.05 });
+        const directory = await mkdtemp(path.join(os.tmpdir(), "canvas-video-audio-"));
+        try {
+            const storageKey = String(task.input.storageKey || "");
+            const input = path.join(directory, "input-video");
+            const output = path.join(directory, "extracted-audio.mp3");
+            await writeFile(input, await this.media!.read(storageKey));
+            this.assertActive(task.id);
+            const info = await this.probe(input);
+            this.assertActive(task.id);
+            if (!info.hasAudio) throw new Error("视频不包含可提取的音频轨道");
+            await this.spawnFfmpeg(task.id, ["-hide_banner", "-loglevel", "error", "-y", "-i", input, "-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "2", "-id3v2_version", "3", output]);
+            this.assertActive(task.id);
+            const baseName = path.basename(String(task.params.name || "video")).replace(/\.[^.]+$/, "") || "video";
+            const stored = await this.media!.storeStream(createReadStream(output), {
+                name: `${baseName}.mp3`, mimeType: "audio/mpeg", category: "output",
+                durationMs: info.duration > 0 ? Math.round(info.duration * 1000) : undefined,
+            });
+            const media = { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, bytes: stored.bytes, durationMs: stored.durationMs };
+            this.update(task.id, { status: "succeeded", progress: 1, result: { media } });
+            this.tasks.addEvent(task.id, "result", { media });
+        } finally {
+            this.processes.delete(task.id);
+            await rm(directory, { recursive: true, force: true });
+        }
+    }
+
+    private assertActive(id: string) {
+        if (!["queued", "running"].includes(this.tasks.get(id)?.status || "")) throw new Error("媒体处理任务已停止");
+    }
+
+    private async executeTrim(task: RuntimeTask) {
+        this.update(task.id, { status: "running", progress: 0.05 });
+        const directory = await mkdtemp(path.join(os.tmpdir(), "canvas-video-trim-"));
+        try {
+            const input = path.join(directory, "input.mp4");
+            const output = path.join(directory, "output.mp4");
+            await writeFile(input, await this.media!.read(String(task.input.storageKey)));
+            this.assertActive(task.id);
+            const info = await this.probe(input);
+            this.assertActive(task.id);
+            const { start, end } = validateVideoTrimRange(task.params.start, task.params.end);
+            if (!info.duration || start >= info.duration || end > info.duration + 0.001) throw new Error("视频裁剪范围超出视频时长，或无法读取视频时长（需要 ffprobe）");
+            const duration = Math.min(end, info.duration) - start;
+            await this.spawnFfmpeg(task.id, ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(start), "-i", input,
+                "-t", String(duration), "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "veryfast",
+                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", output]);
+            this.assertActive(task.id);
+            const stored = await this.media!.storeStream(createReadStream(output), { name: "video-trim.mp4", mimeType: "video/mp4", category: "output",
+                width: Math.ceil(info.width / 2) * 2, height: Math.ceil(info.height / 2) * 2, durationMs: Math.round(duration * 1000) });
+            const media = { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType,
+                width: stored.width, height: stored.height, durationMs: stored.durationMs };
+            this.update(task.id, { status: "succeeded", progress: 1, result: { media, start, end } });
+            this.tasks.addEvent(task.id, "result", { media, start, end });
+        } finally {
+            this.processes.delete(task.id);
+            await rm(directory, { recursive: true, force: true });
+        }
+    }
+    cancel(id: string) {
+        this.processes.get(id)?.kill();
+        const task = this.tasks.cancel(id);
+        this.events?.publish({ type: "task.updated", entityId: id, payload: task });
+        return task;
+    }
+    private async execute(task: RuntimeTask) {
+        this.update(task.id, { status: "running", progress: 0.05 });
+        const temporaryFiles: string[] = [];
+        let ownedOutput = "";
+        try {
+            const inputs = await Promise.all((task.input.videos as string[]).map((value, index) => this.resolveInput(value, task.id, index, temporaryFiles)));
+            const requestedOutput = String(task.params.output || "");
+            const output = requestedOutput || path.join(engineDirs().mediaDir, `video-concat-${crypto.randomUUID()}.mp4`);
+            if (!requestedOutput && this.media) ownedOutput = output;
+            await mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
+            const requestedLayout = VideoConcatBackend.layout(task.params.layout);
+            let layout: "sequence" | "hstack" | "vstack" = requestedLayout === "adaptive"
+                ? "hstack"
+                : requestedLayout;
+            if (requestedLayout === "adaptive") {
+                const firstVideo = await this.probe(inputs[0]);
+                layout = firstVideo.width > 0 && firstVideo.height > 0 && firstVideo.width > firstVideo.height ? "vstack" : "hstack";
+            }
+            if (layout === "hstack") await this.runHstackFfmpeg(task.id, inputs, output, Number(task.params.longEdge) || 0);
+            else if (layout === "vstack") await this.runVstackFfmpeg(task.id, inputs, output, Number(task.params.longEdge) || 0);
+            else {
+                const concatList = path.join(os.tmpdir(), `video-concat-${crypto.randomUUID()}.txt`);
+                await writeFile(concatList, inputs.map((file) => `file '${file.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
+                temporaryFiles.push(concatList);
+                await this.runFfmpeg(task.id, concatList, output, Number(task.params.longEdge) || 0);
+            }
+            const stored = this.media ? await this.media.storeStream(createReadStream(output), { name: path.basename(output), mimeType: "video/mp4", category: "output" }) : null;
+            const result = { ...(requestedOutput ? { path: output } : {}), longEdge: task.params.longEdge, layout, ...(stored ? { media: { url: this.media!.url(stored), storageKey: stored.storageKey, mimeType: stored.mimeType, filename: path.basename(output) } } : {}) };
+            this.update(task.id, { status: "succeeded", progress: 1, result });
+            this.tasks.addEvent(task.id, "result", result);
+        } finally {
+            this.processes.delete(task.id);
+            await Promise.all(temporaryFiles.map((file) => rm(file, { force: true })));
+            if (ownedOutput) await rm(ownedOutput, { force: true });
+        }
+    }
+    private async resolveInput(value: string, taskId: string, index: number, temporaryFiles: string[]) {
+        try { await access(value); return value; } catch {}
+        if (!this.media?.meta(value)) throw new Error(`视频输入不存在：${value}`);
+        const file = path.join(os.tmpdir(), `video-concat-${taskId}-${index}.mp4`);
+        await writeFile(file, await this.media.read(value));
+        temporaryFiles.push(file);
+        return file;
+    }
+    private runFfmpeg(taskId: string, list: string, output: string, longEdge: number) {
+        const scale = longEdge > 0 ? ["-vf", `scale='if(gte(iw,ih),${longEdge},-2)':'if(gte(iw,ih),-2,${longEdge})'`] : [];
+        const args = ["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list, ...scale, "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", output];
+        return this.spawnFfmpeg(taskId, args);
+    }
+    /**
+     * 横向并排（hstack）多路视频：所有格子等高、保持各自宽高比，短片用末帧补齐到最长时长，
+     * 音轨取第一路（对比弹窗里第一路才是有声的源视频）。
+     * `longEdge` 在此布局下表示**每格的目标高度**；自动模式按输入视频中的最大高度，较小视频等比放大。
+     */
+    private async runHstackFfmpeg(taskId: string, inputs: string[], output: string, cellHeight: number) {
+        const probes = await Promise.all(inputs.map((file) => this.probe(file)));
+        const maxInputHeight = Math.max(...probes.map((probe) => probe.height), 0);
+        const targetHeight = cellHeight > 0 ? cellHeight : maxInputHeight || 720;
+        const height = Math.max(2, Math.ceil(targetHeight / 2) * 2);
+        const total = Math.max(...probes.map((probe) => probe.duration), 0);
+        const parts = inputs.map((_, index) => {
+            // hstack 要求各格尺寸/帧率/时基一致，因此每路统一到 fps=30 + AVTB 时基；
+            // scale=-2:H 保持各自宽高比只固定高度；tpad 让短片停在末帧补到最长时长。
+            const chain = [`scale=-2:${height}`, "setsar=1", "fps=30", "settb=AVTB", "setpts=PTS-STARTPTS"];
+            const pad = total - (probes[index]?.duration || 0);
+            if (pad > 0.05) chain.push(`tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}`);
+            return `[${index}:v]${chain.join(",")}[v${index}]`;
+        });
+        const filter = [...parts, `${inputs.map((_, index) => `[v${index}]`).join("")}hstack=inputs=${inputs.length}[out]`].join(";");
+        const args = ["-hide_banner", "-loglevel", "error", "-y", ...inputs.flatMap((file) => ["-i", file]), "-filter_complex", filter, "-map", "[out]", "-map", "0:a?", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "aac", "-movflags", "+faststart", output];
+        await this.spawnFfmpeg(taskId, args);
+    }
+    /** Vertical comparison stack: equal cell widths, preserved aspect ratios and first-input audio. */
+    private async runVstackFfmpeg(taskId: string, inputs: string[], output: string, cellWidth: number) {
+        const probes = await Promise.all(inputs.map((file) => this.probe(file)));
+        const maxInputWidth = Math.max(...probes.map((probe) => probe.width), 0);
+        const targetWidth = cellWidth > 0 ? cellWidth : maxInputWidth || 720;
+        const width = Math.max(2, Math.ceil(targetWidth / 2) * 2);
+        const total = Math.max(...probes.map((probe) => probe.duration), 0);
+        const parts = inputs.map((_, index) => {
+            const chain = [`scale=${width}:-2`, "setsar=1", "fps=30", "settb=AVTB", "setpts=PTS-STARTPTS"];
+            const pad = total - (probes[index]?.duration || 0);
+            if (pad > 0.05) chain.push(`tpad=stop_mode=clone:stop_duration=${pad.toFixed(3)}`);
+            return `[${index}:v]${chain.join(",")}[v${index}]`;
+        });
+        const filter = [...parts, `${inputs.map((_, index) => `[v${index}]`).join("")}vstack=inputs=${inputs.length}[out]`].join(";");
+        const args = ["-hide_banner", "-loglevel", "error", "-y", ...inputs.flatMap((file) => ["-i", file]), "-filter_complex", filter, "-map", "[out]", "-map", "0:a?", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "aac", "-movflags", "+faststart", output];
+        await this.spawnFfmpeg(taskId, args);
+    }
+    /** 读视频宽高与时长；ffprobe 缺失或解析失败时返回 0，由调用方走安全默认。 */
+    private probe(file: string): Promise<{ width: number; height: number; duration: number; hasAudio: boolean }> {
+        const binary = mediaToolPath("ffprobe");
+        const args = ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", file];
+        return new Promise((resolve) => {
+            const child = spawn(binary, args, { stdio: ["ignore", "pipe", "ignore"] });
+            let stdout = "";
+            child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+            child.once("error", () => resolve({ width: 0, height: 0, duration: 0, hasAudio: false }));
+            child.once("exit", () => {
+                try {
+                    const parsed = JSON.parse(stdout) as { streams?: Array<{ codec_type?: string; width?: number; height?: number }>; format?: { duration?: string } };
+                    const video = (parsed.streams || []).find((stream) => stream.codec_type === "video");
+                    const hasAudio = (parsed.streams || []).some((stream) => stream.codec_type === "audio");
+                    resolve({ width: Number(video?.width) || 0, height: Number(video?.height) || 0, duration: Number(parsed.format?.duration) || 0, hasAudio });
+                } catch { resolve({ width: 0, height: 0, duration: 0, hasAudio: false }); }
+            });
+        });
+    }
+    private spawnFfmpeg(taskId: string, args: string[]) {
+        return new Promise<void>((resolve, reject) => {
+            const child = spawn(this.ffmpeg, args, { stdio: ["ignore", "ignore", "pipe"] });
+            this.processes.set(taskId, child);
+            let stderr = "";
+            child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+            child.once("error", reject);
+            child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg 失败（${code}）：${stderr.trim().slice(0, 1000)}`)));
+        });
+    }
+    private update(id: string, patch: Parameters<TaskStore["update"]>[1]) { const task = this.tasks.update(id, patch); this.events?.publish({ type: task.status === "succeeded" ? "task.completed" : task.status === "failed" ? "task.failed" : "task.updated", entityId: id, payload: task }); return task; }
+    private fail(id: string, error: unknown) { if (this.tasks.get(id)?.status === "cancelled") return; const message = error instanceof Error ? error.message : String(error); this.update(id, { status: "failed", error: message }); this.tasks.addEvent(id, "error", { error: message }); }
+}
