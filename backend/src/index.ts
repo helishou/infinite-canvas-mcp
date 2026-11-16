@@ -60,10 +60,38 @@ import {
 
 const logger = createLogger("main");
 
-if (process.argv[2] === "mcp") {
-  await startBackendMcpServer();
-} else {
-  await startBackendHttpServer();
+/**
+ * 进程级兜底必须早于任何 await。
+ *
+ * 之前这两个 handler 注册在 startBackendHttpServer() 的末尾（约 489 行），启动过程中
+ * 任何一次 await 失败都会直接以 triggerUncaughtException 结束进程 —— 日志里只剩
+ * 一句 `fetch failed / ECONNREFUSED`，连调用栈都留不下（例如指向已停掉的 3900 渠道）。
+ *
+ * 放到模块最顶部：既留住带 stack/cause 的证据，也不让单点异常顺手带走整个后端。
+ */
+function describeError(error: unknown): Record<string, unknown> {
+    const cause = (error as { cause?: unknown } | null)?.cause;
+    const code = (cause as { code?: string } | undefined)?.code;
+    return {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        ...(cause ? { cause: `${cause instanceof Error ? cause.message : String(cause)}${code ? ` (${code})` : ""}` } : {}),
+    };
+}
+
+process.on("uncaughtException", (error) => logger.error("uncaughtException", describeError(error)));
+process.on("unhandledRejection", (reason) => logger.error("unhandledRejection", describeError(reason)));
+
+try {
+  if (process.argv[2] === "mcp") {
+    await startBackendMcpServer();
+  } else {
+    await startBackendHttpServer();
+  }
+} catch (error) {
+  // 启动阶段失败：把完整栈写进日志再退出，别只留一句 fetch failed 让人猜
+  logger.error("boot-failed", describeError(error));
+  process.exit(1);
 }
 
 async function startBackendHttpServer() {
@@ -444,8 +472,14 @@ async function startBackendHttpServer() {
     }
     // canvas-*/direct-* 类型：上面的 resume 循环已尝试恢复，此处不再处理
   }
-  void episodeProductionRunner.resumePending();
-  void canvasProductionRunner.resumePending();
+  // 这两个恢复循环会重放排队/中断的任务，可能连到已经停掉的渠道（例如 3900 的
+  // voiceStudio）。之前是裸 void，一旦 reject 就是未处理的 Promise 拒绝。
+  void episodeProductionRunner.resumePending().catch((error) =>
+    logger.warn("resume-pending-failed", { runner: "episode", ...describeError(error) }),
+  );
+  void canvasProductionRunner.resumePending().catch((error) =>
+    logger.warn("resume-pending-failed", { runner: "canvas", ...describeError(error) }),
+  );
   markStartupStage("recoveryDispatch");
   registerCanvasCollaborationRoutes(app, db, canvasRealtime);
   registerBackendErrorHandler(app);
@@ -484,17 +518,8 @@ async function startBackendHttpServer() {
   }
 
   // ── 进程级异常兜底 ───────────────────────────────────────────────────
-  // 单点异常（如 SSE 断连后的 EPIPE、媒体读取错误）不应直接杀掉进程；
-  // 记录日志后继续运行，配合 tsx --watch 的热重载更稳健。
-  process.on("uncaughtException", (error) =>
-    logger.error("uncaughtException", {
-      message: error.message,
-      stack: error.stack,
-    }),
-  );
-  process.on("unhandledRejection", (reason) =>
-    logger.error("unhandledRejection", { reason: String(reason) }),
-  );
+  // 已移到模块顶部（import 之后、首个 await 之前）：注册在这里太晚，
+  // 启动阶段的失败会直接打穿进程且不留栈。见文件开头 describeError/process.on。
 
   const shutdown = (signal: string) => {
     const shutdownStartedAt = performance.now();
