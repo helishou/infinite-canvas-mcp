@@ -6,6 +6,11 @@ import { clipRuntimeState } from "../services/h3-clip-runtime";
 import { refsForSegment } from "../services/h3-data";
 import { message } from "antd";
 
+/**
+ * H3 节点只剩「自选视频模型」这一条执行链：提交仍是 h3-run（保留分段/续写/二采确认的外壳），
+ * 实际每个 Clip 由所选视频模型执行，默认是执行引擎的「H3 展开流」。
+ */
+
 export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
     const runInFlight = useRef<Set<string>>(new Set());
     const segments = segmentsFor(ctx.node.metadata || {});
@@ -61,6 +66,7 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
             }
             // The host's runCanvasGeneration path flushes the canvas before submitting this H3 command.
             if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("minimax-h3:submit-pending", { detail: { nodeId: ctx.node.id, segmentId: selectedId, pending: true } }));
+            // 提交 h3-run：后端按 Clip 的自选视频模型执行（默认 engine-local::H3 展开流）。
             await ctx.ai.runCanvasGeneration({ mode: "video", operation: "h3-run", projectId: ctx.projectId, nodeId: ctx.node.id, segmentId: selectedId, runFromCurrent, forceRegenerate });
         } catch (error) {
             const detail = error instanceof Error ? error.message : String(error);
