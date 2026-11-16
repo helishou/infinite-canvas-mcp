@@ -2,3 +2,7 @@
 	path = .agents/skills/acheng-director
 	url = https://github.com/helishou/acheng-director-skill.git
 	branch = main
+[submodule "comfyui2api"]
+	path = comfyui2api
+	url = git@github.com:helishou/comfyui2api.git
+	branch = main

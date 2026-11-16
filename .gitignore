@@ -63,3 +63,7 @@ node-compile-cache/
 deliveries/
 deliverables/
 .codex-remote-attachments/
+
+# 本地安装的第三方技能包，不入库
+/.agents/skills/drama-topic/
+
