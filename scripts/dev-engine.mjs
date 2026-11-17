@@ -79,7 +79,14 @@ async function main() {
         return;
     }
     log(`启动 comfyui2api → http://127.0.0.1:${port}/`);
-    const child = spawn(process.execPath, [entry, 'serve', '--port', String(port)], { cwd: engineDir, stdio: 'inherit', windowsHide: true });
+    // 告诉引擎「我是带着刚构建好的 dist 起来的」：否则构建与启动只差几秒，
+    // /health 会一直报 stale，控制台顶部就是那条「服务端在跑旧构建」的红条。
+    const child = spawn(process.execPath, [entry, 'serve', '--port', String(port)], {
+        cwd: engineDir,
+        stdio: 'inherit',
+        windowsHide: true,
+        env: { ...process.env, COMFYUI2API_DIST_BASELINE: String(Date.now()) },
+    });
     const stop = () => { try { child.kill(); } catch { /* 已退出 */ } };
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
