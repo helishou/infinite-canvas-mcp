@@ -16,8 +16,8 @@ export const NOVEL_MAX_CHARS = 3000;
 export const NOVEL_MIN_CHARS = 200;
 /** 默认单镜秒数，用于估算时长。 */
 export const BEAT_SECONDS = 3;
-/** 单段 Clip 目标时长，与 chapter-storyboard 的默认一致。 */
-export const CLIP_SECONDS = 5;
+/** 单段 Clip 目标时长，与 chapter-storyboard 的默认一致（对齐影策 8–15 秒，取 10）。 */
+export const CLIP_SECONDS = 10;
 
 export type AdaptChapterRow = NovelChapter & {
     /** 用户是否勾选进入改编。 */

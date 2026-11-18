@@ -1215,6 +1215,24 @@ export class CanvasH3Runner {
             ...videoRefs,
             ...audioRefs,
         ];
+        // 制作设置「每段最多参考图」：在尾帧路由之前按人物优先收窄图片参考，
+        // 超出的设定仍留在 compiledPrompt 文字描述里（不丢信息）。0 或不传=按模型上限。
+        // 尾帧续写场景（previousPath）依赖参考图编号对齐潜变量，跳过截断避免破坏一致性。
+        const referenceLimit = Number(params.referenceLimit || 0);
+        if (referenceLimit > 0 && !previousPath) {
+            const roleRank = (ref: Record<string, unknown>) => {
+                const role = String(ref.role || "");
+                if (/identity|character|人物|角色/.test(role)) return 0;
+                if (/prop|道具/.test(role)) return 1;
+                if (/scene|environment|场景|环境/.test(role)) return 2;
+                return 3;
+            };
+            const imageRefsAll = actualReferences.filter(ref => String(ref.type || "image") === "image");
+            if (imageRefsAll.length > referenceLimit) {
+                const kept = new Set([...imageRefsAll].sort((a, b) => roleRank(a) - roleRank(b)).slice(0, referenceLimit));
+                actualReferences = actualReferences.filter(ref => kept.has(ref) || String(ref.type || "image") !== "image");
+            }
+        }
         let runtimeTaskMode = taskMode;
         const anchorAlreadyCompiled = Boolean(segment.tailFrameAnchor?.storageKey);
         if (previousPath && useTailFrame && !anchorAlreadyCompiled) {

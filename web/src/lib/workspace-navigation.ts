@@ -19,6 +19,7 @@ export function resolveWorkspaceNavigation(pathname: string, search = ""): Works
     if (root === "assets" || root === "prompts") return { area: "resources", secondary: "resources", activeSecondary: root, compact: false };
     if (root === "workflows") return { area: "workflows", compact: false };
     if (root === "skills") return { area: "skills", compact: false };
+    if (root === "drama-studio") return { area: "dramaStudio", compact: false };
     if (root === "canvas" || (root === "projects" && query.get("type") === "canvas")) {
         return { area: "freeCanvas", compact: root === "canvas" && segments.length > 1 };
     }

@@ -38,6 +38,10 @@ export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 export type FrontendSettings = {
     [key: `homePinnedProject:${string}`]: boolean | undefined;
+    /** 导演运行时渠道：hermes(acp) 或 codex(原生)。设置页只管切这个，模型由对话面板决定。 */
+    agentEngine?: "hermes" | "codex";
+    /** 每个渠道上次选用的模型，作为该渠道新对话的初始模型。 */
+    agentModelByEngine?: Partial<Record<"hermes" | "codex", string>>;
     agentModel?: string;
     agentReasoningEffort?: string;
     agentPermissionMode?: string;

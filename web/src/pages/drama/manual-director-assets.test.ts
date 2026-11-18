@@ -32,7 +32,7 @@ test("manual prop creation adds plan, prompt card and a v2 asset-backed subject 
         id: "AST_NEW_PROP", kind: "prop", asset_name: "铜铃", version: "v1", description: "旧铜铃", purpose: "持有物", depends_on: [], status: "planned", canvas_scope: "episode",
     });
     assert.deepEqual(result.assetCard, {
-        id: "AST_NEW_PROP", asset_id: "AST_NEW_PROP", asset_kind: "prop", asset_version: "v1", prompt: "A worn brass bell", references: [], reference_policy: "none",
+        id: "AST_NEW_PROP", asset_id: "AST_NEW_PROP", asset_kind: "prop", target_skill: "im2-clean-image", source_repository: "im2-image-skills", asset_version: "v1", prompt: "A worn brass bell", references: [], reference_policy: "none",
     });
     assert.deepEqual(result.subject, {
         id: "SUB_NEW_PROP", kind: "prop", entityRef: { ownerKind: "episode", ownerId: "EP_1", kind: "asset", id: "AST_NEW_PROP" }, pictureBindings: [],

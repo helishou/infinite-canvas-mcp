@@ -162,6 +162,44 @@ export class CanvasVideoDispatcher {
         return retried;
     }
 
+    /**
+     * 失败/取消后的引擎任务回捞：按持久化的 engineTaskId 把引擎里仍在执行的同一次 prompt 接回来。
+     * 不重新提交、不重新加载模型；接回后复用正常路径的媒体归档与节点回写。
+     */
+    async reclaim(id: string): Promise<RuntimeTask> {
+        const task = this.stores.tasks.get(id);
+        if (!task || task.kind !== "canvas-video") throw new Error(`画布视频任务不存在：${id}`);
+        if (!["failed", "cancelled"].includes(task.status)) throw new Error(`任务状态 ${task.status} 不可回捞`);
+        const submission = this.stores.tasks.events(id).find((event) => event.type === "engine_submitted")?.payload as { engineTaskId?: string; baseUrl?: string; model?: string } | undefined;
+        if (!submission?.engineTaskId || !submission.baseUrl) throw new Error("原任务没有记录引擎任务 id；只有新增的执行引擎任务支持回捞，请重新生成");
+        const config = this.stores.settings.get("ai.config");
+        const candidates = [findEngineChannel(config, submission.model || ""), findComfyuiEngineTarget(config, submission.model || "")].filter((item): item is EngineChannelTarget => Boolean(item));
+        const target = candidates.find((item) => item.baseUrl === submission.baseUrl) || candidates[0];
+        if (!target) throw new Error("原引擎渠道已不在设置里，请在原配置下回捞");
+        const engine = new CanvasEngineClient(target.baseUrl, target.token);
+        const outcome = await engine.reclaimTask(submission.engineTaskId);
+        if (outcome.error) throw new Error(`执行引擎回捞失败：${outcome.error}`);
+        const log = this.stores.logs.list({ runtimeTaskId: id, limit: 1 })[0];
+        const current = this.stores.tasks.update(id, { status: "running", progress: 0.05, error: null });
+        this.stores.tasks.addEvent(id, "engine_reclaim", { engineTaskId: submission.engineTaskId, ...outcome });
+        const input = task.input as CanvasVideoGenerationInput;
+        const plan: Plan = { input, kind: "engine", engine: target };
+        void this.waitReclaimed(current, submission.engineTaskId, target, plan, log?.id ?? null)
+            .catch((error) => this.fail(current, input, error, log?.id ?? null, Date.now()));
+        return current;
+    }
+
+    private async waitReclaimed(task: RuntimeTask, engineTaskId: string, target: EngineChannelTarget, plan: Plan, logId: string | null) {
+        const engine = new CanvasEngineClient(target.baseUrl, target.token);
+        const finished = await engine.waitVideo(engineTaskId);
+        if (finished.status !== "succeeded") throw new Error(finished.error || `执行引擎返回 ${finished.status}`);
+        this.assertActive(task.id);
+        const imported = await importEngineMedia(this.stores.media, finished.media, (url) => engine.fetchMedia(url));
+        const media = imported.find((item) => String(item.mimeType).startsWith("video/")) || imported[0];
+        if (!media) throw new Error("视频工作流回捞完成但没有返回媒体");
+        this.finish(task, plan, media, logId, Date.now());
+    }
+
     resume(task: RuntimeTask) {
         if (task.kind !== "canvas-video" || !["queued", "running"].includes(task.status)) return;
         const input = task.input as CanvasVideoGenerationInput;
@@ -208,6 +246,11 @@ export class CanvasVideoDispatcher {
         }
         this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
         const media = await this.dispatch(plan, task.id);
+        this.finish(task, plan, media, logId, startedAt);
+    }
+
+    /** 产物落盘与节点回写：正常执行与引擎回捞共用，避免两条路径写出不同状态。 */
+    private finish(task: RuntimeTask, plan: Plan, media: Record<string, unknown>, logId: string | null, startedAt: number) {
         if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
         if (plan.input.projectId && plan.input.nodeId) {
             const written = this.stores.projects.writeBackCanvasVideoTask({ ...task, status: "succeeded", result: { media: [media] } },
@@ -393,6 +436,8 @@ export class CanvasVideoDispatcher {
                 size: plan.input.size,
             });
             this.engineTasks.set(childId, { taskId: created.taskId, target });
+            // 进程内的 engineTasks 会在 waitVideo 结束后清掉；失败任务的回捞需要持久化映射。
+            this.stores.tasks.addEvent(taskId, "engine_submitted", { engineTaskId: created.taskId, baseUrl: target.baseUrl, model: plan.input.model });
             const finished = await engine.waitVideo(created.taskId);
             if (finished.status !== "succeeded") throw new Error(finished.error || `执行引擎返回 ${finished.status}`);
             this.assertActive(taskId);
@@ -547,6 +592,17 @@ function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
     if (values.seconds === undefined && values.duration !== undefined) values.seconds = values.duration;
     return values;
 }
-function messageOf(error: unknown) { return error instanceof Error ? error.message : String(error); }
+function messageOf(error: unknown) {
+    if (error instanceof Error) return error.message;
+    // 引擎回执里的 error 可能是 {code, message} 对象：直接 String() 会写成 [object Object]。
+    if (error && typeof error === "object") {
+        const item = error as { message?: unknown; code?: unknown; error?: unknown };
+        if (typeof item.message === "string" && item.message.trim()) return item.message;
+        if (typeof item.error === "string" && item.error.trim()) return item.error;
+        if (typeof item.code === "string" && item.code.trim()) return item.code;
+        try { return JSON.stringify(error); } catch { return "未知错误"; }
+    }
+    return String(error);
+}
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }
 function firstMedia(task: RuntimeTask) { const media = task.result?.media; const values = Array.isArray(media) ? media : media && typeof media === "object" ? [media] : []; const output = values.find((item: any) => String(item?.mimeType || "").startsWith("video/")) || values[0]; if (!output || typeof output !== "object") throw new Error("视频任务完成但没有返回媒体"); return output as Record<string, unknown>; }

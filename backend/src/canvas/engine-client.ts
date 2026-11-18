@@ -179,6 +179,11 @@ export class CanvasEngineClient {
         await this.request(`/v1/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST" }).catch(() => undefined);
     }
 
+    /** 失败/取消后按 clientId 接回引擎里仍在执行的同一次 prompt（不重新提交）。 */
+    async reclaimTask(taskId: string): Promise<{ status?: string; promptId?: string; error?: string }> {
+        return await this.request<{ status?: string; promptId?: string; error?: string }>(`/api/tasks/${encodeURIComponent(taskId)}/reclaim`, { method: "POST" });
+    }
+
     /** 服务端到服务端转发（画布 `/api/engine/*` 代理用），令牌只在这条链路里出现。 */
     async proxyFetch(url: string, init: { method: string; body?: string; contentType?: string }): Promise<{ status: number; contentType: string; body: Buffer }> {
         const response = await fetch(url, {

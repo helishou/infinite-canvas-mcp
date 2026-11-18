@@ -124,7 +124,7 @@ export default function ProjectsPage() {
             <div className="flex min-h-0 w-full flex-1">
                 <div className="min-w-0 flex-1 overflow-y-auto">
                     <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} headingHidden={directoryType === "drama"} />}
+                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} headingHidden={directoryType === "drama"} openInStudio />}
                         {showCanvases && <>
                         <PageSectionHeader
                             title={t("projects.canvas")}

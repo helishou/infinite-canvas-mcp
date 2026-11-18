@@ -1,0 +1,106 @@
+/**
+ * 全自动流水线 HTTP 路由（对齐影策 /api/dramas/:id/start、/pause、approve、release、retry-failed）。
+ * 由 index.ts 注入已 startLoop 的 DramaPipeline 实例。
+ */
+import type { Router } from "express";
+import { z } from "zod";
+import type { DramaPipeline } from "../drama/pipeline.js";
+import type { BackendDatabase } from "../db.js";
+import { bindPipelineAssetImage } from "../drama/pipeline-asset-image.js";
+
+const pipelineOptionsSchema = z.object({
+    storyboardModel: z.string().optional(),
+    assetExtractModel: z.string().optional(),
+    videoPromptModel: z.string().optional(),
+    textThinking: z.object({ storyboard: z.string().optional(), extract: z.string().optional(), prompt: z.string().optional() }).optional(),
+    videoModel: z.string().optional(),
+    imageModelsByKind: z.object({ character: z.string().optional(), scene: z.string().optional(), prop: z.string().optional() }).optional(),
+    referenceLimit: z.number().int().min(0).max(20).optional(),
+    independent: z.boolean().optional(),
+    storyboardRules: z.object({
+        episodeSeconds: z.number().optional(),
+        segmentRange: z.object({ min: z.number(), max: z.number() }).optional(),
+        dialogueDensity: z.string().optional(),
+        transitionMode: z.string().optional(),
+        transitionMs: z.number().optional(),
+        pacing: z.string().optional(),
+    }).optional(),
+    concurrency: z.object({ text: z.number().optional(), video: z.number().optional(), render: z.number().optional() }).optional(),
+}).partial();
+
+const startSchema = z.object({
+    reviewMode: z.enum(["auto", "sample", "every"]).default("auto"),
+    mediaMode: z.enum(["auto", "manual"]).default("auto"),
+    options: pipelineOptionsSchema.optional(),
+}).strict();
+
+const approveSchema = z.object({ episodeId: z.string().min(1) }).strict();
+const releaseSchema = z.object({ target: z.enum(["assets", "episodes", "all"]).default("all") }).strict();
+const bindAssetImageSchema = z.object({
+    episodeId: z.string().min(1),
+    assetId: z.string().min(1),
+    nodeId: z.string().min(1),
+    storageKey: z.string().min(1),
+    taskId: z.string().optional(),
+    imageId: z.string().optional(),
+}).strict();
+
+export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipeline, db?: BackendDatabase) {
+    // 一键全自动启动（幂等；影策 create(start:true) 的等价物）
+    router.post("/drama/:dramaId/pipeline/start", async (req, res) => {
+        const parsed = startSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: parsed.error.issues.map(i => i.message).join("; ") });
+        try {
+            const result = await pipeline.start(String(req.params.dramaId), parsed.data);
+            res.json({ ok: true, ...result });
+        } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 暂停 / 恢复（影策 /pause 与 /start 的等价物；没有单独 resume 路由，恢复=start）
+    router.post("/drama/:dramaId/pipeline/pause", (req, res) => {
+        try { pipeline.pause(String(req.params.dramaId)); res.json({ ok: true }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+    router.post("/drama/:dramaId/pipeline/resume", async (req, res) => {
+        try { await pipeline.resume(String(req.params.dramaId)); res.json({ ok: true }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 状态（前端轮询）
+    router.get("/drama/:dramaId/pipeline/status", (req, res) => {
+        try { res.json({ ok: true, ...pipeline.status(String(req.params.dramaId)) }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 闸门放行（影策 /episodes/:eid/approve）
+    router.post("/drama/:dramaId/pipeline/approve", (req, res) => {
+        const parsed = approveSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
+        try { pipeline.approve(String(req.params.dramaId), parsed.data.episodeId); res.json({ ok: true }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 媒体放行（影策 /media/release）
+    router.post("/drama/:dramaId/pipeline/release", (req, res) => {
+        const parsed = releaseSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: "target 无效" });
+        try { pipeline.releaseMedia(String(req.params.dramaId), parsed.data.target); res.json({ ok: true }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 失败重试（影策 /retry-failed）
+    router.post("/drama/:dramaId/pipeline/retry-failed", (req, res) => {
+        try { const n = pipeline.retryFailed(String(req.params.dramaId)); res.json({ ok: true, requeued: n }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 全自动流水线资产参考图写回：draft/published.director.assets[assetId] + 实体节点 metadata。
+    // 只接受真实归档媒体：storageKey 必须能在 media_files 找到对应文件，sha256 由文件字节计算。
+    router.post("/drama/pipeline/assets/bind-image", (req, res) => {
+        if (!db) return void res.status(503).json({ ok: false, error: "资产参考图写回需要数据库访问，服务尚未就绪" });
+        const parsed = bindAssetImageSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: parsed.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ") });
+        try { res.json(bindPipelineAssetImage(db, parsed.data)); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+}

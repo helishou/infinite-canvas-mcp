@@ -34,6 +34,8 @@
         "./drama/novel-chapters": "./dist/drama/novel-chapters.js",
         "./drama/chapter-storyboard": "./dist/drama/chapter-storyboard.js",
         "./drama/chapter-demand": "./dist/drama/chapter-demand.js",
+        "./drama/asset-extract": "./dist/drama/asset-extract.js",
+        "./drama/segment-writer": "./dist/drama/segment-writer.js",
         "./drama/chapter-episodes": "./dist/drama/chapter-episodes.js",
         "./drama/demand-beats": "./dist/drama/demand-beats.js",
         "./drama/field-authority": "./dist/drama/field-authority.js",

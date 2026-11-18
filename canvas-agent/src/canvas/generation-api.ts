@@ -3,7 +3,7 @@ export const H3_EXECUTION_PREVIEW_PATH = "/canvas/generation/h3-preview" as cons
 export const CANVAS_LOOP_PREPARE_PATH = "/canvas/generation/prepare-loop" as const;
 export const CANVAS_TASKS_PATH = "/tasks" as const;
 export const CANVAS_TASK_ROUTE = `${CANVAS_TASKS_PATH}/:id` as const;
-export const CANVAS_TASK_ACTIONS = ["cancel", "retry"] as const;
+export const CANVAS_TASK_ACTIONS = ["cancel", "reclaim", "retry"] as const;
 
 export type CanvasTaskAction = (typeof CANVAS_TASK_ACTIONS)[number];
 

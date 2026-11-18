@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+- [修复] 连续性账本写回后自动投影到镜头：coverage 声明但未勾选的事实会报 `CONTINUITY_FACT_NOT_SELECTED` 并阻断编译，避免“账本写完了但 H3 提示词不带状态”；同时修正镜头投影所需 requirements 与覆盖摘要。
+- [新增] 画布可回捞执行引擎里未丢的生成任务：引擎提交时把 `engineTaskId` 记进画布任务事件，新增 MCP 工具 `h3_reclaim_task {taskId}` 与 `POST /tasks/:id/reclaim`，失败/取消后按原 id 接回同一次执行并复用媒体归档与节点回写；不重投、不重载模型，旧任务没有映射时明确拒绝。
+- [修复] 引擎不再把「ComfyUI 重启/瞬断」直接当失败：`/history` 掉线时先按 clientId 观察 90 秒并接回原执行（事件 `comfy_offline`/`comfy_reclaimed`，窗口可用 `COMFY_OFFLINE_GRACE_MS` 调，默认 90 秒），队列被清空才明确报「未产出」；新增 `POST /api/tasks/{id}/reclaim` 供失败任务按 clientId 回捞产物，不重投、不重新加载模型。
+- [新增] v2 制作稿可治理场次：`production_edit` 新增 `merge_director_scenes`（同环境合并，保留全部剧本块与顺序，自动改指镜头与连续性锚点）和 `reorder_director_scenes`（整表重排），不再只能拆不能合。
 - [新增] 角色四视图强制校验（`canvas-agent` 的 `turnaround-layout`，按其源规范 `.agents/skills/acheng-director/references/60-assets-and-keyframes.md`）：提示词或节点标题含四视图/三视图/turnaround 时，`canvas_run_generation` 会检查四格（正面脸及肩部、右侧脸及肩部、无头正面全身、完整背面全身）、2×2 等宽双列与顶行 1/3、空手下垂，并要求横版（宽高比 ≥1.15）；不合格直接拒绝并指出缺项，不再靠文档自觉。
 - [新增] 选题门禁：题材与一句话故事都没填时，后端拒建资产（`create_manual_director_asset`）和新增场次/镜头（`upsert_scene`/`upsert_shot`），返回 `PLANNING_TOPIC_REQUIRED` 并指出缺哪几项；共享源登记（`sharedSource`）与已有内容的编辑不受影响，补齐后同一条操作直接通过。
 - [变更] 「按顺序生成大纲」收成可折叠工具条：六步都写完时默认收起成一行（标题＋六步都写完了＋模型＋交给导演），点标题可展开重看；还有没写的步骤时仍默认展开，不再长期占用大纲页正文空间。角色／场景／道具底稿改为默认落在剧目共享资产画布（`assetCanvasScope`：有共享画布即 shared，单集或自由画布才 episode），分集画布只留引用。

@@ -1004,13 +1004,17 @@ def adapt_production(production, *, draft=False):
         all_transformed_shots.extend(transformed_shots)
 
         first_shot = transformed_shots[0]
-        # Reuse the authored production creative notes when this Clip has no
-        # dedicated summary, so the existing frontend field controls Ref2VA's summary.
-        summary = str(segment.get("summary") or "")
+        # Ref2VA 的 summary 只写本 Clip 这一两句：优先用作者填的 segment.summary，
+        # 没有就用本段镜头标题拼一句（派生、不新写情节），最后才退回通用句。
+        # 绝不能拿 source.brief（整集需求/剧本）兜底——那样每个 Clip 都被塞进一份
+        # 6477 字的「I. Narrative Function … VII. What Not to Do」，H3 会把全篇当段摘要。
+        summary = str(segment.get("summary") or "").strip()
         if not summary:
-            summary = str(source.get("brief") or "").strip()
-        if not summary:
-            summary = "A continuous scene of " + str(len(shot_ids)) + " authored camera Shot(s)."
+            titles = [str(shot.get("title") or "").strip() for shot in transformed_shots]
+            beats = "；".join(title for title in titles[:3] if title)
+            summary = beats if beats else "A continuous scene of " + str(len(shot_ids)) + " authored camera Shot(s)."
+        # 本段摘要上限 600 字：整集 brief/需求绝不进 summary。
+        summary = summary[:600].strip()
         if not summary.startswith("["):
             summary = "[reference generation] " + summary
         mode_reason = str(segment.get("mode_selection_reason") or ("Inferred from visible Subject and keyframe references." if mode == "Ref2VA" else "No image reference intent is present; using text-to-video."))

@@ -52,7 +52,7 @@ test("every built-in tool declared by the toolbar or image registry survives gro
     for (const name of ["baseToolbarTools", "nodeToolbarTools", "sharedTools"]) collect(variable(name), tree);
     const imageTree = ts.createSourceFile("image-tools.tsx", readFileSync(new URL("./canvas-image-toolbar-tools.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     collect(imageTree, imageTree);
-    assert.equal(ids.size, 39);
+    assert.equal(ids.size, 40);
     const groups = groupCanvasNodeActions([...ids].map(id => ({ id })));
     assert.deepEqual(groups.flatMap(group => group.actions.map(action => action.id)).sort(), [...ids].sort());
     assert.ok(!groups.some(group => group.id === "extensions"), "built-in actions must have deliberate sections");

@@ -83,6 +83,7 @@ export type PluginMcpBackend = {
     previewH3Generation?(input: CanvasGenerationCommand): Promise<import('../canvas/generation-contract.js').H3ExecutionPreview>;
     getTask(id: string): Promise<{ task: import("../runtime/types.js").RuntimeTask; events: import("../runtime/types.js").RuntimeTaskEvent[] }>;
     cancelTask(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
+    reclaimTask(id: string): Promise<import("../runtime/types.js").RuntimeTask>;
     getH3Defaults(): Promise<Record<string, unknown>>;
     setH3Defaults(settings: Record<string, unknown>): Promise<Record<string, unknown>>;
     resetH3Defaults(): Promise<void>;

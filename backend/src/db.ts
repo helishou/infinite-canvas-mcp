@@ -1,5 +1,5 @@
 import { readRawProject, readStoredProjectRows, rawProjectFromStoredRows, createStoredProject, writeStoredProjectDelta } from "./stores/canvas-project-storage.js";
-import { CURRENT_DATABASE_SCHEMA } from "./database-schema.js";
+import { CURRENT_DATABASE_SCHEMA, DRAMA_PIPELINE_DDL } from "./database-schema.js";
 import { migrateStorageFormat } from "./storage-format-migration.js";
 import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import { syncEntityNodeEdits, syncH3SceneImageReferences, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
@@ -141,6 +141,8 @@ export class BackendDatabase {
         this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
         try { this.migrate(); }
         catch (error) { this.db.close(); throw error; }
+        // 全自动流水线队列表：独立 DDL 补建，不升 schema version（见 database-schema.ts 注释）。
+        this.db.exec(DRAMA_PIPELINE_DDL);
     }
 
     close() { this.db.close(); }

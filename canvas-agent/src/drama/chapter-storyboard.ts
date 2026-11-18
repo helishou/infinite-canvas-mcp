@@ -105,7 +105,9 @@ export type StoryboardPlan = {
 };
 
 const DEFAULT_FPS = 24;
-const DEFAULT_CLIP_SECONDS = 5;
+// 对齐影策：剧情段目标 8–15 秒（编译器硬限 4–15）。影策真实段多为 10–11 秒，
+// 旧默认 5 秒导致实测每段只有 5–6 秒，远低于 UI 标注的「剧情段8–15秒」。
+const DEFAULT_CLIP_SECONDS = 10;
 const DEFAULT_MIN_SHOT_SECONDS = 1;
 
 /**

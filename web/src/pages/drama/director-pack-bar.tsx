@@ -6,7 +6,8 @@ import { useTranslation } from "react-i18next";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 
 import { buildPlan, toWriteOps, type DraftShot } from "@/lib/drama/adapt-storyboard";
-import { buildDirectorPack, composeSegmentPrompt, packSegmentsToShotRows, packSummary, regroupPlanByPackSegments, segmentFromShotGroup, textOf } from "@/lib/director-pack";
+import { buildDirectorPack, composeSegmentPrompt, packSegmentsToShotRows, packSummary, pickSegmentPrompt, regroupPlanByPackSegments, segmentFromShotGroup, textOf } from "@/lib/director-pack";
+import { buildPackGroupMedia, collectPackClips } from "@/lib/director-pack-canvas";
 import { collectPackRefs, importPackRefs } from "@/lib/director-pack-assets";
 import { promoteImportedPack } from "@/lib/director-pack-promote";
 import { packToZip, zipToPack } from "@/lib/director-pack-io";
@@ -14,7 +15,7 @@ import { editEpisodeProduction, fetchEpisodeProduction, type DramaEpisode } from
 
 type Production = {
     revision: number;
-    draft?: { director?: { source?: Record<string, unknown> } };
+    draft?: { director?: { source?: Record<string, unknown>; artifacts?: Array<Record<string, unknown>> } };
     source?: Record<string, unknown>;
 };
 
@@ -35,9 +36,17 @@ function readShots(source: Record<string, unknown>) {
     return { fps, shots: asArray(source.shots) };
 }
 
-/** 画布制作稿 → 导演包（段=Clip，提示词=编译好的段提示词，缺就按累计时间拼镜头）。 */
-export function buildPackFromProduction(input: { title: string; production: Production; aspect?: string }) {
-    const source = (input.production.draft?.director?.source || input.production.source || {}) as Record<string, unknown>;
+/** 画布制作稿 → 导演包（段=Clip，提示词=画布 H3 段的视频提示词，缺就按累计时间拼镜头）。 */
+export function buildPackFromProduction(input: { title: string; production: Production; aspect?: string; clipPrompts?: Map<string, string> }) {
+    const director = input.production.draft?.director;
+    const source = (director?.source || input.production.source || {}) as Record<string, unknown>;
+    // 编译产物是画布提示词的备份：画布被清空或没打开时，包里仍然有真实的视频提示词。
+    const artifactPrompts = new Map<string, string>();
+    for (const artifact of asArray(director?.artifacts)) {
+        if (artifact.kind !== "h3" || artifact.status !== "ready") continue;
+        const targetId = str(artifact.targetId), prompt = str(artifact.prompt).trim();
+        if (targetId && prompt && !artifactPrompts.has(targetId)) artifactPrompts.set(targetId, prompt);
+    }
     const groups = readGroups(source);
     const { fps, shots } = readShots(source);
     const byId = new Map(shots.map((shot) => [str(shot.id), shot]));
@@ -54,13 +63,18 @@ export function buildPackFromProduction(input: { title: string; production: Prod
     const segments = groups.map((group, index) => {
         const members = group.shotIds.map((id) => byId.get(id)).filter(Boolean) as Array<Record<string, unknown>>;
         const seconds = members.reduce((sum, shot) => sum + shotSeconds(shot), 0) || Math.max(0.5, Number(source.clip_seconds || 6));
-        const prompt = group.prompt || composeSegmentPrompt(members.map((shot) => ({
+        const prompt = pickSegmentPrompt([
+            // 画布 H3 段上的提示词就是实际提交给模型的视频提示词，优先用它。
+            input.clipPrompts?.get(group.id),
+            artifactPrompts.get(group.id),
+            group.prompt,
+        ], composeSegmentPrompt(members.map((shot) => ({
             // 只取画面正文：草稿里的 camera 是编译器自动补的「固定机位，按画面描述构图」，
             // 拼进去会让导出的提示词和原包对不上（实测 25/25 段全被污染）。
             visual: textOf(shot.visual),
             camera: "",
             durationSec: shotSeconds(shot),
-        })), fps);
+        })), fps));
         const segment = segmentFromShotGroup({ index, id: group.id || `sh_${index + 1}`, prompt, durationSec: seconds, fps, start: cursor, continuityFromPrev: index > 0 });
         cursor += seconds;
         return segment;
@@ -109,18 +123,40 @@ export function DirectorPackBar({ episode, production, onImported }: {
         if (!production) return;
         setExporting(true);
         try {
-            const pack = buildPackFromProduction({ title: episode ? `第 ${episode.episodeNumber} 集` : "导演包", production });
-            // 参考图：把本集导入过的图片按段号装回包里（没有就是空，不写假的 refs）。
-            if (episode) {
-                const refs = await collectPackRefs({ episodeId: episode.id, dramaId: episode.dramaId });
+            // 画布 H3 节点是视频提示词与参考图的权威来源；读不到就退回分镜拼稿，并明确告知。
+            const canvasClips = episode?.canvasId ? await collectPackClips(episode.canvasId).catch(() => null) : null;
+            const clipPrompts = new Map<string, string>();
+            for (const [targetId, clip] of canvasClips || []) if (clip.prompt) clipPrompts.set(targetId, clip.prompt);
+            const pack = buildPackFromProduction({ title: episode ? `第 ${episode.episodeNumber} 集` : "导演包", production, clipPrompts });
+            let missingRefs = 0;
+            let refCount = 0;
+            for (const group of pack.groups) {
+                const clip = canvasClips?.get(group.segment.id);
+                if (!clip?.images.length) continue;
+                const media = await buildPackGroupMedia({ groupIndex: group.index, images: clip.images });
+                group.images = media.images;
+                group.segment.refs = media.refs;
+                missingRefs += media.missing;
+                refCount += media.images.length;
+            }
+            // 老包导入时落在资产库的参考图（那批数据没有画布 referenceBindings）；画布已给齐就不必再拉资产库。
+            const legacy = episode && pack.groups.some((group) => !group.images.length)
+                ? await collectPackRefs({ episodeId: episode.id, dramaId: episode.dramaId }).catch(() => null)
+                : null;
+            if (legacy) {
                 for (const group of pack.groups) {
-                    const hit = refs.get(group.index);
+                    if (group.images.length) continue;
+                    const hit = legacy.get(group.index);
                     if (!hit) continue;
                     group.images = hit.images;
                     group.segment.refs = hit.refs;
-                    const self = pack.timeline.segments.find((segment) => segment.id === group.segment.id);
-                    if (self) self.refs = hit.refs;
+                    refCount += hit.images.length;
                 }
+            }
+            // groups 与 timeline.segments 共用同一批对象，段级 refs 已同步；这里只把段级改动收口。
+            for (const group of pack.groups) {
+                const self = pack.timeline.segments.find((segment) => segment.id === group.segment.id);
+                if (self) self.refs = group.segment.refs;
             }
             const bytes = packToZip(pack);
             const blob = new Blob([bytes as unknown as BlobPart], { type: "application/zip" });
@@ -132,8 +168,9 @@ export function DirectorPackBar({ episode, production, onImported }: {
             anchor.click();
             anchor.remove();
             window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-            const refCount = pack.groups.reduce((sum, group) => sum + group.images.length, 0);
             message.success(t("directorPack.exported", { segments: pack.timeline.segments.length, refs: refCount }));
+            if (!clipPrompts.size) message.warning(t("directorPack.exportNoCanvas"));
+            if (missingRefs) message.warning(t("directorPack.exportMissingRefs", { count: missingRefs }));
         } catch (error) {
             message.error(String((error as Error)?.message || error));
         } finally {

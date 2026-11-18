@@ -71,16 +71,18 @@ async function waitTask(taskId: string, onTick?: (status: string) => void) {
  * 先落 synopsis（后端按它切剧本块），没有场次就先初始化，再按场次写分镜与台词。
  * 重复写同一场次时复用原 Clip ID —— 否则后端会以「Clip ID 集合不一致」拒绝。
  */
-export function AdaptStoryboardPanel({ dramaId, episodes, onWritten }: {
+export function AdaptStoryboardPanel({ dramaId, episodes, onWritten, defaultEpisodeId }: {
     dramaId: string;
     episodes: readonly DramaEpisode[];
     onWritten?: () => void;
+    /** 外部（如制作台抽屉）指定初始选中的分集；用户仍可在下拉里改选。 */
+    defaultEpisodeId?: string;
 }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
     const config = useConfigStore(state => state.config);
 
-    const [episodeId, setEpisodeId] = useState("");
+    const [episodeId, setEpisodeId] = useState(defaultEpisodeId || "");
     const [rows, setRows] = useState<DraftShot[]>([]);
     const [meta, setMeta] = useState<{ sceneName: string; timeOfDay: string }>({ sceneName: "", timeOfDay: "" });
     const [diagnostics, setDiagnostics] = useState<string[]>([]);
@@ -93,6 +95,11 @@ export function AdaptStoryboardPanel({ dramaId, episodes, onWritten }: {
     useEffect(() => {
         if (!episodeId && episodes.length) setEpisodeId(episodes[0].id);
     }, [episodes, episodeId]);
+
+    // 外部切换当前集时同步选中（抽屉复用同一组件实例）。
+    useEffect(() => {
+        if (defaultEpisodeId) setEpisodeId(defaultEpisodeId);
+    }, [defaultEpisodeId]);
 
     // 换集必须清空草案：草案是按集写的，留着上一集的镜头会把它写进别的集。
     useEffect(() => {
@@ -199,12 +206,13 @@ export function AdaptStoryboardPanel({ dramaId, episodes, onWritten }: {
             // 1) 需求正文先落到分集：后端建场次、切剧本块都以 synopsis 为准。
             await updateBackendDramaEpisode(episode.id, { synopsis: demand });
 
-            // 2) 制作稿为空则先初始化场次（只吃空壳稿，所以放在写分镜之前）。
+            // 2) 制作稿还没有任何场次时才初始化（只吃空壳稿，放在写分镜之前）。
+            //    已初始化过（有 scenes、哪怕还没有 shots）再调会撞 DIRECTOR_ALREADY_INITIALIZED，必须跳过。
             let production = (await fetchEpisodeProduction(episode.id)).production;
             const directorSource = () => (production.draft as { director?: { source?: Record<string, unknown> } } | undefined)?.director?.source;
-            const hasShots = Array.isArray((directorSource() as { shots?: unknown[] } | undefined)?.shots)
-                && ((directorSource() as { shots?: unknown[] }).shots || []).length > 0;
-            if (!hasShots) {
+            const sceneList = (directorSource() as { scene_registry?: unknown[] } | undefined)?.scene_registry;
+            const hasScenes = Array.isArray(sceneList) && sceneList.length > 0;
+            if (!hasScenes) {
                 production = (await editEpisodeProduction(episode.id, production.revision, [{ type: "initialize_director_from_demand" } as never])).production;
             }
 

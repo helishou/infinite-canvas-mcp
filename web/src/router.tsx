@@ -26,6 +26,8 @@ const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
 const SkillsPage = lazy(() => import("@/pages/skills"));
+const DramaStudioPage = lazy(() => import("@/pages/drama-studio"));
+const StudioCreatePage = lazy(() => import("@/pages/drama-studio/studio-create"));
 
 const pageFallback = <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">加载中…</div>;
 
@@ -73,6 +75,8 @@ function HomeModeRedirect({ mode }: { mode: "image" | "video" }) {
 export const appRoutes = [
     { path: "/", element: lazyPage(HomePage) },
     { path: "/projects", element: lazyPage(ProjectsPage) },
+    { path: "/drama-studio", element: lazyPage(DramaStudioPage) },
+    { path: "/drama-studio/new", element: lazyPage(StudioCreatePage) },
     { path: "/production", element: lazyPage(ProductionHubPage) },
     { path: "/director", element: lazyPage(LegacyDirectorPage) },
     { path: "/director/:projectId", element: lazyPage(EpisodeProductionPage) },

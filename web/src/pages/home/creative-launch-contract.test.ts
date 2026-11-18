@@ -463,6 +463,12 @@ test("settings popovers open below the trigger and the director launcher hides b
     assert.match(agentPanel, /createPortal\(chatDialog, workbenchCanvasOverlay\)/);
     assert.match(agentPanel, /workbenchCanvasOverlay \? "z-\[1000\]" : "z-\[80\]"/);
     assert.match(agentPanel, /zIndex: workbenchCanvasOverlay \? 950 : undefined/);
+    // 拖动入口不能在 pointerdown 就 setPointerCapture：那会把 click 目标重定向到外层 div，
+    // 按钮的 onClick 收不到（真实鼠标点了没反应）。捕获只能在越过拖动阈值后发生。
+    const pointerDownBlock = agentPanel.slice(agentPanel.indexOf("const onLauncherPointerDown"), agentPanel.indexOf("const onLauncherPointerMove"));
+    assert.doesNotMatch(pointerDownBlock, /setPointerCapture/, "pointerdown 不能捕获指针");
+    const moveBlock = agentPanel.slice(agentPanel.indexOf("const onLauncherPointerMove"), agentPanel.indexOf("const endLauncherDrag"));
+    assert.match(moveBlock, /try \{ e\.currentTarget\.setPointerCapture/, "只有确认拖动后才捕获指针");
 });
 
 test("settings popovers stay compact against Tailwind preflight font-size overrides", () => {

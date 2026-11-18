@@ -86,6 +86,7 @@ export type ServerDeps = {
   events?: BackendEventBus;
   stores?: Stores;
   cancelTask?: (task: RuntimeTask) => RuntimeTask;
+  reclaimTask?: (task: RuntimeTask) => RuntimeTask | Promise<RuntimeTask>;
   retryTask?: (task: RuntimeTask) => RuntimeTask | Promise<RuntimeTask>;
   resolveH3Confirmation?: (id: string, action: H3ConfirmationAction) => RuntimeTask;
   prepareAiConfig?: (config: unknown) => unknown | Promise<unknown>;
@@ -2167,6 +2168,19 @@ export function startServer(
         payload: h3TaskSummary || task,
       });
       res.json({ ok: true, task: h3TaskSummary || task });
+    } catch (error) {
+      res.status(409).json({ ok: false, error: (error as Error).message });
+    }
+  });
+  app.post(canvasTaskActionRoute("reclaim"), async (req, res) => {
+    try {
+      const taskId = String(req.params.id);
+      const current = stores.tasks.get(taskId);
+      if (!current) return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
+      if (!deps.reclaimTask) return void res.status(409).json({ ok: false, error: "回捞执行器未注册", code: "RECLAIM_UNAVAILABLE" });
+      const task = await deps.reclaimTask(current);
+      events.publish({ type: "task.updated", entityId: task.id, payload: task });
+      res.json({ ok: true, task });
     } catch (error) {
       res.status(409).json({ ok: false, error: (error as Error).message });
     }

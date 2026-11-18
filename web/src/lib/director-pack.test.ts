@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-import { buildDirectorPack, composeSegmentPrompt, packSegmentsToShotRows, packSummary, parseDirectorPack, segmentFromShotGroup, splitTimedLines } from "./director-pack";
+import { buildDirectorPack, composeSegmentPrompt, packSegmentsToShotRows, packSummary, parseDirectorPack, pickSegmentPrompt, segmentFromShotGroup, splitTimedLines } from "./director-pack";
 import { packToZip, readPackHeader, zipToPack } from "./director-pack-io";
 
 /** 导演大师真实产出的包（本机存在才跑，CI 上跳过）。 */
@@ -14,6 +14,12 @@ test("段提示词按累计时间拼成「0–6秒：…」", () => {
         { camera: "特写", visual: "灯纸上的名字", durationSec: 4 },
     ], 24);
     assert.equal(text, "0–6秒：中景。陈灯提灯走进义庄\n6–10秒：特写。灯纸上的名字");
+});
+
+test("段提示词优先级：画布视频提示词 > 编译产物 > 旧稿 > 分镜拼稿", () => {
+    assert.equal(pickSegmentPrompt(["  画布视频提示词 ", "编译产物"], "分镜拼稿"), "画布视频提示词");
+    assert.equal(pickSegmentPrompt([undefined, "编译产物"], "分镜拼稿"), "编译产物");
+    assert.equal(pickSegmentPrompt(["", "  "], "分镜拼稿"), "分镜拼稿");
 });
 
 test("画布 Clip → 包段落：时长/帧数/累计起点自洽", () => {

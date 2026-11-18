@@ -81,6 +81,7 @@ import { buildPublishedProductionClip, claimableProductionClipNodes, clipInputHa
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
+import { auditContinuityFactBindings } from "./continuity-binding.js";
 import { isAgentWrite } from "./agent-write-scope.js";
 import { shotStructureIssues } from "./shot-agent-structure.js";
 import { isArchivedStoryboardKeyframeBinding } from "./storyboard-media.js";
@@ -1143,9 +1144,11 @@ export class EpisodeProductionService {
         const current = this.get(id);
         const owner = { kind: this.ownerKind, id };
         const engineReport = await auditAchengContinuity(director, undefined, false);
+        const bindingIssues = auditContinuityFactBindings(director.source);
         const operationId = `compile-auto:${crypto.randomUUID()}`;
         const segments = [...new Set(((director.source.segments || []) as any[]).map(item => String(item.id || "")))];
-        const report = { ...engineReport, verdict: engineReport.status, owner, snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
+        const report = { ...engineReport, verdict: bindingIssues.length ? "blocked" : engineReport.status, status: bindingIssues.length ? "blocked" : engineReport.status,
+            diagnostics: [...(engineReport.diagnostics || []), ...bindingIssues], owner, snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
             runtimeId: engineReport.validatorRuntimeId, engine: engineReport.validatorEngine, revision: current.revision, checkedAt: new Date().toISOString(), operationId,
             selectedTargets: segments.length ? segments : [] };
         const requestHash = fingerprint({ owner, snapshot, sourceHash: director.sourceHash, runtimeId: report.runtimeId, autoCheck: true });
@@ -1174,7 +1177,9 @@ export class EpisodeProductionService {
         const segments = new Set(((director.source.segments || []) as any[]).map(item => String(item.id || "")));
         if ((input.targetIds || []).some(target => !segments.has(target))) throw new Error("连续性检查目标必须属于当前制作稿 Segment");
         const engineReport = await auditAchengContinuity(director, input.targetIds, false);
-        const report = { ...engineReport, verdict: engineReport.status, owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
+        const bindingIssues = auditContinuityFactBindings(director.source);
+        const report = { ...engineReport, verdict: bindingIssues.length ? "blocked" : engineReport.status, status: bindingIssues.length ? "blocked" : engineReport.status,
+            diagnostics: [...(engineReport.diagnostics || []), ...bindingIssues], owner, snapshot: input.snapshot, snapshotVersion: current.publishedVersion, sourceHash: director.sourceHash,
             runtimeId: engineReport.validatorRuntimeId, engine: engineReport.validatorEngine, revision: current.revision, checkedAt: new Date().toISOString(), operationId: input.operationId,
             selectedTargets: input.targetIds || (segments.size ? [...segments] : []) };
         const persisted = reports.persist(owner, input.operationId, requestHash, report);
@@ -4951,6 +4956,17 @@ export class EpisodeProductionService {
             projectDirector(draft);
             return;
         }
+        if (op.type === "set_director_story_beats") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            const source = draft.director.source as Record<string, unknown>;
+            source.hook = op.hook;
+            source.cliffhanger = op.cliffhanger;
+            draft.director.sourceHash = directorHash(draft.director.source);
+            draft.director.executionAuthorized = false;
+            draft.director.artifacts = draft.director.artifacts.map(artifact => artifact.status === "ready" ? { ...artifact, status: "stale" as const } : artifact);
+            projectDirector(draft);
+            return;
+        }
         if (op.type === "set_director_brief") {
             if (draft.director) this.patchDirectorSource(draft.director, "brief", undefined, { value: op.brief });
             else this.initializeDirector(draft, op.brief, undefined, this.planMediaProductionMode(episodeId));
@@ -5870,6 +5886,82 @@ export class EpisodeProductionService {
                 }
                 ledger.coverage = rows;
             }
+            director.sourceHash = directorHash(source);
+            director.executionAuthorized = false;
+            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+            if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "reorder_director_scenes") {
+            const director = draft.director;
+            if (!director || !isSubjectPromptAssembly(director.source)) throw new Error("场次重排仅支持 Subject Prompt Assembly v2 正式源稿");
+            const source = director.source as Record<string, any>;
+            const scriptScenes = clipRows(source.script_scenes);
+            const currentIds = scriptScenes.map(row => String(row.id || ""));
+            if (op.ids.length !== currentIds.length || new Set(op.ids).size !== op.ids.length || op.ids.some((id: string) => !currentIds.includes(id))) {
+                throw new Error("场次重排必须一次包含全部场次，且不重复、不遗漏");
+            }
+            const byId = new Map(scriptScenes.map(row => [String(row.id || ""), row]));
+            source.script_scenes = op.ids.map((id: string) => byId.get(id)!);
+            director.sourceHash = directorHash(source);
+            director.executionAuthorized = false;
+            director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));
+            if (director.workflow.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
+            projectDirector(draft);
+            return;
+        }
+        if (op.type === "merge_director_scenes") {
+            const director = draft.director;
+            if (!director || !isSubjectPromptAssembly(director.source)) throw new Error("场次合并仅支持 Subject Prompt Assembly v2 正式源稿");
+            const source = director.source as Record<string, any>;
+            const scriptScenes = clipRows(source.script_scenes);
+            const byId = new Map(scriptScenes.map(row => [String(row.id || ""), row]));
+            if (!op.sceneIds.includes(op.targetSceneId)) throw new Error("合并目标场次必须包含在待合并场次内");
+            const merging = op.sceneIds.map((id: string) => {
+                const row = byId.get(id);
+                if (!row) throw new Error(`待合并场次不存在：${id}`);
+                return row;
+            });
+            // 一个场次只对应一个环境；跨环境合并会破坏环境参考。未登记环境的场次继承目标环境。
+            const declared = [...new Set(merging.map(row => String(row.scene_id || "")).filter(Boolean))];
+            if (declared.length > 1) throw new Error("只能合并同一环境的场次；跨环境请先改环境或保持分开");
+            const inheritedEnvironment = declared[0] || String(byId.get(op.targetSceneId)?.scene_id || "");
+            const blocksOf = (row: Record<string, any>) => Array.isArray(row.blocks) && row.blocks.length ? row.blocks.map(record) : [row];
+            const mergedBlocks: Record<string, any>[] = [];
+            const seen = new Set<string>();
+            for (const row of merging) {
+                for (const block of blocksOf(row)) {
+                    const blockId = String(block.id || "");
+                    if (blockId && seen.has(blockId)) throw new Error(`合并后的正文块 ID 重复：${blockId}`);
+                    if (blockId) seen.add(blockId);
+                    mergedBlocks.push(structuredClone(block));
+                }
+            }
+            const target = byId.get(op.targetSceneId)!;
+            const removedIds = new Set(op.sceneIds.filter((id: string) => id !== op.targetSceneId));
+            const targetBlocks = Array.isArray(target.blocks) && target.blocks.length ? mergedBlocks : [mergedBlocks[0]];
+            const mergedRow = {
+                ...target,
+                ...(op.title ? { scene_name: op.title } : {}),
+                ...(inheritedEnvironment ? { scene_id: inheritedEnvironment } : {}),
+                blocks: targetBlocks,
+                ...(Array.isArray(target.beat_ids) || merging.some(row => Array.isArray(row.beat_ids))
+                    ? { beat_ids: [...new Set(merging.flatMap(row => Array.isArray(row.beat_ids) ? row.beat_ids.map(String) : []))] } : {}),
+            };
+            const firstIndex = Math.min(...op.sceneIds.map((id: string) => scriptScenes.findIndex(row => String(row.id || "") === id)));
+            const keptScenes = scriptScenes.filter(row => !removedIds.has(String(row.id || "")) && String(row.id || "") !== op.targetSceneId);
+            const insertAt = scriptScenes.slice(0, firstIndex).filter(row => keptScenes.includes(row)).length;
+            source.script_scenes = [...keptScenes.slice(0, insertAt), mergedRow, ...keptScenes.slice(insertAt)];
+            const remapSceneId = (value: unknown) => removedIds.has(String(value || "")) ? op.targetSceneId : value;
+            if (Array.isArray(source.shots)) source.shots = source.shots.map((shot: Record<string, any>) => ({
+                ...shot, source_scene_id: remapSceneId(shot.source_scene_id),
+            }));
+            const ledger = record(source.ledger);
+            if (Array.isArray(ledger.coverage)) ledger.coverage = ledger.coverage.map((coverage: Record<string, any>) => {
+                const anchor = record(coverage.source_anchor);
+                return removedIds.has(String(anchor.block_id || "")) ? { ...coverage, source_anchor: { ...anchor, block_id: op.targetSceneId } } : coverage;
+            });
             director.sourceHash = directorHash(source);
             director.executionAuthorized = false;
             director.artifacts = director.artifacts.map(artifact => ({ ...artifact, status: "stale" as const }));

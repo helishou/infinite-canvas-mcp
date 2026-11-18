@@ -33,8 +33,8 @@ test("multi-selection actions preserve focus, rename, arrange, group and destruc
     };
     visit(tree); assert.ok(block);
     const invoked: string[] = [];
-    const handlers = Object.fromEntries(["FocusSelection", "BatchRename", "Arrange", "AddGroup", "Delete"].map(name => [`on${name}`, () => invoked.push(name)]));
-    const icons = Object.fromEntries(["Focus", "PencilLine", "Grid2x2", "Group", "Trash2"].map(name => [name, () => null]));
+    const handlers = Object.fromEntries(["FocusSelection", "BatchRename", "UnifySize", "AddGroup", "Arrange", "Delete"].map(name => [`on${name}`, () => invoked.push(name)]));
+    const icons = Object.fromEntries(["Focus", "PencilLine", "Scaling", "Grid2x2", "Group", "Trash2"].map(name => [name, () => null]));
     const Button = () => null;
     const scope: Record<string, unknown> = { React, t, Button, Tooltip: ({ children }: { children: unknown }) => children, ...handlers, ...icons, selectedCount: 2, groupSelection: true, deleteDisabled: false, theme: { toolbar: { panel: "", border: "", item: "" } } };
     const code = ts.transpileModule(`return (${block.getText(tree)});`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -53,9 +53,9 @@ test("multi-selection actions preserve focus, rename, arrange, group and destruc
         return buttons;
     };
     const buttons = renderButtons();
-    assert.deepEqual(buttons.map(button => button.onClick), [handlers.onFocusSelection, handlers.onBatchRename, handlers.onAddGroup, handlers.onArrange, handlers.onDelete]);
+    assert.deepEqual(buttons.map(button => button.onClick), [handlers.onFocusSelection, handlers.onBatchRename, handlers.onUnifySize, handlers.onAddGroup, handlers.onArrange, handlers.onDelete]);
     buttons.forEach(button => button.onClick!());
-    assert.deepEqual(invoked, ["FocusSelection", "BatchRename", "AddGroup", "Arrange", "Delete"]);
+    assert.deepEqual(invoked, ["FocusSelection", "BatchRename", "UnifySize", "AddGroup", "Arrange", "Delete"]);
     assert.equal(buttons.at(-1)?.danger, true);
     assert.deepEqual(renderButtons({ selectedCount: 1, groupSelection: false }).map(button => button.onClick), [handlers.onFocusSelection, handlers.onArrange, handlers.onDelete]);
 });

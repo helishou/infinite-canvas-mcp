@@ -13,10 +13,10 @@ const chapter = (index: number, chars: number): NovelChapter => ({
     continued: false,
 });
 
-test("镜头数与段数按 120 字/镜、5 秒/段估算", () => {
+test("镜头数与段数按 120 字/镜、10 秒/段估算", () => {
     assert.deepEqual(estimateChapterScale(0), { shots: 1, segments: 1, seconds: 3 });
     assert.deepEqual(estimateChapterScale(120), { shots: 1, segments: 1, seconds: 3 });
-    assert.deepEqual(estimateChapterScale(3000), { shots: 25, segments: 15, seconds: 75 });
+    assert.deepEqual(estimateChapterScale(3000), { shots: 25, segments: 8, seconds: 75 });
 });
 
 test("时长格式化：不足一分钟只显示秒", () => {

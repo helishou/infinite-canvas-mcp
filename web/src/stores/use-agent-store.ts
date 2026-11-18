@@ -9,6 +9,7 @@ import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-age
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { productionObjectForPresentation, type ProductionObject } from "@/lib/production-object";
 import type { AgentPromptQueueItem } from "@/lib/agent/agent-prompt-queue";
+import { rememberedModelForEngine } from "@/lib/agent/agent-engine-memory";
 import { useProductionWorkspaceStore } from "@/stores/use-production-workspace-store";
 
 export type AgentChatRole = "user" | "assistant" | "system" | "tool" | "error";
@@ -107,6 +108,9 @@ type AgentStore = {
     models: AgentModel[];
     model: string;
     reasoningEffort: AgentReasoningEffort | "";
+    /** 导演运行时渠道（设置页只管这个）；模型由对话面板决定并记在 modelByEngine。 */
+    agentEngine: "hermes" | "codex" | "";
+    modelByEngine: Partial<Record<"hermes" | "codex", string>>;
     activity: string;
     conversation: AgentConversationState;
     bootstrapStatus: AgentBootstrapStatus | null;
@@ -142,6 +146,8 @@ function debouncedSaveAgentSettings(patch: Partial<AgentStore>) {
     if (patch.permissionMode !== undefined) settingsPatch.agentPermissionMode = patch.permissionMode;
     if (patch.model !== undefined) settingsPatch.agentModel = patch.model;
     if (patch.reasoningEffort !== undefined) settingsPatch.agentReasoningEffort = patch.reasoningEffort;
+    if (patch.agentEngine === "hermes" || patch.agentEngine === "codex") settingsPatch.agentEngine = patch.agentEngine;
+    if (patch.modelByEngine !== undefined) settingsPatch.agentModelByEngine = patch.modelByEngine;
     if (Object.keys(settingsPatch).length === 0) return;
     if (saveSettingsTimer) clearTimeout(saveSettingsTimer);
     pendingAgentSettings = { ...pendingAgentSettings, ...settingsPatch };
@@ -193,6 +199,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     models: [],
     model: "",
     reasoningEffort: "",
+    agentEngine: "",
+    modelByEngine: {},
     activity: i18n.t("agent.state.ready"),
     conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} },
     bootstrapStatus: null,
@@ -337,7 +345,17 @@ async function hydrateAgentSettings() {
     const patch: Partial<AgentStore> = {};
     if (settings.agentPanelWidth) patch.width = settings.agentPanelWidth;
     if (settings.agentPermissionMode) patch.permissionMode = settings.agentPermissionMode as AgentPermissionMode;
-    if (settings.agentModel && modelSelectionRevision === agentModelSelectionRevision) patch.model = settings.agentModel;
+    if (settings.agentEngine === "hermes" || settings.agentEngine === "codex") patch.agentEngine = settings.agentEngine;
+    if (settings.agentModelByEngine) patch.modelByEngine = settings.agentModelByEngine;
+    if (modelSelectionRevision === agentModelSelectionRevision) {
+        const engine = settings.agentEngine === "hermes" || settings.agentEngine === "codex" ? settings.agentEngine : "";
+        const models = useAgentStore.getState().models;
+        const engineModel = engine && models.length
+            ? rememberedModelForEngine(models, engine, settings.agentModelByEngine, settings.agentModel)
+            : "";
+        const target = engineModel || settings.agentModel;
+        if (target) patch.model = target;
+    }
     if (settings.agentReasoningEffort && modelSelectionRevision === agentModelSelectionRevision) patch.reasoningEffort = settings.agentReasoningEffort as AgentReasoningEffort;
     if (Object.keys(patch).length > 0) useAgentStore.setState(patch);
 }

@@ -153,6 +153,7 @@ async function createBackendMcpInstance(
     previewH3Generation: (input) => backendApi.previewH3Generation(input),
     getTask: (id) => backendApi.getTask(id),
     cancelTask: (id) => backendApi.cancelTask(id),
+    reclaimTask: (id) => backendApi.reclaimTask(id),
     getH3Defaults: () => backendApi.getH3Defaults(),
     setH3Defaults: (settings) => backendApi.setH3Defaults(settings),
     resetH3Defaults: () => backendApi.resetH3Defaults(),

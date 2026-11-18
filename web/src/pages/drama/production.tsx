@@ -178,7 +178,7 @@ export default function ProductionRoute({ dramaId }: { dramaId?: string } = {}) 
 }
 
 
-type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; series?: { id: string; episodes: DramaEpisode[] }; episodesUnavailable?: boolean; onSeriesEpisodesChanged?: () => void; notice?: ReactNode };
+type ProductionEditorProps = { owner?: ProductionCanvasContext["owner"]; embedded?: boolean; dialog?: boolean; hideWorkspaceNavigation?: boolean; series?: { id: string; episodes: DramaEpisode[] }; episodesUnavailable?: boolean; onSeriesEpisodesChanged?: () => void; notice?: ReactNode };
 export function ProductionEditor(props: ProductionEditorProps) {
   const params = useParams();
   if (props.embedded) return <ProductionEditorContent {...props} />;
@@ -201,7 +201,7 @@ function useOpenCanvasFromQuery(canvasHost: ReturnType<typeof useWorkbenchCanvas
   return projectId;
 }
 
-function ProductionEditorContent({ owner, embedded = false, dialog = false, series, episodesUnavailable = false, onSeriesEpisodesChanged, notice }: ProductionEditorProps) {
+function ProductionEditorContent({ owner, embedded = false, dialog = false, hideWorkspaceNavigation = false, series, episodesUnavailable = false, onSeriesEpisodesChanged, notice }: ProductionEditorProps) {
   const canvasHost = useWorkbenchCanvas();
   const surfaceHost = useCanvasHost();
   const params = useParams();
@@ -2483,7 +2483,7 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, seri
       {(remoteRevision !== null || showCommandNotice) && <div data-production-recovery-notice className="mb-4 text-sm">{remoteRevision !== null && <p>{t("drama.production.conflictDetail", { number: remoteRevision })}</p>}{pendingNotice}</div>}
       {pendingRunNotice}
       <div data-production-workspace-layout className={embedded ? "min-w-0" : "grid min-w-0 items-start gap-5 lg:grid-cols-[220px_minmax(0,1fr)] lg:gap-8"}>
-        <ProductionWorkspaceNavigation groups={navigationGroupsWithSeriesSubtabs} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />
+        {!hideWorkspaceNavigation && <ProductionWorkspaceNavigation groups={navigationGroupsWithSeriesSubtabs} selectedId={selectedNavigationId} compact={embedded} horizontal={!embedded} onSelect={item => navigateWorkspace(item.workspace, undefined, item.seriesView)} />}
         <section data-production-workspace-content={!embedded || undefined} aria-label={workspaceLabel} className="min-w-0">
           {workspace === "series" && series ? <SeriesWorkspaceBody navigationTitleVisible={!embedded} dramaId={series.id} view={seriesView || "planning"} initialPlanningTab={seriesTab} onEpisodesChanged={() => onSeriesEpisodesChanged?.()} /> : <>
             {embedded && workspace === "assets" && <p className="mb-5 text-xs leading-5 text-muted-foreground" data-production-asset-scope={scope}>{t(`director.workspaceHierarchy.${scope === "episode" ? "episodeAssetsHint" : scope === "shared-assets" ? "sharedAssetsHint" : "projectAssetsHint"}`)}</p>}

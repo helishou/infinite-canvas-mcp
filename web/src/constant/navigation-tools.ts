@@ -7,6 +7,7 @@ import { Clapperboard, FileText, FolderOpen, Images, LayoutGrid, Workflow, WandS
  */
 export const navigationTools = [
     { slug: "projects", href: "/projects", icon: FolderOpen },
+    { slug: "dramaStudio", href: "/drama-studio", icon: Clapperboard },
     { slug: "freeCanvas", href: "/projects?type=canvas", icon: LayoutGrid },
     { slug: "resources", href: "/assets", icon: Images },
     { slug: "workflows", href: "/workflows", icon: Workflow },

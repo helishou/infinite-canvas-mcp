@@ -30,6 +30,7 @@ const examples: Record<string, unknown> = {
     replace_director_clip_storyboard: { segmentId: "CLIP1", segment: { id: "CLIP1", shot_ids: ["SHOT1"] }, shots: [{ id: "SHOT1", start_frame: 0, end_frame: 48 }], shotInputs: { SHOT1: { keyframePolicy: "none", assetIds: [] } } },
     request_director_clip_refresh: { segmentId: "CLIP1" },
     set_director_brief: { brief: "A traveller returns home." },
+    set_director_story_beats: { hook: "劈头黑斧压来，青锋一横，红莲在笑！", cliffhanger: "刀锋停在咽喉，门却自己开了。" },
     patch_director_source: { entity: "asset", id: "character-1", patch: { description: "Authored character appearance." } },
     replace_director_scene_storyboard: { sceneId: "SC1", shots: [{ id: "SH1", source_scene_id: "SC1", duration_frames: 120, timeline_id: "main", story_order: 0 }], segments: [{ id: "SEG1", shot_ids: ["SH1"] }], shotInputs: { SH1: { keyframePolicy: "none", assetIds: [] } } },
     archive_director_scene: { sceneId: "SC1", expectedCanvasRevision: 1, confirmed: true },

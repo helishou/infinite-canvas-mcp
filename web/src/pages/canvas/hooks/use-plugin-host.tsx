@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { translateCompiledH3Prompt } from "@/services/api/translation";
 import { fetchWorkflowDetail } from "@/services/api/workflows";
+import { fetchChannelModelDetail } from "@/services/api/image";
 import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
@@ -24,7 +25,7 @@ import { uploadImage as uploadCanvasImage } from "@/services/image-storage";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { ensurePluginsLoaded } from "@/lib/canvas/plugin-loader";
 import { canvasThemes } from "@/lib/canvas-theme";
-import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService, CanvasVideoModelSchema } from "@/types/canvas-plugin";
+import type { CanvasAssetPickerImage, CanvasGenerationCommand, CanvasGenerationLogs, CanvasMediaPreview, CanvasNodeToolbarItem, CanvasPluginAi, CanvasPluginHost, CanvasReferenceService, CanvasVideoModelField, CanvasVideoModelSchema } from "@/types/canvas-plugin";
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 import { flushCanvasProjectBeforeGeneration, useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -297,15 +298,32 @@ export function usePluginHost(params: PluginHostParams) {
                 const modelName = decoded?.model || model;
                 const channel = effectiveConfig.channels.find((item) => decoded?.channelId ? item.id === decoded.channelId : item.models.some((candidate) => candidate.name === modelName));
                 const declaration = channel?.models.find((candidate) => candidate.name === modelName);
+                // 本地引擎模型的字段权威来源是引擎的 GET /v1/models/{id}（工作流字段在引擎里配），
+                // 不再只依赖 ai.config 的本地解析——否则引擎里配好的自定义参数在画布上看不到。
+                // 拿不到（远端普通 OpenAI / 引擎不可达）时回退下面的原逻辑，绝不阻塞面板。
+                // 旧 Clip 可能存着失效的渠道前缀：decodeChannelModel 只认 ::，单冒号坏值（calc:H3 展开流）
+                // 解不出来，这里额外按单冒号剥出纯模型名，供引擎字段查询按名字兜底匹配。
+                const bareModelName = model.includes(":") ? model.slice(model.lastIndexOf(":") + 1).trim() : model;
+                let engineFields: CanvasVideoModelField[] = [];
+                try {
+                    let detail = await fetchChannelModelDetail(model);
+                    if (!detail.fields.length && bareModelName && bareModelName !== model) {
+                        detail = await fetchChannelModelDetail(bareModelName);
+                    }
+                    if (Array.isArray(detail.fields) && detail.fields.length) engineFields = detail.fields as CanvasVideoModelField[];
+                } catch { /* 引擎不可达时按原逻辑降级 */ }
                 if (resolved) {
                     const detail = await fetchWorkflowDetail(resolved);
-                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: detail.config?.fields || [], defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
+                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: engineFields.length ? engineFields : (detail.config?.fields || []), defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
                 }
                 const fallback = declaration?.workflows?.[0];
                 if (fallback) {
                     const detail = await fetchWorkflowDetail(fallback);
-                    return { model, kind: "workflow", workflow: fallback, supported: false, fields: detail.config?.fields || [], error: `该视频模型不支持当前输入数量（${referenceCount} 个参考）` };
+                    return { model, kind: "workflow", workflow: fallback, supported: false, fields: engineFields.length ? engineFields : (detail.config?.fields || []), error: `该视频模型不支持当前输入数量（${referenceCount} 个参考）` };
                 }
+                // 引擎模型即使 ai.config 没绑本地工作流，也要暴露引擎里的真实字段；
+                // 只有引擎确实没返回字段时才退回写死的常用参数。
+                if (engineFields.length) return { model, kind: "workflow", workflow: modelName, supported: true, fields: engineFields, defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
                 if (channel?.kind !== "comfyui" && declaration?.capability === "video") return {
                     model, kind: "direct", supported: true, fields: [
                         { id: "seconds", name: "时长（秒）", type: "number", default: 6, min: 1, max: 20, step: 1 },

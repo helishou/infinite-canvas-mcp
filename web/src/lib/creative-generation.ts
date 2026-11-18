@@ -1,6 +1,7 @@
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { buildCreativeCommandReferences } from "@/lib/creative-command-references";
 import { getGenerationCount } from "@/lib/canvas/canvas-generation-helpers";
 import { creativeProjectTitle, type ReferenceAsset } from "@/lib/creative-pad";
 import { normalizeVideoSizeValue } from "@/lib/video-size";
@@ -122,14 +123,9 @@ export async function startCreativeGeneration(options: CreativeGenerationOptions
         await flushCanvasProjectBeforeGeneration(id);
     }
 
-    const commandReferences = imageRefs.map((item, index) => ({
-        id: referenceNodes[index].id,
-        name: `${item.title || item.id}.png`,
-        type: item.mimeType || "image/png",
-        dataUrl: item.storageKey ? "" : (item.dataUrl || item.url || ""),
-        ...(item.url ? { url: item.url } : {}),
-        ...(item.storageKey ? { storageKey: item.storageKey } : {}),
-    }));
+    // 参考图句柄按后端 prepareReferences 的契约构造：/media/... 代理地址走 url，
+    // 只有 base64 data: 才走 dataUrl，避免关键帧这类共享素材被误判成缺媒体句柄 400。
+    const commandReferences = buildCreativeCommandReferences(imageRefs, (_item, index) => referenceNodes[index].id);
     const clientTaskId = crypto.randomUUID();
     // 会话级任务不带画布绑定：Backend 仍会执行并把媒体落在 task.result.media，只是不回写节点、不写生成日志。
     const binding = {

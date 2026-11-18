@@ -24,7 +24,7 @@ import { TOPIC_DEFAULTS } from "./planning-topic-logic";
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
-export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean } = {}) {
+export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false, createOnly = false, onCreated, openInStudio = false }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean; createOnly?: boolean; onCreated?: (folderId: string) => void; openInStudio?: boolean } = {}) {
     const { t } = useTranslation();
     const hydrated = useCanvasStore((state) => state.hydrated);
     const createFolder = useCanvasStore((state) => state.createFolder);
@@ -38,6 +38,14 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
     const setActiveView = (id: string) => {
         if (episodesByDrama[id] === undefined) {
             message.info(t("projects.episodesUnavailable"));
+            return;
+        }
+        // openInStudio：作品列表页复用为「新制作台列表页」，进剧目直达 drama-studio。
+        if (openInStudio) {
+            const next = new URLSearchParams(query.toString());
+            next.set("dramaId", id);
+            next.delete("manage");
+            navigate(`/drama-studio?${next.toString()}`);
             return;
         }
         navigate(dramaProjectDestination(id, query.toString()));
@@ -167,6 +175,8 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
             }
             setCreateOpen(false);
             creationRef.current = undefined;
+            // 嵌入新制作台时把新建的剧目 id 交回宿主，由宿主跳到新制作台（不跳老版 /production）。
+            if (onCreated) { onCreated(creation.folderId); return; }
             // 有原文时落到「原剧本」页签：分集列表与批量建集就在那里，省掉找入口。
             const destination = split.groups.length
                 ? `${dramaProjectDestination(creation.folderId, query.toString())}&workspace=series&seriesView=planning&seriesTab=source`
@@ -196,9 +206,13 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
         imageModelsByKind: { ...current.imageModelsByKind, [kind]: model || undefined },
     }));
 
+    // createOnly（嵌入新制作台，原文已写进草稿）：挂载即打开设置向导，自动回填草稿。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => { if (createOnly && hydrated) void openCreateDrama(); }, [createOnly, hydrated]);
+
     return (
         <section className="text-foreground" aria-label={t("projects.drama")}>
-            {searchQuery === undefined ? (
+            {!createOnly && (searchQuery === undefined ? (
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-5">
                     <Input className="!w-full sm:!w-80" size="large" allowClear prefix={<Search className="mr-1 size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} />
                     <Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
@@ -209,8 +223,8 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                     description={headingHidden ? undefined : t("projects.dramaDescription")}
                     actions={<Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>}
                 />
-            )}
-            <section className="mt-6">
+            ))}
+            {!createOnly && <section className="mt-6">
                 {!hydrated ? (
                     <div role="status" className="flex min-h-72 items-center justify-center rounded-xl border border-border bg-card/50 text-sm text-muted-foreground">{t("canvas.loading")}</div>
                 ) : dramaFolders.length ? (
@@ -228,7 +242,7 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                         <Button type="primary" className={cn("shrink-0", compactEmpty ? "col-start-2 justify-self-start" : "mt-5")} icon={<Plus className="size-4" />} onClick={openCreateDrama}>{t("drama.createProject")}</Button>
                     </div>
                 )}
-            </section>
+            </section>}
             <Modal
                 width={760}
                 open={createOpen}

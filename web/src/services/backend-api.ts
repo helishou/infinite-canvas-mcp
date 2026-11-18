@@ -321,6 +321,14 @@ export function requestDramaOutlineProposal(dramaId: string, input: { step: stri
     return request<{ ok: boolean; step: string; text: string; model: string; error?: string }>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/outline-proposal`, input);
 }
 
+/** 剧目策划真值：原剧本正文（folder.productionPlan.sourceScript）。 */
+export function fetchDramaPlanningSource(dramaId: string) {
+    return sharedGet<{ ok: boolean; sourceScript?: string; updatedAt?: string }>(`/drama/${encodeURIComponent(dramaId)}/planning?include=sourceScript`);
+}
+export function patchDramaPlanningSource(dramaId: string, sourceScript: string, expectedUpdatedAt?: string) {
+    return request<{ ok: boolean; updatedAt?: string; applied?: string[] }>("PATCH", `/drama/${encodeURIComponent(dramaId)}/planning`, { sourceScript, ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}) });
+}
+
 export type AssetSpecKind = "character" | "scene" | "prop";
 export type AssetSpec = { kind: AssetSpecKind; character?: Record<string, unknown>; scene?: Record<string, unknown>; prop?: Record<string, unknown>; updatedAt?: string };
 export type AssetSpecResponse = {
@@ -960,4 +968,54 @@ export async function saveBackendH3Defaults(settings: Record<string, unknown>) {
 export async function resetBackendH3Defaults() {
     const result = await request<{ defaults?: null }>("DELETE", "/plugins/minimax-h3/defaults");
     if (result.defaults !== null) throw new Error("Backend 未确认 H3 默认参数重置");
+}
+
+// ── 全自动流水线（对齐影策服务端自动编排） ──────────────────────────────
+
+export type DramaPipelineStatus = {
+    ok: boolean;
+    pipeline?: {
+        drama_id: string; status: string; review_mode: string; media_mode: string;
+        pause_reason: string | null; last_tick_at: string | null; revision: number;
+    };
+    jobs?: Array<Record<string, unknown>>;
+    byStage?: Record<string, number>;
+    logs?: Array<Record<string, unknown>>;
+};
+
+export type DramaPipelineStartOptions = {
+    storyboardModel?: string; assetExtractModel?: string; videoPromptModel?: string;
+    textThinking?: { storyboard?: string; extract?: string; prompt?: string };
+    videoModel?: string; referenceLimit?: number; independent?: boolean;
+    /** 参考图模型按资产类型写入各集 production.settings.imageModelsByKind。 */
+    imageModelsByKind?: { character?: string; scene?: string; prop?: string };
+    storyboardRules?: {
+        episodeSeconds?: number; segmentRange?: { min: number; max: number };
+        dialogueDensity?: string; transitionMode?: string; transitionMs?: number; pacing?: string;
+    };
+    concurrency?: { text?: number; video?: number; render?: number };
+};
+export function startDramaPipeline(dramaId: string, opts?: { reviewMode?: string; mediaMode?: string; options?: DramaPipelineStartOptions }) {
+    return request<{ ok: boolean; [k: string]: unknown }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/start`, {
+        reviewMode: opts?.reviewMode ?? "auto", mediaMode: opts?.mediaMode ?? "auto",
+        ...(opts?.options ? { options: opts.options } : {}),
+    });
+}
+export function pauseDramaPipeline(dramaId: string) {
+    return request<{ ok: boolean }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/pause`, {});
+}
+export function resumeDramaPipeline(dramaId: string) {
+    return request<{ ok: boolean }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/resume`, {});
+}
+export function fetchDramaPipelineStatus(dramaId: string) {
+    return request<DramaPipelineStatus>("GET", `/drama/${encodeURIComponent(dramaId)}/pipeline/status`);
+}
+export function approveDramaPipelineEpisode(dramaId: string, episodeId: string) {
+    return request<{ ok: boolean }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/approve`, { episodeId });
+}
+export function releaseDramaPipelineMedia(dramaId: string, target: "assets" | "episodes" | "all" = "all") {
+    return request<{ ok: boolean }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/release`, { target });
+}
+export function retryFailedDramaPipeline(dramaId: string) {
+    return request<{ ok: boolean; requeued?: number }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-failed`, {});
 }

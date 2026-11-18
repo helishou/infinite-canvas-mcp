@@ -90,7 +90,7 @@ test("the unified directory is additive and preserves all established routes", (
     const router = readFileSync(new URL("../../router.tsx", import.meta.url), "utf8");
     const paths = [...router.matchAll(/path:\s*"([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(new Set(paths), new Set([
-        "/", "/projects", "/production", "/director", "/director/:projectId", "/image", "/video", "/assets", "/prompts", "/skills", "/canvas", "/canvas/performance", "/canvas/:id", "/drama", "/drama/episodes/:episodeId/production", "/drama/scenes/:sceneId/production", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local", "/pelican-bike", "*",
+        "/", "/projects", "/drama-studio", "/drama-studio/new", "/production", "/director", "/director/:projectId", "/image", "/video", "/assets", "/prompts", "/skills", "/canvas", "/canvas/performance", "/canvas/:id", "/drama", "/drama/episodes/:episodeId/production", "/drama/scenes/:sceneId/production", "/workflows", "/config", "/diagnostics/mcp", "/analytics/local", "/pelican-bike", "*",
     ]));
     assert.match(router, /const CanvasProjectPage = lazy\(loadCanvasProjectPage\)/, "the existing draft-safe lazy project loader must stay in use");
 });

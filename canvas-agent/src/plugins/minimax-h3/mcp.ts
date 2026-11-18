@@ -307,6 +307,13 @@ const TOOLS: PluginMcpToolWire[] = [
         inputJsonSchema: { type: "object", properties: { taskId: { type: "string", description: "任务 id" } }, required: ["taskId"] },
     },
     {
+        id: "h3_reclaim_task",
+        version: "1.0.0",
+        name: "H3 回捞任务结果",
+        description: "任务被判失败但 ComfyUI 可能仍在跑时，按原引擎任务 id 接回同一次执行并归档产物；不重新提交，也不会再次加载模型。仅支持记录过引擎任务 id 的失败/取消任务。",
+        inputJsonSchema: { type: "object", properties: { taskId: { type: "string", description: "画布任务 id" } }, required: ["taskId"] },
+    },
+    {
         id: "h3_move_clip",
         version: "1.0.0",
         name: "H3 移动片段",
@@ -1304,6 +1311,10 @@ export const pluginMcp: PluginMcpModule = {
             h3_cancel_task: async (input) => {
                 const taskId = String(input.taskId || "");
                 return summarizeRuntimeTask(await context.backend.cancelTask(taskId));
+            },
+            h3_reclaim_task: async (input) => {
+                const taskId = String(input.taskId || "");
+                return summarizeRuntimeTask(await context.backend.reclaimTask(taskId));
             },
             h3_prepare_clip_updates: async (input) => {
                 const projectId = String(input.projectId || ""), nodeId = String(input.nodeId || "");

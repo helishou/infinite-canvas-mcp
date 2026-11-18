@@ -25,6 +25,8 @@ import {
     resolveLaunchOutputs,
     CREATIVE_CONVERSATION_STORAGE_KEY,
     nextConversationId,
+    outputDisplayName,
+    shortModelName,
     pruneConversations,
     readCreativeConversations,
     taskDestination,
@@ -387,7 +389,7 @@ function HomeWorkbench() {
     const cover = (p: CanvasProject) => stableCovers[coverKey(p)] || null;
     const hasWork = Boolean(latest || folders.some((folder) => folder.isDrama));
     const latestCover = latest ? cover(latest) : null;
-    const outputTitle = (o: WorkbenchOutput) => projects.find((p) => p.id === o.log.projectId)?.title || o.log.model || t("home.workbench.result");
+    const outputTitle = (o: WorkbenchOutput) => outputDisplayName(o.log, projects.find((p) => p.id === o.log.projectId)?.title, t("home.workbench.result"));
     const outputCard = (o: WorkbenchOutput) => (
         <button key={o.id} type="button" className="ch-output-card group min-w-0 cursor-pointer text-left" onClick={() => setPreviewOutput(o)} aria-label={t("home.workbench.previewNamed", { name: outputTitle(o) })}>
             <div className="ch-output-cover">
@@ -595,7 +597,7 @@ function HomeWorkbench() {
                             <WorkbenchMediaPreview media={previewOutput} label={outputTitle(previewOutput)} controls />
                         </div>
                         <p className="ui-caption mt-3 text-muted-foreground">
-                            {previewOutput.log.model} · {date(previewOutput.log.createdAt)}
+                            {shortModelName(previewOutput.log.model) || t("home.workbench.result")} · {date(previewOutput.log.createdAt)}
                         </p>
                         {previewOutput.log.prompt && <p className="ui-body mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap break-words">{previewOutput.log.prompt}</p>}
                     </>
@@ -623,7 +625,7 @@ function HomeWorkbench() {
                                         <div className="min-w-0 flex-1">
                                             <p className="ui-group-title truncate">{projects.find((p) => p.id === task.projectId)?.title || task.model || task.kind || t("home.workbench.task")}</p>
                                             <p className="ui-caption mt-1 text-muted-foreground">
-                                                {task.model} · {date(task.updatedAt || task.createdAt || "")}
+                                                {shortModelName(task.model) || t("home.workbench.task")} · {date(task.updatedAt || task.createdAt || "")}
                                             </p>
                                         </div>
                                         <Tag color={task.status === "failed" ? "error" : task.status === "running" ? "processing" : task.status === "succeeded" ? "success" : "default"}>{t(`home.workbench.status_${task.status}`)}</Tag>

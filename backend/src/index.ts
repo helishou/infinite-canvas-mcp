@@ -49,6 +49,10 @@ import { EpisodeProductionService } from "./drama/production.js";
 import { SharedAssetCoordinator } from "./drama/shared-assets.js";
 import { NativeProductionGeneration } from "./drama/native-generation.js";
 import { EpisodeProductionRunner } from "./drama/production-runner.js";
+import { PipelineStore } from "./drama/pipeline-store.js";
+import { DramaPipeline } from "./drama/pipeline.js";
+import { resolveOutlineModel } from "./drama/outline-proposal.js";
+import { registerDramaPipelineRoutes } from "./server/drama-pipeline-routes.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes, registerDramaStageRoutes, registerDramaTopicProposalRoute } from "./server/drama-planning-routes.js";
 import { registerAssetSpecRoutes } from "./server/asset-spec-routes.js";
@@ -194,7 +198,7 @@ async function startBackendHttpServer() {
         return canvasAudioDispatcher.cancel(task.id);
       if (task.kind === CANVAS_BROWSER_TASK_KIND)
         return canvasBrowserScriptDispatcher.cancel(task.id);
-      if (task.kind === "canvas-h3-run") throw new Error("H3 任务已迁移到执行引擎");
+      if (task.kind === "canvas-h3-run") return canvasH3Runner.cancel(task.id);
       if (task.kind.startsWith("runninghub:"))
         throw new Error("RunningHub 任务已迁移到执行引擎，请在引擎里取消");
       if (task.kind === "video-concat" || task.kind === "video-trim" || task.kind === "video-audio-extract") return videoConcat.cancel(task.id);
@@ -202,6 +206,10 @@ async function startBackendHttpServer() {
       if (task.kind === "direct-audio") return directAudio.cancel(task.id);
       if (task.kind.startsWith("image:")) return directImage.cancel(task.id);
       throw new Error(`任务类型 ${task.kind} 没有注册取消执行器`);
+    },
+    reclaimTask: async (task) => {
+      if (task.kind !== "canvas-video") throw new Error(`任务类型 ${task.kind} 不支持引擎回捞`);
+      return await canvasVideoDispatcher.reclaim(task.id);
     },
     retryTask: async (task) => {
       if (task.kind === "canvas-image")
@@ -310,6 +318,16 @@ async function startBackendHttpServer() {
   registerDramaPlanningStateRoutes(app, runtime.db);
   registerDramaStageRoutes(app, runtime.db);
   registerAssetSpecRoutes(app, runtime.db);
+  // 全自动流水线：独立 store + 编排器，HTTP 自调用复用现成生成/编译/op 能力。
+  const pipelineStore = new PipelineStore();
+  const dramaPipeline = new DramaPipeline({
+    store: pipelineStore, token: config.token, baseUrl: config.url,
+    resolveTextModel: () => resolveOutlineModel(runtime.stores.settings.get("ai.config")),
+    // 资产参考图默认模型：设置页 ai.config.imageModel（制作设置 imageModelsByKind 可逐类型覆盖）。
+    resolveImageModel: () => String((runtime.stores.settings.get("ai.config") as Record<string, unknown> | undefined)?.imageModel || "").trim(),
+  });
+  registerDramaPipelineRoutes(app, dramaPipeline, runtime.db);
+  dramaPipeline.startLoop();
   const canvasProduction = new EpisodeProductionService(runtime.db, runtime.events, undefined, true);
   const directorSubagents = new DirectorSubagents(runtime.stores, productionAgents, runtime.events, process.cwd(), (threadId, model) => productionHermes.delegationModel(threadId, model), kind => kind === "episode" ? episodeProduction : canvasProduction);
   directorSubagents.reconcileStartup();
@@ -572,3 +590,4 @@ async function startBackendHttpServer() {
     }
   }
 }
+

@@ -104,6 +104,21 @@ export function composeSegmentPrompt(shots: Array<{ visual?: unknown; camera?: u
     }).join("\n");
 }
 
+/**
+ * 段提示词的取值优先级，导出侧的唯一定义：
+ * 画布 H3 段的实际视频提示词 → 编译产物（artifacts.kind=h3）→ 旧稿 segment.prompt → 分镜拼稿。
+ *
+ * 制作稿 v2 之后 `source.segments` 不再存提示词，取不到真实视频提示词时拼出来的只是分镜词；
+ * 所以只有前两级都没有才退回分镜拼稿（并告知用户）。
+ */
+export function pickSegmentPrompt(candidates: Array<string | undefined>, fallback = ""): string {
+    for (const candidate of candidates) {
+        const text = String(candidate ?? "").trim();
+        if (text) return text;
+    }
+    return fallback;
+}
+
 export function buildDirectorPack(input: {
     title: string;
     output: DirectorPackOutput;

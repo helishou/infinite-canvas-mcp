@@ -709,3 +709,56 @@ CREATE TRIGGER task_history_tombstone_guard
                         SELECT RAISE(ABORT, 'task id already pruned (tombstone)');
                     END;
 `;
+
+/**
+ * 全自动流水线作业队列（对齐影策 drama_jobs）。独立导出，用 CREATE TABLE IF NOT EXISTS
+ * 在 db 构造时补建——不进 CURRENT_DATABASE_SCHEMA，避免升 schema version（现有库有版本
+ * 记录时 migrate() 不会重放 schema）。
+ */
+export const DRAMA_PIPELINE_DDL = String.raw`
+CREATE TABLE IF NOT EXISTS drama_pipeline_jobs (
+    id TEXT PRIMARY KEY,
+    drama_id TEXT NOT NULL,
+    episode_id TEXT,
+    kind TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    priority INTEGER NOT NULL DEFAULT 0,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    dedupe_key TEXT NOT NULL,
+    task_id TEXT,
+    label TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    attempts_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drama_pipeline_jobs_drama_status ON drama_pipeline_jobs(drama_id, status);
+CREATE INDEX IF NOT EXISTS idx_drama_pipeline_jobs_dedupe ON drama_pipeline_jobs(dedupe_key);
+
+CREATE TABLE IF NOT EXISTS drama_pipelines (
+    drama_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'running',
+    review_mode TEXT NOT NULL DEFAULT 'auto',
+    media_mode TEXT NOT NULL DEFAULT 'auto',
+    pause_reason TEXT,
+    last_tick_at TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS drama_pipeline_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    drama_id TEXT NOT NULL,
+    job_id TEXT,
+    episode_id TEXT,
+    level TEXT NOT NULL DEFAULT 'info',
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drama_pipeline_events_drama ON drama_pipeline_events(drama_id, id);
+`;

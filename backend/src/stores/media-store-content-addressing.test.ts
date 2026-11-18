@@ -68,3 +68,23 @@ test("不同内容不共享文件，缺失的旧文件不会被当成可复用�
     assert.equal(db.countMediaFileSharers(again.filePath, again.storageKey), 0);
     void mediaDir;
 });
+
+const PNG_BYTES = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex");
+
+test("缺 mime 的图片按文件头补齐，扩展名不退化成 .bin", async (t) => {
+    const { media } = await fixture(t);
+    const stored = media.store(PNG_BYTES, { name: "frame" });
+    assert.equal(stored.mimeType, "image/png");
+    assert.ok(stored.filePath.endsWith(".png"), `扩展名必须是 .png，实际 ${stored.filePath}`);
+    assert.deepEqual(await media.read(stored.storageKey), PNG_BYTES);
+});
+
+test("已存在的 .bin 内容不被同内容的 .png 入库复用", async (t) => {
+    const { media } = await fixture(t);
+    const legacy = media.store(PNG_BYTES, { name: "legacy.bin", mimeType: "application/octet-stream" });
+    assert.ok(legacy.filePath.endsWith(".bin"));
+    // 同一份内容以真实扩展名重新入库：必须另存一份 .png，否则编译会继续拿到 .bin 而被拒。
+    const fixed = media.store(PNG_BYTES, { name: "frame.png", mimeType: "image/png" });
+    assert.notEqual(fixed.filePath, legacy.filePath);
+    assert.ok(fixed.filePath.endsWith(".png"));
+});

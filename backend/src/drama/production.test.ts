@@ -442,3 +442,70 @@ test("Backend recovery resumes prepared translations by their persisted operatio
     assert.equal(db.getMcpCommandReceipt("legacy-translation")?.receipt?.translationStatus, "retry_required");
     assert.equal(db.getMcpCommandReceipt("legacy-translation")?.status, "prepared", "recoverable request remains on the original receipt");
 });
+
+const governEngine = { commit: "a".repeat(40), patchVersion: "p", runtimeId: "r", version: "4.3.9" };
+
+function governSource() {
+    return {
+        version: 2, prompt_assembly: { version: 2 }, fps_num: 24, fps_den: 1,
+        character_registry: [], asset_plan: [], utterances: [],
+        scene_registry: [{ id: "ENV_A", name: "屋前" }, { id: "ENV_B", name: "蟒腹内" }],
+        subject_registry: [{ id: "SUB_ENV_A", kind: "scene", entityRef: { ownerKind: "episode", ownerId: "episode", kind: "scene", id: "ENV_A" }, pictureBindings: [] }],
+        script_scenes: [
+            { id: "scene-1", scene_id: "ENV_A", scene_name: "场1", blocks: [{ id: "s1-b1", kind: "action", text: "甲" }] },
+            { id: "scene-2", scene_id: "ENV_A", scene_name: "场2", blocks: [{ id: "s2-b1", kind: "action", text: "乙" }, { id: "s2-b2", kind: "dialogue", text: "丙" }] },
+            { id: "scene-3", scene_id: "ENV_B", scene_name: "场3", blocks: [{ id: "s3-b1", kind: "action", text: "丁" }] },
+            { id: "scene-4", scene_name: "场4", blocks: [{ id: "s4-b1", kind: "action", text: "戊" }] },
+        ],
+        shots: [{ id: "SH_A", scene_id: "ENV_A", source_scene_id: "scene-2", timeline_id: "main", story_order: 0, duration_frames: 96,
+            visual: "她抬头。", camera: { description: "static" }, subject_usages: [], keyframes: [], utterance_refs: [] }],
+        segments: [{ id: "CLIP_1", shot_ids: ["SH_A"], mode: "T2VA" }],
+        ledger: { contract_version: 2, facts: [], timelines: [{ id: "main" }], initial: [], events: [], requirements: [], coverage: [] },
+    };
+}
+
+async function governDirector(service: EpisodeProductionService) {
+    const source = governSource();
+    const director = { schemaVersion: 1, engine: governEngine, source, sourceHash: directorHash(source), modules: {}, artifacts: [],
+        assets: {}, shotInputs: {}, boundaries: [], executionAuthorized: false, unresolved: [], workflow: {} };
+    await service.edit("episode", { operationId: "govern-director", expectedRevision: 0, ops: [{ type: "set_director_production", director }] });
+    return () => structuredClone(service.get("episode").draft.director!.source as Record<string, any>);
+}
+
+test("merging director scenes keeps every block in order and rewrites shot scene refs", async (t) => {
+    const { service } = fixture(t);
+    const source = await governDirector(service);
+    const revision = service.get("episode").revision;
+    await service.edit("episode", { operationId: "merge-same-env", expectedRevision: revision, ops: [
+        { type: "merge_director_scenes", sceneIds: ["scene-1", "scene-2"], targetSceneId: "scene-2", title: "场1 合并" },
+    ] });
+    const merged = source();
+    assert.deepEqual(merged.script_scenes.map((row: any) => row.id), ["scene-2", "scene-3", "scene-4"], "merged row keeps the target position and the others survive");
+    assert.deepEqual(merged.script_scenes[0].blocks.map((block: any) => block.id), ["s1-b1", "s2-b1", "s2-b2"], "blocks follow the requested order without loss");
+    assert.equal(merged.script_scenes[0].scene_name, "场1 合并");
+    assert.equal(merged.script_scenes[0].scene_id, "ENV_A", "merged scene keeps its environment");
+    assert.equal(merged.shots[0].source_scene_id, "scene-2", "shot pointing at the target keeps its ref");
+});
+
+test("merging scenes that point at different environments is rejected", async (t) => {
+    const { service } = fixture(t);
+    await governDirector(service);
+    const revision = service.get("episode").revision;
+    await assert.rejects(async () => await service.edit("episode", { operationId: "merge-cross-env", expectedRevision: revision, ops: [
+        { type: "merge_director_scenes", sceneIds: ["scene-1", "scene-3"], targetSceneId: "scene-1" },
+    ] }), /只能合并同一环境的场次/);
+    assert.equal(service.get("episode").revision, revision, "a rejected merge leaves the revision untouched");
+});
+
+test("scene reorder requires the full list and reorders the script rows", async (t) => {
+    const { service } = fixture(t);
+    const source = await governDirector(service);
+    const revision = service.get("episode").revision;
+    await assert.rejects(async () => await service.edit("episode", { operationId: "reorder-partial", expectedRevision: revision, ops: [
+        { type: "reorder_director_scenes", ids: ["scene-1", "scene-2"] },
+    ] }), /必须一次包含全部场次/);
+    await service.edit("episode", { operationId: "reorder-full", expectedRevision: revision, ops: [
+        { type: "reorder_director_scenes", ids: ["scene-2", "scene-1", "scene-4", "scene-3"] },
+    ] });
+    assert.deepEqual(source().script_scenes.map((row: any) => row.id), ["scene-2", "scene-1", "scene-4", "scene-3"]);
+});

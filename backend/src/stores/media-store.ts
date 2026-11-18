@@ -12,6 +12,24 @@ import { extensionForMime, mediaKindForMime, type MediaCategory, type MediaStore
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 
 /**
+ * 生成端（引擎/画布执行器）常常不带 mime 或只给 application/octet-stream，
+ * 此时扩展名会退化成 `.bin`，而 ACHENG 编译只接受 png/jpg/webp 这类真实扩展名，
+ * 会把 `.bin` 参考图判成「asset prompt or JSON」直接拒编。
+ * 因此入库前按文件头补齐 mime，补不到才沿用调用方的值。
+ */
+function sniffMediaMime(data: Buffer): string | null {
+    const head = data.subarray(0, 16);
+    if (head.length >= 8 && head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+    if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+    if (head.length >= 6 && head.subarray(0, 3).toString("ascii") === "GIF") return "image/gif";
+    if (head.length >= 12 && head.subarray(0, 4).toString("ascii") === "RIFF" && head.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+    if (head.length >= 12 && head.subarray(4, 8).toString("ascii") === "ftyp") return "video/mp4";
+    if (head.length >= 3 && head.subarray(0, 3).toString("ascii") === "ID3") return "audio/mpeg";
+    if (head.length >= 4 && head.subarray(0, 4).toString("ascii") === "%PDF") return "application/pdf";
+    return null;
+}
+
+/**
  * 内容寻址去重：同 sha256、同字节数、且文件仍在盘上时，复用同一份物理文件，
  * 只登记新的 storageKey（文件不重复落盘）。
  *
@@ -36,14 +54,18 @@ export function createMediaStore(db: BackendDatabase): MediaStore {
         store(data, options) {
             if (!data.length) throw new Error("媒体为空");
             if (data.length > MAX_MEDIA_BYTES) throw new Error("媒体超过 200 MB 限制");
-            const mimeType = options.mimeType || "application/octet-stream";
+            const declaredMime = options.mimeType && options.mimeType !== "application/octet-stream" ? options.mimeType : sniffMediaMime(data);
+            const mimeType = declaredMime || options.mimeType || "application/octet-stream";
             const name = path.basename(options.name || "media.bin");
             const storageKey = options.storageKey || `${kindFor(mimeType, name)}:${randomUUID()}`;
             const extension = path.extname(name).replace(/[^a-z0-9.]/gi, "").slice(0, 12) || extensionForMime(mimeType);
             const category = safeCategory(options.category);
             const categoryDir = path.join(MEDIA_DIR, category);
             const sha256 = createHash("sha256").update(data).digest("hex");
-            const reuse = reusablePath(db, sha256, data.length);
+            // 只复用扩展名一致的物理文件：早期以 .bin 落盘的同一份内容被复用后，
+            // 编译仍会拿 .bin 去当参考图并被拒，宁可多存一份也不复用错扩展名。
+            const candidate = reusablePath(db, sha256, data.length);
+            const reuse = candidate && path.extname(candidate).toLowerCase() === extension.toLowerCase() ? candidate : null;
             const filePath = reuse ?? path.join(categoryDir, `${randomUUID()}${extension}`);
             if (!reuse) {
                 fs.mkdirSync(categoryDir, { recursive: true, mode: 0o700 });

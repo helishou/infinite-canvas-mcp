@@ -1,8 +1,10 @@
 import type { Router } from "express";
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { dramaOutlineDetailSchema, dramaProductionPlanSchema, dramaTopicSchema, episodeHasScript } from "@basketikun/canvas-agent/drama/production-contract";
 import { dramaNextAction, dramaStageStates, renderDramaStageContext, type DramaStageEpisode } from "@basketikun/canvas-agent/drama/stage-contract";
 import { freshestStageActivity } from "../drama/stage-activity.js";
+import { EpisodeProductionService } from "../drama/production.js";
 
 import type { BackendDatabase } from "../db.js";
 import type { Stores } from "../stores/types.js";
@@ -100,6 +102,20 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
                 model: parsed.data.model,
                 instruction: parsed.data.instruction,
             });
+            // 生成出的钩子/悬念顺手写进导演源稿；这是尽力而为的增强，失败不能挡住分场文本返回。
+            if (result.hook || result.cliffhanger) {
+                try {
+                    const service = new EpisodeProductionService(db);
+                    const current = service.get(episode.id);
+                    await service.edit(episode.id, {
+                        operationId: randomUUID(),
+                        expectedRevision: current.revision,
+                        ops: [{ type: "set_director_story_beats", hook: result.hook, cliffhanger: result.cliffhanger }],
+                    });
+                } catch (beatsError) {
+                    console.warn(`[script-proposal] 写入 hook/cliffhanger 失败（episode=${episode.id}）：`, beatsError instanceof Error ? beatsError.message : beatsError);
+                }
+            }
             res.json({ ok: true, episodeId: episode.id, ...result });
         } catch (error) {
             res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });

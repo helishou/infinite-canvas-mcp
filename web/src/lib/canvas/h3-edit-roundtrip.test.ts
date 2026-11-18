@@ -28,7 +28,7 @@ test("H3 control edit survives real diff, Backend save, receipt delta and refres
     assert.equal(operations[0].type, "update_h3_segment");
     assert.equal(operations[0].segmentId, "b");
     const fields = Object.keys(operations[0].patch as Record<string, unknown>);
-    assert.deepEqual(new Set(fields), new Set(["tailFrameContinuation", "motionContextEnabled", "h3ParameterOverrides"]));
+    assert.deepEqual(new Set(fields), new Set(["tailFrameContinuation", "motionContextEnabled", "h3ParameterOverrides", "videoContinuation"]));
     const receipt = db.applyCanvasProjectOperations("p", Number(base.revision || 0), operations, { operationId: "edit-b" });
     const projected = applyBackendCanvasDelta(base, receipt.operations, receipt.revision);
     const refreshed = db.getCanvasProject("p") as unknown as CanvasProject;

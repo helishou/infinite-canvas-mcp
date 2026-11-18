@@ -14,7 +14,6 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { ConfigConnection } from "@/components/layout/config-connection";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { ConfigImportFailure } from "@/services/config-import-operation";
-import { request as backendRequest } from "@/services/backend-api";
 import { fetchSettings, saveSettings } from "@/services/settings-api";
 import { exportAppConfig, importAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
@@ -65,9 +64,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const configInputRef = useRef<HTMLInputElement>(null);
     const [activeTab, setActiveTab] = useState<ConfigTabKey>(initialTab);
     const [editingChannelId, setEditingChannelId] = useState("");
-    /** 导演引擎：Codex CLI 与 Hermes 是两条原生运行时，只能在设置里指定，新建对话才生效。 */
-    const [agentModelOptions, setAgentModelOptions] = useState<Array<{ id: string; label: string }>>([]);
-    const [agentModelValue, setAgentModelValue] = useState("");
+    /** 导演运行时渠道：设置页只切 hermes / codex，模型由对话面板决定并各自记住。 */
+    const [agentEngine, setAgentEngine] = useState<"hermes" | "codex" | "">("");
     const [testingWebdav, setTestingWebdav] = useState(false);
     const [syncingWebdav, setSyncingWebdav] = useState(false);
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
@@ -91,34 +89,20 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     useEffect(() => {
         if (!active || activeTab !== "channels") return;
         let cancelled = false;
-        void fetchSettings().then((settings) => { if (!cancelled) setAgentModelValue(settings.agentModel || ""); }).catch(() => undefined);
-        // 只向运行时问「本机 Codex 原生模型」；渠道里的导演模型直接由本地配置派生，
-        // 否则运行时没热更时下拉会空（渠道明明存在却看不到）。
-        void backendRequest<{ data?: Array<{ model?: string; displayName?: string }> }>("GET", "/agent/codex/models?source=codex")
-            .then((data) => {
-                if (cancelled) return;
-                setAgentModelOptions((data.data || []).filter((row) => row.model).map((row) => ({ id: String(row.model), label: `Codex / ${String(row.displayName || row.model)}` })));
-            })
-            .catch(() => undefined);
+        void fetchSettings().then((settings) => { if (!cancelled) setAgentEngine(settings.agentEngine || ""); }).catch(() => undefined);
         return () => { cancelled = true; };
     }, [active, activeTab]);
-    /** 渠道派生项：Codex CLI 渠道与 Hermes 渠道都是导演可选的运行时。 */
-    const channelAgentOptions = config.channels
-        .filter((channel) => channel.kind === "codex-cli" || channel.kind === "hermes")
-        .map((channel) => ({
-            runtime: (channel.kind === "hermes" ? "hermes" : "codex") as "codex" | "hermes",
-            options: channel.models
-                .filter((model) => (model.capability || "text") === "text" && !model.script?.trim())
-                .map((model) => ({ value: `${channel.id}::${model.name}`, label: `${channel.name || channel.id} / ${model.name}` })),
-        }));
-    const agentModelGroups = [
-        { label: t("config.channels.agentEngineCodex"), options: agentModelOptions.map((item) => ({ value: item.id, label: item.label })) },
-        ...channelAgentOptions.filter((group) => group.options.length).map((group) => ({ label: t(group.runtime === "hermes" ? "config.channels.agentEngineHermes" : "config.channels.agentEngineCodex"), options: group.options })),
-    ].filter((group) => group.options.length);
-    const changeAgentModel = async (value: string) => {
-        setAgentModelValue(value);
+    /** 导演渠道选项：hermes 需要存在 hermes 渠道；codex 是原生 Codex CLI，恒可用。 */
+    const agentEngineOptions = [
+        { value: "codex" as const, label: t("config.channels.agentEngineCodex") },
+        ...(config.channels.some((channel) => channel.kind === "hermes")
+            ? [{ value: "hermes" as const, label: t("config.channels.agentEngineHermes") }]
+            : []),
+    ];
+    const changeAgentEngine = async (value: "hermes" | "codex") => {
+        setAgentEngine(value);
         try {
-            await saveSettings({ agentModel: value });
+            await saveSettings({ agentEngine: value });
             window.dispatchEvent(new CustomEvent("agent-settings-changed"));
             message.success(t("config.channels.agentEngineSaved"));
         } catch {
@@ -248,8 +232,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <section className="mb-5 rounded-lg border border-border p-4">
                                     <h3 className="mb-1 text-sm font-medium">{t("config.channels.agentEngine")}</h3>
                                     <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("config.channels.agentEngineHint")}</p>
-                                    {agentModelGroups.length ? (
-                                        <Select className="w-full sm:w-96" aria-label={t("config.channels.agentEngine")} value={agentModelValue || undefined} options={agentModelGroups} onChange={(value) => void changeAgentModel(value)} placeholder={t("config.channels.agentEnginePlaceholder")} />
+                                    {agentEngineOptions.length ? (
+                                        <Select className="w-full sm:w-96" aria-label={t("config.channels.agentEngine")} value={agentEngine || undefined} options={agentEngineOptions} onChange={(value) => void changeAgentEngine(value)} placeholder={t("config.channels.agentEnginePlaceholder")} />
                                     ) : (
                                         <div className="text-xs text-muted-foreground">{t("config.channels.agentEngineEmpty")}</div>
                                     )}

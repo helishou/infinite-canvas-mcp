@@ -218,7 +218,8 @@ export function resolveSubjectPictureBindingIds(subjectValue: unknown, usageValu
     if (usage.presentation !== "visible" && !(usage.presentation === "state_context" && sceneEnvironment)) {
         return { bindingIds: [] as string[], issues: [] as string[] };
     }
-    if (subject.entityRef?.kind === "scene" && !purposes.includes("environment")) return { bindingIds: [] as string[], issues: [] as string[] };
+    if (subject.entityRef?.kind === "scene" && !purposes.includes("environment")) return { bindingIds: [] as string[], issues: [
+        "场景 " + String(subject.id || "") + " 的 referencePurpose 没有 environment；环境图不会进本镜参考"] };
     // Older prop bindings were authored as identity. Keep them usable until a Subject has
     // purpose-specific prop bindings, while new prop bindings use the explicit prop purpose.
     const isPropSubject = subject.kind === "prop" || subject.entityRef?.kind === "asset";
@@ -838,10 +839,13 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("request_director_clip_refresh"), segmentId: id }).strict(),
     z.object({ type: z.literal("request_director_shot_refresh"), shotIds: z.array(id).min(1).refine(values => new Set(values).size === values.length, "Shot ID 不能重复") }).strict(),
     z.object({ type: z.literal("set_director_brief"), brief: z.string() }).strict(),
+    z.object({ type: z.literal("set_director_story_beats"), hook: z.string().max(500), cliffhanger: z.string().max(500) }).strict(),
     z.object({ type: z.literal("initialize_director_from_demand") }).strict(),
     z.object({ type: z.literal("patch_director_source"), entity: z.enum(directorPatchSourceEntities), id: id.optional(), patch: directorPatchObjectSchema }).strict(),
     z.object({ type: z.literal("set_director_scene_environment"), sceneId: id, environmentId: id }).strict(),
     z.object({ type: z.literal("split_director_scene"), sourceSceneId: id, sourceScenePatch: directorScenePatchSchema.default({}), newScene: directorSceneOccurrenceSchema, shotIds: z.array(id).min(1), environmentSubjectId: id, environmentPictureBindingId: id }).strict(),
+    z.object({ type: z.literal("merge_director_scenes"), sceneIds: z.array(id).min(2), targetSceneId: id, title: z.string().trim().min(1).optional() }).strict(),
+    z.object({ type: z.literal("reorder_director_scenes"), ids: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),

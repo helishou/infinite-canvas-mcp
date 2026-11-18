@@ -9,6 +9,7 @@ import i18n from "@/i18n";
 import { readAgentUrlBootstrap } from "@/lib/agent/agent-url-bootstrap";
 import { ACHENG_DIRECTOR_SKILL_NAME, findProjectAchengDirectorSkill, creativeLaunchPrompt } from "@/lib/agent/creative-launch";
 import { selectAvailableAgentModel } from "@/lib/agent/agent-model-selection";
+import { engineMismatch, modelEngine, rememberModelByEngine, rememberedModelForEngine } from "@/lib/agent/agent-engine-memory";
 import { subscribeUseMarketSkill } from "@/lib/market-skill-bus";
 import { enqueueAgentPrompt } from "@/lib/agent/agent-prompt-queue";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -823,7 +824,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 const state = useAgentStore.getState();
                 const pendingHistoryModel = pendingHistoryModelRef.current;
                 const restoreHistoryModel = pendingHistoryModel?.threadId === state.activeThreadId ? pendingHistoryModel.model : "";
-                const selected = selectAvailableAgentModel(response.data || [], restoreHistoryModel || state.model, state.reasoningEffort);
+                // 无历史模型要恢复时，按设置里的渠道取该渠道记住的模型作为初始选择。
+                const engineInitial = !restoreHistoryModel && state.agentEngine
+                    ? rememberedModelForEngine(response.data || [], state.agentEngine, state.modelByEngine, state.model)
+                    : "";
+                const selected = selectAvailableAgentModel(response.data || [], restoreHistoryModel || engineInitial || state.model, state.reasoningEffort);
                 if (restoreHistoryModel && selected.model === restoreHistoryModel) {
                     pendingHistoryModelRef.current = null;
                     setAgentState(selected);
@@ -1576,7 +1581,10 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         }
         pendingHistoryModelRef.current = null;
         const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
-        setAgentState({ model, reasoningEffort: effort || "" });
+        // 按该模型所属渠道记住选择，作为该渠道下次新对话的初始模型。
+        const modelByEngine = rememberModelByEngine(current.modelByEngine, selected);
+        const engine = modelEngine(selected);
+        setAgentState({ model, reasoningEffort: effort || "", modelByEngine, ...(engine ? { agentEngine: engine } : {}) });
         if (needsConversation && await startNewThread({ preserveSkill: true })) message.info(rt("modelConversationCreated"));
     };
 

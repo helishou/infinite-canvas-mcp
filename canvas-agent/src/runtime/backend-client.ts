@@ -787,6 +787,15 @@ export class BackendClient {
     return data.task;
   }
 
+  async reclaimTask(id: string): Promise<RuntimeTask> {
+    const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(
+      canvasTaskActionPath(id, "reclaim"),
+    );
+    if (!data.task)
+      throw new Error(`backend task reclaim returned no task: ${id}`);
+    return data.task;
+  }
+
   async retryTask(id: string): Promise<RuntimeTask> {
     const data = await this.post<{ ok: boolean; task?: RuntimeTask }>(
       canvasTaskActionPath(id, "retry"),

@@ -127,9 +127,11 @@ export async function proposeDramaOutlineStep(
 }
 
 const EPISODE_SYSTEM_PROMPT = [
-    "你是短剧编剧，负责把全剧大纲落成单集的剧本大纲（分场）。",
-    "只输出场次行本身：不要客套话、不要解释思路、不要 Markdown 标题、不要写对白和镜头。",
+    "你是短剧编剧，负责把全剧大纲落成单集的剧本大纲（分场），并给出本集的开场钩子与结尾悬念。",
+    "先输出一段「本集梗概」：用自然语言把这一集的来龙去脉讲清楚（谁、为什么、经过、结果），100-200 字，是一段连贯的话，不是分场、不要列表、不要场次编号。",
+    "再输出场次行：每行一场。不要客套话、不要解释思路、不要 Markdown 标题、不要写对白和镜头。",
     "人物、地点、事件必须来自已定的全剧大纲、原剧本或本集简介，不得新增设定；信息不足就少写几场，不要编。",
+    "卡点必须紧扣本集剧情：开场钩子是抓人开场的那一瞬，结尾悬念是逼人追下一集的卡点，各一句、20 字内。",
     "全部用中文。",
 ].join("\n");
 
@@ -151,7 +153,10 @@ export function buildEpisodeScriptPrompt(input: {
 }) {
     const parts = [
         `本集任务：第 ${input.episodeNumber} 集${input.title ? `《${input.title}》` : ""}的剧本大纲（分场）`,
-        "输出格式：每行一场 —— 场N｜内景/外景·地点｜日/夜｜出场人物｜这一场发生什么（一句因果，写清本场钩子）",
+        "输出格式（严格按顺序）：",
+        "1) 第一行写「本集梗概：」后接一段自然语言梗概（100-200字，谁/为什么/经过/结果，连贯成段，不要场次编号或列表）。",
+        "2) 之后每行一场：场N｜内景/外景·地点｜日/夜｜出场人物｜这一场发生什么（一句因果，写清本场钩子）",
+        "3) 分场行写完后另起两段，格式严格为「开场钩子：……」和「结尾悬念：……」（各一句、20 字内），不要加序号或项目符号",
     ];
     if (input.synopsis.trim()) parts.push(`本集简介：${input.synopsis.trim()}`);
     if (input.outline.trim()) parts.push(`全剧故事线：\n${input.outline.trim()}`);
@@ -165,6 +170,32 @@ export function buildEpisodeScriptPrompt(input: {
     return parts.join("\n\n");
 }
 
+/**
+ * 从分场文本中抽出开场钩子/结尾悬念两行，并把这两行从正文里剥离。
+ * 两行都可缺省：没有的段落返回空字符串，正文原样保留，不抛错。
+ */
+export function parseEpisodeScriptBeats(text: string): { text: string; hook: string; cliffhanger: string; synopsis: string } {
+    let hook = "", cliffhanger = "", synopsis = "", matched = false;
+    const lines = String(text || "").split("\n");
+    const kept = lines.filter((line) => {
+        const opening = line.match(/^\s*开场钩子[:：]\s*(.*?)\s*$/);
+        if (opening) { hook = String(opening[1] || "").trim().slice(0, 500); matched = true; return false; }
+        const closing = line.match(/^\s*结尾悬念[:：]\s*(.*?)\s*$/);
+        if (closing) { cliffhanger = String(closing[1] || "").trim().slice(0, 500); matched = true; return false; }
+        return true;
+    });
+    // 本集梗概：抽成独立字段 s，并把「本集梗概：」那一整行从正文剥离。
+    const keptText = kept.join("\n").trim();
+    const synopsisLines = keptText.split("\n");
+    const synopsisIdx = synopsisLines.findIndex(line => /^\s*本集梗概[:：]/.test(line));
+    if (synopsisIdx >= 0) {
+        synopsis = synopsisLines[synopsisIdx].replace(/^\s*本集梗概[:：]\s*/, "").trim();
+        synopsisLines.splice(synopsisIdx, 1);
+    }
+    const bodyText = synopsisLines.join("\n").trim();
+    return { text: matched ? bodyText : bodyText || String(text || "").trim(), hook, cliffhanger, synopsis };
+}
+
 export async function proposeEpisodeScript(
     stores: Pick<Stores, "settings">,
     input: { episodeNumber: number; title: string; synopsis: string; outline: string; worldContext?: string; threeActs?: readonly string[]; ending?: string; source: string; previousTail?: string; model?: string; instruction?: string; signal?: AbortSignal },
@@ -175,7 +206,9 @@ export async function proposeEpisodeScript(
     if (!input.synopsis.trim() && !input.outline.trim() && !trimSource(input.source)) throw new Error("先写好本集简介或全剧大纲，再来生成分场");
     const provider = resolveTextProvider(aiConfig, model, { systemPrompt: EPISODE_SYSTEM_PROMPT, reasoningEffort: "auto" });
     const raw = await requestOpenAiText(provider, buildEpisodeScriptPrompt(input), [], input.signal);
-    const text = String(raw || "").replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
-    if (!text) throw new Error("模型返回了空内容");
-    return { text, model };
+    const cleaned = String(raw || "").replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
+    if (!cleaned) throw new Error("模型返回了空内容");
+    const beats = parseEpisodeScriptBeats(cleaned);
+    if (!beats.text) throw new Error("模型返回了空内容");
+    return { text: beats.text, model, hook: beats.hook, cliffhanger: beats.cliffhanger, synopsis: beats.synopsis };
 }
