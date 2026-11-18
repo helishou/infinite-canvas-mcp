@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CREATIVE_LAUNCH_LIMIT, CREATIVE_LAUNCH_STORAGE_KEY, collectOutputs, launchStatus, launchTextResults, nextCreativeLaunches, outputMedia, projectCover, pruneCreativeLaunches, readCreativeLaunches, resolveLaunchOutputs, retainProjectCovers, taskDestination, writeCreativeLaunches, type CreativeLaunch } from "./workbench-data";
+import { CREATIVE_LAUNCH_LIMIT, CREATIVE_LAUNCH_STORAGE_KEY, collectOutputs, launchStatus, launchTextResults, nextCreativeLaunches, outputDisplayName, outputMedia, projectCover, pruneCreativeLaunches, readCreativeLaunches, resolveLaunchOutputs, retainProjectCovers, shortModelName, taskDestination, writeCreativeLaunches, type CreativeLaunch } from "./workbench-data";
 import type { BackendGenerationLog } from "../../services/backend-api";
 import type { CanvasProject } from "../../stores/canvas/use-canvas-store";
 
@@ -157,6 +157,19 @@ test("canvas-free conversation launches persist and surface task media without a
     assert.equal(resolveLaunchOutputs(task, [log], canvasFree).length, 1);
 });
 
+test("summary tasks expose media via top-level outputs when result.media was trimmed", () => {
+    const canvasFree: CreativeLaunch = { taskId: "summary-1", mode: "image", prompt: "姿态图", model: "全能图片模型P", createdAt: "2026-11-17T16:50:00.000Z", params: {} };
+    // 后端 ?summary=true：result 被裁成 null，媒体引用只留在顶层 outputs。
+    const task = {
+        id: "summary-1", status: "succeeded" as const, progress: 1, result: null,
+        outputs: [{ url: "/media/image%3A28a1cf37", storageKey: "image:28a1cf37", mimeType: "image/png", bytes: 40544 }],
+    } as never;
+    const outputs = resolveLaunchOutputs(task, [], canvasFree);
+    assert.equal(outputs.length, 1);
+    assert.equal(outputs[0].kind, "image");
+    assert.equal(outputs[0].storageKey, "image:28a1cf37");
+});
+
 test("text results prefer the task payload and only read completed text outputs", () => {
     const task = { id: "t", status: "succeeded" as const, progress: 1, result: { texts: [{ content: "from task" }, { content: "  " }] } };
     const logs = [generationLog({ id: "l", status: "success", outputs: [{ mimeType: "text/plain", content: "from log" }, { mimeType: "image/png", storageKey: "image:x" }] })];
@@ -164,4 +177,21 @@ test("text results prefer the task payload and only read completed text outputs"
     assert.deepEqual(launchTextResults(undefined, logs), ["from log"]);
     assert.deepEqual(launchTextResults(undefined, [generationLog({ id: "l", status: "failed", outputs: [{ type: "text/plain", content: "partial" }] })]), []);
     assert.deepEqual(launchTextResults(undefined, []), []);
+});
+
+test("recent output titles use project, then prompt, then model without the channel prefix", () => {
+    assert.equal(shortModelName("engine-local::全能图片模型P"), "全能图片模型P");
+    assert.equal(shortModelName("engine-local::H3 展开流"), "H3 展开流");
+    assert.equal(shortModelName("gpt-image-2"), "gpt-image-2");
+    assert.equal(shortModelName(""), "");
+
+    const log = { model: "engine-local::全能图片模型P", prompt: "文生图16:9，美女，失眠熊。" };
+    assert.equal(outputDisplayName(log, "七绝山·蟒妻"), "七绝山·蟒妻", "有画布时用画布名");
+    assert.equal(outputDisplayName(log), "文生图16:9，美女，失眠熊。", "会话级生成用提示词首行");
+    assert.equal(outputDisplayName({ model: log.model }), "全能图片模型P", "无提示词时退到去前缀的模型名");
+    assert.equal(outputDisplayName({}, undefined, "生成结果"), "生成结果");
+
+    const longPrompt = " ".repeat(4) + "一只橘猫坐在窗台，午后逆光写实照片，毛发细节丰富，暖色调电影感人像风格，浅景深背景虚化，高清写实摄影";
+    assert.equal(outputDisplayName({ prompt: longPrompt }), `${longPrompt.trim().slice(0, 24)}…`);
+    assert.equal(outputDisplayName({ prompt: "subject_definitions:\n<Subject 1> 崇良" }), "<Subject 1> 崇良", "跳过结构化前缀行，取第一条有内容的行");
 });

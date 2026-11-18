@@ -49,6 +49,40 @@ export function collectOutputs(logs: BackendGenerationLog[]): WorkbenchOutput[] 
         );
 }
 
+/** 去掉 `engine-local::xxx` 这类渠道前缀，只留模型名。 */
+export function shortModelName(model?: string) {
+    const value = String(model || "").trim();
+    return value.includes("::") ? value.split("::").slice(1).join("::") : value;
+}
+
+/** 从提示词首行压出可当卡片标题的短名字；长提示词取前 24 字加省略号。 */
+function promptTitle(prompt?: string) {
+    if (!prompt) return "";
+    for (const line of prompt.split(/\r?\n/)) {
+        const cleaned = line.trim()
+            .replace(/^(?:integrated_multimodal_description|subject_definitions|prompt|caption)\s*[:：]\s*/i, "")
+            .replace(/\s+/g, " ")
+            .trim();
+        // 跳过只剩结构化前缀的行（如 subject_definitions:），取第一条真正有内容的行。
+        if (!cleaned) continue;
+        return cleaned.length > 24 ? `${cleaned.slice(0, 24)}…` : cleaned;
+    }
+    return "";
+}
+
+/**
+ * 「最近生成」卡片标题：项目名 > 提示词短标题 > 去掉渠道前缀的模型名。
+ * 会话级生成没有 projectId，旧逻辑直接显示 `engine-local::全能图片模型P` 这种原始 ID。
+ */
+export function outputDisplayName(
+    log: Pick<BackendGenerationLog, "model" | "prompt">,
+    projectTitle?: string,
+    fallback = "生成结果",
+) {
+    if (projectTitle?.trim()) return projectTitle.trim();
+    return promptTitle(log.prompt) || shortModelName(log.model) || fallback;
+}
+
 export function projectCover(project: CanvasProject, outputs: WorkbenchOutput[], folder?: CanvasFolder): WorkbenchMedia | null {
     const result = outputs.find((output) => output.log.projectId === project.id && output.kind === "image") || outputs.find((output) => output.log.projectId === project.id && output.kind === "video");
     if (result) return result;
@@ -273,7 +307,10 @@ function conversationLog(launch: CreativeLaunch, outputs: Array<Record<string, u
  */
 export function resolveLaunchOutputs(task: BackendRuntimeTask | undefined, logs: BackendGenerationLog[], launch: CreativeLaunch): WorkbenchOutput[] {
     const fromLogs = collectOutputs(logs);
-    const media = ((task?.result?.media || []) as unknown as Array<Record<string, unknown>>);
+    // 任务列表摘要（?summary=true）会把 result.media 裁掉，媒体引用只留在顶层 outputs；
+    // 详情接口才有完整 result.media。两处都要读，否则对话工作台的图片任务会误报「没有可预览的结果」。
+    const fromResult = (task?.result?.media || []) as unknown as Array<Record<string, unknown>>;
+    const media = fromResult.length ? fromResult : ((task?.outputs || []) as Array<Record<string, unknown>>);
     const seen = new Set(fromLogs.map(output => output.storageKey || output.url || ""));
     const fromTask: WorkbenchOutput[] = [];
     for (const [index, item] of media.entries()) {
