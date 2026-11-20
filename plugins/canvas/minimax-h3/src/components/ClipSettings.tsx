@@ -342,7 +342,7 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
             <span>秒数</span>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                 {H3_PRESET_SECONDS.map((seconds) => h3PresetButton(`seconds-${seconds}`, `${seconds}s`, presetSeconds === seconds, () => writePresetSeconds(seconds)))}
-                <InputNumber min={1} max={15} precision={0} value={presetSeconds} placeholder="自定义秒数" aria-label="自定义秒数" onChange={(value) => { if (value != null && Number.isFinite(Number(value))) writePresetSeconds(Number(value)); }} />
+                <InputNumber min={1} max={15} step={0.1} precision={1} value={presetSeconds} placeholder="自定义秒数" aria-label="自定义秒数" onChange={(value) => { if (value != null && Number.isFinite(Number(value))) writePresetSeconds(Number(value)); }} />
             </div>
         </div> : null}
     </div> : null;
