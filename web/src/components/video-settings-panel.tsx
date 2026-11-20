@@ -14,6 +14,7 @@ import type { PresetFieldIds } from "@/lib/model-standard-params";
 export { normalizeVideoSizeValue } from "@/lib/video-size";
 
 const resolutionOptions = [
+    { value: "1080", label: "1080p" },
     { value: "720", label: "720p" },
     { value: "480", label: "480p" },
 ];
@@ -224,7 +225,6 @@ export function VideoSettingsPanel({
                                     >
                                         <SizePreview width={item.width} height={item.height} color={theme.node.text} />
                                         <span>{t(`settingsPanels.video.sizes.${item.labelKey}`)}</span>
-                                        {item.value === "auto" ? null : <span className="text-[11px] leading-none opacity-55">{item.value}</span>}
                                     </button>
                                 ))}
                             </div>

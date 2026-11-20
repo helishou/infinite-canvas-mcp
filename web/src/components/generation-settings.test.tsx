@@ -87,7 +87,7 @@ test("image unsupported and missing workflow diagnoses remain distinct and retai
 
 test("video retains every generic size, duration and custom numeric control", () => {
     const html = video({ size: "auto", videoSeconds: "20", vquality: "1080" });
-    for (const value of ["1280x720", "720x1280", "1024x1024", "1792x1024", "1024x1792"]) assert.ok(html.includes(value));
+    for (const ratio of ["landscape", "portrait", "square", "widescreen", "tall"]) assert.ok(html.includes(i18n.t(`settingsPanels.video.sizes.${ratio}`)));
     for (const value of [6, 10, 12, 16, 20]) assert.ok(buttons(html).some((button) => button.text === `${value}s`));
     assert.match(html, /value="1080"/);
     assert.match(html, /max="20"/);
@@ -109,8 +109,8 @@ test("video engine preset mode keeps size/duration presets and folds remaining w
         onCustomFieldChange: noChange,
         presetFieldIds: { width: "width", height: "height", seconds: "frames" },
     });
-    // 预设区照常渲染
-    for (const value of ["1280x720", "720x1280", "1024x1024"]) assert.ok(html.includes(value));
+    // 预设区照常渲染（尺寸卡片只显示比例名）
+    for (const ratio of ["landscape", "portrait", "square"]) assert.ok(html.includes(i18n.t(`settingsPanels.video.sizes.${ratio}`)));
     assert.ok(buttons(html).some((button) => button.text === "6s"));
     // 字段当前值成为预设选中态（864x480 不是标准预设，精确尺寸里应出现）
     assert.match(html, /value="864"/);
@@ -125,10 +125,11 @@ test("video workflow fields replace standard controls only when fields exist", (
     const workflow = video({}, { customFields: fields, customFieldValues: { seed: 17 }, onCustomFieldChange: noChange });
     assert.match(workflow, /Test workflow seed/);
     assert.match(workflow, /value="17"/);
-    assert.ok(!workflow.includes("1280x720"));
+    const landscape = i18n.t("settingsPanels.video.sizes.landscape");
+    assert.ok(!workflow.includes(landscape));
     const missing = video({}, { customFields: [], implementationMissing: "Scenario unsupported" });
     assert.ok(missing.includes("Scenario unsupported"));
-    assert.ok(missing.includes("1280x720"));
+    assert.ok(missing.includes(landscape));
 });
 
 test("H3 keeps its specific duration presets, range and resolved-parameter feedback", () => {
