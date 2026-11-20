@@ -33,7 +33,7 @@ export type CanvasVideoModelField = {
     id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
     required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
 };
-export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; presetFieldIds?: { width?: string; height?: string; seconds?: string }; error?: string };
 export type CanvasGenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 export type CanvasGenerationLog = {
     id: string; projectId: string; nodeId?: string; segmentId?: string; status: CanvasGenerationLogStatus;
@@ -122,7 +122,7 @@ export type CanvasTextEditorHandle = {
     replace: (text: string) => void;
     focus: () => void;
 };
-export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string };
+export type CanvasTextReference = { label: string; displayLabel?: string; title?: string; insert?: string; tokens?: string[]; previewUrl?: string; active?: boolean; suggestible?: boolean; kind?: string; /** 荧光高亮色（CSS 颜色）；省略时编辑器按稳定身份派生。 */ color?: string };
 export type CanvasSpeakerOption = { id: string; name?: string; previewUrl?: string };
 export type CanvasTextEditorProps = {
     projectId: string; target: CanvasTextTarget; placeholder?: string;

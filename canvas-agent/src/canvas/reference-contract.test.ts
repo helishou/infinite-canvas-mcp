@@ -288,6 +288,16 @@ test("关闭服装总开关不提交图片，保留单件选择且不关闭声�
     assert.deepEqual(compileReferenceSubmission(groupProject, segment).references.map((ref) => ref.storageKey), ["image:a", "image:b"]);
 });
 
+test("段级音色覆写只给 voiceStorageKey（无 url）时仍派生参考音频绑定", () => {
+    const group = { id: "group-voice-only", characterName: "路人", characterNodeId: "character-1", subjectId: "SUB_ROAD",
+        outfits: [], voiceEnabled: true, voice: { storageKey: "voice:路人-指定", name: "指定音色" } };
+    const refs = characterGroupBindings(group as any);
+    const audio = refs.find((ref) => ref.mediaType === "audio");
+    assert.ok(audio, "只有 storageKey 的手动指定音色也必须进入参考绑定");
+    assert.equal(audio!.storageKey, "voice:路人-指定");
+    assert.equal(audio!.groupId, "group-voice-only");
+});
+
 for (const role of ["scene", "storyboard"] as const) {
     test(`刷新旧角色绑定保持 Picture 的媒体语义，兼容${role}排序`, () => {
         const segment = groupSegment([]);

@@ -1,5 +1,6 @@
 // probe-reload-trigger-1
 import { entityNodeOperations, removedSharedEntityNodeOperations, removedSubjectEntityNodeOperations } from "./entity-nodes.js";
+import { compareVersionSnapshots, summarizeVersionSnapshot, type MediaDurationLookup, type VersionDiff, type VersionRef, type VersionSnapshotSummary } from "./production-version-compare.js";
 import { captureCanvasInputs, effectiveTargetInput, inputHash, type CanvasExecutionSnapshot } from "./canvas-inputs.js";
 import { replaceDirectorSceneStoryboard } from "./scene-storyboard.js";
 import { editDirectorShot } from "./shot-edit.js";
@@ -62,6 +63,7 @@ import { schemaDiagnostics, ProductionValidationError, applyDirectorSourcePatch,
 import { selectSmartImageResult } from "@basketikun/canvas-agent/reference-contract";
 
 import { directorHash, projectDirector, validateDirectorMedia, directorMediaReadContext, assertDirectorEngine, withoutDirectorProjection, publicProductionRecord } from "./director.js";
+import { captureCanvasClipVideos, recordClipVideoVersions, readClipVideoVersions, countClipVideoVersions } from "./clip-video-versions.js";
 import { DATA_DIR } from "../config.js";
 import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { BackendDatabase } from "../db.js";
@@ -78,6 +80,9 @@ import { productionLayoutStableId, productionNodePosition } from "./production-l
 import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
 import { compiledImageInput, assertImageReferenceCoverage, imageInputOperations, verifyImageInput } from "./image-inputs.js";
 import { buildPublishedProductionClip, claimableProductionClipNodes, clipInputHash, clipInputOperations, formalStoryboardTrack, productionClipProjection, type ReferenceSync } from "./clip-inputs.js";
+import { aiConfigMaxAudiosResolver } from "../canvas/model-audio-capability.js";
+import { mediaReadable, planJianyingDraftPreview, JIANYING_ARCHIVE_MAX_BYTES, type JianyingPreflightSegmentInput, type DramaJianyingDraftPreview } from "./jianying-preflight.js";
+import { JianyingRevisionConflictError, JianyingExportBlockedError, makeJianyingExportPlan, type JianyingExportPlan, type SubtitleCalibration } from "./jianying-export.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { archiveDirectorScene, deleteDirectorClip, listArchivedDirectorScenes, restoreDirectorScene } from "./production-scene-archive.js";
 import { continuityTargetBlockers, ProductionContinuityReports } from "./continuity-reports.js";
@@ -3153,7 +3158,7 @@ export class EpisodeProductionService {
                     const group: EpisodeProductionData["clipGroups"][number] | undefined = current.published.clipGroups.find(group => group.id === id.slice(8));
                     const node: any = nodes.find(node => node.id === group?.nodeId);
                     const index = node?.metadata?.segments?.findIndex((segment: any) => segment.id === group?.segmentId);
-                    if (group?.segmentId && index >= 0) node.metadata.segments[index] = buildPublishedProductionClip(executionProject, current.published, group, group.segmentId, record(this.db.getSetting(H3_DEFAULTS_KEY)), runSettings);
+                    if (group?.segmentId && index >= 0) node.metadata.segments[index] = buildPublishedProductionClip(executionProject, current.published, group, group.segmentId, record(this.db.getSetting(H3_DEFAULTS_KEY)), runSettings, undefined, this.db.resolveEpisodeChapterNumbers(episodeId));
                 } else {
                     const assetId = id.startsWith("frame:") ? director.shotInputs[id.slice(6)]?.keyframeAssetId : id.slice(6);
                     const node = nodes.find(node => node.id === director.assets[assetId || ""]?.nodeId);
@@ -3409,6 +3414,62 @@ export class EpisodeProductionService {
         if (snapshot.director && !isSubjectPromptAssembly(snapshot.director.source)) throw new ProductionValidationError([{ code: "UNSUPPORTED_PRODUCTION_FORMAT", path: "version.snapshot.director.source", message: "旧版发布快照只能通过生产源稿维护命令检查。", severity: "error" }]);
         return { version: row.version, stage: row.stage, snapshot, impact: JSON.parse(row.impact_json) as ProductionImpact, createdAt: row.created_at };
     }
+
+    /** 只读原始版本快照行。刻意不经过 episodeProductionHistoryDataSchema，避免旧版 director.source 被校验拒绝；对比只读 JSON 原文。 */
+    private rawVersionRows(episodeId: string): Array<{ version: number; stage: string; created_at: string; snapshot_json: string }> {
+        const linked = this.linked(episodeId); if (linked) return linked.service.rawVersionRows(linked.id);
+        this.episode(episodeId);
+        return this.prepare("SELECT version, stage, created_at, snapshot_json FROM episode_production_versions WHERE episode_id = ? ORDER BY version DESC").all(episodeId) as Array<{ version: number; stage: string; created_at: string; snapshot_json: string }>;
+    }
+
+    /** 版本摘要里的成片时长真值回调：finalResource.storageKey → media_files.duration_ms（查不到返回 null，不编造）。 */
+    private mediaDurationLookup(): MediaDurationLookup {
+        return (storageKey) => {
+            const media = this.db.getMediaFile(String(storageKey || ""));
+            return typeof media?.durationMs === "number" && Number.isFinite(media.durationMs) && media.durationMs > 0 ? media.durationMs : null;
+        };
+    }
+
+    /** 版本列表：版本号/stage/时间 + 从 snapshot_json 真派生的摘要（镜头/段/提示词/成片 storageKey/时长等）。
+     *  clipVideoCount 来自 clip_video_versions 表的真计数（countClipVideoVersions），不是快照推断；
+     *  同一真值同时放在 summary 内与条目顶层（summary 供摘要消费方，顶层保留既有契约）。 */
+    versionCompareList(episodeId: string): Array<VersionRef & { summary: VersionSnapshotSummary & { clipVideoCount: number }; clipVideoCount: number }> {
+        const counts = countClipVideoVersions(this.db, episodeId);
+        const lookup = this.mediaDurationLookup();
+        return this.rawVersionRows(episodeId).map((row) => {
+            const clipVideoCount = counts.get(row.version) ?? 0;
+            return {
+                version: row.version, stage: row.stage, createdAt: row.created_at,
+                summary: { ...summarizeVersionSnapshot(JSON.parse(row.snapshot_json) as unknown, lookup), clipVideoCount },
+                clipVideoCount,
+            };
+        });
+    }
+
+    /** 两版本结构化对比。全部字段源自两份 snapshot_json；版本不存在时抛错（HTTP 层映射为 404）。 */
+    versionCompare(episodeId: string, v1: number, v2: number): VersionDiff {
+        for (const [label, value] of [["v1", v1], ["v2", v2]] as const) {
+            if (!Number.isInteger(value) || value < 1) throw new Error(`${label} 必须为已发布正整数版本`);
+        }
+        const rows = this.rawVersionRows(episodeId);
+        const fromRow = rows.find((row) => row.version === v1);
+        const toRow = rows.find((row) => row.version === v2);
+        if (!fromRow) throw new Error(`找不到制作稿版本 v${v1}`);
+        if (!toRow) throw new Error(`找不到制作稿版本 v${v2}`);
+        const clipVideos = readClipVideoVersions(this.db, episodeId, [v1, v2]);
+        const lookup = this.mediaDurationLookup();
+        return compareVersionSnapshots(episodeId, {
+            version: v1, stage: fromRow.stage, createdAt: fromRow.created_at, snapshot: JSON.parse(fromRow.snapshot_json) as unknown, lookupMediaDurationMs: lookup,
+        }, {
+            version: v2, stage: toRow.stage, createdAt: toRow.created_at, snapshot: JSON.parse(toRow.snapshot_json) as unknown, lookupMediaDurationMs: lookup,
+        }, clipVideos.get(v1) ?? [], clipVideos.get(v2) ?? []);
+    }
+
+    /** 当前画布逐clip成片真值（实时读段 resultStorageKey），供与某版本记录做诚实对比。 */
+    currentClipVideos(episodeId: string) { return captureCanvasClipVideos(this.db, episodeId); }
+
+    /** 指定版本已记录的逐clip成片真值；旧版本无记录返回空数组。 */
+    clipVideosAtVersion(episodeId: string, version: number) { return readClipVideoVersions(this.db, episodeId, [version]).get(version) ?? []; }
 
     exportMarkdown(episodeId: string, stage: "script" | "shots" | "director", version?: number) {
         const current = this.get(episodeId);
@@ -3779,6 +3840,8 @@ export class EpisodeProductionService {
         const refreshes = input.ops.filter(op => op.type === "request_director_clip_refresh" || op.type === "request_director_shot_refresh");
         const refreshTargetIds = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
         const refreshShotIds = refreshes.flatMap(op => op.type === "request_director_shot_refresh" ? op.shotIds : []);
+        // 段级参考图策略是源稿编辑，按与 request_director_clip_refresh 相同的方式登记目标以触发重编译。
+        const referencePolicyTargetIds = input.ops.flatMap(op => op.type === "set_segment_reference_policy" ? [op.segmentId] : []);
         // The same edit transaction owns both the saved source and its refresh intent.
         // A queued refresh has no new compiled input to project yet.
         const clipSync = { targets: undefined as Set<string> | undefined, pending: new Set<string>() };
@@ -3838,7 +3901,7 @@ export class EpisodeProductionService {
             if (record.draft.director && draft.director && isSubjectPromptAssembly(draft.director.source)) {
                 const before = record.draft.director, after = draft.director;
                 if (!sceneRuntime || refreshes.length || overwriteCompiledPromptTargets?.size) clipSync.targets = new Set<string>();
-                const explicitTargets = refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []);
+                const explicitTargets = [...refreshes.flatMap(op => op.type === "request_director_clip_refresh" ? [op.segmentId] : []), ...referencePolicyTargetIds];
                 const shotTargets = refreshShotIds;
                 const shotResolvedTargets = new Set<string>();
                 if (shotTargets.length) {
@@ -3913,12 +3976,19 @@ export class EpisodeProductionService {
                         clipSync.pending.add(segmentId);
                     }
                 });
-            } else if (refreshes.length) {
+            } else if (refreshes.length || referencePolicyTargetIds.length) {
                 if (refreshes.some(op => op.type === "request_director_shot_refresh")) throw new Error("SHOT_REFRESH_REQUIRES_V2: 按稳定 Shot 身份返修仅支持 Prompt Assembly v2");
-                const refresh = refreshes[0];
-                if (refresh?.type !== "request_director_clip_refresh" || !record.draft.director || !draft.director) throw new Error("CLIP_REFRESH_SOURCE_MISSING");
-                assertClipEdit(record.draft.director, draft.director, input, refresh.segmentId);
-                this.clipRefreshStore(episodeId).register(input.operationId, record.revision + 1, record.draft.director, draft.director, refresh.segmentId);
+                if (!record.draft.director || !draft.director) throw new Error("CLIP_REFRESH_SOURCE_MISSING");
+                if (refreshes.length) {
+                    const refresh = refreshes[0]!;
+                    if (refresh.type !== "request_director_clip_refresh") throw new Error("CLIP_REFRESH_SOURCE_MISSING");
+                    assertClipEdit(record.draft.director, draft.director, input, refresh.segmentId);
+                    this.clipRefreshStore(episodeId).register(input.operationId, record.revision + 1, record.draft.director, draft.director, refresh.segmentId);
+                }
+                for (const segmentId of referencePolicyTargetIds) {
+                    if (!clipRows(draft.director.source.segments).some(segment => String(segment.id) === segmentId)) throw new Error(`SEGMENT_REFERENCE_TARGET_UNKNOWN: ${segmentId}`);
+                    this.clipRefreshStore(episodeId).register(input.operationId, record.revision + 1, record.draft.director, draft.director, segmentId);
+                }
             }
             if (packets.length) {
                 if (!draft.director || !record.draft.director) throw new Error("ADOPTION_SOURCE_MISSING");
@@ -4088,6 +4158,14 @@ export class EpisodeProductionService {
             const updatedAt = new Date().toISOString();
             this.prepare("INSERT INTO episode_production_versions (episode_id, version, stage, snapshot_json, impact_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
                 .run(episodeId, publishedVersion, input.stage, JSON.stringify(withoutDirectorProjection(candidate)), JSON.stringify(impact), updatedAt);
+            // 逐clip成片真值：发布时刻捕获当前画布段 resultStorageKey，按版本落 clip_video_versions。
+            // 快照 director.artifacts 没有逐clip成片地址，这条链是逐clip对比唯一可信来源。
+            try {
+                recordClipVideoVersions(this.db, episodeId, publishedVersion, captureCanvasClipVideos(this.db, episodeId), updatedAt);
+            } catch (error) {
+                // 真值捕获失败不阻断发布，但必须留痕；不写入任何推断或占位的成片地址。
+                console.warn("CLIP_VIDEO_TRUTH_CAPTURE_FAILED", JSON.stringify({ episodeId, version: publishedVersion, error: String(error) }));
+            }
             const draft = structuredClone(record.draft);
             if (input.stage === "director") draft.keyframeReviews = structuredClone(candidate.keyframeReviews);
             if (input.stage !== "script") draft.clipGroups = candidate.clipGroups;
@@ -4472,7 +4550,7 @@ export class EpisodeProductionService {
                         sceneOperations: scopedShotProjection ? [] : productionSceneCreationOperations(canvas, next.draft, layout, owner, createdSceneIds, h3Defaults, next.published),
                         clips: deferShotClipProjection
                             ? { operations: [], referenceSync: [] }
-                            : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets, options.clipSync?.pending),
+                            : clipInputOperations(canvas, next.draft, layout, h3Defaults, materializeClipIds, scopedShotProjection ? shotTargets : undefined, options.overwriteCompiledPromptTargets, options.forceBoundaryTargets, options.clipSync?.pending, aiConfigMaxAudiosResolver(this.db.getSetting("ai.config")), this.db.resolveEpisodeChapterNumbers(episodeId)),
                     }));
                     next.referenceSync = deferShotClipProjection ? undefined : clips.referenceSync.filter(item => !options.clipSync?.targets || options.clipSync.targets.has(item.targetId));
                     const readyClips = new Set(clips.referenceSync.filter(item => item.status === "ready").map(item => item.targetId));
@@ -5706,10 +5784,137 @@ export class EpisodeProductionService {
             for (const id of beforeIds) if (!afterIds.has(id)) { delete draft.keyframes[id]; delete draft.keyframeReviews[id]; }
             projectDirector(draft); return;
         }
+        if (op.type === "set_segment_reference_policy") {
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            setSegmentReferenceOverrides(draft.director, op);
+            draft.director.sourceHash = directorHash(draft.director.source);
+            projectDirector(draft);
+            return;
+        }
         if (op.type === "patch_director_source") {
             if (!draft.director) throw new Error("缺少 Acheng 制作稿");
             this.patchDirectorSource(draft.director, op.entity, op.id, op.patch, allowMissingSourceEntityCreate);
             if (!deferDirectorProjection) projectDirector(draft);
+            return;
+        }
+        if (op.type === "update_shot_dialogue") {
+            // 镜头内联编辑器的台词写入口：真值在 director.source.utterances[]，
+            // shot.utterance_refs 只负责定位，不写投影字段；改完必须重算 sourceHash 并 projectDirector，
+            // 否则下一次重投影会用旧 source 把台词冲掉（同 delete_shot / set_director_shot_utterances）。
+            if (!draft.director) throw new Error("缺少 Acheng 制作稿");
+            const source = draft.director.source;
+            const shots = Array.isArray(source.shots) ? source.shots.map(record) : [];
+            const shotIndex = shots.findIndex(item => String(item.id) === op.shotId);
+            if (shotIndex < 0) throw new Error(`镜头不存在：${op.shotId}`);
+            const shot = shots[shotIndex];
+            const utterances = clipRows(source.utterances);
+            const refs = clipRows(shot.utterance_refs);
+            const refIds = refs.map(ref => String(ref.utteranceId));
+            let target = op.utteranceId
+                ? utterances.find(item => String(item.id) === op.utteranceId && refIds.includes(String(op.utteranceId)))
+                : refIds.length ? utterances.find(item => String(item.id) === refIds[0]) : undefined;
+            // 兼容旧稿：只有 utterance.start.shotId、没有 shot.utterance_refs。
+            if (!target && !op.utteranceId) target = utterances.find(item => String((item.start as Record<string, unknown> | undefined)?.shotId) === op.shotId);
+            if (op.utteranceId && !target) throw new Error(`台词 ${op.utteranceId} 不属于镜头 ${op.shotId}，请刷新后重试`);
+            const text = op.text.trim();
+            if (!text) throw new Error("台词不能为空");
+
+            // 说话人显示名真值：subject.entityRef.id → 各 registry 的 name；找不到就回退 speakerName / subject id。
+            const nameById = new Map<string, string>();
+            for (const [collection, fields] of [
+                ["character_registry", ["name"]],
+                ["scene_registry", ["name", "heading", "title"]],
+                ["asset_plan", ["asset_name", "name", "title"]],
+            ] as const) {
+                for (const item of clipRows(source[collection])) {
+                    const id = String(item.id || item.asset_id || "");
+                    const name = fields.map(field => String(item[field] || "")).find(Boolean) || "";
+                    if (id && name) nameById.set(id, name);
+                }
+            }
+            const subjects = clipRows(source.subject_registry);
+            const displayNameOf = (subject: Record<string, any>) => {
+                const entityId = String((subject.entityRef as Record<string, unknown> | undefined)?.id || "");
+                return nameById.get(entityId) || String(subject.name || subject.speakerName || "") || String(subject.id || "");
+            };
+            const subjectFor = (utterance?: Record<string, any> | null) =>
+                utterance?.speakerSubjectId ? subjects.find(item => String(item.id) === String(utterance.speakerSubjectId)) : undefined;
+            const currentName = target
+                ? (subjectFor(target) ? displayNameOf(subjectFor(target)!) : String(target.speakerName || ""))
+                : "";
+            const typedSpeaker = op.speaker ? op.speaker.trim() : "";
+            const speakerChanged = Boolean(typedSpeaker) && typedSpeaker !== currentName;
+            const matchedSubject = speakerChanged ? subjects.find(item => displayNameOf(item) === typedSpeaker) : undefined;
+            const applySpeaker = (record: Record<string, any>) => {
+                if (!typedSpeaker || !speakerChanged) return;
+                if (matchedSubject) { record.speakerSubjectId = String(matchedSubject.id); delete record.speakerName; }
+                else { record.speakerName = typedSpeaker; delete record.speakerSubjectId; }
+            };
+
+            const textChanged = !target || String(target.text || "") !== text;
+            if (!textChanged && !speakerChanged) return; // 原样重放：不动草稿，也不撤销执行授权
+            if (textChanged && target) {
+                // source 校验要求所有 Shot 声音片段按顺序不重不漏地覆盖完整对白原文
+                // （见 production-contract validateDirectorSource：textStart 连续、最后 textEnd === 文本长度）。
+                // 只改 utterance.text 会让旧窗口失配，因此按原比例重分配所有引用镜头的文字窗口。
+                const order = new Map(shots.map((s, i) => [String(s.id), i]));
+                const allRefs: Array<{ shotId: string; ref: Record<string, any> }> = [];
+                for (const s of shots) {
+                    for (const r of clipRows(s.utterance_refs)) {
+                        if (String(r.utteranceId) === String(target.id)) allRefs.push({ shotId: String(s.id), ref: r });
+                    }
+                }
+                allRefs.sort((a, b) => (order.get(a.shotId) ?? 0) - (order.get(b.shotId) ?? 0)
+                    || Number(a.ref.localStartFrame) - Number(b.ref.localStartFrame));
+                const len = Array.from(text).length;
+                if (len < allRefs.length) throw new Error(`台词只有 ${len} 字，无法分配到 ${allRefs.length} 个引用镜头；请先减少引用镜头或写更长的台词`);
+                if (allRefs.length === 1) {
+                    allRefs[0].ref.textStart = 0;
+                    allRefs[0].ref.textEnd = len;
+                } else if (allRefs.length > 1) {
+                    const oldLens = allRefs.map(item => Math.max(1, Number(item.ref.textEnd) - Number(item.ref.textStart) || 1));
+                    const oldTotal = oldLens.reduce((sum, value) => sum + value, 0);
+                    const newLens = oldLens.map(value => Math.max(1, Math.round(value * len / oldTotal)));
+                    let sum = newLens.reduce((value, total) => value + total, 0);
+                    while (sum !== len) {
+                        const index = newLens.indexOf(Math.max(...newLens));
+                        if (sum > len) { if (newLens[index] <= 1) break; newLens[index]--; sum--; }
+                        else { newLens[index]++; sum++; }
+                    }
+                    let cursor = 0;
+                    for (let i = 0; i < allRefs.length; i++) {
+                        allRefs[i].ref.textStart = cursor;
+                        cursor += newLens[i];
+                        allRefs[i].ref.textEnd = cursor;
+                    }
+                }
+            }
+            if (target) {
+                target.text = text;
+                applySpeaker(target);
+            } else {
+                // 该镜还没有对白：建一条真值 utterance + ref（时间窗取全镜，不伪造半句时间轴）。
+                const utteranceId = op.utteranceId || `UTT:${op.shotId}:${utterances.length + 1}`;
+                if (utterances.some(item => String(item.id) === utteranceId)) throw new Error(`台词 ID 已存在：${utteranceId}`);
+                const duration = Math.max(1, Math.floor(Number(shot.duration_frames) || 24));
+                const created: Record<string, any> = {
+                    id: utteranceId, text, voiceover: false,
+                    start: { shotId: op.shotId, localFrame: 0 },
+                    end: { shotId: op.shotId, localFrame: duration },
+                };
+                if (typedSpeaker && matchedSubject) created.speakerSubjectId = String(matchedSubject.id);
+                else if (typedSpeaker) created.speakerName = typedSpeaker;
+                utterances.push(created);
+                shot.utterance_refs = [...refs, {
+                    utteranceId, role: "speaker", localStartFrame: 0, localEndFrame: duration,
+                    textStart: 0, textEnd: Array.from(text).length,
+                }];
+            }
+            source.utterances = utterances;
+            source.shots = shots;
+            draft.director.sourceHash = directorHash(source);
+            draft.director.executionAuthorized = false;
+            projectDirector(draft);
             return;
         }
         if (op.type === "set_director_scene_environment") {
@@ -6130,9 +6335,95 @@ export class EpisodeProductionService {
         } else if (op.type === "delete_shot") {
             const owningGroups = draft.clipGroups.filter(group => group.shotIds.includes(op.id));
             if (owningGroups.some(group => group.shotIds.length <= 1)) throw new Error("SHOT_LAST_IN_CLIP: 不能单独删除 Clip 的最后一个镜头；请删除整个 Clip");
-            draft.shots = draft.shots.filter((item) => item.id !== op.id);
-            delete draft.keyframes[op.id]; delete draft.keyframeReviews[op.id];
-            draft.clipGroups = draft.clipGroups.map((group) => ({ ...group, shotIds: group.shotIds.filter((id) => id !== op.id) }));
+            if (draft.director) {
+                // Acheng 制作稿以 director.source 为唯一真值；draft.shots/clipGroups 是投影，直接改会在重投影与落库时被重写。
+                const source = draft.director.source;
+                const segments = Array.isArray(source.segments) ? source.segments.map(record) : [];
+                const owningSegments = segments.filter(seg => Array.isArray(seg.shot_ids) && seg.shot_ids.some((sid: unknown) => String(sid) === op.id));
+                if (owningSegments.some(seg => (seg.shot_ids as unknown[]).length <= 1)) throw new Error("SHOT_LAST_IN_CLIP: 不能单独删除 Clip 的最后一个镜头；请删除整个 Clip");
+                const shots = Array.isArray(source.shots) ? source.shots.map(record) : [];
+                if (!shots.some(item => String(item.id) === op.id)) throw new Error(`镜头不存在：${op.id}`);
+                source.shots = shots.filter(item => String(item.id) !== op.id);
+                for (const seg of owningSegments) seg.shot_ids = (seg.shot_ids as unknown[]).filter(sid => String(sid) !== op.id);
+                delete draft.keyframes[op.id]; delete draft.keyframeReviews[op.id];
+                draft.director.sourceHash = directorHash(source);
+                draft.director.executionAuthorized = false;
+                projectDirector(draft);
+            } else {
+                draft.shots = draft.shots.filter((item) => item.id !== op.id);
+                delete draft.keyframes[op.id]; delete draft.keyframeReviews[op.id];
+                draft.clipGroups = draft.clipGroups.map((group) => ({ ...group, shotIds: group.shotIds.filter((id) => id !== op.id) }));
+            }
+        } else if (op.type === "insert_shot") {
+            if (draft.director) {
+                // 复制目标 Shot 作为模板，在 source.shots 中前/后插入：新唯一 ID、沿用 scene_id/timeline、清空关键帧与对白/媒体引用、
+                // 并入同一个 Clip（segment.shot_ids）。sourceHash 更新后由 projectDirector 重建 shots/clipGroups 并让编译产物过期。
+                const source = draft.director.source;
+                const shots = Array.isArray(source.shots) ? source.shots.map(record) : [];
+                const index = shots.findIndex(item => String(item.id) === op.id);
+                if (index < 0) throw new Error(`镜头不存在：${op.id}`);
+                const segments = Array.isArray(source.segments) ? source.segments.map(record) : [];
+                const taken = new Set<string>([...shots.map(item => String(item.id)), ...segments.map(seg => String(seg.id))]);
+                let newId = `${op.id}-copy`;
+                for (let suffix = 2; taken.has(newId); suffix++) newId = `${op.id}-copy-${suffix}`;
+                const inserted = structuredClone(shots[index]) as Record<string, any>;
+                inserted.id = newId;
+                inserted.keyframes = [];
+                inserted.reference_requirements = [];
+                inserted.utterance_refs = [];
+                inserted.audio = {};
+                delete inserted.performance;
+                inserted.outcome_events = [];
+                // story_order 在同一 timeline 内必须唯一：插入位占用目标序号，后续同时间线镜头整体后移一位。
+                const timelineId = String(inserted.timeline_id ?? "");
+                const targetOrder = Number(shots[index].story_order);
+                if (Number.isInteger(targetOrder) && targetOrder >= 0) {
+                    const insertedOrder = op.position === "before" ? targetOrder : targetOrder + 1;
+                    for (const other of shots) {
+                        if (String(other.timeline_id ?? "") !== timelineId) continue;
+                        const order = Number(other.story_order);
+                        if (Number.isInteger(order) && order >= insertedOrder) other.story_order = order + 1;
+                    }
+                    inserted.story_order = insertedOrder;
+                } else {
+                    let max = -1;
+                    for (const other of shots) {
+                        if (String(other.timeline_id ?? "") !== timelineId) continue;
+                        const order = Number(other.story_order);
+                        if (Number.isInteger(order) && order > max) max = order;
+                    }
+                    inserted.story_order = max + 1;
+                }
+                shots.splice(op.position === "before" ? index : index + 1, 0, inserted);
+                source.shots = shots;
+                for (const seg of segments) {
+                    if (!Array.isArray(seg.shot_ids)) continue;
+                    const pos = seg.shot_ids.findIndex((sid: unknown) => String(sid) === op.id);
+                    if (pos < 0) continue;
+                    const ids = seg.shot_ids.map((sid: unknown) => String(sid));
+                    ids.splice(op.position === "before" ? pos : pos + 1, 0, newId);
+                    seg.shot_ids = ids;
+                }
+                draft.director.sourceHash = directorHash(source);
+                draft.director.executionAuthorized = false;
+                projectDirector(draft);
+            } else {
+                // 兼容无 Acheng 制作稿的旧制作稿：直接操作投影镜头与 clipGroups，再用 orderShotsByScene 归位。
+                const target = shot(op.id);
+                const index = draft.shots.findIndex(item => item.id === op.id);
+                const taken = new Set(draft.shots.map(item => item.id));
+                let newId = `${op.id}-copy`;
+                for (let suffix = 2; taken.has(newId); suffix++) newId = `${op.id}-copy-${suffix}`;
+                draft.shots.splice(op.position === "before" ? index : index + 1, 0, { ...target, id: newId });
+                draft.clipGroups = draft.clipGroups.map((group) => {
+                    if (!group.shotIds.includes(op.id)) return group;
+                    const pos = group.shotIds.indexOf(op.id);
+                    const ids = [...group.shotIds];
+                    ids.splice(op.position === "before" ? pos : pos + 1, 0, newId);
+                    return { ...group, shotIds: ids };
+                });
+                draft.shots = orderShotsByScene(draft);
+            }
         } else if (op.type === "reorder_shots") {
             const selected = draft.shots.filter((item) => item.sceneId === op.sceneId);
             const reordered = reorder(selected, op.ids);
@@ -6410,8 +6701,144 @@ export class EpisodeProductionService {
         if (!node) throw new Error(`分集画布中找不到节点：${nodeId}`);
         return node;
     }
+
+    /**
+     * 真预检（对齐影策 planDramaJianyingDraft）的共用计划：只读制作稿 + 画布 H3 段 +
+     * media_files 元数据 + 首字节。revision 是交付内容指纹，供下载端复核。
+     */
+    private jianyingPlan(id: string, input: { draftRoot?: string; captions?: boolean }) {
+        const current = this.get(id);
+        const draft = current.draft;
+        const director = draft.director;
+        const source = director ? record(director.source) : {};
+        const sourceSegments = clipRows(source.segments);
+        const sourceShots = clipRows(source.shots);
+        const shotById = new Map(sourceShots.map(shot => [String(shot.id), shot]));
+        const canvasId = this.ownerKind === "canvas" ? id : this.episodeInfo(id).canvasId;
+        const nodes = canvasId ? ((this.db.getCanvasProject(canvasId)?.nodes || []) as Array<Record<string, any>>) : [];
+
+        const groups = draft.clipGroups || [];
+        const groupById = new Map(groups.map(group => [String(group.id), group]));
+        // 段全集 = 源稿 Segment ∪ Clip 组。影策的「shots 索引 ∪ segments 索引」在本项目里由
+        // Segment.shot_ids 表达镜头归属；不属于任何 Segment 的孤立 Shot 无法定位段，故不列出（见报告残留风险）。
+        const orderedIds: string[] = [];
+        const seen = new Set<string>();
+        for (const seg of [...sourceSegments, ...groups]) {
+            const segId = String(seg?.id || "");
+            if (segId && !seen.has(segId)) { seen.add(segId); orderedIds.push(segId); }
+        }
+        const fpsNumerator = Number(source.fps_num || 0), fpsDenominator = Number(source.fps_den || 1);
+        const fps = fpsNumerator > 0 && fpsDenominator > 0 ? fpsNumerator / fpsDenominator : 24;
+
+        const segments: JianyingPreflightSegmentInput[] = orderedIds.map((segId, position) => {
+            const authored = sourceSegments.find(seg => String(seg.id) === segId);
+            const group = groupById.get(segId);
+            const shotIds = clipRows(authored ? authored.shot_ids : group?.shotIds)
+                .map(shot => String(typeof shot === "string" ? shot : shot?.id || ""))
+                .filter(Boolean);
+            const shots = shotIds.map(shotId => shotById.get(shotId)).filter(Boolean) as Array<Record<string, any>>;
+            // 存镜（group.nodeId/segmentId）优先；缺失时用后端现成的画布关联解析，与前端
+            // productionSegmentRuntimeMatches 走同一套身份判定。多义匹配不猜测，按未就绪处理。
+            let nodeId = String(group?.nodeId || "");
+            let runtimeSegmentId = String(group?.segmentId || "");
+            let ambiguousResult = false;
+            if (!nodeId || !runtimeSegmentId) {
+                const association = this.resolveDirectorSegmentRuntime(id, segId);
+                if (association.status === "resolved") {
+                    nodeId = association.matches[0].nodeId;
+                    runtimeSegmentId = association.matches[0].segmentId;
+                } else if (association.status === "ambiguous") ambiguousResult = true;
+            }
+            const node = nodes.find(item => String(item.id) === nodeId);
+            const runtimeSegments = clipRows(record(node?.metadata).segments);
+            const clip = runtimeSegments.find(seg => String(seg.id) === runtimeSegmentId)
+                || runtimeSegments.find(seg => String(record(seg.productionClipProjection).targetId) === segId);
+            const resultStorageKey = String(clip?.resultStorageKey || "");
+            // 结构化 stale：H3 段与 Clip 组任一标记 inputOutdated 即为旧版本，不用 notice 正则。
+            const stale = clip?.inputOutdated === true || group?.inputOutdated === true;
+            const clipDurationMs = Number(clip?.duration || 0) * 1000;
+            const shotFrames = shotIds.reduce((sum, shotId) => sum + Number(shotById.get(shotId)?.duration_frames || 0), 0);
+            const estimatedDurationMs = clipDurationMs > 0 ? clipDurationMs : shotFrames / fps * 1000;
+            const media = resultStorageKey ? this.db.getMediaFile(resultStorageKey) : null;
+            const title = String(authored?.title || shots.map(shot => shot.title).filter(Boolean).join(" / ") || `第 ${position + 1} 段`);
+            return {
+                id: segId, title, shotIds, estimatedDurationMs, resultStorageKey, stale, ambiguousResult,
+                media: media ? { storageKey: media.storageKey, filePath: media.filePath, mimeType: media.mimeType,
+                    bytes: media.bytes, durationMs: media.durationMs, sha256: media.sha256 } : null,
+                readable: Boolean(media && mediaReadable(media.filePath, media.bytes)),
+            };
+        });
+
+        const preview = planJianyingDraftPreview({
+            episodeId: id,
+            sourceHash: String(director?.sourceHash || ""),
+            productionRevision: current.revision,
+            draftRoot: input.draftRoot,
+            captions: input.captions,
+            segments,
+            source: director ? director.source : undefined,
+        });
+        return { preview, segments, draft, source, director };
+    }
+
+    previewJianyingDraft(id: string, input: { draftRoot?: string; captions?: boolean } = {}): DramaJianyingDraftPreview {
+        return this.jianyingPlan(id, input).preview;
+    }
+
+    /**
+     * 真导出准备（对齐影策 PrepareDramaJianyingDraft）：重跑 plan，用 revision 做 409 防篡改，
+     * 按 allowIncomplete / allowStale 放行，再装配草稿文件 + 字幕计划。不写 ZIP、不写用户本机草稿目录。
+     */
+    prepareJianyingExport(id: string, input: {
+        draftRoot?: string; captions?: boolean; revision?: string;
+        allowIncomplete?: boolean; allowStale?: boolean; width?: number; height?: number;
+        calibration?: SubtitleCalibration | null;
+    }): JianyingExportPlan {
+        const { preview, segments, source, director } = this.jianyingPlan(id, { draftRoot: input.draftRoot, captions: input.captions });
+        // 影策 :201-203：下载时 revision 与现场重算的交付指纹不一致 ⇒ 409，拒绝导出。
+        if (typeof input.revision === "string" && input.revision && input.revision !== preview.revision) {
+            throw new JianyingRevisionConflictError(input.revision, preview.revision);
+        }
+        if (preview.missingSegments > 0 && input.allowIncomplete !== true) {
+            throw new JianyingExportBlockedError(
+                `预检发现 ${preview.missingSegments} 个不可导出段；请确认跳过后重试（allowIncomplete=true）`,
+                "JIANYING_INCOMPLETE_BLOCKED", { missingSegments: preview.missingSegments });
+        }
+        if (preview.staleSegments > 0 && input.allowStale !== true) {
+            throw new JianyingExportBlockedError(
+                `预检发现 ${preview.staleSegments} 个旧版本段；请确认使用后重试（allowStale=true）`,
+                "JIANYING_STALE_BLOCKED", { staleSegments: preview.staleSegments });
+        }
+        // 对齐影策 dramaArchiveMaxBytes：可用媒体总量超 8GB 直接拒绝导出，不静默出大包。
+        if (preview.mediaBytes > JIANYING_ARCHIVE_MAX_BYTES) {
+            throw new JianyingExportBlockedError(
+                `可用媒体总量 ${(preview.mediaBytes / 1024 / 1024 / 1024).toFixed(2)}GB 超过 8GB 上限；影策会直接拒绝，请先分批下载视频`,
+                "JIANYING_ARCHIVE_TOO_LARGE", { mediaBytes: preview.mediaBytes, limit: JIANYING_ARCHIVE_MAX_BYTES });
+        }
+        const title = String((this.db.getDramaEpisode(id) as { title?: string } | null)?.title || `episode-${id}`);
+        return makeJianyingExportPlan({
+            preview, segments, source, sourceHash: String(director?.sourceHash || ""), title,
+            draftRoot: input.draftRoot, captions: input.captions, width: input.width, height: input.height, calibration: input.calibration,
+        });
+    }
 }
 
+/** 段级参考图策略写入创作源稿真值：mode=auto 删除覆写恢复自动派生；manual 合并 order/disabled。 */
+function setSegmentReferenceOverrides(director: DirectorProduction, op: Extract<ProductionOperation, { type: "set_segment_reference_policy" }>) {
+    const source = director.source as Record<string, unknown>;
+    const segments = (Array.isArray(source.segments) ? source.segments : []).map(record);
+    const index = segments.findIndex(segment => String(segment.id || "") === op.segmentId);
+    if (index < 0) throw new Error(`SEGMENT_REFERENCE_TARGET_UNKNOWN: 段 ${op.segmentId} 不存在于当前源稿`);
+    if (op.mode === "auto") {
+        delete segments[index].referenceOverrides;
+    } else {
+        const current = record(segments[index].referenceOverrides);
+        const order = op.order !== undefined ? op.order.map(String) : Array.isArray(current.order) ? current.order.map(String) : [];
+        const disabled = op.disabled !== undefined ? op.disabled.map(String) : Array.isArray(current.disabled) ? current.disabled.map(String) : [];
+        segments[index].referenceOverrides = { mode: "manual", order, disabled };
+    }
+    source.segments = segments;
+}
 function record(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 
 const SOURCE_LIFECYCLE_COLLECTIONS: Record<string, string> = {

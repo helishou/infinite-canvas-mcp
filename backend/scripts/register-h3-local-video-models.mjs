@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildNativeNanFengV15Workflow } from "../src/comfyui/bridge.ts";
+import { buildNativeNanFengV15Workflow } from "../../media-engine/src/comfyui/bridge.ts";
 import { BASE_H3_NODE_METADATA, H3_VIDEO_RATIOS } from "../../canvas-agent/src/plugins/minimax-h3/node-factory.ts";
+import { videoCapabilitiesFromWorkflowPackage } from "../src/canvas/model-video-capability.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const endpoint = process.env.H3_SETUP_BACKEND || "http://127.0.0.1:17370";
@@ -37,6 +38,9 @@ for (const item of definitions) {
     const graph = await buildNativeNanFengV15Workflow({ prompt: "", references: Array.from({ length: count }, (_, i) => `slot-${i + 1}.png`) }, params, async (name) => name, comfy.url, new AbortController().signal);
     const node = graph.nf_v15;
     if (!node || node.class_type !== "NanFengH3MultiReferenceGeneratorV15") throw new Error("H3 默认设置未生成原生 V15 工作流，停止登记");
+    // 真实能力：原生 V15 节点上的「音频N」槽位数（影策 video.references.maxAudios → profile.MaxAudios）。
+    // 本地工作流 config.mediaInputs 不声明这些槽位，所以必须从节点图本身数，不用拍脑袋的常量。
+    const maxAudios = Object.keys(node.inputs || {}).filter((key) => /^音频\d+$/.test(key)).length;
     for (let i = 1; i <= 9; i++) node.inputs[`图片${i}`] = "未选择";
     node.inputs["固定随机种子"] = true;
     node.inputs["随机种子"] = 1;
@@ -51,7 +55,10 @@ for (const item of definitions) {
     graph.nf_output.inputs.filename_prefix = `video/H3_${item.suffix}`;
     const pkg = { format: "infinite-canvas-workflow", version: 1, name, workflow: graph, config: { title: item.name, backend: "comfyui", operation: "video-generation", description: `${item.name}；使用 H3 导演台原生 V15 节点及当前默认参数。${item.mode === "fl2v" ? "图片1=首帧，图片2=尾帧。" : ""}`, fields, mediaInputs: {}, miniCards: {} } };
     await fs.writeFile(path.join(backup, `prepared-${item.suffix}.json`), JSON.stringify(pkg, null, 2));
-    packages.push({ item, name, pkg });
+    // 视频能力真值：从刚生成的真实工作流包派生（画面比例选项 / 图片输入字段 / 出片节点音频绑定），
+    // 没有真实来源的项（如 H3 用连续百万像素、没有分辨率下拉档位）保持缺省，不臆造默认值。
+    const videoCapabilities = videoCapabilitiesFromWorkflowPackage(pkg);
+    packages.push({ item, name, pkg, maxAudios, videoCapabilities });
 }
 const listed = (await api("/api/workflows")).workflows;
 for (const { item, name, pkg } of packages) {
@@ -66,10 +73,10 @@ for (const { item, name, pkg } of packages) {
 const current = (await api("/settings/ai-config")).config;
 const channel = current.channels.find((entry) => entry.id === local.id && entry.kind === "comfyui");
 if (!channel) throw new Error("本地渠道已改变，工作流已保存，未覆盖渠道配置");
-for (const { item, name } of packages) {
+for (const { item, name, maxAudios, videoCapabilities } of packages) {
     const routing = { text: "__unsupported__", single: "__unsupported__", multi: "__unsupported__", [item.scenario]: name };
     if (item.mode === "ref2va") routing.single = name;
-    const model = { name: item.name, capability: "video", workflows: [name], workflowRouting: routing };
+    const model = { name: item.name, capability: "video", workflows: [name], workflowRouting: routing, maxAudios, ...videoCapabilities };
     const index = channel.models.findIndex((entry) => entry.name === item.name);
     if (index < 0) channel.models.push(model);
     else channel.models[index] = { ...channel.models[index], ...model, script: "" };

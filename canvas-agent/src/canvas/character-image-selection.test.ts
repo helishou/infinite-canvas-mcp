@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { characterReferenceUpdates, resolveCharacterImageKeys, syncH3CharacterGroupSource } from "./character-image-selection.js";
+import { characterReferenceUpdates, matchChapterLookIndex, resolveCharacterImageKeys, selectChapterLookIndex, syncH3CharacterGroupSource } from "./character-image-selection.js";
 
 const image = (key: string) => ({ storageKey: key, url: `/media/${key}` });
 const character = (keys = ["image:a", "image:b"], primary = 0) => ({ id: "character", type: "character", metadata: { characterImages: keys.map(image), characterPrimaryIndex: primary } });
@@ -76,4 +76,38 @@ test("H3 added costumes stay off; deleting the only selected costume recovers th
         { storageKey: "image:b", url: "/b.png", name: "新服装" },
     ] })!;
     assert.deepEqual(deleted.outfits.map((outfit) => [outfit.storageKey, outfit.enabled]), [["image:b", true]]);
+});
+
+// 造型章节范围选图：与影策 production.DefaultLook 同口径（含其单测用例）。
+test("chapter look picks the range containing the episode's first chapter; latest start and narrower range win", () => {
+    const looks = [
+        { name: "散修", fromChapter: 1, toChapter: 10 },
+        { name: "外门", fromChapter: 11, toChapter: 20 },
+        { name: "内门", fromChapter: 21, toChapter: 0 },
+        { name: "伪装", fromChapter: 0, toChapter: 0 },
+    ];
+    assert.equal(selectChapterLookIndex(looks, [5, 6], 0), 0);
+    assert.equal(selectChapterLookIndex(looks, [12], 0), 1);
+    assert.equal(selectChapterLookIndex(looks, [30], 0), 2);
+    assert.equal(selectChapterLookIndex(looks, [25, 21], 0), 2, "chapter order must not matter; the smallest chapter decides");
+    assert.equal(selectChapterLookIndex(looks, [], 1), 1, "no chapters -> primaryIndex");
+    assert.equal(selectChapterLookIndex(looks, [0, -3], 3), 3, "non-positive chapters -> primaryIndex");
+    const overlap = [{ name: "宽", fromChapter: 1, toChapter: 50 }, { name: "窄", fromChapter: 1, toChapter: 5 }];
+    assert.equal(selectChapterLookIndex(overlap, [3], 0), 1, "same start -> narrower range");
+});
+
+test("chapter look honours open ends and falls back to primary when nothing matches", () => {
+    const looks = [
+        { name: "前段", fromChapter: 0, toChapter: 10 },
+        { name: "后段", fromChapter: 11, toChapter: 0 },
+        { name: "无章节", fromChapter: 0, toChapter: 0 },
+    ];
+    assert.equal(selectChapterLookIndex(looks, [8], 2), 0, "To=10 limits the upper end");
+    assert.equal(selectChapterLookIndex(looks, [40], 0), 1, "To=0 is open-ended");
+    assert.equal(selectChapterLookIndex(looks, [1, 100], 2), 0, "smallest chapter decides across open ranges");
+    const none = [{ name: "中段", fromChapter: 5, toChapter: 6 }];
+    assert.equal(selectChapterLookIndex(none, [3], 0), 0, "no match -> primaryIndex");
+    assert.equal(selectChapterLookIndex(none, [5], 9), 0, "primaryIndex is clamped to catalog length");
+    assert.equal(matchChapterLookIndex(none, [3]), -1, "no match is reported as -1 so callers keep the compiled image");
+    assert.equal(matchChapterLookIndex(looks, [30]), 1, "open-ended look matches the first chapter");
 });

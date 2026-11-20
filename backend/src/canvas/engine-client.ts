@@ -25,6 +25,18 @@ export type EngineMedia = {
     filename?: string;
 };
 
+/** 引擎任务详情里附带的生成态预览帧（KJ 逐帧桥 / 自定义工作流预览桥共用形状）。 */
+export type EngineTaskLivePreview = {
+    dataUrl: string;
+    mime?: string;
+    step?: number;
+    total?: number;
+    nodeId?: string;
+    source?: "step" | "node";
+    promptId?: string;
+    updatedAt?: number;
+};
+
 export type EngineImageRequest = {
     model: string;
     prompt?: string;
@@ -121,6 +133,35 @@ export class CanvasEngineClient {
         };
     }
 
+    /**
+     * 按本次的参考图张数 + 提示词，取引擎真正会执行的那条工作流的能力。
+     *
+     * `/v1/models/<模型名>` 固定按 0 张图解析模型（详情里明说"与参考图张数无关"），
+     * 全能模型于是返回用户设定的「0 图 → 文生图流」；直接拿它预检带参考图的请求，
+     * 会把本来能跑的单图/多图任务误判成「只有 0 个图片输入槽」。
+     * dry_run 让引擎用和真正生成完全相同的路由逻辑选出工作流（不提交 GPU、不落任务），
+     * 再读那条流的真实槽位；路由失败则退回默认详情，由调用方给出原有可读错误。
+     */
+    async modelInfoForRequest(name: string, options: { prompt?: string; referenceCount: number }): Promise<EngineModelInfo> {
+        const placeholder = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgAAAAAgAB4iG8MwAAAABJRU5ErkJggg==";
+        let resolved = "";
+        try {
+            const preview = await this.request<{ model?: string }>("/v1/images/generations", {
+                method: "POST",
+                body: JSON.stringify({
+                    model: name,
+                    prompt: options.prompt ?? "",
+                    images: Array.from({ length: Math.max(0, options.referenceCount) }, () => placeholder),
+                    dry_run: true,
+                }),
+            });
+            resolved = String(preview.model ?? "").trim();
+        } catch {
+            // 0 图请求撞到纯图生图流等场景会在这里被拒；退回默认详情保留原错误文案。
+        }
+        return this.modelInfo(resolved || name);
+    }
+
     /** 异步视频：提交即返回任务 id，进度用 `waitVideo` 轮询。 */
     async createVideo(request: EngineVideoRequest): Promise<{ taskId: string }> {
         const body = await this.request<{ id?: string }>("/v1/videos", {
@@ -182,6 +223,14 @@ export class CanvasEngineClient {
     /** 失败/取消后按 clientId 接回引擎里仍在执行的同一次 prompt（不重新提交）。 */
     async reclaimTask(taskId: string): Promise<{ status?: string; promptId?: string; error?: string }> {
         return await this.request<{ status?: string; promptId?: string; error?: string }>(`/api/tasks/${encodeURIComponent(taskId)}/reclaim`, { method: "POST" });
+    }
+
+    /**
+     * 任务详情（含生成态预览帧）。预览帧只在引擎内存里、随轮询现取，
+     * 仅供画布节点生成态显示，绝不参与产物回写或归档。
+     */
+    async taskDetail(taskId: string): Promise<{ status?: string; preview?: EngineTaskLivePreview | null }> {
+        return await this.request<{ status?: string; preview?: EngineTaskLivePreview | null }>(`/api/tasks/${encodeURIComponent(taskId)}`);
     }
 
     /** 服务端到服务端转发（画布 `/api/engine/*` 代理用），令牌只在这条链路里出现。 */

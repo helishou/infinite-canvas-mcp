@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
-import type { Router } from "express";
+import express, { type Router } from "express";
 import { ZodError } from "zod";
 
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
+import { JianyingRevisionConflictError, JianyingZipWriter, writeJianyingExport, type SubtitleCalibration } from "../drama/jianying-export.js";
 import { resolveProductionTarget } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
 import { getProductionContract } from "@basketikun/canvas-agent/skills/acheng";
@@ -10,6 +11,8 @@ import { productionWorkspaceSchemas, productionContractQuerySchema, validateProd
 import { ProductionValidationError } from "@basketikun/canvas-agent/drama/production-validation";
 import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion, validateProductionSourceFields } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
+import { withSegmentState, type SegmentStateRuntime } from "../drama/segment-state.js";
+import { findReprocessableVideo, VideoReprocessFailure, type VideoReprocessDeps } from "../drama/video-reprocess.js";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
 import { clipRefreshReceipt } from "../drama/clip-refresh.js";
@@ -28,6 +31,71 @@ function batchReceipt(batch: ReturnType<EpisodeProductionService["getBatch"]>) {
     const snapshot = batch.executionSnapshot;
     return { ...batch, executionSnapshot: { schemaVersion: snapshot.schemaVersion, inputBasis: snapshot.inputBasis, canvasId: snapshot.canvasId,
         canvasRevision: snapshot.canvasRevision, planHash: snapshot.planHash, targets: snapshot.targets.map(({ id, nodeId, segmentId, inputHash, dependencies }) => ({ id, nodeId, segmentId, inputHash, dependencies })), blockedTargets: snapshot.blockedTargets, warnings: snapshot.warnings } };
+}
+
+/**
+ * 段状态的运行态真值：
+ * - 等待原因/上游阶段：只读 drama_pipeline_jobs（前端 pipeline.jobs 同源）与 episode_production_runs。
+ * - custom：画布 Clip 的 productionClipProjection.targetId → promptCustom（用户手动改写提示词的真值）。
+ * - videoReprocessable：复用 findReprocessableVideo 对每段做只读判定（已生成视频但后处理失败）。
+ * 任何读取失败（旧库无表、无画布、无剧集）都退化为不带该真值，绝不编造。
+ * 后者按段逐条查询（N+1，段数即 Clip 数，量级小、只读；与重处理预览端点同一真值源，保持口径一致）。
+ */
+export function readSegmentStateRuntime(service: EpisodeProductionService, episodeId: string): SegmentStateRuntime | undefined {
+    try {
+        const backend = service.storageDatabase();
+        const db = backend?.db;
+        if (!backend || typeof db?.prepare !== "function" || !episodeId) return undefined;
+        const jobs = (db.prepare("SELECT episode_id, stage, status, error FROM drama_pipeline_jobs WHERE episode_id=? ORDER BY priority DESC, created_at ASC")
+            .all(episodeId) as Array<{ episode_id: string; stage: string; status: string; error: string | null }>)
+            .map(row => ({ episodeId: row.episode_id, stage: row.stage, status: row.status, error: row.error }));
+        const runs = (db.prepare("SELECT episode_id, status, error FROM episode_production_runs WHERE episode_id=? ORDER BY version DESC")
+            .all(episodeId) as Array<{ episode_id: string; status: string; error: string | null }>)
+            .map(row => ({ episodeId: row.episode_id, status: row.status, error: row.error }));
+        const runtime: SegmentStateRuntime = { jobs, runs };
+
+        try {
+            const canvasId = String(service.episodeInfo(episodeId)?.canvasId || "");
+            const project = canvasId ? backend.getCanvasProject(canvasId) : undefined;
+            if (!project) return runtime;
+            const segments = Array.isArray(project.nodes)
+                ? project.nodes.flatMap((node: any) => Array.isArray(node?.metadata?.segments) ? node.metadata.segments : [])
+                : [];
+            const customSegments: Record<string, boolean> = {};
+            const reprocessablePairs: Array<{ targetId: string; clipId: string }> = [];
+            for (const segment of segments) {
+                const targetId = String(segment?.productionClipProjection?.targetId || "");
+                if (!targetId) continue;
+                if (typeof segment?.promptCustom === "boolean") customSegments[targetId] = segment.promptCustom;
+                const clipId = String(segment?.id || "");
+                if (clipId) reprocessablePairs.push({ targetId, clipId });
+            }
+            if (Object.keys(customSegments).length) runtime.customSegments = customSegments;
+
+            if (reprocessablePairs.length) {
+                // findReprocessableVideo 只用到 deps.db（stores/events 仅在真正重跑时用到），预览判定是纯只读。
+                const deps = { db: backend } as unknown as VideoReprocessDeps;
+                const reprocessableSegments: Record<string, boolean> = {};
+                for (const { targetId, clipId } of reprocessablePairs) {
+                    try {
+                        const candidate = findReprocessableVideo(deps, episodeId, clipId);
+                        reprocessableSegments[targetId] = !candidate.alreadyReady;
+                    } catch (error) {
+                        if (!(error instanceof VideoReprocessFailure)) continue; // 未知异常静默跳过，不编造。
+                        // 结构性错误（无剧集/无画布/Clip 不存在）视为无真值；业务拒绝（无视频/运行中/已就绪/非后处理失败）=不可重处理。
+                        if (["EPISODE_NOT_FOUND", "EPISODE_CANVAS_MISSING", "CANVAS_MISSING", "SEGMENT_NOT_FOUND"].includes(error.code)) continue;
+                        reprocessableSegments[targetId] = false;
+                    }
+                }
+                if (Object.keys(reprocessableSegments).length) runtime.reprocessableSegments = reprocessableSegments;
+            }
+        } catch {
+            // 画布读取失败 → custom / videoReprocessable 留 undefined，不影响 jobs/runs。
+        }
+        return runtime;
+    } catch {
+        return undefined;
+    }
 }
 
 export function registerDramaProductionRoutes(router: Router, service: EpisodeProductionService, runner?: EpisodeProductionRunner, base = "/drama/episodes/:episodeId/production", events?: BackendEventBus, agents?: Pick<ProductionAgentPool, "run">) {
@@ -274,9 +342,62 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
                 if (activeClipRefreshes.length && selected && typeof selected === "object") (selected as any).clipRefreshes = activeClipRefreshes;
                 if (!(selected as any).unchanged && query.targetIds?.length && !query.sourceSections?.length && !["summary", "clip_workbench", "shot_workbench", "subject_workbench"].includes(query.view) && !query.chunkBytes) { (selected as any).targetStatus = service.targetOccupancy(req.params.episodeId, query.targetIds); (selected as any).canvasInputs = service.canvasEditorialState(req.params.episodeId, query.targetIds); }
             }
-            res.json({ ok: true, production: selected });
+            // 段状态只在返回副本上派生：draft_json 被多处 UPDATE 重写，写入 state 会被 wiping。
+            const runtime = base.startsWith("/drama/episodes") ? readSegmentStateRuntime(service, req.params.episodeId) : undefined;
+            res.json({ ok: true, production: withSegmentState(selected, runtime, req.params.episodeId) });
         } catch (error) { handle(res, error); }
     });
+    // 真预检：对齐影策 POST /dramas/:id/episodes/:episodeId/jianying-draft/preview。
+    // 只读制作稿 + 画布 Clip + media_files + 首字节；不生成 ZIP、不写用户本机路径。
+    router.post<Record<string, string>>(`${base}/jianying/preflight`, (req, res) => {
+        try {
+            const input = z.object({ draftRoot: z.string().max(4096).optional(), captions: z.boolean().optional() })
+                .strict().parse(req.body ?? {});
+            res.json({ ok: true, preview: service.previewJianyingDraft(req.params.episodeId, input) });
+        } catch (error) { handle(res, error); }
+    });
+    // 真导出：对齐影策 POST /dramas/:id/episodes/:episodeId/jianying-draft。
+    // 本机草稿目录走 POST body（表单或 JSON），不走 GET query 以避免访问日志记录本机路径。
+    // 现场重跑预检 + revision 复核（不一致 409）+ allowIncomplete/allowStale 放行后流式写 ZIP。
+    const jianyingBool = z.preprocess(value => typeof value === "string" ? value === "true" || value === "1" : value, z.boolean().optional());
+    router.post<Record<string, string>>(
+        `${base}/jianying/export`,
+        express.urlencoded({ extended: false }),
+        async (req, res) => {
+            try {
+                const input = z.object({
+                    draftRoot: z.string().max(4096).optional(),
+                    captions: jianyingBool,
+                    revision: z.string().max(128).optional(),
+                    allowIncomplete: jianyingBool,
+                    allowStale: jianyingBool,
+                    width: z.coerce.number().int().min(16).max(7680).optional(),
+                    height: z.coerce.number().int().min(16).max(7680).optional(),
+                    calibration: z.any().optional(),
+                }).strict().parse(req.body ?? {});
+                // 准备阶段（含 409 / 放行判定）先完成，失败时还能返回 JSON；之后再设置 ZIP 响应头。
+                const plan = service.prepareJianyingExport(req.params.episodeId, {
+                    ...input,
+                    calibration: (input.calibration as SubtitleCalibration | undefined) ?? null,
+                });
+                res.status(200);
+                res.setHeader("Content-Type", "application/zip");
+                res.setHeader("Content-Disposition", `attachment; filename="jianying-draft.zip"; filename*=UTF-8''${encodeURIComponent(plan.fileName)}`);
+                res.setHeader("Cache-Control", "no-store");
+                const writer = new JianyingZipWriter(chunk => res.write(chunk));
+                res.on("drain", () => writer.resume());
+                await writeJianyingExport(plan, writer);
+                res.end();
+            } catch (error) {
+                if (error instanceof JianyingRevisionConflictError && !res.headersSent) {
+                    return void res.status(409).json({ ok: false, code: error.code, error: error.message,
+                        expected: error.expected, current: error.current });
+                }
+                if (!res.headersSent) return handle(res, error);
+                res.destroy();
+            }
+        },
+    );
     router.get<Record<string, string>>(`${base}/readiness`, (req, res) => {
         try {
             const source = z.enum(["draft", "published"]).default("draft").parse(req.query.source);
@@ -339,6 +460,20 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             if (req.query.fields !== undefined) validateProductionSourceFields(productionReadSchema.parse(query));
             res.json({ ok: true, version: req.query.view ? projectProductionVersion(owner, version, query, value => crypto.createHash("sha256").update(value).digest("hex")) : version });
         } catch (error) { handle(res, error); }
+    });
+    // 版本对比：列表含 snapshot 真派生摘要；对比结果全部由两份 snapshot_json 结构化 diff 得出。
+    router.get<Record<string, string>>(`${base}/version-compare/versions`, (req, res) => {
+        try { res.json({ ok: true, versions: service.versionCompareList(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/version-compare/:v1/:v2`, (req, res) => {
+        try { res.json({ ok: true, comparison: service.versionCompare(req.params.episodeId, Number(req.params.v1), Number(req.params.v2)) }); } catch (error) { handle(res, error); }
+    });
+    // 逐clip成片真值链：当前画布实时段结果（可与版本记录做诚实对比）；版本记录来自 clip_video_versions。
+    router.get<Record<string, string>>(`${base}/clip-videos/current`, (req, res) => {
+        try { res.json({ ok: true, clipVideos: service.currentClipVideos(req.params.episodeId) }); } catch (error) { handle(res, error); }
+    });
+    router.get<Record<string, string>>(`${base}/clip-videos/:version`, (req, res) => {
+        try { res.json({ ok: true, clipVideos: service.clipVideosAtVersion(req.params.episodeId, Number(req.params.version)) }); } catch (error) { handle(res, error); }
     });
     router.get<Record<string, string>>(`${base}/export`, (req, res) => {
         try {

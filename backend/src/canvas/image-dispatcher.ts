@@ -48,6 +48,8 @@ export type CanvasImageGenerationInput = {
   references?: CanvasImageReference[];
   loopInputImages?: CanvasImageReference[];
   size?: string;
+  /** 影策参考图分辨率档位（1k/2k/4k）；无显式 size 时按 1:1 预设换算成像素。 */
+  imageResolution?: "1k" | "2k" | "4k";
   width?: number;
   height?: number;
   quality?: string;
@@ -59,6 +61,20 @@ export type CanvasImageGenerationInput = {
   clientTaskId?: string;
   resultPolicy?: "replace-active" | "append";
 };
+
+/** 影策参考图分辨率档位 → 像素 size（1:1 预设，与 web/src/lib/media-size.ts 同源）。 */
+export const IMAGE_RESOLUTION_PIXELS: Record<"1k" | "2k" | "4k", string> = {
+  "1k": "1024x1024",
+  "2k": "2048x2048",
+  "4k": "2880x2880",
+};
+
+/** 生图最终像素 size：显式 size > width/height > 档位预设；无任一输入时返回 undefined。 */
+export function resolveImageSize(input: Pick<CanvasImageGenerationInput, "size" | "width" | "height" | "imageResolution">): string | undefined {
+  if (/^\d+\s*x\s*\d+$/i.test(String(input.size || "").trim())) return String(input.size).replace(/\s/g, "");
+  if (input.width && input.height) return `${input.width}x${input.height}`;
+  return input.imageResolution ? IMAGE_RESOLUTION_PIXELS[input.imageResolution] : undefined;
+}
 
 type CanvasImageExecutionPlan = {
   executor: CanvasExecutorId;
@@ -535,8 +551,11 @@ export class CanvasImageDispatcher {
       ...(channelId ? { channelId } : {}),
       ...(input.params || {}),
     };
+    // 分辨率档位（影策 1k/2k/4k）→ 像素 size：优先级 显式 size > width/height > 档位。
+    const resolvedSize = resolveImageSize(input);
     const normalized = {
       ...input,
+      ...(resolvedSize ? { size: resolvedSize } : {}),
       model,
       ...(Object.keys(params).length ? { params } : {}),
     };
@@ -806,9 +825,11 @@ export class CanvasImageDispatcher {
   ) {
     const engine = new CanvasEngineClient(target.baseUrl, target.token);
     const workflowName = target.model;
-    const info = await engine.modelInfo(workflowName);
-    const { fieldValues } = imageWorkflowFieldValues(input, info.fields, input.params || {});
     const references = executionImageInputs(input);
+    // 预检要走本次「参考图张数 + 提示词」真实路由到的那条流，而不是 /v1/models 的
+    // 0 图默认详情（全能模型那条是文生图流，0 图槽）——否则带参考图会被误拦。
+    const info = await engine.modelInfoForRequest(workflowName, { prompt: input.prompt, referenceCount: references.length });
+    const { fieldValues } = imageWorkflowFieldValues(input, info.fields, input.params || {});
     const slots = info.imageInput.fieldIds;
     if (references.length > slots.length) {
       throw new Error(`工作流「${workflowName}」只有 ${slots.length} 个图片输入槽，本轮需要 ${references.length} 张（${input.loopInputImages?.length || 0} 张循环图 + ${input.references?.length || 0} 张固定参考图）；请减少参考输入或更换工作流`);

@@ -175,3 +175,74 @@ export function assetSpecReadiness(kind: AssetSpecKind, spec: AssetSpec | null |
         hint: missing.length ? `先把${missing.join("、")}补上，再按「${skill.section}」写提示词` : `按「${skill.section}」写${skill.imageKind}`,
     };
 }
+
+
+/** 参考图方案：对齐影策 AssetScheme（assets.go）。内置方案全部横版 16:9。 */
+export const ASSET_SCHEMES = [
+    { id: "portrait", name: "定妆照", kinds: ["character"], defaultFor: "character",
+      description: "单人正面半身，五官最清晰，适合对话多的短剧。",
+      frameHint: "参考图为角色定妆照，只沿用五官、发型与服装" },
+    { id: "turnaround", name: "三视图设定板", kinds: ["character"], defaultFor: "",
+      description: "正面/侧面/背面全身同图，服装体型一致性最好，适合打戏与全身镜头。",
+      frameHint: "参考图为三视图设定板，只沿用时外貌服装体型，不复制排版" },
+    { id: "fourview", name: "四格资产板", kinds: ["character"], defaultFor: "",
+      description: "面部特写+正侧背无脸四格，脸只出现一次，适合长剧跨集一致性。",
+      frameHint: "参考图为四格资产板，面部以特写为准，服装体型以全身格为准" },
+    { id: "scene", name: "场景空镜", kinds: ["scene"], defaultFor: "scene",
+      description: "横版宽景、无人物空镜，前中后景分层。",
+      frameHint: "参考图为场景空镜，只沿用空间布局与光线" },
+    { id: "prop", name: "道具设定图", kinds: ["prop"], defaultFor: "prop",
+      description: "横版单件道具居中、无人物，材质细节清晰。",
+      frameHint: "参考图为道具设定图，只沿用道具外形材质颜色" },
+] as const;
+export type AssetSchemeId = (typeof ASSET_SCHEMES)[number]["id"];
+
+/** 按资产类型取默认方案（角色=定妆照 / 场景=场景空镜 / 道具=道具设定图）。 */
+export function defaultSchemeFor(kind: AssetSpecKind): AssetSchemeId {
+    const found = ASSET_SCHEMES.find((s) => (s.defaultFor as string) === kind);
+    return (found?.id as AssetSchemeId) || "portrait";
+}
+
+/** 方案是否适用于该资产类型。 */
+export function schemeAppliesTo(scheme: AssetSchemeId, kind: AssetSpecKind): boolean {
+    const found = ASSET_SCHEMES.find((s) => s.id === scheme);
+    return Boolean(found && (found.kinds as readonly string[]).includes(kind));
+}
+
+/**
+ * 按「方案 + 资产名 + 外观描述」拼参考图提示词（影策 buildDramaCastImagePrompt 的本地等价）。
+ * 只依赖 name/appearance，不需要完整 AssetSpec，便于 pipeline 建档后直接出图。
+ * 选中方案会真实改变发送内容（不同版式约束），不是只读装饰。
+ */
+export function buildSchemePrompt(kind: AssetSpecKind, name: string, appearance: string,
+    scheme: AssetSchemeId, options: { artStyle?: string; language?: string } = {}): string {
+    const body = appearance.trim();
+    let core: string;
+    if (kind === "scene") {
+        core = `场景概念设定图：${name}。${body}\n横版宽景构图，无人物、空镜，构图完整，主体空间与出入口清晰，前中后景层次分明；光源方向明确。禁止文字、水印、边框。`;
+    } else if (kind === "prop") {
+        core = `道具设定图：${name}。${body}\n横版构图，单件道具居中完整展示，四周留白，干净背景，柔和棚拍光，外形材质颜色细节清晰；无人物、无手部。禁止文字、水印、边框。`;
+    } else if (scheme === "turnaround") {
+        core = `专业人物三视图设定板：${name}。${body}\n画面严格分成三个等宽竖向区域，从左到右正面全身、右侧面全身、背面全身；同一个人同一服装同一发型同一体型。站立中性姿势，头顶到脚底完整入画不裁切，纯净中性浅色背景。禁止文字、边框、道具说明、额外人物。`;
+    } else if (scheme === "fourview") {
+        core = `角色四格资产参考图：${name}。${body}\n全图共4格等高排列：①面部特写（唯一清晰的脸，五官特征完整锁定）；②正面全身（面部弱化）；③90°侧面全身；④背面全身。全身格头顶到鞋底完整入画；四格服装发型体型配饰完全一致。禁止文字（除音色标签外）、边框、第二张可辨认的脸、额外人物。`;
+    } else {
+        core = `角色定妆照：${name}。${body}\n横版构图，单人居中，正面半身，中性表情，目视镜头；干净浅色纯背景，柔和均匀正面光，五官发型服装细节清晰。禁止文字、水印、道具遮挡面部、额外人物。`;
+    }
+    const schemeInfo = ASSET_SCHEMES.find((s) => s.id === scheme);
+    const withHint = schemeInfo ? `${core}\n【参考图用法】${schemeInfo.frameHint}` : core;
+    // 对齐影策 WithAssetRatio：明确写出横版画幅，保证提示词文字与实际 16:9 像素一致；
+    // 同时去掉画风里可能夹带的"9:16/竖屏"等冲突字样（StripFrameDirectives）。
+    const withRatio = `${withHint}\n最终输出画幅必须为 16:9，横版，宽度大于高度。`;
+    return withArtStyle(withRatio, stripFrameDirectives(options.artStyle), options.language);
+}
+
+/** 去掉画风文本里与横版画幅冲突的指令（对齐影策 StripFrameDirectives）。 */
+export function stripFrameDirectives(style: unknown): string {
+    return String(style ?? "")
+        .replace(/最终输出画幅[^。\n]*[。\n]/g, "")
+        .replace(/画幅(必须)?(为)?\s*(9:16|竖屏|竖版|2:3|3:4)/gi, "")
+        .replace(/(9:16|竖屏|竖版)/gi, "")
+        .replace(/[，,]{2,}/g, "，").replace(/^，|，$/g, "")
+        .trim();
+}

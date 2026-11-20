@@ -7,10 +7,12 @@ import express, {
 import crypto from "node:crypto";
 import { gzip } from "node:zlib";
 import { summarizeCanvasState, validateCanvasStateInput, type StateInput } from "@basketikun/canvas-agent/state-summary";
+import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
 import fs from "node:fs";
 import path from "node:path";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
+import { sharedAssetVersionsForAsset } from "./drama/shared-assets.js";
 import { episodeCanvasRead } from "./drama/episode-read.js";
 import { withDerivedStoryboardTracks } from "./drama/storyboard-track.js";
 
@@ -74,6 +76,7 @@ import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.j
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";
 import { registerSkillMarketRoutes } from "./server/skill-market-routes.js";
+import { resolveTaskLivePreview } from "./canvas/engine-preview.js";
 
 const logger = createLogger("backend");
 
@@ -1069,8 +1072,12 @@ export function startServer(
     const freeCanvasIds: string[] = Array.isArray(req.body?.freeCanvasIds)
       ? [...new Set<string>((req.body.freeCanvasIds as unknown[]).filter((id): id is string => typeof id === "string" && id.length > 0))]
       : [];
+    const deleteAssets = req.body?.deleteAssets === true;
     const deletedCanvasIds: string[] = [...new Set([...db.listDramaCanvasIds(dramaId), ...freeCanvasIds])];
     const dramaFiles = stores.assets.list({ kind: "drama-file", dramaId });
+    // 必须在删剧目之前取快照：drama_projects 行一删，assets.drama_id 就会被外键置空，
+    // 之后再按剧目查资产已经查不到了。
+    const dramaAssets = deleteAssets ? stores.assets.list({ dramaId }) : [];
     let deleted: number;
     try {
       deleted = db.deleteDramaProject(dramaId, freeCanvasIds);
@@ -1082,9 +1089,16 @@ export function startServer(
       stores.assets.delete(asset.id);
       if (storageKey) stores.media.delete(storageKey);
     }
+    // 资产库条目只在用户明确选择时随剧目清掉；默认保留（失去剧目后归属回落「未归属」）。
+    let deletedAssets = 0;
+    for (const asset of dramaAssets) {
+      if (db.deleteAssetRecord(asset.id) <= 0) continue;
+      deletedAssets++;
+      events.publish({ type: "asset.updated", entityId: asset.id, payload: { deleted: 1 } });
+    }
     for (const canvasId of deletedCanvasIds) events.publishCanvasSnapshot({ entityId: canvasId, payload: { deleted: 1 } });
     events.publishCanvasFolder({ entityId: dramaId, payload: { deleted } });
-    res.json({ ok: true, deleted });
+    res.json({ ok: true, deleted, deletedAssets });
   });
   // ── Drama episodes：剧目 → 分集 → 画布 ───────────────────────────────
   app.get("/drama/projects/:dramaId", (req, res) => {
@@ -1100,6 +1114,15 @@ export function startServer(
       } });
     }
     res.json({ ok: true, drama });
+  });
+  // 单资产版本记录（只读真值 drama_asset_versions）：按 asset_id 拉历史版本，含 storage_key/来源/快照。
+  app.get("/drama/projects/:dramaId/asset-versions", (req, res) => {
+    const dramaId = String(req.params.dramaId || "");
+    const assetId = typeof req.query.assetId === "string" ? req.query.assetId.trim() : "";
+    const drama = db.listCanvasFolders(dramaId)[0];
+    if (!drama?.isDrama) return void res.status(404).json({ ok: false, code: "DRAMA_NOT_FOUND", error: "剧目不存在" });
+    if (!assetId) return void res.status(400).json({ ok: false, code: "ASSET_ID_REQUIRED", error: "缺少 assetId" });
+    res.json({ ok: true, assetId, versions: sharedAssetVersionsForAsset(db, dramaId, assetId) });
   });
   app.get("/drama/projects/:dramaId/episodes", (req, res) => {
     const dramaId = String(req.params.dramaId || "");
@@ -1167,6 +1190,8 @@ export function startServer(
       title?: unknown;
       synopsis?: unknown;
       fullPlot?: unknown;
+      sourceFormat?: unknown;
+      sourceText?: unknown;
       canvasId?: unknown;
     };
     const episodeNumber = Number(body.episodeNumber);
@@ -1175,8 +1200,18 @@ export function startServer(
         .status(400)
         .json({ ok: false, error: "episodeNumber 必须是大于等于 1 的整数" });
     const title = String(body.title ?? `第 ${episodeNumber} 集`).trim();
+    if ([...title].length > 60)
+      return void res.status(400).json({ ok: false, error: "集标题不能超过 60 字" });
     const synopsis = String(body.synopsis ?? "");
-    const fullPlot = String(body.fullPlot ?? "");
+    // 影策 AddEpisodeModal 的三种素材类型；未知/空值按 novel 归一（对齐影策 NormalizeSourceFormat）。
+    const requestedFormat = String(body.sourceFormat ?? "").trim();
+    const sourceFormat = ["novel", "script", "storyboard"].includes(requestedFormat) ? requestedFormat : "novel";
+    const sourceText = String(body.sourceText ?? "").replace(/\r\n/g, "\n").trim();
+    const sourceChars = [...sourceText.replace(/\s/g, "")].length;
+    if (sourceChars > EPISODE_SOURCE_CHARS)
+      return void res.status(400).json({ ok: false, error: `本集原文 ${sourceChars} 字，单集不超过 ${EPISODE_SOURCE_CHARS} 字，请拆成多集分别添加` });
+    // 原文是本集素材真值；未显式给剧情正文时用原文初始化 fullPlot，让下游拆解直接用得上。
+    const fullPlot = body.fullPlot === undefined ? sourceText : String(body.fullPlot);
     const canvasId =
       body.canvasId === undefined ||
       body.canvasId === null ||
@@ -1202,6 +1237,9 @@ export function startServer(
           error: `分集编号已存在: ${dramaId}/${episodeNumber}`,
         });
     try {
+      // PlanDone 后不允许手工加集（影策 PlanDone 锁）；新增集号在此被拒，
+      // 既有集的编辑仍走原流程。抛错由下方 catch 统一返回 409。
+      db.assertDramaEpisodeCreationAllowed(dramaId, episodeNumber);
       const episode = db.upsertDramaEpisode({
         id: typeof body.id === "string" ? body.id : undefined,
         dramaId,
@@ -1209,6 +1247,8 @@ export function startServer(
         title,
         synopsis,
         fullPlot,
+        sourceFormat,
+        sourceText,
         canvasId,
       });
       events.publish({
@@ -1238,7 +1278,7 @@ export function startServer(
     if (!episode)
       return void res.status(404).json({ ok: false, error: "分集不存在" });
     if (view === "summary") {
-      const { fullPlot: _fullPlot, ...summary } = episode;
+      const { fullPlot: _fullPlot, sourceText: _sourceText, ...summary } = episode;
       return void res.json({ ok: true, episode: summary });
     }
     if (req.query.plotChunkBytes !== undefined) {
@@ -1280,6 +1320,8 @@ export function startServer(
       title?: unknown;
       synopsis?: unknown;
       fullPlot?: unknown;
+      sourceFormat?: unknown;
+      sourceText?: unknown;
       canvasId?: unknown;
     };
     const patch: {
@@ -1287,6 +1329,8 @@ export function startServer(
       title?: string;
       synopsis?: string;
       fullPlot?: string;
+      sourceFormat?: string;
+      sourceText?: string;
       canvasId?: string | null;
     } = {};
     if (body.episodeNumber !== undefined) {
@@ -1300,6 +1344,17 @@ export function startServer(
     if (body.title !== undefined) patch.title = String(body.title).trim();
     if (body.synopsis !== undefined) patch.synopsis = String(body.synopsis);
     if (body.fullPlot !== undefined) patch.fullPlot = String(body.fullPlot);
+    if (body.sourceFormat !== undefined) {
+      const requested = String(body.sourceFormat).trim();
+      patch.sourceFormat = ["novel", "script", "storyboard"].includes(requested) ? requested : "novel";
+    }
+    if (body.sourceText !== undefined) {
+      const text = String(body.sourceText).replace(/\r\n/g, "\n").trim();
+      const chars = [...text.replace(/\s/g, "")].length;
+      if (chars > EPISODE_SOURCE_CHARS)
+        return void res.status(400).json({ ok: false, error: `本集原文 ${chars} 字，单集不超过 ${EPISODE_SOURCE_CHARS} 字` });
+      patch.sourceText = text;
+    }
     if (body.canvasId !== undefined)
       patch.canvasId =
         body.canvasId === null || body.canvasId === ""
@@ -1333,11 +1388,35 @@ export function startServer(
     }
   });
   app.delete("/drama/episodes/:episodeId", (req, res) => {
-    const deleted = db.deleteDramaEpisode(req.params.episodeId);
+    const episode = db.getDramaEpisode(req.params.episodeId);
+    // 兼容旧行为：不存在的集仍回 deleted=0，不引入新的 404 分支。
+    if (!episode) return void res.json({ ok: true, deleted: 0 });
+    const guard = db.dramaEpisodeDeleteGuard(episode);
+    const compact = (value: unknown) => String(value ?? "").replace(/\s+/g, "");
+    const supplied = req.body?.confirmText ?? req.query?.confirmText;
+    if (guard.required && compact(supplied) !== compact(guard.confirmText)) {
+      return void res.status(409).json({
+        ok: false,
+        code: "EPISODE_CONFIRM_REQUIRED",
+        reason: "episodeConfirmRequired",
+        error: `第 ${episode.episodeNumber} 集${guard.reasons.join("、")}，删除后视频、成片与历史版本无法恢复；请输入“${guard.confirmText}”确认删除`,
+        confirmText: guard.confirmText,
+        episodeId: episode.id,
+        episodeNumber: episode.episodeNumber,
+        details: {
+          confirmText: guard.confirmText,
+          reasons: guard.reasons,
+          stats: guard.stats,
+          episodeId: episode.id,
+          episodeNumber: episode.episodeNumber,
+        },
+      });
+    }
+    const deleted = db.deleteDramaEpisode(episode.id);
     if (deleted)
       events.publish({
         type: "drama-episode.updated",
-        entityId: req.params.episodeId,
+        entityId: episode.id,
         payload: { deleted },
       });
     res.json({ ok: true, deleted });
@@ -1948,9 +2027,20 @@ export function startServer(
       });
     // summary=true：纯展示场景裁掉 params/references/inputCounts 三大列（占响应体约八成，首页网格不读）；
     // prompt/outputs 保留（缩略图与预览需要）。详情弹窗、导出等按 projectId 取列表的路径仍走全量。
-    const responseLogs = req.query.summary === "true"
+    // mediaDuration=true：给每个视频产物 output 补 media_files.duration_ms（成片时长真值）。
+    // 只补 output 自身没有 durationMs 的项，且仅在该选项显式开启时查库，避免影响其它调用方。
+    const enrichMediaDuration = req.query.mediaDuration === "true";
+    const withMediaDuration = (log: GenerationLog): GenerationLog => enrichMediaDuration
+        ? { ...log, outputs: Array.isArray(log.outputs) ? log.outputs.map((output) => {
+            const storageKey = String(output.storageKey || "");
+            if (!storageKey || typeof output.durationMs === "number") return output;
+            const media = storageKey ? db.getMediaFile(storageKey) : null;
+            return typeof media?.durationMs === "number" ? { ...output, durationMs: media.durationMs } : output;
+        }) : log.outputs }
+        : log;
+    const responseLogs = (req.query.summary === "true"
       ? logs.map((log) => ({ ...log, references: [], inputCounts: {}, params: {} }))
-      : logs;
+      : logs).map(withMediaDuration);
     res.json({ ok: true, logs: responseLogs });
   });
   app.post("/generation-logs", (req, res) => {
@@ -2071,15 +2161,15 @@ export function startServer(
       return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
     res.json({ ok: true, task: { id: task.id, status: task.status } });
   });
-  app.get(CANVAS_TASK_ROUTE, (req, res) => {
+  app.get(CANVAS_TASK_ROUTE, async (req, res) => {
     const task = stores.tasks.get(req.params.id);
     if (!task)
       return void res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
     res.json({
       ok: true,
       task,
-      // 自定义工作流的预览桥帧：画布节点生成态按 runtimeTaskId 轮询这里。
-      preview: null,
+      // 生成态预览帧现取自执行引擎（engine_submitted → /api/tasks/:id），只随任务详情下发。
+      preview: await resolveTaskLivePreview(stores, req.params.id),
       events: stores.tasks.events(req.params.id, Number(req.query.after || 0)),
     });
   });

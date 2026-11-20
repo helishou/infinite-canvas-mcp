@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
-import { fetchBackendTasks, type BackendRuntimeTask } from "@/services/backend-api";
+import { fetchBackendGenerationLogs, fetchBackendTasks, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { taskProgress } from "@/lib/canvas/task-progress";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useTaskConfirmationStore } from "@/stores/use-task-confirmation-store";
@@ -120,4 +120,157 @@ export function useRunningTaskCount(projectId: string) {
         }
     }
     return { running, queued, awaiting, active: running + queued, runningProgresses };
+}
+
+// ── 生成计时（画布总计时 / 卡片计时 / 列表行耗时）──────────────────────────
+// 真值：tasks.created_at（跨刷新稳定）作为计时锚；generation_logs.duration_ms/finished_at 终态直接读。
+// 单一 per-project 外部存储 + 15s 轮询 + task.* SSE，多个订阅组件共享一次拉取，按 task.id 独立维护。
+
+type TimingSnapshot = { active: Map<string, BackendRuntimeTask>; logs: BackendGenerationLog[] };
+const EMPTY_TIMING: TimingSnapshot = { active: new Map(), logs: [] };
+const timingStores = new Map<string, ReturnType<typeof createTimingStore>>();
+
+function createTimingStore(projectId: string) {
+    const listeners = new Set<() => void>();
+    let snapshot: TimingSnapshot = EMPTY_TIMING;
+    let refCount = 0;
+    let timer: number | undefined;
+    let removeConnection: (() => void) | undefined;
+    let syncing = false;
+
+    const emit = () => listeners.forEach((listener) => listener());
+
+    const sync = async () => {
+        if (!projectId || syncing || !useBackendStore.getState().connected) return;
+        syncing = true;
+        try {
+            const [running, queued, awaiting, logPage] = await Promise.all([
+                fetchBackendTasks({ projectId, status: "running", limit: 100, offset: 0 }),
+                fetchBackendTasks({ projectId, status: "queued", limit: 100, offset: 0 }),
+                fetchBackendTasks({ projectId, status: "awaiting_confirmation", limit: 100, offset: 0 }),
+                fetchBackendGenerationLogs({ projectId, limit: 200, offset: 0 }),
+            ]);
+            const active = new Map<string, BackendRuntimeTask>();
+            for (const task of running.tasks || []) active.set(task.id, task);
+            for (const task of queued.tasks || []) active.set(task.id, task);
+            for (const task of awaiting.tasks || []) active.set(task.id, task);
+            snapshot = { active, logs: logPage.logs || [] };
+            emit();
+        } catch {
+            // 轮询失败保留上一次快照，避免计时闪烁归零
+        } finally {
+            syncing = false;
+        }
+    };
+
+    const onEvent = (event: Event) => {
+        const detail = (event as CustomEvent).detail as { type?: string; entityId?: string; payload?: BackendRuntimeTask } | undefined;
+        const payload = detail?.payload;
+        if (!detail?.type?.startsWith("task.") || !payload || payload.projectId !== projectId) return;
+        const next = new Map(snapshot.active);
+        if (isActiveStatus(payload.status)) next.set(payload.id, payload);
+        else next.delete(payload.id);
+        snapshot = { ...snapshot, active: next };
+        emit();
+        // 终态（完成/取消/失败）已从 active 移除并停表；补一次日志刷新以拿到 duration_ms 真值。
+        if (!isActiveStatus(payload.status)) {
+            void fetchBackendGenerationLogs({ projectId, limit: 200, offset: 0 })
+                .then((page) => { snapshot = { ...snapshot, logs: page.logs || [] }; emit(); })
+                .catch(() => {});
+        }
+    };
+
+    const start = () => {
+        if (timer !== undefined) return;
+        void sync();
+        timer = window.setInterval(() => void sync(), POLL_INTERVAL_MS);
+        window.addEventListener("backend-event", onEvent);
+        removeConnection = useBackendStore.subscribe((state, previous) => {
+            if (state.connected && !previous.connected) void sync();
+            if (!state.connected && previous.connected) { snapshot = EMPTY_TIMING; emit(); }
+        });
+    };
+    const stop = () => {
+        if (timer !== undefined) window.clearInterval(timer);
+        timer = undefined;
+        window.removeEventListener("backend-event", onEvent);
+        removeConnection?.();
+        removeConnection = undefined;
+        snapshot = EMPTY_TIMING;
+    };
+
+    return {
+        subscribe(listener: () => void) {
+            listeners.add(listener);
+            refCount += 1;
+            if (refCount === 1) start();
+            return () => {
+                listeners.delete(listener);
+                refCount -= 1;
+                if (refCount <= 0) { stop(); timingStores.delete(projectId); }
+            };
+        },
+        getSnapshot: () => snapshot,
+    };
+}
+
+/** 当前项目的活跃任务 + 生成日志快照；多个组件共享同一轮询/SSE，不额外起定时器。 */
+export function useCanvasTaskTiming(projectId: string): TimingSnapshot {
+    let store = timingStores.get(projectId);
+    if (!store) { store = createTimingStore(projectId); timingStores.set(projectId, store); }
+    return useSyncExternalStore(store.subscribe, store.getSnapshot, () => EMPTY_TIMING);
+}
+
+/** 活跃任务中最早的创建时间：总计时从第一个任务创建起算（排队时间计入）。 */
+export function earliestActiveCreatedAt(active: Map<string, BackendRuntimeTask>): string | undefined {
+    let earliest: BackendRuntimeTask | undefined;
+    for (const task of active.values()) {
+        if (!task.createdAt) continue;
+        if (!earliest || Date.parse(task.createdAt) < Date.parse(earliest.createdAt!)) earliest = task;
+    }
+    return earliest?.createdAt;
+}
+
+/** 某节点最早仍在活跃的任务创建时间：本卡计时锚点。 */
+export function nodeActiveCreatedAt(active: Map<string, BackendRuntimeTask>, nodeId: string): string | undefined {
+    let earliest: BackendRuntimeTask | undefined;
+    for (const task of active.values()) {
+        if (task.nodeId !== nodeId || !task.createdAt) continue;
+        if (!earliest || Date.parse(task.createdAt) < Date.parse(earliest.createdAt!)) earliest = task;
+    }
+    return earliest?.createdAt;
+}
+
+/** 某节点最近一条终态生成日志的 durationMs（真值，直接读，不再计算）。 */
+export function nodeLastLogDurationMs(logs: BackendGenerationLog[], nodeId: string): number | undefined {
+    let latest: BackendGenerationLog | undefined;
+    for (const log of logs) {
+        if (log.nodeId !== nodeId || log.status === "running" || log.status === "queued") continue;
+        if (!Number.isFinite(Date.parse(log.finishedAt || log.createdAt))) continue;
+        if (!latest || Date.parse(log.finishedAt || log.createdAt) >= Date.parse(latest.finishedAt || latest.createdAt)) latest = log;
+    }
+    return latest && Number.isFinite(latest.durationMs) ? Math.max(0, latest.durationMs) : undefined;
+}
+
+/** 与生成日志弹窗一致的耗时格式：毫秒取整到秒。 */
+export function formatDurationMs(ms: number): string {
+    return `${Math.round(ms / 1000)}s`;
+}
+
+/**
+ * 秒级跳动计时。以服务端 createdAt 为锚：仅在锚点变化（含刷新后按后端 createdAt 重新锚定）
+ * 时算一次基线并 clamp 到 >=0；其间用本地单调时钟推进，避免无校准端点下的负数/跳变与归零。
+ */
+export function useElapsedSeconds(createdAt: string | undefined, enabled = true): number {
+    const [elapsedMs, setElapsedMs] = useState(0);
+    useEffect(() => {
+        if (!enabled || !createdAt) { setElapsedMs(0); return undefined; }
+        const serverMs = Date.parse(createdAt);
+        const baseMs = Number.isFinite(serverMs) ? Math.max(0, Date.now() - serverMs) : 0;
+        const startedAt = performance.now();
+        setElapsedMs(baseMs);
+        const id = window.setInterval(() => setElapsedMs(baseMs + Math.max(0, performance.now() - startedAt)), 1000);
+        return () => window.clearInterval(id);
+    }, [createdAt, enabled]);
+    return Math.floor(elapsedMs / 1000);
 }

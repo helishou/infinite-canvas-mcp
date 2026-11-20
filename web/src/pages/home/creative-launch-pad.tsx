@@ -26,6 +26,7 @@ import { fetchSettings } from "@/services/settings-api";
 import { getGenerationCount } from "@/lib/canvas/canvas-generation-helpers";
 import { normalizeVideoSizeValue } from "@/lib/video-size";
 import { mediaRatioOptions, parsePixelSize } from "@/lib/media-size";
+import { readFileAsDataUrl, readImageMeta } from "@/lib/image-utils";
 import { cn } from "@/lib/utils";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -72,6 +73,29 @@ function shouldSubmitOnEnter(event: ReactKeyboardEvent<HTMLTextAreaElement>): bo
     if (event.key !== "Enter" || event.shiftKey) return false;
     if (event.nativeEvent.isComposing || event.keyCode === 229) return false;
     return true;
+}
+
+/** 把粘贴/拖入的媒体文件转成参考素材：图片读 dataUrl 供模型参考，视频用 blob URL 只登记。 */
+async function mediaFileToReference(file: File): Promise<ReferenceAsset> {
+    const isVideo = file.type.startsWith("video/");
+    const title = file.name.replace(/\.[^.]+$/, "") || file.name;
+    if (isVideo) {
+        const url = URL.createObjectURL(file);
+        return {
+            id: `paste-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+            title, kind: "video", mediaType: "video", category: "other",
+            coverUrl: url, url, dataUrl: "", mimeType: file.type || "video/*",
+            width: 0, height: 0, bytes: file.size, tags: [], searchText: title.toLowerCase(),
+        };
+    }
+    const dataUrl = await readFileAsDataUrl(file);
+    const meta = await readImageMeta(dataUrl);
+    return {
+        id: `paste-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        title, kind: "image", mediaType: "image", category: "image",
+        coverUrl: dataUrl, url: dataUrl, dataUrl, mimeType: file.type || "image/*",
+        width: meta.width, height: meta.height, bytes: file.size, tags: [], searchText: title.toLowerCase(),
+    };
 }
 
 /**
@@ -381,9 +405,11 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
         <div className="flex flex-wrap gap-2 px-5 pb-3" data-testid="creative-reference-list">
             {references.map(item => (
                 <span key={item.id} data-testid="creative-reference-chip" className="inline-flex max-w-[220px] items-center gap-1.5 rounded-full border border-border bg-card py-1 pl-1 pr-2 text-xs">
-                    {item.coverUrl
-                        ? <img src={item.coverUrl} alt="" className="size-5 rounded-full object-cover" />
-                        : <ImageIcon className="size-4 text-muted-foreground" />}
+                    {item.mediaType === "video" && item.coverUrl
+                        ? <video src={item.coverUrl} muted preload="metadata" playsInline className="size-5 rounded-full object-cover" />
+                        : item.coverUrl
+                            ? <img src={item.coverUrl} alt="" className="size-5 rounded-full object-cover" />
+                            : <ImageIcon className="size-4 text-muted-foreground" />}
                     <span className="truncate" title={item.title}>{item.title}</span>
                     <button type="button" aria-label={`${t("creativePad.referenceRemove")} ${item.title}`} onClick={() => setReferences(current => current.filter(entry => entry.id !== item.id))} className="text-muted-foreground hover:text-foreground">
                         <X className="size-3" />
@@ -402,6 +428,22 @@ export function CreativeLaunchPad({ onGenerated, historyCount = 0, onOpenHistory
             rows={variant === "thread" ? 2 : 3}
             placeholder={t(`creativePad.placeholders.${mode}`)}
             onChange={event => setDraft(event.target.value)}
+            onPaste={event => {
+                const data = event.clipboardData;
+                const files = Array.from(data?.files || []);
+                if (!files.length && data) {
+                    for (const item of Array.from(data.items)) {
+                        const file = item.kind === "file" ? item.getAsFile() : null;
+                        if (file) files.push(file);
+                    }
+                }
+                const media = files.filter(file => /^(image|video)\//.test(file.type));
+                if (!media.length) return;
+                event.preventDefault();
+                void Promise.all(media.map(mediaFileToReference)).then(added => {
+                    setReferences(current => [...current, ...added].slice(0, 5));
+                }).catch(() => message.error(t("creativePad.pasteFailed")));
+            }}
             onKeyDown={event => {
                 if (!shouldSubmitOnEnter(event)) return;
                 event.preventDefault();

@@ -93,6 +93,12 @@ export const canvasGenerationCommandSchema = z
     audioReferences: z.array(z.record(z.string(), z.unknown())).optional(),
     size: z.string().optional(),
     seconds: z.string().optional(),
+    /** 参考图分辨率档位（影策制作设置）：1k/2k/4k。dispatcher 在有 size 时以 size 为准，否则按档位×比例换算像素。 */
+    imageResolution: z.enum(["1k", "2k", "4k"]).optional(),
+    /** 分集规划/剧本提案使用的文本模型（影策制作设置 planModel），流水线透传给 script-proposal。 */
+    planModel: z.string().optional(),
+    /** 样片模式（影策制作设置）：第 1 集为样片，视频阶段需人工 approve 才继续。 */
+    sampleMode: z.boolean().optional(),
     resolution: z.string().optional(),
     /** Canvas video workflow execution route; omitted means inherit the workflow default. */
     runTarget: z.enum(["local", "cloud", "hybrid"]).optional(),

@@ -19,6 +19,19 @@ const sectionKeys: SectionKey[] = ["model", "continuation", "sampling", "lora", 
 const modeLabels = { t2v: "文生视频", i2v: "图生视频", fl2v: "首尾帧", ref2va: "多参考" } as const;
 const NO_STYLE_TEMPLATE_OPTION = "__h3_no_style_template__";
 const H3_LORA_PRESETS_STORAGE_KEY = "h3-lora-presets";
+// 引擎标准参数（width/height/frames）的预设档，尺寸值与客户设置面板一致。
+const H3_STANDARD_SIZES = [
+    { label: "横屏", w: 1280, h: 720 },
+    { label: "竖屏", w: 720, h: 1280 },
+    { label: "方形", w: 1024, h: 1024 },
+    { label: "宽屏", w: 1792, h: 1024 },
+    { label: "长图", w: 1024, h: 1792 },
+];
+const H3_PRESET_SECONDS = [6, 10, 12, 15];
+const h3PresetButton = (key: string, label: string, active: boolean, onClick: () => void) => <button
+    key={key} type="button" aria-pressed={active} onClick={onClick}
+    style={{ border: `1px solid ${active ? "#22d3ee" : "#40505e"}`, borderRadius: 5, background: active ? "#164357" : "#202a33", color: active ? "#d9f7ff" : "#cbd5e1", padding: "7px 13px", fontSize: 13, cursor: "pointer", whiteSpace: "nowrap" }}
+>{label}</button>;
 type H3LoraSlot = { name: string; strength: number; enabled: boolean };
 type H3LoraPreset = { name: string; slots: H3LoraSlot[] };
 
@@ -266,6 +279,73 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
         if (item.type === "dropdown" && item.options?.length) return control(label, <H3Dropdown values={item.options} value={value === undefined || value === null ? undefined : String(value)} onChange={(next) => patchSelectedModelField(item, String(next))} allowClear placeholder={label} searchable />);
         return control(label, <Input value={value === undefined || value === null ? "" : String(value)} placeholder={item.default === undefined ? label : String(item.default)} onChange={(event) => patchSelectedModelField(item, event.target.value)} />);
     };
+    // 引擎标准参数（宽/高/帧）走预设 UI，其余字段平铺为高级参数。
+    const presetIds = selectedVideoModelSchema?.presetFieldIds;
+    const widthField = presetIds?.width ? selectedModelFields.find((item) => item.id === presetIds.width) : undefined;
+    const heightField = presetIds?.height ? selectedModelFields.find((item) => item.id === presetIds.height) : undefined;
+    const secondsField = presetIds?.seconds ? selectedModelFields.find((item) => item.id === presetIds.seconds) : undefined;
+    const hasStandardPresets = Boolean((widthField && heightField) || secondsField);
+    const advancedModelFields = hasStandardPresets
+        ? selectedModelFields.filter((item) => item.id !== widthField?.id && item.id !== heightField?.id && item.id !== secondsField?.id)
+        : selectedModelFields;
+    // 一次写入多个字段，避免连续 patchSelectedModelField 时后者读到旧闭包覆盖前者。
+    const patchPresetFields = (updates: Record<string, unknown>) => {
+        const next = { ...selectedModelValues, ...updates };
+        patch({ selectedVideoModelFieldValues: { ...allSelectedModelValues, [selectedModelSchemaKey]: next } });
+    };
+    const numFieldValue = (item?: CanvasVideoModelField) => {
+        if (!item) return undefined;
+        const value = defaultSelectedModelFieldValue(item);
+        return value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : undefined;
+    };
+    const presetWidth = numFieldValue(widthField);
+    const presetHeight = numFieldValue(heightField);
+    const writePresetSize = (width: number, height: number) => {
+        const updates: Record<string, unknown> = {};
+        if (widthField) updates[widthField.id] = Math.max(1, Math.round(width));
+        if (heightField) updates[heightField.id] = Math.max(1, Math.round(height));
+        if (Object.keys(updates).length) patchPresetFields(updates);
+    };
+    const writePresetQuality = (quality: number) => {
+        const base = presetWidth && presetHeight ? { w: presetWidth, h: presetHeight } : { w: 1280, h: 720 };
+        const scale = quality / Math.min(base.w, base.h);
+        writePresetSize(base.w * scale, base.h * scale);
+    };
+    // 秒数：标准 seconds 经引擎 durationTarget 注入帧；H3 段的权威时长是 segment.duration。
+    // 帧数字段是派生落点（引擎会从 seconds 重算并摘掉它），不写入，避免把秒数误当帧数存进去。
+    const presetSeconds = segment.duration != null && Number(segment.duration) > 0 ? Number(segment.duration) : numFieldValue(secondsField);
+    const writePresetSeconds = (seconds: number) => patch({ duration: seconds });
+    const standardPresetsPanel = hasStandardPresets ? <div className="nfh3-standard-presets" style={{ display: "grid", gap: 10 }}>
+        {(widthField && heightField) ? <>
+            <div className="nfh3-control">
+                <span>清晰度</span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {[720, 480].map((quality) => h3PresetButton(`quality-${quality}`, `${quality}p`, Math.min(presetWidth || 0, presetHeight || 0) === quality, () => writePresetQuality(quality)))}
+                </div>
+            </div>
+            <div className="nfh3-control">
+                <span>尺寸</span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                    {H3_STANDARD_SIZES.map((size) => h3PresetButton(`size-${size.w}x${size.h}`, `${size.label} ${size.w}×${size.h}`, presetWidth === size.w && presetHeight === size.h, () => writePresetSize(size.w, size.h)))}
+                </div>
+            </div>
+            <div className="nfh3-control">
+                <span>精确尺寸</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <InputNumber style={{ width: 110 }} min={1} precision={0} value={presetWidth} placeholder="宽 W" onChange={(value) => writePresetSize(value ?? (presetWidth || 1280), presetHeight || 720)} />
+                    <span style={{ color: "#9eafc1" }}>×</span>
+                    <InputNumber style={{ width: 110 }} min={1} precision={0} value={presetHeight} placeholder="高 H" onChange={(value) => writePresetSize(presetWidth || 1280, value ?? (presetHeight || 720))} />
+                </div>
+            </div>
+        </> : null}
+        {secondsField ? <div className="nfh3-control">
+            <span>秒数</span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                {H3_PRESET_SECONDS.map((seconds) => h3PresetButton(`seconds-${seconds}`, `${seconds}s`, presetSeconds === seconds, () => writePresetSeconds(seconds)))}
+                <InputNumber min={1} max={15} precision={0} value={presetSeconds} placeholder="自定义秒数" aria-label="自定义秒数" onChange={(value) => { if (value != null && Number.isFinite(Number(value))) writePresetSeconds(Number(value)); }} />
+            </div>
+        </div> : null}
+    </div> : null;
     const selectedVideoModelPanel = <section className="nfh3-section nfh3-selected-model-parameters" data-section="selected-model-parameters">
         <div className="nfh3-section-head"><b>{h3Label(locale, "selectedVideoModelParameters")}</b><small>{String(segment.selectedVideoModel || "")}</small></div>
         <div className="nfh3-section-body">
@@ -278,7 +358,8 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, audioRefs =
                 {control("视频续写到下一段（像素/音频引导）", <Switch checked={segment.videoContinuation === true} onChange={(checked) => patch({ videoContinuation: checked, ...(checked ? { tailFrameContinuation: false, motionContextEnabled: false } : {}) })} />, false, "使用上一段成片的像素帧与音频做引导（原无限流原生续段分支），与原流程完全一致的接缝。与尾帧参考、Motion Context 互斥；下一段运行时必须有上一段成片。") }
             </div>
             {!selectedVideoModelLoading && !selectedVideoModelError && selectedVideoModelSchema && !selectedModelFields.length ? <div className="nfh3-hint">{h3Label(locale, "selectedVideoModelNoFields")}</div> : null}
-            {selectedModelFields.length ? <div className="nfh3-control-grid">{selectedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
+            {standardPresetsPanel}
+            {advancedModelFields.length ? <div className="nfh3-control-grid">{advancedModelFields.map((item) => <div key={item.id} className="nfh3-dynamic-model-field">{renderSelectedModelField(item)}</div>)}</div> : null}
         </div>
     </section>;
     const sageChoices = nfChoices("SageAttention", attentionModes);

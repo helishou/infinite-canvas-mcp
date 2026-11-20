@@ -44,7 +44,10 @@ export const directorPatchFields = {
     character: ["name", "appearance", "description", "prompt_description", "identity", "voice_description", "voice"],
     asset_card: ["prompt", "seven_steps", "references", "reference_policy", "target_skill", "source_repository", "recipe", "mode", "transaction", "character_name", "state_label", "view_layout", "generation_status", "actual_settings", "output_file", "heavy_scene", "structure_lock", "style_anchor_purpose"],
     asset: ["asset_name", "name", "title", "kind", "description", "prompt", "depends_on", "role", "version", "reference_role", "canvas_scope", "status"],
-    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features"],
+    // action / imagePrompt / transition 是 ShotEditor 的镜头标注字段：由 patch_director_source(op entity=shot)
+    // 写进 director.source.shots[]，参与 sourceHash 与投影，但不进入出片提示词编译（编译器只读 visual/camera 结构轨）。
+    // transition 的首镜 disabled 是前端 UI 约束，后端只存字段、不做取值校验。
+    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features", "action", "imagePrompt", "transition"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence", "locked", "preLockNoiseSeedMode"],
 } as const;
 
@@ -122,6 +125,13 @@ export const directorSceneWorkSchema = z.object({
 }).strict();
 export type DirectorSharedReviewWork = Omit<z.infer<typeof directorSceneWorkSchema>, "sceneId" | "stage" | "runIds" | "artifactIds" | "cursor" | "generationAuthorized" | "assetReviews"> & { assetIds?: string[] };
 export const directorSharedReviewWorkSchema: z.ZodType<DirectorSharedReviewWork> = directorSceneWorkSchema.omit({ sceneId: true, stage: true, runIds: true, artifactIds: true, cursor: true, generationAuthorized: true, assetReviews: true }).extend({ assetIds: z.array(id).optional() });
+/** 段级参考图覆写真值，落在 director.source.segments[].referenceOverrides。auto 表示未覆写、完全按编译派生。 */
+export const segmentReferenceOverridesSchema = z.object({
+    mode: z.enum(["auto", "manual"]),
+    order: z.array(id).default([]),
+    disabled: z.array(id).default([]),
+}).strict();
+export type SegmentReferenceOverrides = z.infer<typeof segmentReferenceOverridesSchema>;
 export const directorWorkflowSchema = z.object({
     contentDeliveryMode: z.enum(["auto_file_batch", "interactive_segment"]).optional(),
     mediaProductionMode: z.enum(["prompt_only", "per_item", "automatic"]).optional(),
@@ -451,7 +461,16 @@ export function directorSourceV2Diagnostics(source: Record<string, unknown>) {
         else shotById.set(String(shot.id), shot);
         if (!Number.isInteger(shot.duration_frames) || shot.duration_frames <= 0) add([...path, "duration_frames"], "新合同 Shot 必须使用正整数 duration_frames");
         if (Object.hasOwn(shot, "start_frame") || Object.hasOwn(shot, "end_frame")) add(path, "prompt v2 Shot 的全局帧窗由 duration_frames、timeline 与 story_order 派生");
-        for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets", "dialogues"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
+        // dialogues 是允许直接写在 Shot 上的对白副本（Array<{speaker,text}>），供「对白逐字核查」
+        // 读取；它不参与提示词编译（编译仍以 utterance_refs / utterances 为准），所以不再按 v2 禁用字段拒绝。
+        for (const field of ["state_description", "state_in", "state_out", "continuity_cues", "required_assets"]) if (Object.hasOwn(shot, field)) add([...path, field], "prompt v2 Shot 状态、参考与对白必须使用各自的结构化来源");
+        if (Object.hasOwn(shot, "dialogues")) {
+            const rows = shot.dialogues;
+            if (!Array.isArray(rows) || rows.some((row: unknown) => !row || typeof row !== "object" || Array.isArray(row)
+                || typeof (row as Record<string, unknown>).speaker !== "string" || typeof (row as Record<string, unknown>).text !== "string")) {
+                add([...path, "dialogues"], "Shot.dialogues 必须是 Array<{speaker:string,text:string}>");
+            }
+        }
         const timelineId = String(shot.timeline_id || defaultTimelineId);
         let storyOrder = Number.isInteger(shot.story_order) && shot.story_order >= 0
             ? Number(shot.story_order)
@@ -757,6 +776,21 @@ export const dramaSourceSplitSchema = z.object({
 export type DramaSourceSplit = z.infer<typeof dramaSourceSplitSchema>;
 const defaultDramaSourceSplit: DramaSourceSplit = { excluded: [], perEpisode: 1, maxChars: 0 };
 
+/**
+ * 模型自动分集的候选/确认快照：chapters 是 1 起算的章序号（对应拆章结果的 index），
+ * 同一章可以出现在多集（模型把一章拆成两集），解析器保证每章至少被一集覆盖。
+ * episodeNumber 只在确认建集后写入，重复 apply 靠它复用同一集号（幂等）。
+ */
+export const modelEpisodeGroupSchema = z.object({
+    title: z.string(),
+    chapters: z.array(z.number().int().min(1)).min(1),
+    synopsis: z.string(),
+    hook: z.string().default(""),
+    cliffhanger: z.string().default(""),
+    episodeNumber: z.number().int().min(1).optional(),
+}).strict();
+export type ModelEpisodeGroup = z.infer<typeof modelEpisodeGroupSchema>;
+
 export const dramaProductionPlanSchema = z.object({
     backgroundMusicEnabled: productionSettingsSchema.shape.backgroundMusicEnabled,
     parallelScenes: productionSettingsSchema.shape.parallelScenes,
@@ -765,6 +799,13 @@ export const dramaProductionPlanSchema = z.object({
     /** 原剧本：剧目级原文（粘贴或导入的完整剧本/小说正文），供改编与拆集引用。 */
     sourceScript: z.string().default(""),
     sourceSplit: dramaSourceSplitSchema.default(defaultDramaSourceSplit),
+    /**
+     * 分集方式：chapter = 确定性按章分集（本地原有行为，缺省）；auto = 文本模型按剧情分集。
+     * 缺省（老剧目没有该字段）按 chapter 解释，避免把历史项目误标成模型分集。
+     */
+    episodeMode: z.enum(["auto", "chapter"]).optional(),
+    /** 模型自动分集的确认快照（预览不写入；apply 后写入，作为幂等与追溯依据）。 */
+    modelEpisodeGroups: z.array(modelEpisodeGroupSchema).default([]),
     /** 生成节奏：新开稿的导演工作流沿用这里的默认值；只跑文本时不会替用户提交任何生成。 */
     mediaProductionMode: z.enum(["prompt_only", "per_item", "automatic"]).default("per_item"),
     topic: dramaTopicSchema.default(defaultDramaTopic),
@@ -831,6 +872,8 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
             textMode: z.enum(["whole", "segment", "partition"]).optional(), textCuts: z.array(z.number().int().positive()).optional(),
         }).strict().refine(value => Boolean(value.speakerSubjectId) !== Boolean(value.speakerName), "对白说话人须选择已登记 Subject 或填写本镜称呼")).max(32),
     }).strict(),
+    /** 镜头内联编辑器：只改本镜主/指定 utterance 的台词文本与可选说话人，保留时间窗和跨镜引用；走 sourceHash + projectDirector 真值链。 */
+    z.object({ type: z.literal("update_shot_dialogue"), shotId: id, utteranceId: id.optional(), text: z.string().min(1), speaker: z.string().trim().min(1).optional() }).strict(),
     z.object({ type: z.literal("edit_director_shot"), action: z.enum(["insert", "duplicate", "delete", "move", "split", "merge"]), shotId: id.optional(), targetShotId: id.optional(), newShotId: id.optional(), anchorShotId: id.optional(), position: z.enum(["before", "after"]).optional(), splitFrame: z.number().int().positive().optional(), textOffsets: z.record(z.number().int().nonnegative()).optional(), reaction: z.boolean().optional(), shot: z.record(z.unknown()).optional(), shots: z.array(z.record(z.unknown())).min(1).optional(), shotInputs: z.record(z.unknown()).optional(), firstShotPatch: z.record(z.unknown()).optional(), segment: z.record(z.unknown()).optional(), cameraShotId: id.optional() }).strict(),
     z.object({ type: z.literal("repartition_director_clips"), shotIds: z.array(id).min(1), segments: z.array(z.record(z.unknown())).min(1) }).strict(),
     z.object({ type: z.literal("reverse_sync_director_prompt"), segmentId: id, artifactId: id, sourceHash: hash, basePromptHash: hash, prompt: z.string(), canvasRevision: z.number().int().nonnegative() }).strict(),
@@ -849,6 +892,12 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("adopt_director_fields"), targetId: id, nodeId: id, segmentId: id.optional(), canvasRevision: z.number().int().nonnegative(), fields: z.array(id).min(1) }).strict(),
     z.object({ type: z.literal("adopt_director_clip_style"), targetId: id, nodeId: id, segmentId: id, canvasRevision: z.number().int().nonnegative(), styleTemplateId: z.string().nullable() }).strict(),
     z.object({ type: z.literal("set_director_workflow"), patch: directorWorkflowSchema.partial() }).strict(),
+    /**
+     * 段级参考图顺序/启停真值。写入 director.source.segments[].referenceOverrides，
+     * 投影层按该覆写重排并启停 H3 Clip 的 referenceBindings；mode=auto 清除覆写恢复自动派生。
+     * order/disabled 都是 H3 Clip 上稳定的 binding ID（见 segment.referenceBindings[].id）。
+     */
+    z.object({ type: z.literal("set_segment_reference_policy"), segmentId: id, mode: z.enum(["auto", "manual"]).optional(), order: z.array(id).optional(), disabled: z.array(id).optional() }).strict(),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
     z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }).strict(),
@@ -864,6 +913,8 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("reorder_script_blocks"), sceneId: id, ids: z.array(id) }).strict(),
     z.object({ type: z.literal("upsert_shot"), shot: productionShotSchema }).strict(),
     z.object({ type: z.literal("delete_shot"), id }).strict(),
+    /** 复制目标镜头作为模板，在其前/后插入同场次新镜头（新 ID、清空关键帧引用、并入同一 Clip）。 */
+    z.object({ type: z.literal("insert_shot"), id, position: z.enum(["before", "after"]) }).strict(),
     z.object({ type: z.literal("reorder_shots"), sceneId: id, ids: z.array(id) }).strict(),
     z.object({ type: z.literal("set_keyframe"), shotId: id, nodeId: id.nullable() }).strict(),
     z.object({ type: z.literal("set_clip_group"), group: clipGroupSchema }).strict(),

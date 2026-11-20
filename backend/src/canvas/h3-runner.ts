@@ -13,6 +13,9 @@ import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { holdUnknownSubmission, submissionDecision } from "../engine-contract/submission-outcome.js";
+import { capAudioReferences, effectiveAudioLimit, resolveModelMaxAudios } from "./model-audio-capability.js";
+import { assertVideoPromptWithinLimit } from "./model-video-capability.js";
+import { voiceSkipNotesFromRefs, mergeVoiceReferenceNotes, normalizeVoiceOverrides, applyVoiceOverridesToRefs } from "../drama/auto-voice.js";
 import type { Stores } from "../stores/types.js";
 import { writeBackH3Task } from "./h3-task-writeback.js";
 import { createLogger } from "../logger.js";
@@ -500,13 +503,59 @@ export class CanvasH3Runner {
         throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 找不到与上一段当前成片匹配的潜空间续写任务，请从组首运行`);
     }
 
+    /**
+     * skipCompleted=true 且目标段的成片都已存在时，这是一次「全部已完成」的成功空跑：
+     * 返回合法的空计划，让 start() 照常建任务并由 execute() 收口为 succeeded。
+     * 只有目标确实存在（wanted 节点齐全且有段）、没有显式 segmentId 找不到、且没有
+     * blockedPlans 时才成立；其余情况返回 null，交还原路径按原逻辑报错。
+     */
+    private completedSkipRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }>): H3RunPlan | null {
+        if (!input.skipCompleted || blockedPlans.length) return null;
+        const project = this.stores.projects.get(input.projectId);
+        const nodes = Array.isArray(project?.nodes) ? project!.nodes as Array<Record<string, unknown>> : [];
+        const wanted = input.nodeIds?.length ? new Set(input.nodeIds.map(String)) : input.nodeId ? new Set([String(input.nodeId)]) : null;
+        if (wanted?.size) {
+            const matched = nodes.filter((node) => String(node.type || "").includes("minimax") && wanted.has(String(node.id || "")));
+            if (matched.length !== wanted.size) return null;
+            if (matched.some((node) => !(recordOf(node.metadata).segments as unknown[] | undefined)?.length)) return null;
+        }
+        let targets: H3Plan[];
+        try {
+            // 去掉 skipCompleted 重算目标：段已被过滤掉不等于「没有目标」。
+            // 显式 segmentId 找不到等契约错误会在这里按原逻辑抛出，交回调用方继续抛出。
+            targets = this.plansFor({ ...input, skipCompleted: false });
+        } catch {
+            return null;
+        }
+        if (!targets.length) return null;
+        for (const plan of targets) {
+            const node = nodes.find((item) => String(item.id || "") === plan.nodeId);
+            const segments = Array.isArray(recordOf(node?.metadata).segments) ? recordOf(node!.metadata).segments as H3Segment[] : [];
+            const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
+            if (!segment || !segment.result) return null;
+        }
+        const noOpPlan: H3RunPlan = {
+            version: 1,
+            plans: [],
+            referenceDigests: {},
+            project: { nodes: [], referenceCatalog: [] },
+            defaults: recordOf(this.stores.settings.get(H3_DEFAULTS_KEY)),
+            requirements: this.stores.projects.getH3ProductionRequirements?.(input.projectId) || null,
+        };
+        return structuredClone(noOpPlan);
+    }
+
     private buildRunPlan(input: H3RunInput, blockedPlans: Array<{ nodeId: string; segmentId: string; clipNumber: number; reason: string }> = [], inspectedReferenceDigests?: Map<string, string>): H3RunPlan {
         const blockedKeys = new Set(blockedPlans.map((item) => `${item.nodeId}:${item.segmentId}`));
         const allPlans = this.plansFor(input);
         const plans = allPlans.filter((plan) => !blockedKeys.has(`${plan.nodeId}:${plan.segmentId}`));
-        if (!plans.length) throw new Error(blockedPlans.length
-            ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
-            : "没有符合条件的 H3 Clip");
+        if (!plans.length) {
+            const completedNoOp = this.completedSkipRunPlan(input, blockedPlans);
+            if (completedNoOp) return completedNoOp;
+            throw new Error(blockedPlans.length
+                ? `没有可运行的 H3 Clip：${blockedPlans.slice(0, 3).map((item) => `Clip ${item.clipNumber}：${item.reason}`).join("；")}`
+                : "没有符合条件的 H3 Clip");
+        }
         const derivedProject = this.projectWithDerivedStoryboard(input.projectId);
         const before = derivedProject.project!;
         const stalePlan = plans.find(plan => derivedProject.stale.includes(plan.segmentId));
@@ -689,7 +738,10 @@ export class CanvasH3Runner {
             if (!task || !["queued", "running"].includes(task.status)) return;
             if (task.status === "queued") task = this.update(task.id, { status: "running" });
             const plans = this.plansForTask(task);
-            if (!plans.length) throw new Error("没有符合条件的 H3 Clip");
+            // skipCompleted 全部完成时计划为空：这是成功空跑，交给下方终态收口
+            // （task.completed + finishParentNode success），不生成任何 Clip。
+            // 非 skipCompleted 的空计划仍是契约错误，保持原报错。
+            if (!plans.length && input.skipCompleted !== true) throw new Error("没有符合条件的 H3 Clip");
             const effectiveFingerprints = new Map<string, string>();
             const parentEvents = this.stores.tasks.events(task.id);
             const completedByKey = new Map(parentEvents
@@ -852,7 +904,8 @@ export class CanvasH3Runner {
             const finished = this.stores.tasks.get(initial.id)!;
             if (finished.status !== "running" || confirmationOf(finished).pending.length) return;
             const result = recordOf(finished.result);
-            if (specificationMismatches.size) {
+            // 空计划的成功空跑没有本轮 Clip，历史事件里的规格不符不能把它误判成失败。
+            if (specificationMismatches.size && plans.length) {
                 const mismatches = [...specificationMismatches.values()];
                 const mismatchSummary = mismatches.map((item) => `Clip ${Number(item.segmentIndex || 0) + 1} ${String(item.error || '媒体规格不符')}`).join('；');
                 const completedCount = Math.max(0, plans.length - mismatches.length);
@@ -1097,11 +1150,24 @@ export class CanvasH3Runner {
             params.latentCheckpointId = createHash("sha256").update(JSON.stringify([parent.id, plan.nodeId, plan.segmentId])).digest("hex");
         }
         const taskMode = normalizeTaskMode(params.taskMode || params.mode || segment.taskMode || segment.mode);
+        // 影策 profile.MaxAudios 真值链：按本段实际选用的视频模型读 maxAudios，
+        // 节点 selectedVideoModel 已由 extractParams 解析（含制作设置/默认值回落）；
+        // 非 reference_to_video 模式上限 0。整个执行链不再写死 3/0。
+        const aiConfigForAudioLimit = this.stores.settings.get("ai.config");
+        const selectedVideoModelForLimit = String(params.selectedVideoModel || "").trim() || H3_DEFAULT_SELECTED_VIDEO_MODEL;
+        const audioLimit = effectiveAudioLimit(
+            (model) => resolveModelMaxAudios(aiConfigForAudioLimit, model),
+            selectedVideoModelForLimit,
+            taskMode,
+        );
         const { compilation, composite, editableReferences } = compileH3Submission(project, segment, taskMode);
         assertReferenceCompilation(compilation);
         const submittedCompilationReferences = compilation.references;
         const scenePromptBase = segment.directorEngine ? compilation.compiledPrompt : appendScenePalettePrompt(compilation.compiledPrompt, sceneNodesByIds(project as { nodes?: unknown }, compilation.references.map((reference) => String(reference.sourceNodeId || ""))));
         const scenePrompt = scenePromptBase;
+        // 模型 promptMaxChars 真值：登记了上限才按码点硬拦（超限抛 PROMPT_TOO_LONG），
+        // 缺省/非法上限保持原行为。对齐影策 RuneCount 口径，不静默截断（截断会毁台词/时间码）。
+        assertVideoPromptWithinLimit(aiConfigForAudioLimit, selectedVideoModelForLimit, scenePrompt);
         const styleTemplates = defaults.styleTemplates;
         const styleTemplateId = params.styleTemplateId === undefined ? styleTemplateFromPrompt(scenePrompt, taskMode, styleTemplates) : params.styleTemplateId;
         if (styleTemplateId && !isH3StyleTemplateId(styleTemplateId, styleTemplates)) throw new Error(`无效的 H3 视觉风格模板：${styleTemplateId}`);
@@ -1126,18 +1192,62 @@ export class CanvasH3Runner {
         const isI2v = taskMode === "i2v";
         const isFl2v = taskMode === "fl2v";
         const imageRefs = isT2v ? [] : refs.filter((ref) => ref.type === "image");
-        const audioRefs = isT2v || isI2v || isFl2v ? [] : refs.filter((ref) => ref.type === "audio");
+        // 「按对白自动音色」真消费点：auto 只发送编译期从台词派生的 autoVoiceGroupIds，
+        // custom 只发送用户逐组打开的 voiceEnabled 组。无法归组的历史/独立音频引用原样保留。
+        const voiceMode = String((segment as any).audioReferenceMode || "auto");
+        const autoVoiceGroupIds = new Set((Array.isArray((segment as any).autoVoiceGroupIds) ? (segment as any).autoVoiceGroupIds : []).map(String));
+        const characterGroups = recordOf((segment as any).h3CharacterGroups);
+        const customVoiceGroupIds = new Set(Object.values(characterGroups)
+            .map(recordOf)
+            .filter(group => group.voiceEnabled === true)
+            .map(group => String(group.id || "")));
+        const allowedVoiceGroupIds = voiceMode === "custom" ? customVoiceGroupIds : autoVoiceGroupIds;
+        // 段级音色覆写（用户真值）：指定音色的角色即使自动派生未命中（未重编译的历史 Clip /
+        // 本体无声线但手指派了样本）也纳入候选，仍受下方 profile.MaxAudios 上限截断。
+        const voiceOverrides = normalizeVoiceOverrides((segment as any).voiceOverrides);
+        for (const groupId of Object.keys(voiceOverrides)) allowedVoiceGroupIds.add(groupId);
+        let audioRefs = isT2v || isI2v || isFl2v ? [] : refs.filter((ref) => {
+            if (ref.type !== "audio") return false;
+            const groupId = String(ref.groupId || "");
+            return !groupId || allowedVoiceGroupIds.has(groupId);
+        });
+        // 真消费点：有覆写用指定 voiceStorageKey，无覆写沿用编译期本体音色（自动）。
+        audioRefs = applyVoiceOverridesToRefs(audioRefs, voiceOverrides);
+        // 影策 dramaSegmentAudioReferences 的做法：超出 profile.MaxAudios 的参考音频
+        // 写 Note 后跳过，不发送也不抛错。按当前模型上限截断，保留开口顺序在前的引用。
+        let audioLimitNote = "";
+        const capped = capAudioReferences(audioRefs, audioLimit);
+        if (capped.skipped.length) {
+            const skipped = capped.skipped.map(ref => String(ref.label || ref.name || ref.id || "参考音频"));
+            audioRefs = capped.kept;
+            audioLimitNote = `所选视频模型「${selectedVideoModelForLimit}」每段最多 ${audioLimit} 段参考音频，已跳过 ${skipped.length} 条超出上限的音色（${skipped.join("、")}），未随请求发送`;
+            logger.warn(`[h3-runner] ${audioLimitNote}`);
+        }
+        // 影策式段级持久 Note：本次运行实际跳过的音色写进 metadata.segments[].voiceReferenceNotes，
+        // 随段详情可查；生成日志 warnings（上方 audioLimitNote）照旧保留，两者互补而非替代。
+        // runtimeWrite 与结果回写同一通道；合并保留编译期写入的无样本/模式不支持原因，
+        // 只以本次实际超限覆盖旧的 audio_reference_limit，避免"旧数据/派生变化"留下过期 Note。
+        const runtimeVoiceNotes = voiceSkipNotesFromRefs({ skipped: capped.skipped, characterGroups, maxAudios: audioLimit });
+        const previousVoiceNotes = (segment as any).voiceReferenceNotes;
+        const persistedVoiceNotes = mergeVoiceReferenceNotes(previousVoiceNotes, runtimeVoiceNotes);
+        if (JSON.stringify(persistedVoiceNotes) !== JSON.stringify(previousVoiceNotes ?? [])) {
+            this.patchSegment(input.projectId, plan.nodeId, plan.segmentId, { voiceReferenceNotes: persistedVoiceNotes });
+        }
         const videoRefs = isT2v || isI2v || isFl2v ? [] : refs.filter((ref) => ref.type === "video");
         if (params.audioDrive === true) {
             const driverIndex = audioRefs.findIndex((ref) => String(ref.id || ref.bindingId || "") === String(params.audioDriveFile || ""));
-            if (driverIndex < 0) throw new Error("音频驱动文件必须从当前 Clip 的参考音频中选择");
-            params.audioDriveFile = await this.resolveRef(audioRefs[driverIndex]);
+            if (driverIndex < 0) {
+                // 被上限截断的驱动参考同样按 Note 跳过；本来就没选中的才视为错误。
+                if (audioLimitNote) {
+                    params.audioDrive = false;
+                    audioLimitNote += "；音频驱动参考一并跳过";
+                } else throw new Error("音频驱动文件必须从当前 Clip 的参考音频中选择");
+            } else params.audioDriveFile = await this.resolveRef(audioRefs[driverIndex]);
         }
         if (isI2v && imageRefs.length !== 1) throw new Error("I2V 必须且只能使用 1 张图片作为首帧");
         if (isFl2v && imageRefs.length !== 2) throw new Error("FL2V 必须使用 2 张图片作为首尾帧");
         if (imageRefs.length > 9) throw new Error("MiniMax H3 最多支持 9 张参考图片");
         if (videoRefs.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考视频");
-        if (audioRefs.length > 3) throw new Error("MiniMax H3 最多支持 3 段参考音频");
         let compositeImagePath = "";
         if (composite) {
             const originalCompilation = compileReferenceSubmission(project, { ...segment, taskMode });
@@ -1260,6 +1370,10 @@ export class CanvasH3Runner {
         const selectedVideoParams = {
             mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: selectedVideoDuration,
             selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
+            // 剧目级 videoResolution 派生尺寸：size/resolution 非 H3_PARAM_KEYS，随请求下发到
+            // 自选模型工作流（video-dispatcher 的 workflowValues → engine.createVideo），真正影响出片。
+            ...(params.size !== undefined ? { size: String(params.size) } : {}),
+            ...(params.resolution !== undefined ? { resolution: String(params.resolution) } : {}),
         };
         const selectedVideoRunTarget = requestedEngine === "auto" ? "hybrid" : requestedEngine === "runninghub" ? "cloud" : "local";
         Object.assign(params, {
@@ -1295,14 +1409,17 @@ export class CanvasH3Runner {
             actualReferences,
             ...(composite ? { storyboardComposite: { rows: composite.rows, columns: composite.columns, sourceBindingIds: composite.sourceBindingIds, panels: composite.panels } } : {}),
             sourceHash: String(segment.directorSourceHash || ""), authoredPromptHash: stableH3Fingerprint(segment.prompt || ""), compiledPromptHash: stableH3Fingerprint(prompt),
-            warnings: compilation.issues.filter((issue) => issue.severity === "warning"),
+            warnings: [
+                ...compilation.issues.filter((issue) => issue.severity === "warning"),
+                ...(audioLimitNote ? [{ severity: "warning" as const, code: "audio_reference_limit", message: audioLimitNote }] : []),
+            ],
             continuation: { tailFrame: useTailFrame, previousVideo: usePreviousAsReference, motionContext: Boolean(plan.continuation), requestedMode: taskMode, runtimeMode: runtimeTaskMode },
         };
         const generationSettings = this.videoDispatcher!.generationSettings({ model: selectedVideoModel, prompt, seconds: String(selectedVideoDuration), workflowReferenceCount: actualReferences.length, params: selectedVideoParams });
         const loggedParams = { submission, generationSettings };
         const log = this.stores.logs.create({
             projectId: String(parent.input.projectId), nodeId: plan.nodeId, segmentId: plan.segmentId,
-            status: "queued", platform: "selected-video-model", workflow: selectedVideoModel, model: selectedVideoModel, taskMode: String(params.taskMode || segment.taskMode || "r2v"),
+            status: "queued", platform: "selected-video-model", source: "pipeline", workflow: selectedVideoModel, model: selectedVideoModel, taskMode: String(params.taskMode || segment.taskMode || "r2v"),
             prompt, references: actualReferences, inputCounts: { image: images.length, video: referenceVideos.length, audio: audios.length }, startedAt: new Date().toISOString(), durationMs: 0, outputs: [],
             params: loggedParams,
         });

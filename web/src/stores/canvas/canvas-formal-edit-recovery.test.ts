@@ -36,32 +36,30 @@ globalThis.fetch = (async (input: any, init: any) => {
 const { useCanvasStore, hydrateCanvasProjects, flushCanvasSyncNow, applyBackendCanvasDelta } = await import("./use-canvas-store");
 const { useBackendStore } = await import("../use-backend-store");
 
-test("旧 Clip 时长投影被拒绝后，可保留其它编辑重提且不改写 Shot 源稿", async () => {
+test("旧草稿夹带正式字段被 400 拒绝后整条 settle：两个项目各自保留草稿与拒因，不自动重放", async () => {
     try {
         useBackendStore.setState({ connected: true });
         await hydrateCanvasProjects(); await flushCanvasSyncNow();
-        const conflict = useCanvasStore.getState().canvasConflicts[base.id];
-        assert.equal(conflict.reason, "rejected");
-        assert.equal(conflict.canRetryStoryboardDurations, true);
-        assert.equal(useCanvasStore.getState().canvasConflicts.unrelated.canRetryStoryboardDurations, false);
-        await useCanvasStore.getState().keepPendingOpsOnCanvasConflict("unrelated");
-        assert.deepEqual(buckets.get("infinite-canvas-command-outbox")!.get(unrelated.operationId), unrelated);
-        await flushCanvasSyncNow(); assert.equal(submissions.length, 0);
-        await useCanvasStore.getState().keepPendingOpsOnCanvasConflict(base.id);
+        const state = useCanvasStore.getState();
+        // 确定性拒绝不再生成冲突记录，两个项目都不锁画布
+        assert.equal(state.canvasConflicts[base.id], undefined, "400 不生成冲突记录");
+        assert.equal(state.canvasConflicts.unrelated, undefined, "无关项目的 400 同样不生成冲突记录");
         const outbox = buckets.get("infinite-canvas-command-outbox")!;
-        const replacement = [...outbox.values()].find(command => command.projectId === base.id);
-        assert.notEqual(replacement.operationId, original.operationId);
-        assert.deepEqual(replacement.operations, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "clip", patch: { prompt: "Manual prompt" } }]);
-        assert.deepEqual(replacement.supersedes, [original.operationId]);
-        assert.ok(writes.indexOf(`save:${replacement.operationId}`) < writes.indexOf(`remove:${original.operationId}`));
-        await flushCanvasSyncNow();
-        assert.equal(submissions.length, 1); assert.equal(outbox.size, 1);
-        assert.equal(outbox.has(unrelated.operationId), true);
-        assert.equal(submissions[0].operationId, replacement.operationId);
+        // 两条失败草稿都 settle 保留，各自记住真实拒因
+        const settled = outbox.get(original.operationId);
+        assert.ok(settled?.settled, "失败草稿保留且标记 settled");
+        assert.equal(settled.rejected, original.rejected, "真实拒因保留在草稿上");
+        assert.deepEqual(settled.operations, original.operations, "整条命令的操作原样保留");
+        assert.ok(outbox.get(unrelated.operationId)?.settled, "无关项目草稿同样 settle 保留");
+        assert.equal(submissions.length, 0, "确定性拒绝不自动重放");
+        // 远端正式字段未被本地编辑改写
         const clip = remote.nodes[0].metadata.segments[0];
-        assert.equal(clip.prompt, "Manual prompt");
+        assert.equal(clip.prompt, "Compiled prompt");
         assert.deepEqual(clip.storyboardDurations, { shot: 5 });
         assert.equal(clip.result, "historical.mp4");
         assert.equal(clip.productionClipProjection.inputHash, "compiled");
+        await flushCanvasSyncNow();
+        assert.equal(submissions.length, 0, "重复同步也不复活被拒命令");
+        assert.ok(buckets.get("infinite-canvas-command-outbox")!.get(original.operationId)?.settled, "草稿未被删除");
     } finally { useBackendStore.setState({ connected: false }); }
 });

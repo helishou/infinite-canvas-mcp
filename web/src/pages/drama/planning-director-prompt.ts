@@ -11,8 +11,9 @@ const SCOPE_TASK: Record<PlanningLaunchScope, string> = {
  * 「交给导演」的提示词：只给目标和边界，具体怎么读怎么写由 agent 依据
  * instructions/drama-planning.md 的合同决定，网页这边不预设步骤细节。
  */
-export function planningPrompt(scope: PlanningLaunchScope, input: { dramaId: string; name: string; pendingEpisodes?: number[] }) {
+export function planningPrompt(scope: PlanningLaunchScope, input: { dramaId: string; name: string; pendingEpisodes?: number[]; focus?: string }) {
     const head = `【剧目策划】剧目「${input.name}」（dramaId=${input.dramaId}）`;
     const pending = input.pendingEpisodes?.length ? `；还没写剧本的集号：${input.pendingEpisodes.join("、")}` : "";
-    return `${head}${pending}。${SCOPE_TASK[scope]}先调用 drama_set_active_project（dramaId=${input.dramaId}）把当前剧目钉住，或每次调用 drama_* 工具都显式传 dramaId；不传会报 PROJECT_SELECTION_REQUIRED（那不是断线）。之后读 drama_get_planning 拿真值和完成度，写的时候用 drama_update_planning（剧本用 drama_update_episode 写 fullPlot），不要只把内容留在对话里，也不要写占位稿。完成后一句话回执：改了哪一步、写进哪个字段、还剩什么。`;
+    const focus = input.focus?.trim() ? `\n\n【本次要讨论的镜头】${input.focus.trim()}。请针对这个镜头给出具体可执行的处理意见（画面、台词、时长、运镜、连续性），能直接改的就用 drama_* 工具写回制作稿。` : "";
+    return `${head}${pending}。${SCOPE_TASK[scope]}先调用 drama_set_active_project（dramaId=${input.dramaId}）把当前剧目钉住，或每次调用 drama_* 工具都显式传 dramaId；不传会报 PROJECT_SELECTION_REQUIRED（那不是断线）。之后读 drama_get_planning 拿真值和完成度，写的时候用 drama_update_planning（剧本用 drama_update_episode 写 fullPlot），不要只把内容留在对话里，也不要写占位稿。完成后一句话回执：改了哪一步、写进哪个字段、还剩什么。${focus}`;
 }

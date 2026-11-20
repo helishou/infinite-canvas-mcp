@@ -1,9 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { claimableProductionClipNodes, clipInputOperations, formalStoryboardTrack, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding } from "./clip-inputs.js";
+import { claimableProductionClipNodes, clipInputOperations, formalStoryboardTrack, reconcileCharacterGroupOutfitSelection, remapPromptPicturesByBinding, resolveChapterLookMedia } from "./clip-inputs.js";
 import { refsForSegment } from "../../../plugins/canvas/minimax-h3/src/services/h3-data.js";
 
 const OWNER = { kind: "episode" as const, id: "EP" };
+
+// 造型章节范围：段要用的角色图从章节真值派生；无章/无命中时返回空表，调用方保持主图。
+test("chapter look overrides the compiler's character image only when the chapter range matches", () => {
+    const characterNode = { id: "CHAR", type: "character", metadata: { characterPrimaryIndex: 0, characterImages: [
+        { storageKey: "image:base", url: "/base.png", outfit: "本体" },
+        { storageKey: "image:early", url: "/early.png", outfit: "前期", fromChapter: 1, toChapter: 10 },
+        { storageKey: "image:late", url: "/late.png", outfit: "后期", fromChapter: 11, toChapter: 0 },
+    ] } };
+    const ref = (storageKey: string) => ({ label: "<Picture 1> 角色", nodeId: "CHAR", storageKey, mediaType: "image" });
+    const refs = [ref("image:base")];
+    const pick = (chapters: number[]) => resolveChapterLookMedia(refs, [characterNode], chapters).get("CHAR")?.storageKey;
+    assert.equal(pick([5]), "image:early");
+    assert.equal(pick([12, 30]), "image:late");
+    assert.equal(pick([]), undefined, "no chapter list -> keep the compiled primary");
+    assert.equal(pick([40, 5]), "image:early", "smallest chapter decides");
+    assert.equal(resolveChapterLookMedia(refs, [characterNode], [12]).get("CHAR")?.url, "/late.png");
+    // 多张身份图引用不做替换；角色本体只有一套图也不做替换。
+    assert.equal(resolveChapterLookMedia([ref("image:base"), ref("image:extra")], [characterNode], [12]).size, 0);
+    assert.equal(resolveChapterLookMedia(refs, [{ ...characterNode, metadata: { ...characterNode.metadata, characterImages: [characterNode.metadata.characterImages[0]] } }], [12]).size, 0);
+});
+
+test("chapter look respects narrower ranges and never invents media for an unmatched chapter", () => {
+    const node = (images: Array<Record<string, unknown>>) => ({ id: "CHAR", type: "character", metadata: { characterPrimaryIndex: 1, characterImages: images } });
+    const ref = [{ label: "<Picture 1> 角色", nodeId: "CHAR", storageKey: "image:base", mediaType: "image" }];
+    const narrow = resolveChapterLookMedia(ref, [node([
+        { storageKey: "image:base" }, { storageKey: "image:narrow", fromChapter: 1, toChapter: 5 }, { storageKey: "image:wide", fromChapter: 1, toChapter: 50 },
+    ])], [3]).get("CHAR")?.storageKey;
+    assert.equal(narrow, "image:narrow");
+    assert.equal(resolveChapterLookMedia(ref, [node([
+        { storageKey: "image:base" }, { storageKey: "image:far", fromChapter: 20, toChapter: 30 },
+    ])], [5]).size, 0, "unmatched chapter -> no override, primary wins");
+});
 
 test("workbench keyframe edits refresh the existing storyboard slot instead of retaining old media", () => {
     const data = { director: { source: { version: 2, prompt_assembly: { version: 2 }, ledger: { contract_version: 2 },

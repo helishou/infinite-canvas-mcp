@@ -6,13 +6,19 @@ import type { Router } from "express";
 import { z } from "zod";
 import type { DramaPipeline } from "../drama/pipeline.js";
 import type { BackendDatabase } from "../db.js";
-import { bindPipelineAssetImage } from "../drama/pipeline-asset-image.js";
+import { adoptSharedAssetImage, bindPipelineAssetImage, restoreAssetsFromCanvas } from "../drama/pipeline-asset-image.js";
 
 const pipelineOptionsSchema = z.object({
     storyboardModel: z.string().optional(),
     assetExtractModel: z.string().optional(),
     videoPromptModel: z.string().optional(),
-    textThinking: z.object({ storyboard: z.string().optional(), extract: z.string().optional(), prompt: z.string().optional() }).optional(),
+    planModel: z.string().optional(),
+    imageResolution: z.enum(["1k", "2k", "4k"]).optional(),
+    // 剧目级段视频分辨率档位（影策 videoResolution）：短边像素档 + 画幅，联动写进 H3 段真实出片参数。
+    videoResolution: z.enum(["480p", "720p", "1080p", ""]).optional(),
+    videoAspectRatio: z.enum(["16:9", "9:16"]).optional(),
+    sampleMode: z.boolean().optional(),
+    textThinking: z.object({ plan: z.string().optional(), storyboard: z.string().optional(), extract: z.string().optional(), prompt: z.string().optional() }).optional(),
     videoModel: z.string().optional(),
     imageModelsByKind: z.object({ character: z.string().optional(), scene: z.string().optional(), prop: z.string().optional() }).optional(),
     referenceLimit: z.number().int().min(0).max(20).optional(),
@@ -34,6 +40,8 @@ const startSchema = z.object({
     options: pipelineOptionsSchema.optional(),
 }).strict();
 
+const rewritePromptsSchema = z.object({ episodeId: z.string().min(1) }).strict();
+
 const approveSchema = z.object({ episodeId: z.string().min(1) }).strict();
 const releaseSchema = z.object({ target: z.enum(["assets", "episodes", "all"]).default("all") }).strict();
 const bindAssetImageSchema = z.object({
@@ -41,6 +49,15 @@ const bindAssetImageSchema = z.object({
     assetId: z.string().min(1),
     nodeId: z.string().min(1),
     storageKey: z.string().min(1),
+    taskId: z.string().optional(),
+    imageId: z.string().optional(),
+}).strict();
+
+const adoptSharedAssetImageSchema = z.object({
+    projectId: z.string().min(1),
+    nodeId: z.string().min(1),
+    storageKey: z.string().min(1),
+    assetId: z.string().optional(),
     taskId: z.string().optional(),
     imageId: z.string().optional(),
 }).strict();
@@ -72,6 +89,14 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
+    // 强制重写段提示词：忽略画布已有的旧 prompt，逐段用真 LLM 重写并 update_h3_segment 写回。
+    router.post("/drama/pipeline/prompts/rewrite", async (req, res) => {
+        const parsed = rewritePromptsSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
+        try { res.json({ ok: true, ...await pipeline.rewritePrompts(parsed.data.episodeId) }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
     // 闸门放行（影策 /episodes/:eid/approve）
     router.post("/drama/:dramaId/pipeline/approve", (req, res) => {
         const parsed = approveSchema.safeParse(req.body || {});
@@ -90,7 +115,7 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
 
     // 失败重试（影策 /retry-failed）
     router.post("/drama/:dramaId/pipeline/retry-failed", (req, res) => {
-        try { const n = pipeline.retryFailed(String(req.params.dramaId)); res.json({ ok: true, requeued: n }); }
+        try { res.json({ ok: true, ...pipeline.retryFailed(String(req.params.dramaId)) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
@@ -101,6 +126,26 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         const parsed = bindAssetImageSchema.safeParse(req.body || {});
         if (!parsed.success) return void res.status(400).json({ ok: false, error: parsed.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ") });
         try { res.json(bindPipelineAssetImage(db, parsed.data)); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 共享资产条目 adopt：把真实归档图片写到共享画布 canonical 节点并锁定；
+    // 派生同步会把 storageKey/sha256 传播到所有消费分集 director.assets 与 H3 段参考图。
+    router.post("/drama/pipeline/assets/adopt-shared-image", (req, res) => {
+        if (!db) return void res.status(503).json({ ok: false, error: "共享资产采用需要数据库访问，服务尚未就绪" });
+        const parsed = adoptSharedAssetImageSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: parsed.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ") });
+        try { res.json(adoptSharedAssetImage(db, parsed.data)); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 流水线收尾对账：整集跑完后从画布实体节点把参考图重新贴回 draft.assets，
+    // 抵消 compile/apply 从空的 pictureBindings 重建 assets 造成的清空。
+    router.post("/drama/pipeline/assets/restore", (req, res) => {
+        if (!db) return void res.status(503).json({ ok: false, error: "资产参考图对账需要数据库访问，服务尚未就绪" });
+        const episodeId = String((req.body as Record<string, any> | undefined)?.episodeId || "").trim();
+        if (!episodeId) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
+        try { res.json({ ok: true, episodeId, ...restoreAssetsFromCanvas(db, episodeId) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 }

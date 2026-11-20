@@ -21,6 +21,11 @@ export function sharedAssetHistory(db: BackendDatabase, dramaId: string) {
     return (db.db.prepare("SELECT * FROM drama_asset_versions WHERE drama_id=? ORDER BY rowid DESC").all(dramaId) as Record<string, any>[]).map(fromRow);
 }
 
+/** 单个资产的版本历史（只读真值，按 asset_id 过滤，供设定详情版本记录展示）。 */
+export function sharedAssetVersionsForAsset(db: BackendDatabase, dramaId: string, assetId: string) {
+    return (db.db.prepare("SELECT * FROM drama_asset_versions WHERE drama_id=? AND asset_id=? ORDER BY rowid DESC").all(dramaId, assetId) as Record<string, any>[]).map(fromRow);
+}
+
 /** Register a usable media version; review evidence is optional historical metadata. */
 export function registerSharedAssetVersion(db: BackendDatabase, projectId: string, version: number, assetId: string, director: DirectorProduction) {
     const drama = db.db.prepare("SELECT folder_id FROM drama_projects WHERE shared_asset_canvas_id=?").get(projectId) as { folder_id: string } | undefined;

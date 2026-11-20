@@ -53,7 +53,25 @@ async function sha256(blob: Blob) {
     return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n.t("canvas.export.defaultNodesName")) {
+/** 批量导出结果：成功写进 ZIP 的节点数、跳过（媒体缺失/读取失败）的节点数、是否被取消。 */
+export type ExportCanvasNodesResult = {
+    success: number;
+    failed: number;
+    aborted: boolean;
+};
+
+/**
+ * 把选中节点逐个写进一个 ZIP 并触发下载。
+ * - 单个节点失败（storageKey 取不到 blob、data: 解析失败等）只跳过该节点，不影响其余节点。
+ * - 传 options.signal 可在节点之间取消：取消后不再打包、也不触发下载。
+ * - 兼容旧调用：第二个参数仍是文件名字符串；旧调用方忽略返回值即可。
+ */
+export async function exportCanvasNodes(
+    nodes: CanvasNodeData[],
+    fileName = i18n.t("canvas.export.defaultNodesName"),
+    options: { signal?: AbortSignal } = {},
+): Promise<ExportCanvasNodesResult> {
+    const { signal } = options;
     const used = new Set<string>();
     const uniqueName = (base: string, ext: string) => {
         const safe = safeFileName(base) || i18n.t("canvas.export.item");
@@ -62,27 +80,41 @@ export async function exportCanvasNodes(nodes: CanvasNodeData[], fileName = i18n
         used.add(name);
         return name;
     };
+    let success = 0;
+    let failed = 0;
 
     async function* files() {
         for (const node of nodes) {
-            const title = node.title || node.type;
-            const storageKey = node.metadata?.storageKey || "";
-            if (storageKey) {
-                const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
-                if (!blob) throw new Error(`导出失败：媒体 ${storageKey} 缺失`);
-                yield { name: uniqueName(title, fileExtension(blob.type, storageKey)), data: blob };
-            } else if (node.type === CanvasNodeType.Text) {
-                yield { name: uniqueName(title, "txt"), data: node.metadata?.content || node.metadata?.prompt || "" };
-            } else if (node.metadata?.content?.startsWith("data:")) {
-                const blob = await (await fetch(node.metadata.content)).blob();
-                yield { name: uniqueName(title, fileExtension(blob.type, storageKey)), data: blob };
-            } else {
-                yield { name: uniqueName(title, "json"), data: JSON.stringify(node, null, 2) };
+            if (signal?.aborted) return;
+            try {
+                const title = node.title || node.type;
+                const storageKey = node.metadata?.storageKey || "";
+                let file: { name: string; data: BlobPart };
+                if (storageKey) {
+                    const blob = storageKey.startsWith("image:") ? await getImageBlob(storageKey) : await getMediaBlob(storageKey);
+                    if (!blob) throw new Error(`导出失败：媒体 ${storageKey} 缺失`);
+                    file = { name: uniqueName(title, fileExtension(blob.type, storageKey)), data: blob };
+                } else if (node.type === CanvasNodeType.Text) {
+                    file = { name: uniqueName(title, "txt"), data: node.metadata?.content || node.metadata?.prompt || "" };
+                } else if (node.metadata?.content?.startsWith("data:")) {
+                    const blob = await (await fetch(node.metadata.content)).blob();
+                    file = { name: uniqueName(title, fileExtension(blob.type, storageKey)), data: blob };
+                } else {
+                    file = { name: uniqueName(title, "json"), data: JSON.stringify(node, null, 2) };
+                }
+                if (signal?.aborted) return;
+                success += 1;
+                yield file;
+            } catch (error) {
+                console.error(`导出节点失败：${node.title || node.type}`, error);
+                failed += 1;
             }
         }
     }
     const zip = await createZip(files());
-    saveAs(zip, `${safeFileName(fileName)}.zip`);
+    const aborted = Boolean(signal?.aborted);
+    if (!aborted && success > 0) saveAs(zip, `${safeFileName(fileName)}.zip`);
+    return { success, failed, aborted };
 }
 
 function collectStorageKeys(value: unknown) {

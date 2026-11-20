@@ -201,7 +201,7 @@ export type CanvasVideoModelField = {
     id: string; name: string; type: "text" | "number" | "slider" | "boolean" | "dropdown" | "image" | "audio" | "video";
     required?: boolean; default?: unknown; min?: number; max?: number; step?: number; options?: string[]; randomEnabled?: boolean; isPrompt?: boolean;
 };
-export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; error?: string };
+export type CanvasVideoModelSchema = { model: string; kind: "workflow" | "direct" | "unsupported"; workflow?: string; supported: boolean; fields: CanvasVideoModelField[]; defaultValues?: Record<string, unknown>; presetFieldIds?: { width?: string; height?: string; seconds?: string }; error?: string };
 
 // 宿主注入的 AI 生成能力,挂在 ctx.ai 下。任何插件均可调用。
 export type CanvasPluginAi = {

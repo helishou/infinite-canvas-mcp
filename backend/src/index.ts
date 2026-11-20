@@ -19,6 +19,7 @@ import { SubtitleTranscribeBackend } from "./runtime/subtitle-transcribe.js";
 import { registerSubtitleTranscribeRoutes } from "./server/subtitle-transcribe-routes.js";
 import { registerAudioTranscribeRoutes } from "./server/audio-transcribe-routes.js";
 import { registerAgentRuntimeRoutes } from "./server/agent-runtime-routes.js";
+import { FinalComposer } from "./drama/final-composer.js";
 import { createAgentRuntime } from "@basketikun/canvas-agent/runtime/agent-runtime";
 import { HermesAgent, isHermesThread } from "@basketikun/canvas-agent/agent/hermes-agent";
 import { ProductionAgentPool } from "@basketikun/canvas-agent/agent/production";
@@ -29,6 +30,7 @@ import { registerBackendMcpHttpRoutes, startBackendMcpServer } from "./mcp.js";
 import { DirectImageBackend } from "./engine-contract/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
+import { registerDramaRestyleRoutes } from "./server/drama-restyle-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
@@ -52,9 +54,12 @@ import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { PipelineStore } from "./drama/pipeline-store.js";
 import { DramaPipeline } from "./drama/pipeline.js";
 import { resolveOutlineModel } from "./drama/outline-proposal.js";
+import { videoCapabilitiesOf } from "./canvas/model-video-capability.js";
 import { registerDramaPipelineRoutes } from "./server/drama-pipeline-routes.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
-import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes, registerDramaStageRoutes, registerDramaTopicProposalRoute } from "./server/drama-planning-routes.js";
+import { registerDramaVideoReprocessRoutes } from "./server/drama-video-reprocess-routes.js";
+import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes, registerDramaStageRoutes, registerDramaTopicProposalRoute, registerDramaEpisodeGroupingRoutes } from "./server/drama-planning-routes.js";
+import { registerDramaSourceChapterRoutes } from "./server/drama-source-chapter-routes.js";
 import { registerAssetSpecRoutes } from "./server/asset-spec-routes.js";
 import { CanvasRealtimeHub } from "./canvas/realtime-hub.js";
 import {
@@ -261,7 +266,43 @@ async function startBackendHttpServer() {
     },
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
+  registerDramaRestyleRoutes(app, runtime.db, runtime.stores, canvasGeneration);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+
+  // 成片自动重合成（影策 finalStale 真链路）：复用 VideoConcatBackend 这个后端合成引擎。
+  // 触发点选 canvas-h3-run 父任务 task.completed —— 段视频已全部回写、父任务刚转 succeeded，
+  // 比「按段写回」更可靠（不会在批量生成的中间态反复合成），且一次批量只触发一次。
+  const finalComposer = new FinalComposer({
+    db: runtime.db,
+    production: episodeProduction,
+    videoConcat,
+    tasks: runtime.tasks,
+    events: runtime.events,
+  });
+  runtime.events.subscribe((event) => {
+    if (event.type !== "task.completed") return;
+    const task = event.payload as { kind?: string; projectId?: string; input?: Record<string, unknown>; params?: Record<string, unknown> } | undefined;
+    if (!task) return;
+    const kind = String(task.kind || "");
+    if (kind !== "canvas-h3-run" && kind !== "canvas-video") return;
+    const binding = task.params?.canvasBinding as Record<string, unknown> | undefined;
+    const projectId = String(task.projectId || task.input?.projectId || binding?.projectId || "");
+    if (!projectId) return;
+    const episode = runtime.db.getDramaEpisodeByCanvasId(projectId);
+    if (!episode) return;
+    void finalComposer.recomposeIfStale(episode.id).catch((error) =>
+      logger.warn("成片自动重合成失败（不阻断生成）", { episodeId: episode.id, error: error instanceof Error ? error.message : String(error) }),
+    );
+  });
+  // 手动兜底入口：前端「合成成品」或诊断可显式触发（默认只在确实过期时动手，force=true 强制）。
+  app.post("/drama/episodes/:episodeId/final/recompose", async (req, res) => {
+    try {
+      const result = await finalComposer.recomposeIfStale(req.params.episodeId, { force: (req.body as Record<string, unknown> | undefined)?.force === true });
+      res.json({ ok: result.status !== "failed", ...result });
+    } catch (error) {
+      res.status(500).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
   const productionHermes = new HermesAgent(runtime.stores.settings, config.url, config.token);
   // 画布文本任务打通导演 agent：模型选到 hermes 渠道时由它执行（structured 单轮，
   // 输出若是对象取 text/demand 字段，否则原样返回字符串）。
@@ -312,10 +353,14 @@ async function startBackendHttpServer() {
   }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
+  // 视频已生成但结果回写失败：只重跑本地后处理，不重新提交模型、不扣费。
+  registerDramaVideoReprocessRoutes(app, runtime.db, runtime.stores, runtime.events);
   registerDramaTopicProposalRoute(app, runtime.stores);
   registerDramaPlanningRoutes(app, runtime.db, runtime.stores);
+  registerDramaEpisodeGroupingRoutes(app, runtime.db, runtime.stores, runtime.events);
   registerDramaScriptRoutes(app, runtime.db, runtime.stores);
   registerDramaPlanningStateRoutes(app, runtime.db);
+  registerDramaSourceChapterRoutes(app, runtime.db);
   registerDramaStageRoutes(app, runtime.db);
   registerAssetSpecRoutes(app, runtime.db);
   // 全自动流水线：独立 store + 编排器，HTTP 自调用复用现成生成/编译/op 能力。
@@ -325,6 +370,8 @@ async function startBackendHttpServer() {
     resolveTextModel: () => resolveOutlineModel(runtime.stores.settings.get("ai.config")),
     // 资产参考图默认模型：设置页 ai.config.imageModel（制作设置 imageModelsByKind 可逐类型覆盖）。
     resolveImageModel: () => String((runtime.stores.settings.get("ai.config") as Record<string, unknown> | undefined)?.imageModel || "").trim(),
+    // C5：段提示词字数上限真值取已登记视频模型的 promptMaxChars；无登记返回 undefined=不限制。
+    resolveVideoPromptMaxChars: (modelValue: string) => videoCapabilitiesOf(runtime.stores.settings.get("ai.config"), modelValue).promptMaxChars,
   });
   registerDramaPipelineRoutes(app, dramaPipeline, runtime.db);
   dramaPipeline.startLoop();

@@ -17,6 +17,7 @@ import { directorArtifact, validateDirectorMedia } from "./director.js";
 import { EpisodeProductionService, type ProductionRecord, type ProductionRun } from "./production.js";
 import { verifyImageInput } from "./image-inputs.js";
 import { productionClipProjection, clipInputHash, CLIP_PROJECTION_FIELDS, type ReferenceSync } from "./clip-inputs.js";
+import { aiConfigMaxAudiosResolver } from "../canvas/model-audio-capability.js";
 import { productionSceneIdsForShots, productionSceneLayout } from "./production-layout.js";
 import { entityNodeOperations, entitySubjectPictureBinding } from "./entity-nodes.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
@@ -280,7 +281,7 @@ export class EpisodeProductionRunner {
                 let projected = activeClip
                     ? { result: { targetId: group.id, status: "blocked" as const, referenceCount: Array.isArray(existing.referenceBindings) ? existing.referenceBindings.length : 0,
                         diagnostics: [{ code: "TARGET_OCCUPIED", message: `Clip ${group.id} 有在途任务，任务结束前保留当前输入` }] } }
-                    : productionClipProjection(project, current.draft, group, segmentId, existing);
+                    : productionClipProjection(project, current.draft, group, segmentId, existing, false, undefined, aiConfigMaxAudiosResolver(this.stores.settings.get("ai.config")));
                 if (projected.segment) {
                     try { this.service.validateClipMedia(id, current.draft.director!, group.id); }
                     catch (error) { projected = { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [{ code: "REFERENCE_NOT_APPROVED", message: String(error) }] } }; }
@@ -468,7 +469,7 @@ export class EpisodeProductionRunner {
             const nodeId = group.nodeId || layoutMember.nodeId;
             const scene = layoutUnit.sceneId ? productionSceneEntries(d.source).find(item => item.id === layoutUnit.sceneId) : undefined;
             const existingClip = (object(nodes.find(item => item.id === nodeId)?.metadata).segments as Record<string, any>[] || []).find(item => item.id === segmentId);
-            const projected = productionClipProjection(project, { ...published, settings: runSettings ? { ...published.settings, ...runSettings } : published.settings }, group, segmentId, existingClip);
+            const projected = productionClipProjection(project, { ...published, settings: runSettings ? { ...published.settings, ...runSettings } : published.settings }, group, segmentId, existingClip, false, undefined, aiConfigMaxAudiosResolver(this.stores.settings.get("ai.config")));
             if (!projected.segment) throw new Error(projected.result.diagnostics.map(item => item.message).join("；"));
             const segment = projected.segment;
             const prompt = String(segment.prompt), bindings = segment.referenceBindings;

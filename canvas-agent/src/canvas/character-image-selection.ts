@@ -35,6 +35,65 @@ export function characterImageKey(image: Image, index: number): string {
     return String(image.storageKey || image.url || image.name || `image-${index}`);
 }
 
+function positiveChapter(value: unknown): number {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+}
+
+function clampLookIndex(index: number, length: number): number {
+    const number = Number(index);
+    if (!Number.isFinite(number)) return 0;
+    return Math.min(Math.max(Math.trunc(number), 0), Math.max(length - 1, 0));
+}
+
+/**
+ * 命中章节范围的最优造型下标；没有任何命中返回 -1（调用方应保持编译产物原样）。
+ */
+export function matchChapterLookIndex<T extends { fromChapter?: unknown; toChapter?: unknown }>(
+    images: readonly T[],
+    chapters: readonly number[],
+): number {
+    let first = 0;
+    for (const chapter of chapters) {
+        const number = positiveChapter(chapter);
+        if (number && (first === 0 || number < first)) first = number;
+    }
+    if (!first || !images.length) return -1;
+    let best = -1;
+    let bestFrom = 0;
+    let bestSpan = Number.MAX_SAFE_INTEGER;
+    for (let index = 0; index < images.length; index += 1) {
+        const image = images[index]!;
+        const from = positiveChapter(image.fromChapter);
+        const to = positiveChapter(image.toChapter);
+        if (!from && !to) continue;
+        if (from > first || (to && first > to)) continue;
+        // Open-ended ranges count as infinite for the "narrower range wins" tie-break.
+        const span = to ? to - Math.max(from, 1) : Number.MAX_SAFE_INTEGER;
+        if (best < 0 || from > bestFrom || (from === bestFrom && span < bestSpan)) {
+            best = index;
+            bestFrom = from;
+            bestSpan = span;
+        }
+    }
+    return best;
+}
+
+/**
+ * 影策 production.DefaultLook 的等价实现：按本剧集覆盖的原著章节序号（1 起）为角色挑默认造型。
+ * 造型的 fromChapter/toChapter 来自 characterImages[]：0/缺失表示该端不限，两端都不限的造型
+ * 不参与按章匹配。命中多套时取起点最晚（最近一次换装），起点相同取范围最窄；没有命中
+ * （也没有章序号）时回退 primaryIndex。本函数纯读，不写画布、不发请求。
+ */
+export function selectChapterLookIndex<T extends { fromChapter?: unknown; toChapter?: unknown }>(
+    images: readonly T[],
+    chapters: readonly number[],
+    primaryIndex: number,
+): number {
+    const matched = matchChapterLookIndex(images, chapters);
+    return matched >= 0 ? matched : clampLookIndex(primaryIndex, images.length);
+}
+
 function primaryKey(metadata: Record<string, unknown>): string {
     const images = imagesOf(metadata);
     const value = Number(metadata.characterPrimaryIndex || 0);

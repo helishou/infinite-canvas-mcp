@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { applyDirectorSourcePatch, productionOperationContract, ref2vaPromptDiagnostics, SHOT_FRAME_VALUES, readShotFraming } from "./production-validation.js";
 import { productionEntities } from "./production-entities.js";
-import { diagnosticBlocksAction, dramaProductionPlanSchema, productionCompileSchema, productionCompileSubmissionSchema, productionEditSchema, productionSettingsSchema, resolveSubjectPictureBindingIds, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
+import { diagnosticBlocksAction, directorPatchFields, dramaProductionPlanSchema, productionCompileSchema, productionCompileSubmissionSchema, productionEditSchema, productionSettingsSchema, resolveSubjectPictureBindingIds, type DirectorProduction, type ProductionDiagnostic } from "./production-contract.js";
 import { toolInputSchemas } from "../canvas/schemas.js";
 
 test("all published operation examples use the actual edit contract", () => {
@@ -71,6 +71,38 @@ test("shot camera and performance patches preserve nested fields that were not s
     assert.deepEqual(shot.performance.tracks.shenyan, { start: 0, end: 24, cue: "起跑", visibility: "visible" });
     assert.deepEqual(shot.performance.tracks.hongxiao, { start: 0, end: 24, cue: "倒地", visibility: "visible" });
     assert.notEqual(director.sourceHash, priorHash, "source hash is refreshed from the patched source");
+});
+
+test("ShotEditor 标注字段 action/imagePrompt/transition 可经 patch_director_source 写入 Shot 真值", () => {
+    for (const field of ["action", "imagePrompt", "transition"] as const) {
+        assert.equal((directorPatchFields.shot as readonly string[]).includes(field), true, `${field} 必须在 shot patch 白名单`);
+    }
+    const edit = (patch: Record<string, unknown>) => productionEditSchema.safeParse({
+        operationId: "shot-editor-fields", expectedRevision: 0,
+        ops: [{ type: "patch_director_source", entity: "shot", id: "SHOT1", patch }],
+    });
+    assert.equal(edit({ action: "甲推门进入", imagePrompt: "清晨门口的近景", transition: "fade" }).success, true);
+    assert.equal(edit({ inventedShotField: "x" }).success, false, "未登记字段仍被拒绝");
+
+    const director = productionOperationContract("set_director_production").operations[0].example.director as DirectorProduction;
+    director.source.shots = [{ id: "SHOT1", duration_frames: 96, visual: "甲站在门口", camera: { framing: "MS" } }];
+    const priorHash = director.sourceHash;
+    applyDirectorSourcePatch(director, "shot", "SHOT1", { action: "甲推门进入", imagePrompt: "清晨门口的近景", transition: "fade" });
+    const shot = (director.source.shots as Array<Record<string, any>>)[0];
+    assert.equal(shot.action, "甲推门进入");
+    assert.equal(shot.imagePrompt, "清晨门口的近景");
+    assert.equal(shot.transition, "fade");
+    assert.equal(shot.visual, "甲站在门口", "同批未提交的字段保留");
+    assert.notEqual(director.sourceHash, priorHash, "标注字段进入 sourceHash");
+    // 只改其中一个字段，其余保留（首帧反复编辑）
+    applyDirectorSourcePatch(director, "shot", "SHOT1", { action: "甲转身离开" });
+    assert.equal(shot.action, "甲转身离开");
+    assert.equal(shot.imagePrompt, "清晨门口的近景");
+    assert.equal(shot.transition, "fade");
+    // 空串可清空字段
+    applyDirectorSourcePatch(director, "shot", "SHOT1", { transition: "" });
+    assert.equal(shot.transition, "");
+    assert.throws(() => applyDirectorSourcePatch(director, "shot", "SHOT1", { inventedShotField: "x" }), /不允许直接修改字段/);
 });
 
 test("asset canvas scope is a formal, validated source field that invalidates old compile receipts", () => {

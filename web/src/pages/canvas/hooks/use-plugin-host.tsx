@@ -11,6 +11,7 @@ import { storeGeneratedVideo } from "@/services/api/video";
 import { translateCompiledH3Prompt } from "@/services/api/translation";
 import { fetchWorkflowDetail } from "@/services/api/workflows";
 import { fetchChannelModelDetail } from "@/services/api/image";
+import { resolvePresetFieldIds } from "@/lib/model-standard-params";
 import { getLocalH3Task, resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { fetchComfyModels } from "@/services/api/canvas-agent";
 import { applyBackendCanvasOperations, backendMediaUrl, createBackendGenerationLog, deleteBackendGenerationLogs, fetchBackendGenerationLogs, getBackendUrl, resolveBackendH3Confirmation, startCanvasGeneration, updateBackendGenerationLog } from "@/services/backend-api";
@@ -305,16 +306,20 @@ export function usePluginHost(params: PluginHostParams) {
                 // 解不出来，这里额外按单冒号剥出纯模型名，供引擎字段查询按名字兜底匹配。
                 const bareModelName = model.includes(":") ? model.slice(model.lastIndexOf(":") + 1).trim() : model;
                 let engineFields: CanvasVideoModelField[] = [];
+                let presetFieldIds: { width?: string; height?: string; seconds?: string } | undefined;
                 try {
                     let detail = await fetchChannelModelDetail(model);
                     if (!detail.fields.length && bareModelName && bareModelName !== model) {
                         detail = await fetchChannelModelDetail(bareModelName);
                     }
-                    if (Array.isArray(detail.fields) && detail.fields.length) engineFields = detail.fields as CanvasVideoModelField[];
+                    if (Array.isArray(detail.fields) && detail.fields.length) {
+                        engineFields = detail.fields as CanvasVideoModelField[];
+                        presetFieldIds = resolvePresetFieldIds(engineFields, detail.standardParams);
+                    }
                 } catch { /* 引擎不可达时按原逻辑降级 */ }
                 if (resolved) {
                     const detail = await fetchWorkflowDetail(resolved);
-                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: engineFields.length ? engineFields : (detail.config?.fields || []), defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
+                    return { model, kind: "workflow", workflow: resolved, supported: true, fields: engineFields.length ? engineFields : (detail.config?.fields || []), defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount), ...(engineFields.length && presetFieldIds && Object.keys(presetFieldIds).length ? { presetFieldIds } : {}) };
                 }
                 const fallback = declaration?.workflows?.[0];
                 if (fallback) {
@@ -323,7 +328,7 @@ export function usePluginHost(params: PluginHostParams) {
                 }
                 // 引擎模型即使 ai.config 没绑本地工作流，也要暴露引擎里的真实字段；
                 // 只有引擎确实没返回字段时才退回写死的常用参数。
-                if (engineFields.length) return { model, kind: "workflow", workflow: modelName, supported: true, fields: engineFields, defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount) };
+                if (engineFields.length) return { model, kind: "workflow", workflow: modelName, supported: true, fields: engineFields, defaultValues: resolveModelWorkflowParams(effectiveConfig, model, referenceCount), ...(presetFieldIds && Object.keys(presetFieldIds).length ? { presetFieldIds } : {}) };
                 if (channel?.kind !== "comfyui" && declaration?.capability === "video") return {
                     model, kind: "direct", supported: true, fields: [
                         { id: "seconds", name: "时长（秒）", type: "number", default: 6, min: 1, max: 20, step: 1 },

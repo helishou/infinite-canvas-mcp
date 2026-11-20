@@ -1,5 +1,5 @@
 import { useState, type CSSProperties } from "react";
-import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
+import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video, Workflow as WorkflowIcon } from "lucide-react";
 import { Button, Segmented } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -7,6 +7,7 @@ import { defaultConfig, resolveModelForCapability, useEffectiveConfig, type AiCo
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasGenerationControls } from "./canvas-generation-controls";
+import { FreeCardWorkflowPanel } from "./free-card-workflow-panel";
 import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata } from "@/types/canvas";
 
 type CanvasConfigNodePanelProps = {
@@ -21,6 +22,7 @@ type CanvasConfigNodePanelProps = {
 
 export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigChange, onGenerate, onStop, onComposerToggle }: CanvasConfigNodePanelProps) {
     const { t } = useTranslation();
+    const [workflowPanelOpen, setWorkflowPanelOpen] = useState(false);
     const globalConfig = useEffectiveConfig();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = node.metadata?.generationMode || "image";
@@ -31,7 +33,18 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
 
     return (
-        <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
+        <div
+            className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm"
+            style={{ color: theme.node.text }}
+            onWheel={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => {
+                // 双击卡片空白处打开参数面板；交互控件上的双击交给各自处理，不误触。
+                const target = event.target as HTMLElement;
+                if (target.closest("button, input, textarea, [contenteditable='true'], .ant-segmented")) return;
+                event.stopPropagation();
+                setWorkflowPanelOpen(true);
+            }}
+        >
             <div className="mb-2 flex items-center justify-between gap-3">
                 <div className="shrink-0 text-sm font-semibold">{t("canvas.configNode.title")}</div>
                 <div className="cursor-default" onMouseDown={(event) => event.stopPropagation()}>
@@ -91,6 +104,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                     <Settings2 className="size-3.5" />
                     {t("canvas.configNode.compose")}
                 </button>
+                <button type="button" className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px]" style={chipStyle} onMouseDown={(event) => event.stopPropagation()} onClick={() => setWorkflowPanelOpen(true)}>
+                    <WorkflowIcon className="size-3.5" />
+                    工作流参数
+                </button>
             </div>
 
             <CanvasGenerationControls
@@ -128,6 +145,14 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                     )}
                 </span>
             </Button>
+
+            <FreeCardWorkflowPanel
+                open={workflowPanelOpen}
+                onClose={() => setWorkflowPanelOpen(false)}
+                node={node}
+                referenceCount={mode === "image" ? inputSummary.imageCount : mode === "video" ? inputSummary.videoCount : mode === "audio" ? inputSummary.audioCount : 0}
+                onConfigChange={onConfigChange}
+            />
         </div>
     );
 }

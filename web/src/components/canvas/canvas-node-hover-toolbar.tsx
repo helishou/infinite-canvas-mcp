@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { App, Dropdown, Input, Modal, Segmented, Tooltip, type MenuProps } from "antd";
-import { AudioLines, Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Images, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video } from "lucide-react";
+import { AudioLines, Columns2, Download, Ellipsis, FolderPlus, Image as ImageIcon, Images, Info, LayoutGrid, ListOrdered, LoaderCircle, Lock, MapPinned, MessageSquare, Minus, Music2, Package, Paintbrush, Plus, RefreshCw, Scissors, Settings2, Trash2, Unlock, Upload, User, Video, WandSparkles, Workflow as WorkflowIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -11,7 +11,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useImageQuickToolsStore } from "@/stores/use-image-quick-tools-store";
 import { CanvasNodeType, type CanvasNodeData, type ViewportTransform } from "@/types/canvas";
-import { canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
+import { canvasNodeImage, canvasNodePrimaryImage } from "@/lib/canvas/canvas-image-renderability";
 import { propNodeAssetImage } from "@/lib/canvas/prop-node-asset";
 import type { CanvasNodeToolbarItem } from "@/types/canvas-plugin";
 import { ImageToolSettingsModal, type ImageToolbarSettingsTool } from "./canvas-image-toolbar-settings-modal";
@@ -36,6 +36,9 @@ type CanvasNodeHoverToolbarProps = {
     onCompareVideo: (node: CanvasNodeData) => void;
     onTrimVideo: (node: CanvasNodeData) => void;
     onExtractAudio: (node: CanvasNodeData) => void;
+    onVideoEdit?: (node: CanvasNodeData) => void;
+    onViggleEdit?: (node: CanvasNodeData) => void;
+    onWorkflowParams?: (node: CanvasNodeData) => void;
     extractingAudio?: boolean;
     onMaskEdit: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
@@ -54,6 +57,7 @@ type CanvasNodeHoverToolbarProps = {
     onConvertToProp: (node: CanvasNodeData) => void;
     onSaveCharacterToAsset: (node: CanvasNodeData) => void;
     onSaveSceneToAsset: (node: CanvasNodeData) => void;
+    onSavePropToAsset: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onArrangeGroup: (node: CanvasNodeData) => void;
     onCreateOrderedGroupCollage: (node: CanvasNodeData) => void;
@@ -98,6 +102,9 @@ export function CanvasNodeHoverToolbar({
     onCompareVideo,
     onTrimVideo,
     onExtractAudio,
+    onVideoEdit,
+    onViggleEdit,
+    onWorkflowParams,
     extractingAudio = false,
     onMaskEdit,
     onCrop,
@@ -116,6 +123,7 @@ export function CanvasNodeHoverToolbar({
     onConvertToProp,
     onSaveCharacterToAsset,
     onSaveSceneToAsset,
+    onSavePropToAsset,
     onToggleFreeResize,
     onArrangeGroup,
     onCreateOrderedGroupCollage,
@@ -184,6 +192,7 @@ export function CanvasNodeHoverToolbar({
     const isAudio = node.type === CanvasNodeType.Audio || (isSmartGenerationNode && smartMode === "audio");
     const isCharacter = node.type === CanvasNodeType.Character;
     const isScene = node.type === CanvasNodeType.Scene;
+    const isProp = node.type === CanvasNodeType.Prop;
     const hasPropImage = Boolean(propNodeAssetImage(node));
     const hasImage = isImage && Boolean(canvasNodePrimaryImage(node));
     const hasVideo = isVideo && Boolean(node.metadata?.content);
@@ -222,7 +231,9 @@ export function CanvasNodeHoverToolbar({
     ];
     const nodeToolbarTools: ToolbarTool[] = [
         ...(canRetry ? [{ id: "retry", title: t("canvas.nodeToolbar.retryTitle"), label: t("canvas.node.retry"), icon: <RefreshCw className="size-4" />, onClick: () => onRetry(node) }] : []),
-        ...(hasImage || hasPropImage || hasVideo || isText ? [{ id: "saveAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
+        ...(isVideo && onViggleEdit && (hasVideo || Boolean(node.metadata?.storageKey)) ? [{ id: "viggleEdit", title: "视频编辑（源视频 + 参考图）", label: "视频编辑", icon: <WandSparkles className="size-4" />, onClick: () => onViggleEdit(node) }] : []),
+        ...(isVideo && onVideoEdit && (hasVideo || Boolean(node.metadata?.storageKey)) ? [{ id: "videoEdit", title: "蒙版改帧：抽帧涂抹后重生成", label: "蒙版改帧", icon: <Paintbrush className="size-4" />, onClick: () => onVideoEdit(node) }] : []),
+        ...(hasImage || hasVideo || isText ? [{ id: "saveAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "common.addToAssets"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveAsset(node) }] : []),
         ...(hasImage || hasVideo || hasAudio || hasText ? [{ id: "download", title: hasAudio ? t("canvas.nodeToolbar.downloadAudio") : hasVideo ? t("canvas.nodeToolbar.downloadVideo") : hasImage ? t("canvas.nodeToolbar.downloadImage") : t("common.download"), label: t("common.download"), icon: <Download className="size-4" />, onClick: () => onDownload(node) }] : []),
         ...(hasVideo ? [{ id: "compareVideo", title: t("canvas.videoCompare.title"), label: t("canvas.videoCompare.open"), icon: <Columns2 className="size-4" />, onClick: () => onCompareVideo(node) }] : []),
         ...(hasVideo ? [{ id: "trimVideo", title: t("canvas.videoTrim.range"), label: t("canvas.videoTrim.open"), icon: <Scissors className="size-4" />, onClick: () => onTrimVideo(node) }] : []),
@@ -230,6 +241,7 @@ export function CanvasNodeHoverToolbar({
         ...(isVideo && !isSmartGenerationNode ? [{ id: "edit", title: t("common.edit"), label: t("common.edit"), icon: <MessageSquare className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
         ...(isText && !isSmartGenerationNode ? [{ id: "generateImage", title: t("canvas.node.generateImage"), label: t("canvas.node.generate"), icon: <ImageIcon className="size-4" />, onClick: () => onGenerateImage(node) }] : []),
         ...(isConfig ? [{ id: "config", title: t("canvas.configNode.title"), label: t("canvas.configNode.title"), icon: <Settings2 className="size-4" />, onClick: () => onToggleDialog(node) }] : []),
+        ...(isSmartGenerationNode && onWorkflowParams ? [{ id: "workflowParams", title: "工作流参数", label: "工作流参数", icon: <WorkflowIcon className="size-4" />, onClick: () => onWorkflowParams(node) }] : []),
         ...(isText ? [{ id: "decreaseFont", title: t("canvas.nodeToolbar.decreaseFont"), label: t("canvas.nodeToolbar.zoomOut"), icon: <Minus className="size-4" />, onClick: () => onDecreaseFont(node) }] : []),
         ...(isText ? [{ id: "increaseFont", title: t("canvas.nodeToolbar.increaseFont"), label: t("canvas.nodeToolbar.zoomIn"), icon: <Plus className="size-4" />, onClick: () => onIncreaseFont(node) }] : []),
         ...(isImage && !isSmartGenerationNode && !hasImage ? [{ id: "uploadImage", title: t("canvas.nodeToolbar.uploadImage"), label: t("canvas.nodeToolbar.uploadImage"), icon: <Upload className="size-4" />, onClick: () => onUpload(node) }] : []),
@@ -240,6 +252,7 @@ export function CanvasNodeHoverToolbar({
         ...(hasImage ? [{ id: "convertToProp", title: t("canvas.nodeToolbar.convertToProp"), label: t("canvas.nodeToolbar.convertToProp"), icon: <Package className="size-4" />, onClick: () => onConvertToProp(node) }] : []),
         ...(isCharacter ? [{ id: "saveCharacterToAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveCharacterToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveCharacterToAsset(node) }] : []),
         ...(isScene ? [{ id: "saveSceneToAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.saveSceneToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSaveSceneToAsset(node) }] : []),
+        ...(isProp && hasPropImage ? [{ id: "savePropToAsset", disabled: savingAsset, loading: savingAsset, title: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.savePropToAsset"), label: t(node.metadata?.sharedAssetReference ? "canvas.sharedLibrary.update" : "canvas.nodeToolbar.savePropToAsset"), icon: <FolderPlus className="size-4" />, onClick: () => onSavePropToAsset(node) }] : []),
         ...(hasImage ? imageTools.map((tool) => ({ id: tool.id, title: tool.title, label: tool.label, icon: tool.icon, active: tool.active, onClick: tool.onClick })) : []),
     ];
     const sharedTools: ToolbarTool[] = node.metadata?.sharedAssetReference && Object.keys(node.metadata.sharedAssetReference.edits || {}).length ? [
@@ -366,7 +379,14 @@ export function CanvasNodeInfoModal({ node, open, onClose, onRename }: { node: C
     const [titleDraft, setTitleDraft] = useState("");
     const isSmartGenerationNode = node?.type === CanvasNodeType.Config && node.metadata?.smart === true;
     const smartMode = isSmartGenerationNode ? node?.metadata?.generationMode || "image" : undefined;
-    const imageBytes = (node?.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image")) && node.metadata?.content ? getDataUrlByteSize(node.metadata.content) : 0;
+    const isMediaNode = node?.type === CanvasNodeType.Image || node?.type === CanvasNodeType.Video || (isSmartGenerationNode && (smartMode === "image" || smartMode === "video"));
+    // 媒体分辨率只取真实媒体元数据，绝不用 node.width/height（那是卡片尺寸）兜底。
+    const primaryImage = node ? canvasNodeImage(node) : null;
+    const resolutionWidth = node?.metadata?.naturalWidth || primaryImage?.naturalWidth || 0;
+    const resolutionHeight = node?.metadata?.naturalHeight || primaryImage?.naturalHeight || 0;
+    const resolutionText = resolutionWidth && resolutionHeight ? `${resolutionWidth} x ${resolutionHeight}` : "";
+    // 视频 content 常为 URL，getDataUrlByteSize 会返回 0，所以优先 metadata.bytes。
+    const fileBytes = isMediaNode ? (node?.metadata?.bytes || (node?.metadata?.content ? getDataUrlByteSize(node.metadata.content) : 0)) : 0;
     const batchCount = node?.type === CanvasNodeType.Image || (isSmartGenerationNode && smartMode === "image") ? node.metadata?.images?.length || 0 : 0;
     const json = useMemo(() => {
         if (!node) return "";
@@ -424,12 +444,13 @@ export function CanvasNodeInfoModal({ node, open, onClose, onRename }: { node: C
                                 value={<Input size="small" value={titleDraft} placeholder={t("canvas.node.untitled")} onChange={(event) => setTitleDraft(event.target.value)} onPressEnter={saveTitle} onBlur={saveTitle} />}
                             />
                             <InfoRow label={t("canvas.nodeToolbar.type")} value={node.type === CanvasNodeType.Group ? t("canvas.node.group") : node.type === CanvasNodeType.Config ? t("canvas.configNode.title") : [CanvasNodeType.Image, CanvasNodeType.Video, CanvasNodeType.Audio, CanvasNodeType.Text].includes(node.type as CanvasNodeType) ? t(`assets.kinds.${node.type}`) : getNodeDefinition(node.type)?.title || node.type} />
-                            <InfoRow label={t("canvas.nodeToolbar.size")} value={`${Math.round(node.width)} x ${Math.round(node.height)}`} />
+                            <InfoRow label={t("canvas.nodeToolbar.cardSize")} value={`${Math.round(node.width)} x ${Math.round(node.height)}`} />
+                            {isMediaNode && resolutionText ? <InfoRow label={t("canvas.nodeToolbar.resolution")} value={resolutionText} /> : null}
                             <InfoRow label={t("canvas.nodeToolbar.position")} value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                             <InfoRow label={t("canvas.nodeToolbar.status")} value={node.metadata?.status || "idle"} />
                             {batchCount > 1 ? <InfoRow label={t("canvas.nodeToolbar.imageGroup")} value={t("canvas.configNode.images", { count: batchCount })} /> : null}
                             {node.metadata?.prompt && node.type !== "minimax-h3:video" ? <InfoRow label={t("canvas.configNode.prompt")} value={node.metadata.prompt} /> : null}
-                            {imageBytes ? <InfoRow label={t("canvas.nodeToolbar.imageSize")} value={formatBytes(imageBytes)} /> : null}
+                            {fileBytes ? <InfoRow label={t("canvas.nodeToolbar.fileSize")} value={formatBytes(fileBytes)} /> : null}
                             {node.metadata?.errorDetails ? (
                                 <div className="rounded-lg border p-3 text-red-400" style={{ borderColor: theme.node.stroke }}>
                                     {node.metadata.errorDetails}

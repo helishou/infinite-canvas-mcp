@@ -98,8 +98,29 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
     return node && isResourceNode(node) ? [node] : [];
 }
 
+/**
+ * @ 候选专用：把「配置节点参考」与「直连参考」取并集。
+ * 只服务于编辑器的 @ 候选列表，不改变 getGenerationResourceNodes / 生成解析语义：
+ * 原 getMentionResourceNodes 在 configInputs 非空时早返回，导致直连图片从候选消失。
+ */
+export function getMentionCandidateResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
+    const resolvedIndex = graphIndex(nodes, connections, index);
+    const configInputs = expandGroupResourceNodes(getConnectedConfigInputNodes(nodeId, nodes, connections, resolvedIndex), nodes, resolvedIndex);
+    const fixedInputs = getFixedReferenceNodes(nodeId, nodes, resolvedIndex);
+    const ownInputs = expandGroupResourceNodes(fixedInputs.length ? fixedInputs : getContextInputNodes(nodeId, nodes, connections, resolvedIndex), nodes, resolvedIndex);
+    const merged = [...new Map([...configInputs, ...ownInputs].map((node) => [node.id, node])).values()];
+    if (merged.length) return merged;
+    const node = resolvedIndex.nodeById.get(nodeId);
+    return node && isResourceNode(node) ? [node] : [];
+}
+
+/** 与 buildNodeMentionReferences 同签名，产出带标签的候选参考（供 project.tsx 注入）。 */
+export function buildMentionCandidateReferences(node: CanvasNodeData, nodes: CanvasNodeData[], connections: CanvasConnection[], index?: CanvasGraphIndex) {
+    return labelResourceNodes(getMentionCandidateResourceNodes(node.id, nodes, connections, index), true);
+}
+
 /** 相同资源内容保留数组引用，让未受影响节点的 React.memo 生效。 */
-export function createMentionReferenceSelector() {
+export function createMentionReferenceSelector(mode: "generation" | "candidate" = "generation") {
     type MapName = "nodeById" | "incomingByNodeId" | "outgoingByNodeId" | "groupChildrenById";
     type Dependency = { map: MapName; id: string; value: unknown };
     type Entry = { references: CanvasResourceReference[]; dependencies: Dependency[]; language: string; registry: number };
@@ -133,7 +154,9 @@ export function createMentionReferenceSelector() {
                 } });
             };
             const tracked = { ...index, nodeById: track("nodeById"), incomingByNodeId: track("incomingByNodeId"), outgoingByNodeId: track("outgoingByNodeId"), groupChildrenById: track("groupChildrenById") };
-            const computed = buildNodeMentionReferences(node, nodes, connections, tracked);
+            const computed = mode === "candidate"
+                ? buildMentionCandidateReferences(node, nodes, connections, tracked)
+                : buildNodeMentionReferences(node, nodes, connections, tracked);
             const references = cached && cached.references.length === computed.length && cached.references.every((item, i) => shallow(item, computed[i])) ? cached.references : computed;
             next.set(node.id, references);
             entries.set(node.id, { references, dependencies, language, registry });

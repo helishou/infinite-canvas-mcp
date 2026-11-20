@@ -7,6 +7,9 @@ import { canonicalH3TaskMode, resolveH3Runtime, H3_PARAM_KEYS } from "@basketiku
 import crypto from "node:crypto";
 import { currentCompilationArtifact } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { buildCharacterGroupFromExistingNode } from "@basketikun/canvas-agent/plugins/minimax-h3/character-groups";
+import { matchChapterLookIndex } from "@basketikun/canvas-agent/canvas/character-image-selection";
+import { deriveAutoVoiceGroupIds, deriveVoiceCandidates, buildVoiceReferenceNotes, normalizeVoiceOverrides, applyVoiceOverridesToGroups } from "./auto-voice.js";
+import { effectiveAudioLimit, type MaxAudiosResolver, defaultMaxAudiosResolver } from "../canvas/model-audio-capability.js";
 import { assertReferenceCompilation, compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 import { canonicalProduction, isSubjectPromptAssembly, productionSceneEntries, shotStoryboardKeyframe, promptSourceMapSchema, resolveSubjectPictureBindingIds, type EpisodeProductionData, type ProductionLayoutPlan } from "@basketikun/canvas-agent/drama/production-contract";
 import { directorArtifact } from "./director.js";
@@ -14,8 +17,30 @@ import type { SharedSubjectPictureMedia } from "./shared-subject-picture.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: any): Record<string, any> => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+/**
+ * 段级参考图策略从真值（director.source.segments[].referenceOverrides）投影到 H3 Clip 编译产物。
+ * 只重排/启停编译已产出的绑定身份，不复制也不臆造引用；auto 或未配置时不干预自动派生。
+ * order/disabled 是 H3 Clip 上稳定的 binding ID；未列入 order 的绑定保持原相对顺序排在末尾。
+ */
+export function applySegmentReferenceOverrides(segment: Record<string, any>, sourceSegments: unknown, targetId: string): Record<string, any> {
+    const policy = object((Array.isArray(sourceSegments) ? sourceSegments : [])
+        .map(object)
+        .find(item => String(item.id || "") === String(targetId))?.referenceOverrides);
+    if (policy.mode !== "manual" || !Array.isArray(segment.referenceBindings)) return segment;
+    const disabled = new Set((Array.isArray(policy.disabled) ? policy.disabled : []).map(String));
+    const position = new Map((Array.isArray(policy.order) ? policy.order : []).map(String).map((id, index) => [id, index]));
+    const bindings: Array<Record<string, any>> = (segment.referenceBindings as Array<Record<string, any>>).map(binding => ({
+        ...object(binding),
+        enabled: !disabled.has(String(object(binding).id || "")),
+    }));
+    // V8 的 Array.prototype.sort 稳定，未列入 order 的绑定按原有相对顺序追加到末尾。
+    bindings.sort((a, b) => (position.get(String(a.id || "")) ?? Number.MAX_SAFE_INTEGER) - (position.get(String(b.id || "")) ?? Number.MAX_SAFE_INTEGER));
+    segment.referenceBindings = bindings;
+    segment.referenceOrder = bindings.map(binding => String(object(binding).id || "")).filter(Boolean);
+    return segment;
+}
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };
-export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "referenceOrder", "tailFrameContinuation", "motionContextEnabled", "videoContinuation", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName"];
+export const CLIP_PROJECTION_FIELDS = ["sourceShotId", "title", "duration", "taskMode", "prompt", "referenceBindings", "referenceOrder", "tailFrameContinuation", "motionContextEnabled", "videoContinuation", "directorEngine", "directorSourceHash", "styleTemplateId", "h3CharacterGroups", "storyboardShots", "aspectRatio", "modelName", "audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes", "voiceOverrides"];
 const ACTIVE_H3_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "running", "generating", "awaiting_confirmation", "awaiting_review", "paused", "cancelling"]);
 const TERMINAL_H3_SEGMENT_STATUSES = new Set(["idle", "success", "succeeded", "failed", "error", "cancelled", "canceled", "complete", "completed"]);
 type SharedClipImage = { storageKey?: string; url?: string; mimeType?: string; name?: string; bindingId?: string };
@@ -122,8 +147,12 @@ function comparableProjectionField(field: string, value: unknown) {
 }
 function hasManualProjectionEdits(segment: Record<string, any>) {
     const projection = object(segment.productionClipProjection), nextValues = object(projection.nextValues);
-    if (Object.keys(nextValues).length) return CLIP_PROJECTION_FIELDS.some(field =>
-        canonicalProduction(comparableProjectionField(field, segment[field]) ?? null) !== canonicalProduction(comparableProjectionField(field, nextValues[field]) ?? null));
+    if (Object.keys(nextValues).length) return CLIP_PROJECTION_FIELDS.some(field => {
+        // 旧 projection 回执没有这几个新字段的基线；其缺失不能证明用户手工改过它们。
+        // voiceReferenceNotes 由编译/运行时写入，运行后的值与编译基线不同属正常，不算人工改动。
+        if (!Object.hasOwn(nextValues, field) && ["audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes", "voiceOverrides"].includes(field)) return false;
+        return canonicalProduction(comparableProjectionField(field, segment[field]) ?? null) !== canonicalProduction(comparableProjectionField(field, nextValues[field]) ?? null);
+    });
     const fieldHashes = object(projection.fieldHashes);
     return CLIP_PROJECTION_FIELDS.some(field => typeof fieldHashes[field] === "string" && clipFieldHash(segment[field]) !== fieldHashes[field]);
 }
@@ -452,7 +481,39 @@ function reconcileSubjectImageReferences(segment: Record<string, any>, director:
             : normalized;
     }
 }
-export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>, h3Defaults?: Record<string, unknown>) {
+/**
+ * 造型章节范围 → 本段实际使用的角色图（影策 DefaultLook 等价）。
+ * 只认编译产物里该角色唯一的一条身份图引用；章列表由调用方从 chapter_ids_json 真值派生。
+ * 返回 nodeId → 替换用的媒体；没有命中或无章列表时返回空表，调用方保持编译产物原样。
+ */
+export function resolveChapterLookMedia(
+    references: readonly Record<string, any>[],
+    nodes: readonly Record<string, any>[],
+    episodeChapters: readonly number[],
+): Map<string, { storageKey: string; url: string }> {
+    const overrides = new Map<string, { storageKey: string; url: string }>();
+    if (!episodeChapters.length) return overrides;
+    const pictureRefs = references.filter((ref) => String(ref.label || "").startsWith("<Picture"));
+    for (const ref of pictureRefs) {
+        const nodeId = String(ref.nodeId || "");
+        if (!nodeId || overrides.has(nodeId)) continue;
+        if (pictureRefs.filter((item) => String(item.nodeId || "") === nodeId).length !== 1) continue;
+        const characterNode = nodes.find((node) => node.id === nodeId && node.type === "character");
+        if (!characterNode) continue;
+        const metadata = object(characterNode.metadata);
+        const images = (Array.isArray(metadata.characterImages) ? metadata.characterImages : []).map(object);
+        if (images.length < 2) continue;
+        const index = matchChapterLookIndex(images, episodeChapters);
+        if (index < 0) continue;
+        const picked = images[index]!;
+        const storageKey = String(picked.storageKey || "");
+        if (!storageKey || storageKey === String(ref.storageKey || "")) continue;
+        overrides.set(nodeId, { storageKey, url: String(picked.url || picked.dataUrl || "") });
+    }
+    return overrides;
+}
+
+export function buildProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, runSettings?: Record<string, unknown>, h3Defaults?: Record<string, unknown>, maxAudiosResolver: MaxAudiosResolver = defaultMaxAudiosResolver, episodeChapters: readonly number[] = [], voiceOverrides: unknown = {}) {
     const nodes: Record<string, any>[] = Array.isArray(project.nodes) ? project.nodes : [];
     const shots = group.shotIds.map(id => published.shots.find(shot => shot.id === id)).filter((shot): shot is NonNullable<typeof shot> => !!shot);
     const settings = runSettings || published.settings as unknown as Record<string, unknown>;
@@ -482,7 +543,19 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
                 && String(binding.assetId || "") === String(ref.assetId || ""));
         return matches.length === 1 ? matches[0] : undefined;
     };
-    const bindings: Array<Record<string, unknown>> = authored.references.map((ref, index) => {
+    // 造型章节范围（影策 DefaultLook 等价）：章序号真值来自 drama_episodes.chapter_ids_json
+    // → source_chapters.chapter_index，经编译输入传入。老剧目没有章列表时为空，选图保持
+    // 编译产物/角色主图原样，绝不臆造章节。只在本段该角色恰好一条身份图引用时替换，
+    // 避免把多张参考图压成同一张；替换只发生在投影层，不改正式稿/编译回执。
+    const chapterLookMedia = resolveChapterLookMedia(authored.references as Array<Record<string, any>>, nodes, episodeChapters);
+    const chapterRef = (ref: Record<string, any>): Record<string, any> => {
+        const override = chapterLookMedia.get(String(ref.nodeId || ""));
+        return override && String(ref.label || "").startsWith("<Picture")
+            ? { ...ref, storageKey: override.storageKey, ...(override.url ? { url: override.url } : {}) }
+            : ref;
+    };
+    const bindings: Array<Record<string, unknown>> = authored.references.map((rawRef, index) => {
+        const ref = chapterRef(rawRef);
         const subjectIds = subjectIdsByAsset.get(String(ref.assetId || ""));
         const subjectId = ref.role === "keyframe" || ref.role === "storyboard" || subjectIds?.size !== 1 ? undefined : [...subjectIds][0];
         const pictureBinding = pictureBindingFor(ref, subjectId);
@@ -502,9 +575,9 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             ...(picturePurpose?.length ? { picturePurpose } : {}),
         };
     });
-    const characterGroups: Record<string, unknown> = {};
+    let characterGroups: Record<string, unknown> = {};
     for (const characterNodeId of new Set(authored.references.filter(ref => nodes.some(n => n.id === ref.nodeId && n.type === "character")).map(ref => ref.nodeId))) {
-        const refs = authored.references.filter(ref => ref.nodeId === characterNodeId);
+        const refs = authored.references.filter((ref) => ref.nodeId === characterNodeId).map(chapterRef);
         const characterNode = nodes.find(n => n.id === characterNodeId)!;
         // Some formal Subject bindings reference an archived image directly. A
         // projected `character` node can exist without a characterImages outfit
@@ -538,8 +611,31 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
                 ...(Array.isArray(binding.picturePurpose) ? { tags: [...new Set([...groupRef.tags, ...binding.picturePurpose.map(String)])] } : {}) };
         });
     }
+    // 段级音色覆写（用户真值，来自已绑定 Clip 的 segment.voiceOverrides）：套到角色组本体 voice 上后再
+    // 派生 autoVoiceGroupIds，使「手指派了声音但本体没声线」的角色也能按开口顺序进入参考清单；
+    // 没有覆写的组沿用本体 voice = 自动音色。清掉覆写即恢复自动，不改开口集合。
+    const normalizedVoiceOverrides = normalizeVoiceOverrides(voiceOverrides);
+    characterGroups = applyVoiceOverridesToGroups(characterGroups, normalizedVoiceOverrides);
+    // 「按对白自动音色」：与影策 dramaSegmentVoicedSpeakers 等价地从上稿台词推导本段开口角色，
+    // 把结果落到 autoVoiceGroupIds，并在 auto 模式下直接改写各组 voiceEnabled，让下游
+    // reference-contract.resolveCharacterGroupBindings 照常派生出 audio 引用。custom 模式下
+    // 逐组开关由用户持有，productionClipProjection 会从既有 Clip 恢复，不被编译冲掉。
     const taskMode = ({ T2VA: "t2v", I2VA: "i2v", FL2VA: "fl2v", L2VA: "l2v", Ref2VA: "ref2va" } as Record<string, string>)[String(planned.mode)];
     if (!taskMode) throw new Error(`未知 Acheng 模式 ${planned.mode}`);
+    // 影策 profile.MaxAudios 的本地读取：节点 selectedVideoModel → 制作设置 → H3 默认值，
+    // 再按本段模式收窄（非 ref2va = 0）。auto 派生列表必须与运行时 h3-runner 用同一上限。
+    const clipNodeMetadata = object(nodes.find((node: any) => node.id === group.nodeId)?.metadata);
+    const clipVideoModel = String(clipNodeMetadata.selectedVideoModel || object(settings).selectedVideoModel || object(h3Defaults).selectedVideoModel || "").trim();
+    const autoVoiceMaxAudios = effectiveAudioLimit(maxAudiosResolver, clipVideoModel, taskMode);
+    const autoVoiceGroupIds = deriveAutoVoiceGroupIds({ source: d.source, shotIds: group.shotIds, groups: characterGroups, maxAudios: autoVoiceMaxAudios });
+    // 影策式段级 Note：给所有开口但未随请求发送的角色写明原因（无样本/模式不支持/超限），
+    // 与 autoVoiceGroupIds 共用同一上限与开口顺序，落进 metadata.segments[].voiceReferenceNotes。
+    const voiceCandidates = deriveVoiceCandidates({ source: d.source, shotIds: group.shotIds, groups: characterGroups });
+    const voiceReferenceNotes = buildVoiceReferenceNotes({ candidates: voiceCandidates, maxAudios: autoVoiceMaxAudios });
+    for (const groupId of Object.keys(characterGroups)) {
+        const character = object(characterGroups[groupId]);
+        characterGroups[groupId] = { ...character, voiceEnabled: autoVoiceGroupIds.includes(groupId) };
+    }
     let prompt = authored.prompt;
     const boundary = outgoingDirectorBoundary(d, group.id);
     const subjectAssembly = isSubjectPromptAssembly(d.source);
@@ -578,6 +674,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         tailFrameContinuation: boundary?.tailFrame === true, motionContextEnabled: boundary?.motionContext === true,
         videoContinuation: boundary?.videoContinuation === true,
         directorEngine: authored.receipt.engine || (authored.receipt.compilationScope as any)?.engine || d.engine, directorSourceHash: authored.sourceHash, styleTemplateId, h3CharacterGroups: characterGroups,
+        audioReferenceMode: "auto", autoVoiceGroupIds, voiceReferenceNotes, voiceOverrides: normalizedVoiceOverrides,
         ...(storyboardShots ? { storyboardShots } : {}),
         aspectRatio: settings.videoAspectRatio || object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).aspectRatio || BASE_H3_NODE_METADATA.aspectRatio,
         modelName: /* h3Model || */ object(nodes.find((node: any) => node.id === group.nodeId)?.metadata).modelName
@@ -626,6 +723,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             segment.tailFrameAnchor = { storageKey: String(anchor.storageKey), sourceSegmentId: incomingBoundary.from };
         }
     }
+    applySegmentReferenceOverrides(segment, d.source.segments, group.id);
     const promptSourceMap = promptSourceMapSchema.safeParse((authored.receipt as Record<string, any>).sourceMap);
     segment.productionClipProjection = { targetId: group.id, sourceHash: authored.sourceHash, artifactId: authored.id, promptHash: authored.sha256,
         promptAssemblyVersion: isSubjectPromptAssembly(d.source) ? 2 : 1, promptSourceMapAvailable: authored.status === "ready" && isSubjectPromptAssembly(d.source) && promptSourceMap.success && promptSourceMap.data.entries.length > 0,
@@ -635,12 +733,12 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
     return segment;
 }
 /** Published content does not replace the model and generation settings saved in the Clip UI. */
-export function buildPublishedProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, defaults: Record<string, unknown>, runSettings?: Record<string, unknown>) {
+export function buildPublishedProductionClip(project: Record<string, any>, published: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, defaults: Record<string, unknown>, runSettings?: Record<string, unknown>, maxAudiosResolver: MaxAudiosResolver = defaultMaxAudiosResolver, episodeChapters: readonly number[] = []) {
     const node = (project.nodes || []).find((node: any) => node.id === group.nodeId);
     const metadata = object(node?.metadata);
     const saved = (metadata.segments || []).find((clip: any) => clip.id === segmentId);
     if (!saved) throw new Error("已发布 Clip 节点不存在");
-    const authored = buildProductionClip(project, published, group, segmentId, runSettings, defaults);
+    const authored = buildProductionClip(project, published, group, segmentId, runSettings, defaults, maxAudiosResolver, episodeChapters, object(saved).voiceOverrides);
     const runtime = resolveH3Runtime(saved, {}, metadata, defaults).params;
     const contentKeys = new Set(CLIP_PROJECTION_FIELDS.filter(key => key !== "modelName"));
     const settings = Object.fromEntries(H3_PARAM_KEYS.filter(key => !contentKeys.has(key) && runtime[key] !== undefined).map(key => [key, runtime[key]]));
@@ -749,10 +847,10 @@ export function formalStoryboardTrack(data: EpisodeProductionData, group: Episod
     };
 }
 
-export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>, overwriteCompiledPrompt = false, h3Defaults?: Record<string, unknown>) {
+export function productionClipProjection(project: Record<string, any>, data: EpisodeProductionData, group: EpisodeProductionData["clipGroups"][number], segmentId: string, existing?: Record<string, any>, overwriteCompiledPrompt = false, h3Defaults?: Record<string, unknown>, maxAudiosResolver: MaxAudiosResolver = defaultMaxAudiosResolver, episodeChapters: readonly number[] = []) {
     const result: ReferenceSync = { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] };
     try {
-        let segment = buildProductionClip(project, data, group, segmentId, undefined, h3Defaults);
+        let segment = buildProductionClip(project, data, group, segmentId, undefined, h3Defaults, maxAudiosResolver, episodeChapters, object(existing).voiceOverrides);
         if (Array.isArray(segment.referenceBindings)) {
             // 去重必须发生在合并/对齐之前：后面的 prompt 图片编号对齐、referenceCount
             // 都按这个数组的槽位计算，重复行会让编号整体错开一位。
@@ -769,8 +867,10 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
         }
         const compiledReferenceBindings = structuredClone(segment.referenceBindings);
         if (existing) {
+            // voiceReferenceNotes 由编译/运行时写入，不作为人工字段参与三方合并：重新编译总是以本轮
+            // 台词/模型派生出的最新 Note 覆盖旧的运行期值，避免运行后留下的 Note 被当成手工编辑冻结。
             const groups = [["referenceBindings", "storyboardShots", "duration"], ["h3CharacterGroups"],
-                ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration"].includes(key)).map(key => [key])];
+                ...CLIP_PROJECTION_FIELDS.filter(key => !["referenceBindings", "h3CharacterGroups", "storyboardShots", "duration", "voiceReferenceNotes"].includes(key)).map(key => [key])];
             const nextValues = Object.fromEntries(CLIP_PROJECTION_FIELDS.filter(key => Object.hasOwn(segment, key)).map(key => [key, segment[key]]));
             const baseline = { ...(existing.productionClipProjection?.fieldHashes || initialProjectionBaseline(existing, segment)) };
             // The bound H3 Clip is the mode authority even when an older projection
@@ -938,10 +1038,30 @@ export function productionClipProjection(project: Record<string, any>, data: Epi
             // nextValues 是应用编译时真正写进 Clip 的载荷；它在合并之前就从 segment 上取过一次，
             // 所以必须用去重后的最终数组覆盖，否则重复的环境引用会绕过前面的去重写回画布。
             if (Array.isArray(segment.referenceBindings)) nextValues.referenceBindings = segment.referenceBindings;
+            // 段级音色模式：已绑定 H3 Clip 的模式由用户持有（与 taskMode 同构）。auto 的派生列表
+            // 每次编译重算，不被三方合并回滚；custom 保留用户逐组开关，不被编译产物覆盖。
+            const voiceMode = existing?.audioReferenceMode === "custom" ? "custom" : "auto";
+            mergedSegment.audioReferenceMode = voiceMode;
+            mergedSegment.autoVoiceGroupIds = Array.isArray(segment.autoVoiceGroupIds) ? segment.autoVoiceGroupIds : [];
+            // 段级音色覆写是用户真值：重新编译必须从既有 Clip 原样带回，清掉即恢复自动（沿用本体）。
+            const preservedVoiceOverrides = normalizeVoiceOverrides(object(existing).voiceOverrides);
+            mergedSegment.voiceOverrides = preservedVoiceOverrides;
+            if (voiceMode === "custom") {
+                const savedGroups = object(existing?.h3CharacterGroups);
+                const currentGroups = object(mergedSegment.h3CharacterGroups);
+                mergedSegment.h3CharacterGroups = Object.fromEntries(Object.entries(currentGroups).map(([id, value]) => {
+                    const saved = object(savedGroups[id]);
+                    return [id, Object.hasOwn(saved, "voiceEnabled") ? { ...object(value), voiceEnabled: saved.voiceEnabled === true } : value];
+                }));
+            }
+            nextValues.audioReferenceMode = voiceMode;
+            nextValues.autoVoiceGroupIds = mergedSegment.autoVoiceGroupIds;
+            nextValues.voiceOverrides = preservedVoiceOverrides;
             const projection = { ...segment.productionClipProjection,
                 ...(repairDuration ? { fieldHashes: { ...segment.productionClipProjection.fieldHashes, duration: clipFieldHash(storyboardTotal) } } : {}),
                 nextValues, fieldGroups: projectionGroups, conflicts, manualFields };
             segment = { ...mergedSegment, inputOutdated, productionClipProjection: projection };
+        applySegmentReferenceOverrides(segment, data.director?.source.segments, group.id);
             if (inputOutdated) group.inputOutdated = true;
             if (conflicts.length) result.diagnostics.push({ code: "MANUAL_INPUT_CONFLICT", message: `存在人工修改与正式源稿冲突，已保留画布输入：${conflicts.join(",")}` });
         }
@@ -1101,7 +1221,7 @@ export function claimableProductionClipNodes(project: Record<string, any>, data:
  * gates node creation and every addition inside a Shot-local projection.
  */
 export function clipInputOperations(project: Record<string, any>, data: EpisodeProductionData, layout: ProductionLayoutPlan,
-    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set(), onlyTargets?: ReadonlySet<string>, overwriteCompiledPromptTargets?: ReadonlySet<string>, forceBoundaryTargets?: ReadonlySet<string>, pendingCompilationTargets?: ReadonlySet<string>) {
+    defaults: Record<string, unknown> = {}, materializeTargets: ReadonlySet<string> = new Set(), onlyTargets?: ReadonlySet<string>, overwriteCompiledPromptTargets?: ReadonlySet<string>, forceBoundaryTargets?: ReadonlySet<string>, pendingCompilationTargets?: ReadonlySet<string>, maxAudiosResolver: MaxAudiosResolver = defaultMaxAudiosResolver, episodeChapters: readonly number[] = []) {
     const operations: CanvasOperation[] = [], referenceSync: ReferenceSync[] = [];
     const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, any>> : [];
     const pendingNodes = new Map<string, CanvasOperation>();
@@ -1166,7 +1286,7 @@ export function clipInputOperations(project: Record<string, any>, data: EpisodeP
         const pendingCompilation = pendingCompilationTargets?.has(group.id) === true;
         const projected: ReturnType<typeof productionClipProjection> = pendingCompilation
             ? { result: { targetId: group.id, status: "blocked", referenceCount: 0, diagnostics: [] } }
-            : productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true, defaults);
+            : productionClipProjection(project, data, group, segmentId, existing, overwriteCompiledPromptTargets?.has(group.id) === true, defaults, maxAudiosResolver, episodeChapters);
         if (existing && forceBoundaryTargets?.has(group.id)) {
             const boundary = data.director?.boundaries.find(item => item.from === group.id);
             const boundaryPatch = {

@@ -55,6 +55,16 @@ test("scene replacement preserves other scenes, existing Clip IDs and derives v2
     assert.deepEqual(d.boundaries, before.boundaries);
     assert.notEqual(d.sourceHash, before.sourceHash);
 });
+test("scene replacement preserves Shot.dialogues for the verbatim dialogue check", () => {
+    const d = fixture();
+    const op = replacement() as any;
+    const dialogues = [{ speaker: "陈九", text: "这雨怕是要下一夜，明天未必停。" }];
+    op.shots[0].dialogues = dialogues;
+    replaceDirectorSceneStoryboard(d, op);
+    const stored = (d.source.shots as any[]).find(shot => shot.id === "A");
+    assert.deepEqual(stored.dialogues, dialogues);
+    assert.notEqual(d.sourceHash, hash((fixture() as any).source));
+});
 test("an empty scene bootstraps formal Shots, Clips and default boundaries", () => {
     const d = fixture();
     d.source.shots = [];

@@ -64,7 +64,7 @@ export function buildH3BatchUpdates(project: Record<string, unknown>, node: Agen
     const candidates: H3Segment[] = [];
     const previewBudget = { remaining: H3_MAX_EDIT_PREVIEWS };
     const projection: H3Segment = {};
-    const protectedFields = new Set<string>([...H3_RUNTIME_SEGMENT_FIELDS, "id", "h3CharacterGroups", "characterGroups", "metadata", "segments", "__proto__", "constructor", "prototype"]);
+    const protectedFields = new Set<string>([...H3_RUNTIME_SEGMENT_FIELDS, "id", "h3CharacterGroups", "characterGroups", "metadata", "segments", "__proto__", "constructor", "prototype", "audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes"]);
     for (const raw of rawUpdates) {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("updates 每项必须为对象");
         const item = raw as Record<string, unknown>;
@@ -993,7 +993,7 @@ export const pluginMcp: PluginMcpModule = {
                 const segment = segments.find((item) => String(item.id || "") === segmentId);
                 if (!segment) throw new Error(`找不到片段:${segmentId}`);
                 const rawPatch = input.patch && typeof input.patch === "object" && !Array.isArray(input.patch) ? input.patch as Record<string, unknown> : {};
-                for (const key of new Set(["id", "metadata", "segments", "__proto__", "constructor", "prototype", "h3CharacterGroups", "characterGroups", "referenceBindings", ...H3_RUNTIME_SEGMENT_FIELDS])) {
+                for (const key of new Set(["id", "metadata", "segments", "__proto__", "constructor", "prototype", "h3CharacterGroups", "characterGroups", "referenceBindings", "audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes", ...H3_RUNTIME_SEGMENT_FIELDS])) {
                     if (Object.prototype.hasOwnProperty.call(rawPatch, key)) throw new Error(`h3_prepare_clip 不允许直接修改 ${key}`);
                 }
                 const explicitSourceId = input.inheritFromSegmentId ? String(input.inheritFromSegmentId) : undefined;

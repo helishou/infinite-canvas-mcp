@@ -39,6 +39,33 @@ export type ChannelModel = {
     script?: string;
     /** 文本模型是否支持图片输入；缺省表示自动探测，true/false 为显式声明。 */
     supportsImages?: boolean;
+    /**
+     * 单段最多提交的参考音频数（影策 video.references.maxAudios → profile.MaxAudios）。
+     * 从引擎 /v1/models 的 media_inputs.audios 真实能力导入；本地 H3 原生工作流
+     * 没暴露该槽位时由登记脚本写入真实槽位数 3。缺省时执行链按 3 回落。
+     */
+    maxAudios?: number;
+    /**
+     * 视频能力（影策 DramaModelOption 的同名字段）。全部可选：缺省 = 未知/不限制，
+     * 设置页不得据此告警。只由模型登记脚本从真实工作流派生、或引擎真实上报时写入，
+     * 没有能力来源时不臆造默认值。
+     */
+    /** 能准确给出的作品画幅（如 "16:9"）；登记自工作流的画面比例选项。 */
+    videoRatios?: string[];
+    /** 作品可指定的分辨率档位（如 "720p"）；空数组表示显式声明「不提供可选档位」。 */
+    videoResolutions?: string[];
+    /** 是否同步生成对白与音效；false 仅在工作流确实无音频输出时登记。 */
+    generateAudio?: boolean;
+    /** 支持图生视频、可用于尾帧续接；false 表示只能并行出片。 */
+    tailFrameChain?: boolean;
+    /** 单段视频最长秒数；只在工作流有真实上限时登记，缺省不限制。 */
+    maxVideoSeconds?: number;
+    /**
+     * 模型级提示词字数硬上限（影策 VideoReferenceConfig.PromptMaxChars，按码点计）。
+     * 本地引擎实测不上报该值：只由设置页显式登记；缺省 = 未知/不限制，不臆造默认值。
+     * 段提示词界面读 modelVideoCapabilitiesOf(...).promptMaxChars；undefined 时保持原软上限。
+     */
+    promptMaxChars?: number;
     /** ComfyUI 渠道：该模型对外暴露时可用的工作流（可挂多个）。 */
     workflows?: string[];
     /** ComfyUI 渠道：三种输入场景分别走哪个工作流；未配置的场景回退到第一个工作流。 */
@@ -215,7 +242,11 @@ export function guessCapability(name: string): ModelCapability {
     return "text";
 }
 
-function findChannelModel(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
+/**
+ * 严格 matcher（改动前的原始语义）：带 :: 时只按 channelId 锁定渠道，绝不跨渠道；
+ * 无 :: 时才跨渠道按精确名找。readiness 这类「不能把已下线渠道当成可用」的判断必须用它。
+ */
+function findChannelModelExact(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
     const decoded = decodeChannelModel(value);
     const name = decoded?.model || value;
     const channel = decoded ? config.channels.find((item) => item.id === decoded.channelId) : config.channels.find((item) => item.models.some((model) => model.name === name));
@@ -223,9 +254,119 @@ function findChannelModel(config: AiConfig, value: string): { channel: ModelChan
     return channel && model ? { channel, model } : null;
 }
 
+/** 跨渠道按精确模型名找：无 :: 时的原有语义，陈旧 channelId 时作为回退复用同一语义。 */
+function findModelByNameAcrossChannels(config: AiConfig, name: string): { channel: ModelChannel; model: ChannelModel } | null {
+    const channel = config.channels.find((item) => item.models.some((model) => model.name === name));
+    const model = channel?.models.find((item) => item.name === name);
+    return channel && model ? { channel, model } : null;
+}
+
+function findChannelModel(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
+    // ① 精确匹配优先：命中即返回，原有精确匹配的优先级完全不变。
+    const exact = findChannelModelExact(config, value);
+    if (exact) return exact;
+    // ② 精确匹配失败且值带 :: 时才回退：渠道 id 已失效（真实库里大量 local-comfyui:: /
+    //    xq3...:: 陈旧段）或模型挪到了别的渠道，按精确模型名跨渠道再找一次。
+    //    无 :: 的情况在 ① 里已经按名找过，不重复。仍要求精确名命中，工作流名不会误匹配。
+    const decoded = decodeChannelModel(value);
+    return decoded ? findModelByNameAcrossChannels(config, decoded.model) : null;
+}
+
+/** H3 原生 V15 节点的 3 个参考音频槽位；模型未声明 maxAudios 时的回落值。 */
+export const DEFAULT_VIDEO_MAX_AUDIOS = 3;
+
 export function modelCapabilityOf(config: AiConfig, value: string): ModelCapability | undefined {
     return findChannelModel(config, value)?.model.capability;
 }
+
+function normalizeMaxAudios(value: unknown): number | undefined {
+    if (typeof value !== "number" && typeof value !== "string") return undefined;
+    if (String(value).trim() === "") return undefined;
+    const count = Number(value);
+    return Number.isSafeInteger(count) && count >= 0 ? count : undefined;
+}
+
+/** 当前视频模型的参考音频上限（影策 profile.MaxAudios）；显式配置优先，否则按 H3 原生默认。 */
+export function modelMaxAudiosOf(config: AiConfig, value: string): number {
+    return normalizeMaxAudios(findChannelModel(config, value)?.model.maxAudios) ?? DEFAULT_VIDEO_MAX_AUDIOS;
+}
+
+/** 段级实际上限：只有 ref2va 模式才允许参考音频（影策其它模式 MaxAudios=0）。 */
+export function segmentAudioLimitOf(config: AiConfig, value: string, taskMode: unknown): number {
+    return String(taskMode || "").toLowerCase() === "ref2va" ? modelMaxAudiosOf(config, value) : 0;
+}
+
+/**
+ * 影策 DramaModelOption 的同名视频能力字段。全部可选，缺省表示「未知/不限制」。
+ * 设置页拿它接真告警：字段不存在就不要 warn，绝不把 undefined 当成 false/[] 处理。
+ */
+export type ModelVideoCapabilities = Pick<ChannelModel, "videoRatios" | "videoResolutions" | "generateAudio" | "tailFrameChain" | "maxVideoSeconds" | "promptMaxChars">;
+
+/** 把 H3 下拉的 "16:9 (Widescreen)" 归一到影策契约的裸 "16:9"；非比例选项不登记。 */
+function canonicalRatios(value: unknown): string[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const out: string[] = [];
+    for (const item of value) {
+        if (typeof item !== "string" || !item.trim()) return undefined;
+        const match = /^(\d+)\s*:\s*(\d+)/.exec(item.trim());
+        if (!match) continue;
+        const a = Number(match[1]);
+        const b = Number(match[2]);
+        if (!a || !b) continue;
+        const gcd = (x: number, y: number): number => (y ? gcd(y, x % y) : x);
+        const canonical = `${a / gcd(a, b)}:${b / gcd(a, b)}`;
+        if (!out.includes(canonical)) out.push(canonical);
+    }
+    return out;
+}
+
+/** 只做类型校验与画幅归一，不补任何默认值；非法/缺失字段不进入结果。 */
+export function normalizeModelVideoCapabilities(value: unknown): ModelVideoCapabilities {
+    const model = value && typeof value === "object" && !Array.isArray(value) ? value as ChannelModel : undefined;
+    if (!model) return {};
+    const out: ModelVideoCapabilities = {};
+    const ratios = canonicalRatios(model.videoRatios);
+    if (ratios?.length) out.videoRatios = ratios;
+    const resolutions = Array.isArray(model.videoResolutions) && model.videoResolutions.every((item) => typeof item === "string" && item.trim())
+        ? model.videoResolutions.slice()
+        : undefined;
+    if (resolutions) out.videoResolutions = resolutions;
+    if (typeof model.generateAudio === "boolean") out.generateAudio = model.generateAudio;
+    if (typeof model.tailFrameChain === "boolean") out.tailFrameChain = model.tailFrameChain;
+    if (typeof model.maxVideoSeconds === "number" && Number.isFinite(model.maxVideoSeconds) && model.maxVideoSeconds > 0) {
+        out.maxVideoSeconds = model.maxVideoSeconds;
+    }
+    if (typeof model.promptMaxChars === "number" && Number.isSafeInteger(model.promptMaxChars) && model.promptMaxChars > 0) {
+        out.promptMaxChars = model.promptMaxChars;
+    }
+    return out;
+}
+
+/**
+ * 当前模型的真实视频能力（来自模型登记/引擎上报，不存在返回空对象）。
+ * 调用方按「缺字段 = 不告警」处理；normalizeConfig 也用同一个校验器保字段。
+ */
+export function modelVideoCapabilitiesOf(config: AiConfig, value: string): ModelVideoCapabilities {
+    return normalizeModelVideoCapabilities(findChannelModel(config, value)?.model);
+}
+
+/**
+ * 制作设置页显式登记模型的提示词字数上限：只改命中的渠道模型，正数整数才写入，
+ * 清空则删除字段回到「缺省不限制」。本地引擎实测不上报该值，这里不填任何隐式默认值。
+ */
+export function setModelPromptMaxChars(config: AiConfig, value: string, maxChars: number | undefined): AiConfig {
+    const match = findChannelModel(config, value);
+    if (!match) return config;
+    const { promptMaxChars: _previous, ...rest } = match.model;
+    const valid = typeof maxChars === "number" && Number.isSafeInteger(maxChars) && maxChars > 0;
+    const nextModel: ChannelModel = valid ? { ...rest, promptMaxChars: maxChars } : rest;
+    const channels = config.channels.map((channel) => channel.id === match.channel.id
+        ? { ...channel, models: channel.models.map((model) => model === match.model ? nextModel : model) }
+        : channel);
+    return { ...config, channels };
+}
+
+export const isAudioReferenceMode = (taskMode: unknown): boolean => String(taskMode || "").toLowerCase() === "ref2va";
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
     if (capability === "video" && value === VIDEO_CONCAT_MODEL) return true;
@@ -316,7 +457,9 @@ export function resolveModelWorkflowParams(config: AiConfig, value: string, refe
 
 function isAiConfigReady(config: AiConfig, model: string) {
     if (model === VIDEO_CONCAT_MODEL) return true;
-    const match = findChannelModel(config, model);
+    // 用严格 matcher：回退只用于读能力，不能让已下线渠道的同名模型被当成「可用」，
+    // 否则已删除 provider 的旧段会被误判为可重试。
+    const match = findChannelModelExact(config, model);
     if (!match) return false;
     const channel = match.channel;
     // codex-cli 与 hermes（本地 ACP 导演 agent）的鉴权都在 agent 进程侧，不需要渠道 apiKey。
@@ -574,7 +717,9 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const workflowParams = typeof item === "string" ? undefined : normalizeModelWorkflowParams(item.workflowParams, workflows, workflowRouting);
         const workflowBindings = typeof item === "string" ? undefined : normalizeWorkflowBindings(item.workflowBindings);
         const supportsImages = typeof item === "string" ? undefined : item.supportsImages;
-        result.push({ name, capability, script, ...(supportsImages === undefined ? {} : { supportsImages }), ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
+        const maxAudios = typeof item === "string" ? undefined : normalizeMaxAudios(item.maxAudios);
+        const videoCapabilities = typeof item === "string" ? {} : normalizeModelVideoCapabilities(item);
+        result.push({ name, capability, script, ...(supportsImages === undefined ? {} : { supportsImages }), ...(maxAudios === undefined ? {} : { maxAudios }), ...videoCapabilities, ...(workflows.length ? { workflows } : {}), ...(workflowRouting ? { workflowRouting } : {}), ...(workflowParams ? { workflowParams } : {}), ...(workflowBindings ? { workflowBindings } : {}) });
     }
     return result;
 }

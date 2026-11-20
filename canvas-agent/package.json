@@ -24,6 +24,7 @@
         "./plugin-mcp": "./dist/server/plugin-mcp.js",
         "./schemas": "./dist/canvas/schemas.js",
         "./canvas/node-sizes": "./dist/canvas/node-sizes.js",
+        "./canvas/character-image-selection": "./dist/canvas/character-image-selection.js",
         "./state-summary": "./dist/canvas/state-summary.js",
         "./collaboration-tools": "./dist/canvas/collaboration-tools.js",
         "./runtime-fields": "./dist/canvas/runtime-fields.js",
@@ -59,6 +60,7 @@
         "./server/mcp-arg-integrity": "./dist/server/mcp-arg-integrity.js",
         "./drama/stage-contract": "./dist/drama/stage-contract.js",
         "./drama/asset-spec": "./dist/drama/asset-spec.js",
+    "./drama/video-resolution": "./dist/drama/video-resolution.js",
         "./canvas/turnaround-layout": {
             "types": "./dist/canvas/turnaround-layout.d.ts",
             "default": "./dist/canvas/turnaround-layout.js"

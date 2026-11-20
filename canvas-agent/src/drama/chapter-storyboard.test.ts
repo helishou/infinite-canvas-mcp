@@ -121,6 +121,21 @@ test("提交载荷不带帧窗字段，Clip 覆盖本场全部镜头", () => {
     assert.equal(covered.size, op.shots.length);
 });
 
+test("台词随镜头进入 op.shots.dialogues（复数、{speaker,text}），无台词镜头不带空字段", () => {
+    const plan = planChapterStoryboard({
+        chapterId: "EP-DLG",
+        scenes: [{ sceneKey: "s", environmentId: "env-庙", beats: [
+            { title: "开口", visual: "陈九开口。", seconds: 3, speaker: "陈九", dialogue: "这雨怕是要下一夜。" },
+            { title: "沉默", visual: "小红沉默。", seconds: 3 },
+        ] }],
+    });
+    assert.deepEqual(plan.shots[0].dialogue, { speaker: "陈九", text: "这雨怕是要下一夜。" });
+    const [op] = toSceneStoryboardOps(plan, new Map([["env-庙", "scene-1"]]));
+    assert.deepEqual(op.shots[0].dialogues, [{ speaker: "陈九", text: "这雨怕是要下一夜。" }]);
+    assert.equal(op.shots[0].source_scene_id, "scene-1", "镜头须显式归属剧本场次，否则后端整批拒绝");
+    assert.equal(Object.hasOwn(op.shots[1], "dialogues"), false, "没有台词的镜头不应出现空字段");
+});
+
 test("结构性错误给出可定位的报错码", () => {
     assert.throws(() => planChapterStoryboard({ chapterId: "EP-1", scenes: [] }), /CHAPTER_STORYBOARD_EMPTY/);
     assert.throws(() => planChapterStoryboard({ chapterId: "EP-1", scenes: [{ sceneKey: "s", environmentId: "", beats: [] }] }), /CHAPTER_STORYBOARD_ENVIRONMENT/);

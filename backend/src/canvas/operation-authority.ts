@@ -135,7 +135,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
             protectFormal(previous, segment);
             if (previous.productionClipProjection) {
                 segment.productionClipProjection = structuredClone(previous.productionClipProjection);
-                for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled"]) if (!Object.hasOwn(segment, field) && Object.hasOwn(previous, field)) segment[field] = structuredClone(previous[field]);
+                for (const field of ["prompt", "referenceBindings", "directorEngine", "directorSourceHash", "h3CharacterGroups", "storyboardShots", "tailFrameContinuation", "motionContextEnabled", "audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes", "voiceOverrides"]) if (!Object.hasOwn(segment, field) && Object.hasOwn(previous, field)) segment[field] = structuredClone(previous[field]);
             }
             checkPatch(previous, segment, undefined, H3_RUNTIME_SEGMENT_FIELDS);
             // 重排/完整替换可以省略只读字段，必须按稳定 ID 从后台继承，不能丢掉结果。

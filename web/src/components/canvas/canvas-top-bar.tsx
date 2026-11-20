@@ -1,5 +1,5 @@
 import { useCanvasHost, useCanvasRoute, useCanvasTransientEscape } from "@/lib/canvas/canvas-host";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArchiveRestore, Clapperboard, MessagesSquare, Download, Home, Images, LoaderCircle, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload, UsersRound } from "lucide-react";
 import { Button, Dropdown, Popover, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
@@ -18,6 +18,7 @@ import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
 import { CanvasNodeFinder } from "@/components/canvas/canvas-node-finder";
 import { markProductionEntry } from "@/lib/production-navigation";
+import { earliestActiveCreatedAt, useCanvasTaskTiming, useElapsedSeconds } from "@/hooks/use-running-task-count";
 
 export function CanvasTopBar({
     projectId,
@@ -166,6 +167,7 @@ export function CanvasTopBar({
                             <button type="button" className="flex h-8 items-center gap-2 rounded px-2 text-xs hover:bg-black/5 dark:hover:bg-white/10" onClick={() => { setToolsOpen(false); setRecoveryDialog("drafts"); }}><ArchiveRestore className="size-3.5" />{t("canvasRecovery.localDrafts")}</button>
                         </div>
                         <UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>}><button type="button" className="grid size-8 place-items-center" aria-label={t("productionCanvas.tools")}><Menu className="size-4" /></button></Popover>}
+                    <CanvasTotalTimer projectId={projectId} />
                     <CanvasTaskCenterButton projectId={projectId} dramaId={productionDramaId} />
                 </div>
             </div>
@@ -173,6 +175,28 @@ export function CanvasTopBar({
             <CanvasDraftsDialog open={recoveryDialog === "drafts"} onClose={() => setRecoveryDialog(null)} />
             <CanvasShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
         </>
+    );
+}
+
+/** 画布总计时：仅当前 projectId 有活跃任务时显示，按最早活跃任务创建时间起算。 */
+function CanvasTotalTimer({ projectId }: { projectId: string }) {
+    const { t } = useTranslation();
+    const colorTheme = useThemeStore((state) => state.theme);
+    const theme = canvasThemes[colorTheme];
+    const { active } = useCanvasTaskTiming(projectId);
+    const anchor = useMemo(() => earliestActiveCreatedAt(active), [active]);
+    const seconds = useElapsedSeconds(anchor, active.size > 0 && Boolean(anchor));
+    if (!active.size || !anchor) return null;
+    return (
+        <span
+            data-canvas-total-timer
+            className="flex h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2 text-xs font-medium"
+            style={{ background: theme.toolbar.panel, color: theme.node.text }}
+            title={t("canvas.task.totalElapsed")}
+        >
+            <LoaderCircle aria-hidden="true" className="size-3.5 animate-spin" />
+            {t("canvas.task.totalElapsed")} {seconds}s
+        </span>
     );
 }
 

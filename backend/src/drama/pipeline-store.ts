@@ -102,6 +102,24 @@ export class PipelineStore {
         return this.db.prepare("SELECT * FROM drama_pipelines ORDER BY updated_at DESC").all() as PipelineRow[];
     }
 
+    // ── 闸门放行记录（持久化；重启后恢复） ──────────────────────────────
+    /** kind='approve' → target=episodeId；kind='release' → target=媒体 target。幂等。 */
+    addApproval(dramaId: string, kind: "approve" | "release", target: string): void {
+        this.db.prepare("INSERT OR IGNORE INTO drama_pipeline_approvals(drama_id,kind,target,created_at) VALUES(?,?,?,?)")
+            .run(dramaId, kind, target, new Date().toISOString());
+    }
+
+    /** 读回某剧目某类闸门的全部放行目标（持久化真值，供 status/重启恢复用）。 */
+    approvalTargets(dramaId: string, kind: "approve" | "release"): string[] {
+        const rows = this.db.prepare("SELECT target FROM drama_pipeline_approvals WHERE drama_id=? AND kind=? ORDER BY created_at ASC").all(dramaId, kind) as Array<{ target: string }>;
+        return rows.map(row => row.target);
+    }
+
+    /** 供自恢复用：某剧目是否已持久化了某条放行。 */
+    hasApproval(dramaId: string, kind: "approve" | "release", target: string): boolean {
+        return Boolean(this.db.prepare("SELECT 1 FROM drama_pipeline_approvals WHERE drama_id=? AND kind=? AND target=?").get(dramaId, kind, target));
+    }
+
     // ── jobs ─────────────────────────────────────────────────────────────
     /** 幂等入队：dedupe_key 已存在则跳过，返回是否新建。 */
     enqueue(input: {
@@ -175,6 +193,21 @@ export class PipelineStore {
 
     jobPayload(job: JobRow): Record<string, unknown> {
         return parseJson(job.payload_json, {}) as Record<string, unknown>;
+    }
+
+    /** C6：依赖未就绪时把作业退回 queued 且回退 attempt（不消耗重试次数），等上游就绪后下一轮重排。 */
+    deferDependency(id: string): void {
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', attempt=MAX(0,attempt-1), error=NULL, updated_at=? WHERE id=?")
+            .run(new Date().toISOString(), id);
+    }
+
+    /** 幂等写 job 的恢复点（如 render 已合成成片的 storageKey）；重放时复用，避免二次提交 provider task。 */
+    setJobRecovery(id: string, patch: Record<string, unknown>): void {
+        const job = this.job(id);
+        if (!job) return;
+        const payload = { ...this.jobPayload(job), ...patch };
+        this.db.prepare("UPDATE drama_pipeline_jobs SET payload_json=?, updated_at=? WHERE id=?")
+            .run(JSON.stringify(payload), new Date().toISOString(), id);
     }
 
     // ── events（日志） ────────────────────────────────────────────────────

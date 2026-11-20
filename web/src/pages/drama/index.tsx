@@ -21,6 +21,7 @@ import { NewDramaFooter, NewDramaWizard, NEW_DRAMA_STEPS, newDramaStepValid } fr
 import { clearNewDramaDraft, newDramaDraftHasContent, readNewDramaDraft, writeNewDramaDraft } from "./new-drama-draft";
 import { planningPrompt, stashPlanningHandoff } from "./planning-director-launch";
 import { TOPIC_DEFAULTS } from "./planning-topic-logic";
+import { confirmDeleteDrama } from "./confirm-delete-drama";
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
@@ -140,8 +141,10 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
             if (!folder) throw new Error("新剧目已创建，但读取不到本地剧目信息");
             const saved = await upsertBackendCanvasFolder(folder as unknown as Record<string, unknown>);
             if (saved.folder) useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === creation!.folderId ? saved.folder as unknown as CanvasFolder : item) }));
+            // 共享资产画布是新制作台资产库的真值容器：无论有没有风格图都必须建（styleMode=none 也要），
+            // ensure 幂等（已绑定直接返回），保证从原文新建的剧目天然具备共享资产画布。
+            const { project } = await ensureSharedAssetCanvas(creation.folderId);
             if (creation.imageNodeId) {
-                const { project } = await ensureSharedAssetCanvas(creation.folderId);
                 const image = creation.image;
                 const node = creation.mode === "prompt"
                     ? { type: "add_node", id: creation.imageNodeId, nodeType: "config", title: t("drama.createProjectStyleNode"), position: { x: 0, y: 0 }, width: 360, height: 260, metadata: { smart: true, generationMode: "image", prompt: creation.prompt, composerContent: creation.prompt, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, status: "idle", generationType: "generation", count: 1, styleMother: true } }
@@ -330,7 +333,7 @@ function DramaCard({ folder, episodes, onOpen, t }: { folder: CanvasFolder; epis
             <div className="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
                 <span>{episodes ? t("drama.boundCanvasCount", { count: boundCanvases }) : t("projects.episodesUnavailable")}</span>
                 <span className="flex items-center gap-3">
-                    <button type="button" className="text-red-500 hover:text-red-600" onClick={(event) => { event.stopPropagation(); modal.confirm({ title: t("drama.deleteProject"), content: t("drama.deleteProjectDescription", { name: folder.name }), okText: t("drama.deleteProjectConfirm"), okType: "danger", cancelText: t("common.cancel"), onOk: async () => { try { await deleteDramaProject(folder.id); message.success(t("drama.deleted")); } catch (error) { message.error(String(error)); } } }); }}> <Trash2 className="inline size-3.5" /> {t("drama.deleteProject")}</button>
+                    <button type="button" className="text-red-500 hover:text-red-600" onClick={(event) => { event.stopPropagation(); void confirmDeleteDrama({ modal, message, t, drama: folder, onDelete: (options) => deleteDramaProject(folder.id, options) }); }}> <Trash2 className="inline size-3.5" /> {t("drama.deleteProject")}</button>
                     <span>{t("drama.enterProject")}</span>
                 </span>
             </div>

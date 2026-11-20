@@ -16,6 +16,26 @@ type ChannelModel = {
   name: string;
   capability?: "image" | "video" | "text" | "audio";
   hidden?: boolean;
+  /**
+   * 单段最多提交的参考音频数（影策 video.references.maxAudios → profile.MaxAudios）。
+   * 由模型登记/引擎能力导入写入真实值；缺省时执行链按 H3 原生 3 槽位回落。
+   */
+  maxAudios?: number;
+  /**
+   * 视频能力（影策 DramaModelOption 同名）：缺省 = 未知/不限制，不臆造默认值。
+   * normalizeConfig 的 `{ ...model }` 原样透传，这里只作类型登记。
+   */
+  videoRatios?: string[];
+  videoResolutions?: string[];
+  generateAudio?: boolean;
+  tailFrameChain?: boolean;
+  maxVideoSeconds?: number;
+  /**
+   * 模型级提示词字数硬上限（影策 VideoReferenceConfig.PromptMaxChars，码点/RuneCount）。
+   * 本地引擎/工作流实测未上报该值，只能由设置页显式登记；缺省 = 不限制，不臆造默认值。
+   * normalizeConfig 的 `{ ...model }` 原样透传，这里只作类型登记。
+   */
+  promptMaxChars?: number;
 } & Record<string, unknown>;
 
 type ModelChannel = {

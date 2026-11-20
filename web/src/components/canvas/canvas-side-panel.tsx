@@ -1,6 +1,6 @@
 import type { SharedAssetSource } from "@basketikun/canvas-agent/shared-asset-reference";
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { App, Drawer, Empty, Input, Popconfirm, Select, Spin, Tag, type InputRef } from "antd";
+import { App, Drawer, Empty, Input, Popconfirm, Select, Spin, type InputRef } from "antd";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { BookOpen, Check, ChevronRight, Clapperboard, Download, Eye, FileText, Image as ImageIcon, LayoutGrid, Rows3, ListChecks, ListRestart, MapPinned, Music2, Package, Plus, Search, Settings2, Sparkles, Square, Trash2, Type, User, Video, type LucideIcon } from "lucide-react";
@@ -15,7 +15,7 @@ import { getNodeDefinition, useNodeRegistryVersion } from "@/lib/canvas/node-reg
 import { cn } from "@/lib/utils";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { CustomPromptDialog } from "@/components/prompts/custom-prompt-dialog";
-import { fetchBackendCanvasDrama } from "@/services/backend-api";
+import { fetchBackendCanvasDrama, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
 import { fetchSourcePrompts, isCustomPrompt, withCustomPromptMeta, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { ensureImagePreview, getImagePreviewRevision, isImageFile, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
@@ -31,6 +31,7 @@ import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import type { InsertAssetPayload } from "./asset-picker-modal";
 import { ONLINE_CATALOG_KINDS } from "@/lib/canvas/online-catalog";
 import { OnlineCostumes } from "./online-costumes";
+import { formatDurationMs, nodeActiveCreatedAt, nodeLastLogDurationMs, useCanvasTaskTiming, useElapsedSeconds } from "@/hooks/use-running-task-count";
 
 const subscribeCompactCanvas = (notify: () => void) => {
     const query = window.matchMedia("(max-width: 767px)");
@@ -131,7 +132,7 @@ export const CanvasSidePanel = memo(function CanvasSidePanel({ projectId, nodes,
                 </div>
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
-                        <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={focusFromDirectory} onPreviewNode={onPreviewNode} onNodeContextMenu={onNodeContextMenu} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
+                        <CanvasNodesTab projectId={projectId} nodes={nodes} selectedNodeIds={selectedNodeIds} onSelectionChange={onSelectionChange} onFocusNode={focusFromDirectory} onPreviewNode={onPreviewNode} onNodeContextMenu={onNodeContextMenu} theme={theme} focusSearchRequest={nodeSearchFocusRequest} />
                     ) : tab === "assets" ? (
                         <CanvasAssetsTab projectId={projectId} onInsert={insertFromDirectory} theme={theme} />
                     ) : (
@@ -198,9 +199,10 @@ function imageCoverForNode(node: CanvasNodeData) {
     return undefined;
 }
 
-const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, onNodeContextMenu, theme, focusSearchRequest }: { nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; onNodeContextMenu: Props["onNodeContextMenu"]; theme: CanvasTheme; focusSearchRequest: number }) {
+const CanvasNodesTab = memo(function CanvasNodesTab({ projectId, nodes, selectedNodeIds, onSelectionChange, onFocusNode, onPreviewNode, onNodeContextMenu, theme, focusSearchRequest }: { projectId: string; nodes: CanvasNodeData[]; selectedNodeIds: Set<string>; onSelectionChange: (ids: Set<string>) => void; onFocusNode: (nodeId: string) => void; onPreviewNode: (nodeId: string) => void; onNodeContextMenu: Props["onNodeContextMenu"]; theme: CanvasTheme; focusSearchRequest: number }) {
     const { message } = App.useApp();
     const { t } = useTranslation();
+    const { active: activeTasks, logs } = useCanvasTaskTiming(projectId);
     const registryVersion = useNodeRegistryVersion((state) => state.version);
     const [keyword, setKeyword] = useState("");
     const [typeFilter, setTypeFilter] = useState<string>("all");
@@ -358,6 +360,7 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
                                             <span className="block truncate text-xs leading-snug opacity-50">{nodePreviewText(node)}</span>
                                         </span>
                                         {node.metadata?.status && node.metadata.status !== "idle" ? <span className="size-1.5 shrink-0 rounded-full" style={{ background: STATUS_COLOR[node.metadata.status] || "transparent" }} /> : null}
+                                        <NodeDurationText nodeId={node.id} activeTasks={activeTasks} logs={logs} />
                                     </button>
                                     {selectMode || !isImage ? null : (
                                         <div className="flex shrink-0 flex-col items-center gap-0.5 pr-1.5">
@@ -395,6 +398,21 @@ const CanvasNodesTab = memo(function CanvasNodesTab({ nodes, selectedNodeIds, on
         </div>
     );
 });
+
+/** 本次耗时：活跃任务按 createdAt 秒级跳动；终态直接读最近生成日志的 duration_ms，格式对齐生成日志弹窗。 */
+function NodeDurationText({ nodeId, activeTasks, logs }: { nodeId: string; activeTasks: Map<string, BackendRuntimeTask>; logs: BackendGenerationLog[] }) {
+    const { t } = useTranslation();
+    const anchor = useMemo(() => nodeActiveCreatedAt(activeTasks, nodeId), [activeTasks, nodeId]);
+    const seconds = useElapsedSeconds(anchor, Boolean(anchor));
+    const terminalMs = useMemo(() => nodeLastLogDurationMs(logs, nodeId), [logs, nodeId]);
+    const text = anchor ? `${seconds}s` : terminalMs === undefined ? null : formatDurationMs(terminalMs);
+    if (!text) return null;
+    return (
+        <span data-canvas-row-duration={nodeId} className="shrink-0 whitespace-nowrap text-[11px] tabular-nums opacity-55" title={t("canvas.task.elapsed")}>
+            {t("canvas.task.elapsed")} {text}
+        </span>
+    );
+}
 
 function CanvasNodeCover({ node }: { node: CanvasNodeData }) {
     const [url, setUrl] = useState("");
@@ -499,7 +517,6 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
     const removeAsset = useAssetStore((state) => state.removeAsset);
     const [keyword, setKeyword] = useState("");
     const [assetSection, setAssetSection] = useState<"mine" | "online">("mine");
-    const [tagFilter, setTagFilter] = useState<string>("all");
     const [dramaFilter, setDramaFilter] = useState(ALL_ASSET_DRAMAS);
     // 默认全折叠，避免打开侧栏时被一堆自动展开的内容刷屏；用户手动展开过的会写入 setCollapsed 记录下来
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>(() => Object.fromEntries(ASSET_GROUPS.map((group) => [group.kind, true])));
@@ -524,12 +541,10 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
 
     useEffect(() => {
         setDramaFilter(ALL_ASSET_DRAMAS);
-        setTagFilter("all");
     }, [projectId]);
     useEffect(() => {
         if (dramaQuery.isSuccess) {
             setDramaFilter(dramaQuery.data.episode?.dramaId || dramaQuery.data.drama?.id || ALL_ASSET_DRAMAS);
-            setTagFilter("all");
         }
     }, [dramaQuery.data?.drama?.id, dramaQuery.data?.episode?.dramaId, dramaQuery.isSuccess]);
 
@@ -539,12 +554,10 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
         return asset.dramaId === dramaFilter;
     })), [assets, dramaFilter, dramaIds]);
 
-    const allTags = useMemo(() => Array.from(new Set(scopedAssets.flatMap((asset) => asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || []))).slice(0, 20), [scopedAssets]);
-
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
-        return scopedAssets.filter((asset) => (tagFilter === "all" || (asset.kind !== "character" && asset.kind !== "scene" && asset.kind !== "prop" && (asset.tags || []).includes(tagFilter))) && (!query || [asset.title, ...(asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? [] : asset.tags || [])].join(" ").toLowerCase().includes(query)));
-    }, [keyword, scopedAssets, tagFilter]);
+        return query ? scopedAssets.filter((asset) => asset.title.toLowerCase().includes(query)) : scopedAssets;
+    }, [keyword, scopedAssets]);
 
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
 
@@ -618,21 +631,9 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ projectId, onInsert, the
                             value={dramaFilter}
                             options={dramaOptions}
                             loading={dramaQuery.isLoading}
-                            onChange={(value) => { setDramaFilter(value); setTagFilter("all"); }}
+                            onChange={(value) => setDramaFilter(value)}
                         />
                     </div>
-                    {allTags.length ? (
-                        <div className="flex flex-wrap gap-1.5 px-3 pb-2">
-                            <Tag.CheckableTag checked={tagFilter === "all"} className={cn("prompt-filter-tag", tagFilter === "all" && "is-active")} onChange={() => setTagFilter("all")}>
-                                {t("common.all")}
-                            </Tag.CheckableTag>
-                            {allTags.map((tag) => (
-                                <Tag.CheckableTag key={tag} checked={tagFilter === tag} className={cn("prompt-filter-tag", tagFilter === tag && "is-active")} onChange={() => setTagFilter((prev) => (prev === tag ? "all" : tag))}>
-                                    {tag}
-                                </Tag.CheckableTag>
-                            ))}
-                        </div>
-                    ) : null}
                     {groups.length ? (
                         <div className="space-y-1">
                             {groups.map((group) => {

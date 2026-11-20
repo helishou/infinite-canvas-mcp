@@ -18,6 +18,21 @@ const DIALOGUE_PATTERN = /<d>(?:\[[^\]]+\])?[\s\S]*?<\/d>/g;
 const SPEAKER_PATTERN = /\((S\d+)\)/gi;
 const SPEAKER_OPTIONS = ["S1", "S2", "S3", "S4", "S5", "S6"];
 const PROMPT_LINE_ACCENTS = ["#38bdf8", "#34d399", "#c084fc", "#fbbf24", "#fb7185", "#2dd4bf", "#a3e635", "#818cf8"];
+/** 引用芯片荧光色板：按稳定身份轮换，连线重排不会把颜色串到别的参考上。 */
+const REFERENCE_HIGHLIGHT_COLORS = ["#22d3ee", "#a78bfa", "#34d399", "#fbbf24", "#fb7185", "#38bdf8", "#f472b6", "#4ade80"];
+
+/**
+ * kind 优先，再对稳定身份串取 hash；刻意不使用数组下标（连线一重排颜色就会漂移）。
+ * 调用方可通过 color 覆盖；组件内派生用 label / token 这类不随数组顺序变化的字符串。
+ */
+function referenceHighlightColor(reference: Pick<CanvasTextReference, "kind" | "label" | "tokens" | "title" | "color">) {
+    if (reference.color) return reference.color;
+    const identity = reference.label || reference.tokens?.[0] || reference.title || "";
+    const key = `${reference.kind || "ref"}:${identity}`;
+    let hash = 0;
+    for (let index = 0; index < key.length; index += 1) hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+    return REFERENCE_HIGHLIGHT_COLORS[hash % REFERENCE_HIGHLIGHT_COLORS.length];
+}
 
 function detectDialogueLanguage(text: string) {
     return /[\u4e00-\u9fff]/.test(text) ? "Chinese" : "English";
@@ -387,6 +402,10 @@ class ReferenceChip extends WidgetType {
             return span;
         }
         span.className = `cm-canvas-reference${this.reference.kind === "character" ? " cm-canvas-reference-character" : ""}`;
+        const accent = referenceHighlightColor(this.reference);
+        span.style.backgroundColor = `color-mix(in srgb, ${accent} 22%, transparent)`;
+        span.style.border = `1px solid color-mix(in srgb, ${accent} 62%, transparent)`;
+        span.style.boxShadow = `0 0 6px color-mix(in srgb, ${accent} 38%, transparent)`;
         span.title = this.reference.title || this.reference.label;
         if (this.reference.previewUrl && (this.reference.kind === "image" || this.reference.kind === "character")) {
             const img = document.createElement("img");
@@ -426,6 +445,10 @@ class UnresolvedReferenceChip extends WidgetType {
         const kind = match?.[1].toLowerCase() === "subject" ? "主体" : match ? "图片/视频/音频" : "引用";
         const id = match ? `${match[1]} ${match[2]}` : this.token;
         span.className = "cm-canvas-reference cm-canvas-reference-error";
+        const accent = referenceHighlightColor({ kind: "unresolved", label: this.token });
+        span.style.backgroundColor = `color-mix(in srgb, ${accent} 20%, transparent)`;
+        span.style.border = `1px solid color-mix(in srgb, ${accent} 78%, transparent)`;
+        span.style.boxShadow = `0 0 6px color-mix(in srgb, ${accent} 42%, transparent)`;
         span.title = `未找到对应的${kind}引用（${id}），点击后从当前 Clip 引用中重新选择，或删除此标记`;
         span.setAttribute("aria-label", span.title);
         span.setAttribute("role", "button");
@@ -530,6 +553,20 @@ function mentionExtensions(references: CanvasTextReference[], chips: boolean, cl
                 label: item.label, detail: item.title, apply: item.insert || item.label,
             })) };
         }] }),
+        EditorView.domEventHandlers({
+            compositionend: (_event, view) => {
+                // 组字期守卫（matchBefore / decorations 的 composing 判断）确保不在 composing 时替换文本；
+                // 中文输入法结束时延迟一帧重跑补全，让 '@中文' 打完就能出候选（借鉴 agent 输入框的 onCompositionEnd）。
+                requestAnimationFrame(() => {
+                    if (!view.dom.isConnected) return;
+                    const head = view.state.selection.main.head;
+                    const before = view.state.doc.sliceString(Math.max(0, head - 128), head);
+                    if (!/@[^\s@]*$/u.test(before)) return;
+                    startCompletion(view);
+                });
+                return false;
+            },
+        }),
         Prec.highest(keymap.of([
             ...completionKeymap,
             { key: "Backspace", run: (view) => chips && removeAdjacentReference(view, [...tokens, ...unresolvedTokens(view.state.doc.toString())], "backward") },

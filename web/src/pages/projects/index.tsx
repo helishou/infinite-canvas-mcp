@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, App, Button, Input } from "antd";
 import { Download, FileUp, LayoutGrid, Plus, Search } from "lucide-react";
@@ -36,6 +36,14 @@ export default function ProjectsPage() {
     const searchQuery = searchParams.get("q") || "";
     const showCanvases = directoryType !== "drama";
     const changeSearch = (q: string) => navigate(updateProjectDirectoryLocation(location, { q }), { replace: true });
+    // 搜索框的值直接绑定 URL 查询参数时，输入法组字的每一次 update 都会 navigate，
+    // 回灌成已提交的明文拼音（候选还没选就被写进输入框）。组字期间只更新本地草稿，
+    // 到 compositionend 再把最终选中的文字同步到 URL。
+    const [searchDraft, setSearchDraft] = useState(searchQuery);
+    const searchComposingRef = useRef(false);
+    useEffect(() => {
+        if (!searchComposingRef.current) setSearchDraft(searchQuery);
+    }, [searchQuery]);
     const inputRef = useRef<HTMLInputElement>(null);
     const autoOpenRef = useRef(false);
     const hydrated = useCanvasStore((state) => state.hydrated);
@@ -119,12 +127,19 @@ export default function ProjectsPage() {
                 width="gallery"
                 title={t(`projects.directoryTitles.${directoryType}`)}
                 description={t("projects.description")}
-                actions={<Input className="!w-full sm:!w-80" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("projects.search")} placeholder={t("projects.search")} value={searchQuery} onChange={event => changeSearch(event.target.value)} />}
+                actions={<Input className="!w-full sm:!w-80" allowClear prefix={<Search className="size-4 text-muted-foreground" />} aria-label={t("projects.search")} placeholder={t("projects.search")} value={searchDraft} onChange={event => {
+                    setSearchDraft(event.target.value);
+                    if (!searchComposingRef.current) changeSearch(event.target.value);
+                }} onCompositionStart={() => { searchComposingRef.current = true; }} onCompositionEnd={event => {
+                    searchComposingRef.current = false;
+                    setSearchDraft(event.currentTarget.value);
+                    changeSearch(event.currentTarget.value);
+                }} />}
             />
             <div className="flex min-h-0 w-full flex-1">
                 <div className="min-w-0 flex-1 overflow-y-auto">
                     <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
-                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} headingHidden={directoryType === "drama"} openInStudio />}
+                        {directoryType !== "canvas" && <DramaPage searchQuery={searchQuery} compactEmpty={directoryType === "all"} headingHidden={directoryType === "drama"} />}
                         {showCanvases && <>
                         <PageSectionHeader
                             title={t("projects.canvas")}

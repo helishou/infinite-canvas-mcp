@@ -28,8 +28,9 @@ export function H3Runner({ ctx }: { ctx: CanvasNodeContext }) {
                 if (["awaiting_confirmation", "succeeded", "failed", "cancelled"].includes(parent.status)) return;
                 const result = (parent.result || {}) as Record<string, unknown>;
                 const childId = String(result.currentChildTaskId || "");
-                const childKind = String(result.currentChildKind || "");
-                if (childId && childKind !== "canvas-video") {
+                // 引擎执行的 Clip 也是 canvas-video 子任务，同样带实时预览帧。
+                // 旧代码用 childKind !== "canvas-video" 把它们整个排除，H3 生成态永远没有画面。
+                if (childId) {
                     const child = await ctx.ai.getLocalH3Task(childId);
                     if (!stopped && child.preview?.dataUrl && typeof window !== "undefined") {
                         window.dispatchEvent(new CustomEvent("minimax-h3-preview", { detail: { parentTaskId: taskId, sourceTaskId: childId, url: child.preview.dataUrl, mime: child.preview.mime, promptId: child.preview.promptId, step: child.preview.step, total: child.preview.total } }));

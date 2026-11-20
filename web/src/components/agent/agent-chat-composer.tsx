@@ -83,7 +83,11 @@ export function AgentChatComposer({
                     <div className="thin-scrollbar mb-2 flex gap-2 overflow-x-auto pb-1">
                         {attachments.map((item) => (
                             <div key={item.id} className="group relative size-14 shrink-0 overflow-hidden rounded-xl border" style={{ borderColor: theme.node.stroke }} title={item.name}>
-                                <img src={item.url} alt={item.name} className="size-full object-cover" />
+                                {item.type?.startsWith("video/") ? (
+                                    <video src={item.url} muted preload="metadata" playsInline className="size-full object-cover" aria-label={item.name} />
+                                ) : (
+                                    <img src={item.url} alt={item.name} className="size-full object-cover" />
+                                )}
                                 {onRemoveAttachment ? (
                                     <button type="button" className="absolute right-1 top-1 grid size-5 place-items-center rounded-full border opacity-0 shadow-sm transition group-hover:opacity-100" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke, color: theme.node.text }} onClick={() => onRemoveAttachment(item.id)} aria-label={t("agent.composer.removeImage")}>
                                         <X className="size-3" />
@@ -98,7 +102,7 @@ export function AgentChatComposer({
                     <div className="flex min-w-0 items-center gap-1">
                         {onAddFiles ? (
                             <>
-                                <input ref={fileInputRef} hidden type="file" accept="image/*" multiple onChange={(event) => {
+                                <input ref={fileInputRef} hidden type="file" accept="image/*,video/*" multiple onChange={(event) => {
                                     void onAddFiles(event.target.files);
                                     event.target.value = "";
                                 }} />

@@ -13,6 +13,9 @@ import { z } from "zod";
 import { productionToolPreflight } from "@basketikun/canvas-agent/drama/production-contract";
 import { productionWriteReceipt, productionWorkspaceRequest, productionWorkspaceToolNames, validateProductionContractQuery, assertProductionSourceFields, canonicalProduction } from "@basketikun/canvas-agent/drama/production-contract";
 import crypto from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { probeMedia } from "./engine-contract/media-tools.js";
 import {
   executeCollaborationTool,
   isCollaborationTool,
@@ -1526,6 +1529,97 @@ function registerBackendCanvasTools(
     },
   );
 
+  // 导入本机视频到智能视频节点：普通 video 节点只保留为旧数据，不再由 MCP 创建。
+  server.registerTool(
+    "canvas_import_local_videos",
+    {
+      description:
+        "把本机视频文件导入当前活动画布，创建 config 类型的智能视频节点（smart=true、generationMode=video），视频保存在节点 metadata 顶层结果槽（content/storageKey/mimeType/bytes/naturalWidth/naturalHeight/durationMs），可继续作为视频编辑的源视频参考。不会创建普通 video 节点。省略 projectId 时使用本 MCP 会话当前画布（或唯一画布）；附件已在本机时直接传它的绝对路径，不必再次转存。",
+      inputSchema: z.object({
+        projectId: z.string().optional().describe("可选：明确指定目标画布；省略时使用当前活动画布"),
+        items: z.array(z.union([
+          z.string().min(1).describe("本地视频绝对路径"),
+          z.object({ filePath: z.string().min(1), title: z.string().optional() }),
+        ])).min(1).max(64).describe("按顺序导入的本地视频，支持 mp4/mov/webm/mkv/avi 等"),
+        x: z.number().optional().describe("首个节点的画布 X；省略时自动放置"),
+        y: z.number().optional().describe("首个节点的画布 Y；省略时自动放置"),
+        width: z.number().positive().optional().describe("显示宽度；省略时使用默认宽度 400"),
+        gap: z.number().min(0).optional().describe("节点间距，默认 48"),
+        columns: z.number().int().min(1).max(12).optional().describe("排列列数，默认 2"),
+        titlePrefix: z.string().optional().describe("标题前缀"),
+        docType: z.string().optional().describe("写入 metadata.docType"),
+      }),
+    },
+    async (rawInput: Record<string, unknown>) => {
+      const target = await resolveMcpProjectIdWithUniqueFallback(config, state, rawInput.projectId, getBrowserActiveProjectId);
+      if (!target.projectId) throw new Error("当前会话没有活动画布；请先在 Canvas 选择目标画布，再重试");
+      const project = await fetchCurrentCanvasProject(config, target.projectId);
+      const sources = normalizeVideoImportSources(rawInput.items);
+      const gap = Math.max(0, Number(rawInput.gap ?? 48));
+      const columns = Math.max(1, Math.min(12, Number(rawInput.columns ?? 2)));
+      const requestedWidth = Number(rawInput.width) > 0 ? Number(rawInput.width) : 0;
+      const titlePrefix = String(rawInput.titlePrefix || "").trim();
+      const docType = String(rawInput.docType || "").trim();
+      const firstPosition = recordOf(nodesOf(project)[0]?.position);
+      const baseX = rawInput.x === undefined ? (nodesOf(project)[0] ? Number(firstPosition.x || 0) + 560 : 120) : Number(rawInput.x);
+      const baseY = rawInput.y === undefined ? (nodesOf(project)[0] ? Number(firstPosition.y || 0) : 120) : Number(rawInput.y);
+      const operations: Array<Record<string, unknown>> = [];
+      const created: Array<Record<string, unknown>> = [];
+      const failed: Array<Record<string, unknown>> = [];
+
+      for (const [index, source] of sources.entries()) {
+        try {
+          const prepared = await readImportableVideo(source);
+          // ffprobe 不可用或探测失败时返回 null，媒体仍照常落库，不强依赖。
+          const probe = await probeMedia(prepared.filePath);
+          const naturalWidth = Number(probe?.width) > 0 ? Number(probe?.width) : null;
+          const naturalHeight = Number(probe?.height) > 0 ? Number(probe?.height) : null;
+          const durationMs = Number(probe?.durationMs) > 0 ? Number(probe?.durationMs) : null;
+          const media = await uploadMediaBinary(config, prepared.data, {
+            name: prepared.name,
+            mimeType: prepared.mimeType,
+            category: "library",
+            width: naturalWidth,
+            height: naturalHeight,
+          });
+          const width = requestedWidth || 400;
+          const height = naturalWidth && naturalHeight
+            ? Math.max(1, Math.round(width * naturalHeight / naturalWidth))
+            : Math.round(width * 9 / 16);
+          const column = index % columns;
+          const row = Math.floor(index / columns);
+          const id = "config-video-" + crypto.randomUUID();
+          const title = source.title || (titlePrefix ? `${titlePrefix} · ${prepared.name}` : prepared.name);
+          const position = { x: baseX + column * (width + gap), y: baseY + row * (height + gap) };
+          const metadata: Record<string, unknown> = {
+            smart: true,
+            generationMode: "video",
+            prompt: "",
+            status: "success",
+            content: media.url,
+            storageKey: media.storageKey,
+            mimeType: prepared.mimeType,
+            bytes: media.bytes,
+            naturalWidth,
+            naturalHeight,
+            ...(durationMs ? { durationMs } : {}),
+            importSource: { kind: "local-file", fileName: prepared.name, importedAt: new Date().toISOString() },
+            ...(docType ? { docType } : {}),
+          };
+          operations.push({ type: "add_node", nodeType: "config", id, title, position, width, height, metadata });
+          created.push({ id, title, nodeType: "config", smart: true, generationMode: "video", storageKey: media.storageKey, url: media.url, bytes: media.bytes, mimeType: prepared.mimeType, naturalWidth, naturalHeight, ...(durationMs ? { durationMs } : {}), position });
+        } catch (error) {
+          failed.push({ fileName: source.filePath.split(/[\\/]/).pop(), error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (!operations.length) throw new Error(`没有可导入的视频：${failed.map(item => `${item.fileName}（${item.error}）`).join("；")}`);
+      const applied = await applyBackendCanvasOperations(config, project.id, Number(project.revision || 0), operations, state.clientId);
+      const result = { ok: true, projectId: project.id, projectTitle: project.title, requested: sources.length, count: created.length, created, ...(failed.length ? { failed } : {}), revision: applied.revision };
+      enforceToolOutputLimit("canvas_import_local_videos", result);
+      return textResult(result);
+    },
+  );
+
   // ── H3 节点历史运行产物（按需取，替代 metadata.materials 字段）──
   server.registerTool(
     "h3_get_node_materials",
@@ -1973,14 +2067,14 @@ function registerBackendCanvasTools(
     "drama_delete_project",
     {
       description:
-        "删除短剧制作台中的剧目及其分集、共享资产和场景画布；如剧目下还有自由画布，请将其 ID 一并传入。",
-      inputSchema: z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).shape,
+        "删除短剧制作台中的剧目及其分集、共享资产和场景画布；如剧目下还有自由画布，请将其 ID 一并传入。deleteAssets=true 时连同该剧目的资产库条目一起删除，默认保留（归属回落「未归属」）。",
+      inputSchema: z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional(), deleteAssets: z.boolean().optional() }).shape,
     },
     async (rawInput: Record<string, unknown>) => {
-      const input = z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional() }).parse(rawInput);
-      const result = await backendApi.delete<{ ok: boolean; deleted?: number }>(
+      const input = z.object({ id: z.string().trim().min(1), freeCanvasIds: z.array(z.string().trim().min(1)).optional(), deleteAssets: z.boolean().optional() }).parse(rawInput);
+      const result = await backendApi.delete<{ ok: boolean; deleted?: number; deletedAssets?: number }>(
         `/drama/projects/${encodeURIComponent(input.id)}`,
-        { freeCanvasIds: input.freeCanvasIds || [] },
+        { freeCanvasIds: input.freeCanvasIds || [], ...(input.deleteAssets ? { deleteAssets: true } : {}) },
       );
       if (Number(result.deleted || 0) > 0 && state.activeDramaId === input.id) {
         state.activeDramaId = null;
@@ -1990,6 +2084,7 @@ function registerBackendCanvasTools(
         ok: true,
         id: input.id,
         deleted: Number(result.deleted || 0) > 0,
+        deletedAssets: Number(result.deletedAssets || 0),
       });
     },
   );
@@ -4865,6 +4960,70 @@ async function fetchMediaBuffer(
   if (!response.ok)
     throw new Error(`读取媒体失败（HTTP ${response.status}）：${storageKey}`);
   return Buffer.from(await response.arrayBuffer());
+}
+
+/** 本机视频导入：扩展名 → MIME。只接受视频，未知格式不猜。 */
+const VIDEO_MIME_BY_EXT: Record<string, string> = {
+  ".mp4": "video/mp4",
+  ".m4v": "video/x-m4v",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".avi": "video/x-msvideo",
+  ".wmv": "video/x-ms-wmv",
+  ".flv": "video/x-flv",
+  ".mpg": "video/mpeg",
+  ".mpeg": "video/mpeg",
+  ".ts": "video/mp2t",
+  ".3gp": "video/3gpp",
+  ".ogv": "video/ogg",
+};
+
+/** 视频体积上限，与 Backend /media/upload-binary 的 100mb 请求体上限一致。 */
+const MAX_IMPORT_VIDEO_BYTES = 100 * 1024 * 1024;
+
+type VideoImportSource = { filePath: string; title?: string };
+type PreparedVideoImport = { filePath: string; name: string; mimeType: string; data: Buffer; bytes: number };
+
+/** 规范化批量视频输入：接受字符串路径或 {filePath,title} 对象，去重并保序。 */
+function normalizeVideoImportSources(input: unknown): VideoImportSource[] {
+  if (!Array.isArray(input) || input.length === 0) throw new Error("items 至少传一个本地视频路径");
+  if (input.length > 64) throw new Error(`一次最多导入 64 个视频，收到 ${input.length}`);
+  const seen = new Set<string>();
+  const out: VideoImportSource[] = [];
+  for (const [index, entry] of input.entries()) {
+    const source: VideoImportSource = typeof entry === "string"
+      ? { filePath: entry }
+      : { filePath: String((entry as Record<string, unknown>)?.filePath || ""), title: String((entry as Record<string, unknown>)?.title || "") || undefined };
+    if (!source.filePath) throw new Error(`items[${index}] 缺少 filePath`);
+    const resolved = path.resolve(source.filePath);
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(source);
+  }
+  return out;
+}
+
+/** 校验并读取一个本地视频文件；不做解码，只做扩展名/体积校验。 */
+async function readImportableVideo(source: VideoImportSource): Promise<PreparedVideoImport> {
+  const filePath = path.resolve(source.filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeType = VIDEO_MIME_BY_EXT[ext];
+  if (!mimeType) throw new Error(`不支持的视频格式：${ext || "(无扩展名)"}；支持 ${Object.keys(VIDEO_MIME_BY_EXT).join(", ")}`);
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    stat = await fs.stat(filePath);
+  } catch {
+    throw new Error(`找不到文件：${filePath}`);
+  }
+  if (!stat.isFile()) throw new Error(`不是普通文件：${filePath}`);
+  if (stat.size === 0) throw new Error(`文件为空：${filePath}`);
+  if (stat.size > MAX_IMPORT_VIDEO_BYTES) {
+    throw new Error(`视频超过上限：${filePath}（${(stat.size / 1024 / 1024).toFixed(1)} MiB > ${MAX_IMPORT_VIDEO_BYTES / 1024 / 1024} MiB）`);
+  }
+  const data = await fs.readFile(filePath);
+  return { filePath, name: path.basename(filePath), mimeType, data, bytes: data.length };
 }
 
 /** 上传二进制媒体到 Backend，返回 storageKey / url / bytes。 */

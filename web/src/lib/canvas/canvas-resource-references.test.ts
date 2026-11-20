@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getMentionResourceNodes, nodeResourceItems, reorderCanvasReferenceConnections } from "./canvas-resource-references";
+import { buildCanvasGraphIndex, createMentionReferenceSelector, getFixedReferenceNodes, getMentionCandidateResourceNodes, getMentionResourceNodes, nodeResourceItems, reorderCanvasReferenceConnections } from "./canvas-resource-references";
 import { buildLoopRunInputPlan, buildLoopSourceInputs, buildNodeGenerationContext, buildNodeGenerationInputs, recordLoopGenerationOutput, type CanvasLoopRuntimeContext } from "@/components/canvas/canvas-node-generation";
 import { resolveLoopInputPlan } from "@/lib/canvas/canvas-loop-execution";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
@@ -418,4 +418,25 @@ test("智能循环逐条提示词数组优先于旧文本字段，空数组不�
     assert.equal(second[0].type === "text" ? second[0].text : "", "新提示 B");
     const empty = { ...loop, metadata: { ...loop.metadata, loopPrompts: [] } };
     assert.deepEqual(buildNodeGenerationInputs(target.id, [empty, target], connection), []);
+});
+
+test("候选专用并集：配置参考与直连参考都进 @ 候选，但旧早返回语义与生成解析不变", () => {
+    const configRef: CanvasNodeData = { id: "config-ref", type: CanvasNodeType.Config, title: "文本设定", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { smart: true, generationMode: "text", content: "人物设定" } };
+    const directImage: CanvasNodeData = { id: "direct-image", type: CanvasNodeType.Image, title: "直连参考图", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "direct.png", storageKey: "media/direct.png" } };
+    const generator: CanvasNodeData = { id: "generator", type: CanvasNodeType.Image, title: "生成器", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: "old.png" } };
+    const config: CanvasNodeData = { id: "config", type: CanvasNodeType.Config, title: "下游配置", position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { smart: true, generationMode: "image" } };
+    const nodes = [configRef, directImage, generator, config];
+    const connections = [
+        { id: "configref-config", fromNodeId: configRef.id, toNodeId: config.id },
+        { id: "direct-generator", fromNodeId: directImage.id, toNodeId: generator.id },
+        { id: "generator-config", fromNodeId: generator.id, toNodeId: config.id },
+    ];
+    // 旧逻辑：configInputs 非空即早返回，直连图从候选消失。
+    assert.deepEqual(getMentionResourceNodes(generator.id, nodes, connections).map((node) => node.id), [configRef.id]);
+    // 新候选函数：取并集、去重、不牵连自身历史输出。
+    const candidateIds = getMentionCandidateResourceNodes(generator.id, nodes, connections).map((node) => node.id);
+    assert.deepEqual(candidateIds, [configRef.id, directImage.id]);
+    assert.equal(new Set(candidateIds).size, candidateIds.length);
+    // 无外部参考时仍回退到自身资源，与旧逻辑一致。
+    assert.deepEqual(getMentionCandidateResourceNodes(generator.id, [generator], []).map((node) => node.id), [generator.id]);
 });

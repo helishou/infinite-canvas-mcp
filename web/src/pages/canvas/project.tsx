@@ -23,7 +23,7 @@ import copyToClipboard from "copy-to-clipboard";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
-import { defaultConfig, resolveModelChannel, resolveModelWorkflow, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
+import { defaultConfig, resolveModelChannel, resolveModelWorkflow, selectableModelsByCapability, useConfigStore, useEffectiveConfig, VIDEO_CONCAT_MODEL } from "@/stores/use-config-store";
 import { fetchWorkflowDetail, isWorkflowImageField } from "@/services/api/workflows";
 import { resolveBackendAgentEndpoint, resolveComfyImageSize, runVideoAudioExtractTask } from "@/services/api/comfyui";
 import { uploadImage, resolveImageUrl, isImageFile, isSvgFile, type UploadedImage } from "@/services/image-storage";
@@ -67,6 +67,7 @@ import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-pa
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import type { CanvasImageStyleTransferParams } from "@/components/canvas/canvas-node-style-transfer-dialog";
+import type { CanvasViggleEditPayload } from "@/components/canvas/canvas-viggle-edit-dialog";
 import type { CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
@@ -100,6 +101,7 @@ import { useCanvasDragFrame } from "@/pages/canvas/hooks/use-canvas-drag-frame";
 import { createMentionReferenceSelector, getFixedReferenceNodes, getGroupResourceNodes, isCanvasReferenceNode, nodeResourceItems, reorderCanvasReferenceConnections, type CanvasGraphIndex, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { useExportCanvas } from "@/hooks/use-export-canvas";
+import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, referenceUrl, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { findFreeNodePosition, placementObstacles, NODE_PLACEMENT_GAP } from "@/lib/canvas/canvas-node-placement";
 import { findGroupDropTarget, getConnectionTargetAnchor, normalizeConnection } from "@/lib/canvas/canvas-node-geometry";
@@ -132,6 +134,7 @@ import { CanvasRefreshShell } from "@/components/canvas/canvas-refresh-shell";
 import { CanvasTopBar } from "@/components/canvas/canvas-top-bar";
 import { useCanvasHost, useCanvasRoute } from "@/lib/canvas/canvas-host";
 
+import { FreeCardWorkflowPanel } from "@/components/canvas/free-card-workflow-panel";
 import {
     AssetPickerModal,
     CanvasDialogHost,
@@ -142,6 +145,7 @@ import {
     CanvasNodePromptPanel,
     CanvasNodeSplitDialog,
     CanvasNodeStyleTransferDialog,
+    CanvasViggleEditDialog,
     CanvasNodeResizeDialog,
     CanvasPluginManagerModal,
     CanvasVideoCompareModal,
@@ -244,6 +248,32 @@ async function localCanvasImageUrl(node: CanvasNodeData, image = canvasNodePrima
     if (!blob) throw new Error("Image media is unavailable");
     const url = URL.createObjectURL(blob);
     return { url, revoke: () => URL.revokeObjectURL(url) };
+}
+
+/** 视频编辑：把视频节点解析成浏览器可解码的 URL，优先使用 Backend 归档媒体。 */
+async function localCanvasVideoUrl(node: CanvasNodeData) {
+    const latest = node.metadata?.loopOutputHistory?.at(-1);
+    const storageKey = node.metadata?.storageKey || latest?.storageKey;
+    if (storageKey) {
+        const blob = await getMediaBlob(storageKey);
+        if (blob) {
+            const url = URL.createObjectURL(blob);
+            return { url, revoke: () => URL.revokeObjectURL(url) };
+        }
+    }
+    const content = node.metadata?.content || node.metadata?.url || latest?.content || latest?.url || "";
+    if (!content) return null;
+    return { url: resolveComfyMediaUrl(content), revoke: () => undefined };
+}
+
+/** 抽帧结果 Blob → data URL，供蒙版涂抹弹窗的 <img> 直接使用。 */
+function videoFrameToDataUrl(blob: Blob) {
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("Failed to read captured video frame"));
+        reader.readAsDataURL(blob);
+    });
 }
 
 async function writeCanvasClipboardBlob(blob: Promise<Blob | null>, kind: CanvasClipboardContent["kind"], mimeType: string | undefined, canvasClipboard: string) {
@@ -364,6 +394,8 @@ const NODE_STATUS_IDLE = "idle" as const;
 const NODE_STATUS_LOADING = "loading" as const;
 const NODE_STATUS_SUCCESS = "success" as const;
 const NODE_STATUS_ERROR = "error" as const;
+/** 画布 Viggle 视频编辑模型：参考图 = 编辑后的预览帧，视频输入 = 源视频。 */
+const VIDEO_EDIT_MODEL = "engine-local::Viggle 视频编辑";
 function h3DropTargetAt(clientX: number, clientY: number) {
     const directTarget = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-canvas-ref-drop-target]");
     if (directTarget) return directTarget;
@@ -588,6 +620,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, []);
     const [size, setSize] = useState({ width: 1200, height: 720 });
     const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+    const [batchDownloading, setBatchDownloading] = useState(false);
     const { publishCursor: publishRealtimeCursor, publishDrag: publishRealtimeDrag } = useCanvasRealtimePresence(projectId, selectedNodeIds);
     const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
     const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -627,6 +660,18 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
+    // 视频编辑两阶段：先抽帧 + 蒙版涂抹生成预览图，确认后用预览帧 + 源视频重生成整条视频。
+    const [videoEditNodeId, setVideoEditNodeId] = useState<string | null>(null);
+    const [videoEditFrameUrl, setVideoEditFrameUrl] = useState<string | null>(null);
+    const [videoEditMaskOpen, setVideoEditMaskOpen] = useState(false);
+    const [videoEditPrompt, setVideoEditPrompt] = useState("");
+    const [videoEditPreviewNodeId, setVideoEditPreviewNodeId] = useState<string | null>(null);
+    const [videoEditCapturing, setVideoEditCapturing] = useState(false);
+    const videoEditRevokeRef = useRef<(() => void) | null>(null);
+    // 视频编辑（Viggle Remake）：源视频 + 1–4 张参考图 + 提示词，保留动作/镜头/音轨。
+    const [viggleEditNodeId, setViggleEditNodeId] = useState<string | null>(null);
+    // 自由卡片：智能生成节点的工作流参数面板（工具栏入口）。
+    const [workflowParamsNodeId, setWorkflowParamsNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [stitchSourceNodeId, setStitchSourceNodeId] = useState<string | null>(null);
     const [styleTransferSourceNodeId, setStyleTransferSourceNodeId] = useState<string | null>(null);
@@ -1316,6 +1361,16 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
+    const videoEditNode = videoEditNodeId ? nodeById.get(videoEditNodeId) || null : null;
+    const videoEditPreviewNode = videoEditPreviewNodeId ? nodeById.get(videoEditPreviewNodeId) || null : null;
+    const videoEditPreviewImage = videoEditPreviewNode ? canvasNodePrimaryImage(videoEditPreviewNode) : null;
+    const videoEditPreviewUrl = videoEditPreviewImage ? (videoEditPreviewImage.storageKey ? backendMediaUrl(videoEditPreviewImage.storageKey) : videoEditPreviewImage.content) : "";
+    const viggleEditNode = viggleEditNodeId ? nodeById.get(viggleEditNodeId) || null : null;
+    const viggleImageNodes = useMemo(
+        () => nodes.filter((item) => item.type === CanvasNodeType.Image || (item.type === CanvasNodeType.Config && item.metadata?.generationMode === "image")),
+        [nodes],
+    );
+    const viggleEditModels = useMemo(() => selectableModelsByCapability(effectiveConfig, "video").filter((name) => name !== VIDEO_CONCAT_MODEL), [effectiveConfig]);
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const resizeNode = resizeNodeId ? nodeById.get(resizeNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
@@ -1547,6 +1602,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
     }, [connections, detailVisibleNodes, graphIndex, nodes]);
     const selectMentionReferences = useMemo(() => createMentionReferenceSelector(), []);
     const mentionReferencesByNodeId = useMemo(() => selectMentionReferences(detailVisibleNodes, nodes, connections, graphIndex), [selectMentionReferences, connections, detailVisibleNodes, graphIndex, nodes, nodeRegistryVersion, t]);
+    // @ 候选专用：配置节点参考 + 直连参考取并集，修「接了配置节点后直连图片从候选消失」。
+    const selectCandidateReferences = useMemo(() => createMentionReferenceSelector("candidate"), []);
+    const candidateReferencesByNodeId = useMemo(() => selectCandidateReferences(detailVisibleNodes, nodes, connections, graphIndex), [selectCandidateReferences, connections, detailVisibleNodes, graphIndex, nodes, nodeRegistryVersion, t]);
     // 图索引已经按目标节点维护上游节点，避免再次遍历全部连线构造同一份 Map。
     const connectedNodesByNodeId = graphIndex.incomingByNodeId;
     const referenceConnectedNodeIds = useMemo(
@@ -2132,6 +2190,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             delete next.metadata.sharedLibraryAssetId;
             delete next.metadata.characterAssetId;
             delete next.metadata.sceneAssetId;
+            delete next.metadata.propAssetId;
         }
         const nextConnections = connectionsRef.current.flatMap((connection) => {
             if (connection.toNodeId === nodeId) {
@@ -3803,6 +3862,27 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         saveAs(url, `canvas-image-${node.id}-${image.id}.${imageExtension(image.mimeType || url)}`);
     }, []);
 
+    const batchDownloadSelectedNodes = useCallback(async () => {
+        const targets = nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id));
+        if (!targets.length) return;
+        setBatchDownloading(true);
+        const hide = message.loading(t("canvas.toolbar.batchDownloading"), 0);
+        try {
+            const result = await exportCanvasNodes(targets, t("canvas.toolbar.batchDownload"));
+            if (result.success > 0) {
+                message.success(t("canvas.toolbar.batchDownloadSuccess", { count: result.success, failed: result.failed }));
+            } else {
+                message.error(t("canvas.toolbar.batchDownloadFailed"));
+            }
+        } catch (error) {
+            console.error(error);
+            message.error(t("canvas.toolbar.batchDownloadFailed"));
+        } finally {
+            hide();
+            setBatchDownloading(false);
+        }
+    }, [message, t]);
+
     const captureVideoNodeFrame = useCallback(
         async (nodeId: string, position: VideoFramePosition) => {
             setContextMenu(null);
@@ -4797,6 +4877,31 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         }
     }, [getCurrentCanvasDramaId, saveCanvasAsset, message, projectId, setNodes, t]);
 
+    // 单个道具节点保存为道具资产：与角色/场景资产库打通，按 propAssetId 或来源节点去重。
+    const savePropNodeToAsset = useCallback(async (node: CanvasNodeData) => {
+        if (node.type !== CanvasNodeType.Prop) return;
+        const image = node.metadata?.propImage;
+        if (!image?.url && !image?.storageKey) {
+            message.warning(t("assets.propRequireImage", { defaultValue: "道具资产至少需要一张道具图" }));
+            return;
+        }
+        const name = (node.title || "").trim();
+        if (!name) {
+            message.warning(t("canvas.prop.saveNameRequired"));
+            return;
+        }
+        const existing = useAssetStore.getState().assets.find((asset) => asset.kind === "prop" && (asset.id === node.metadata?.propAssetId || asset.metadata?.projectId === projectId && asset.metadata?.nodeId === node.id));
+        const data = { name, description: node.metadata?.propDescription || "", image };
+        try {
+            const dramaId = await getCurrentCanvasDramaId();
+            const assetId = await saveCanvasAsset(node, { kind: "prop", title: name, coverUrl: image.url, tags: [], dramaId, source: "Canvas", data, metadata: { source: "canvas", projectId, nodeId: node.id }, ...(existing ? { id: existing.id } : {}) });
+            if (!dramaId) setNodes(prev => prev.map(item => item.id === node.id ? { ...item, metadata: { ...item.metadata, propAssetId: assetId } } : item));
+            message.success(t("canvas.prop.saveToAssetsSuccess"));
+        } catch (error) {
+            message.error(t("canvas.prop.saveToAssetsFailed", { error: error instanceof Error ? error.message : String(error) }));
+        }
+    }, [getCurrentCanvasDramaId, saveCanvasAsset, message, projectId, setNodes, t]);
+
     const dropOnSceneNode = useCallback((node: CanvasNodeData, ref: { url: string; name?: string; storageKey?: string; mimeType?: string }) => {
         if (node.type !== CanvasNodeType.Scene || !ref.url) return;
         setNodes((prev) => prev.map((item) => item.id === node.id ? {
@@ -5057,6 +5162,325 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
         },
         [effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, isAiConfigReady, message, openConfigDialog, projectId, startGenerationRequest, t, updateProject],
     );
+
+    /** 关闭视频编辑会话，释放抽帧时创建的临时 URL。 */
+    const closeVideoEdit = useCallback(() => {
+        videoEditRevokeRef.current?.();
+        videoEditRevokeRef.current = null;
+        setVideoEditNodeId(null);
+        setVideoEditFrameUrl(null);
+        setVideoEditMaskOpen(false);
+        setVideoEditPreviewNodeId(null);
+        setVideoEditPrompt("");
+        setVideoEditCapturing(false);
+    }, []);
+
+    /** 视频编辑阶段一入口：从选中的视频节点抽一帧，交给现有蒙版涂抹弹窗。 */
+    const openVideoEdit = useCallback(async (node: CanvasNodeData) => {
+        setToolbarNodeId(null);
+        setDialogNodeId(null);
+        setContextMenu(null);
+        closeVideoEdit();
+        setVideoEditNodeId(node.id);
+        setVideoEditCapturing(true);
+        let source: { url: string; revoke: () => void } | null = null;
+        try {
+            source = await localCanvasVideoUrl(node);
+            if (!source) throw new Error(t("canvas.videoAudioExtract.missingVideo"));
+            videoEditRevokeRef.current = source.revoke;
+            const displayed = Array.from(containerRef.current?.querySelectorAll<HTMLVideoElement>("video[data-canvas-video]") || [])
+                .find((item) => item.dataset.canvasVideo === node.id);
+            const timeMs = displayed && Number.isFinite(displayed.currentTime) ? displayed.currentTime * 1000 : 0;
+            displayed?.pause();
+            const frame = await captureVideoFrame(source.url, "current", timeMs);
+            setVideoEditFrameUrl(await videoFrameToDataUrl(frame));
+            setVideoEditMaskOpen(true);
+        } catch (error) {
+            closeVideoEdit();
+            message.error(t("canvas.videoAudioExtract.failed", { error: error instanceof Error ? error.message : String(error) }));
+        } finally {
+            setVideoEditCapturing(false);
+        }
+    }, [closeVideoEdit, containerRef, message, t]);
+
+    /** 阶段一确认：把涂抹后的帧作为参考图，走图片局部重绘生成「预览图」节点。 */
+    const videoEditGeneratePreview = useCallback(async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
+        const frameUrl = videoEditFrameUrl;
+        if (!frameUrl) return;
+        const userPrompt = payload.prompt.trim();
+        setVideoEditPrompt(userPrompt);
+        const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: node.metadata?.size || "auto" };
+        if (payload.generate && !isAiConfigReady(generationConfig, generationConfig.model)) {
+            openConfigDialog(true);
+            return;
+        }
+        let frameImage: UploadedImage;
+        let maskImage: UploadedImage;
+        try {
+            [frameImage, maskImage] = await Promise.all([uploadImage(frameUrl), uploadImage(payload.maskDataUrl)]);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : t("canvas.projectPage.maskFailed"));
+            return;
+        }
+        const maskNodeId = nanoid();
+        const childId = nanoid();
+        const imageId = nanoid();
+        const configNodeSize = NODE_DEFAULT_SIZE[CanvasNodeType.Config];
+        const prompt = t("canvas.projectPage.maskPrompt", { source: imageReferenceLabel(0), mask: imageReferenceLabel(1), prompt: userPrompt });
+        const frameSource = { id: `${node.id}:frame`, name: `${node.title || node.id}-frame.png`, type: frameImage.mimeType || "image/png", dataUrl: frameImage.url, storageKey: frameImage.storageKey };
+        const maskSource = { id: maskNodeId, name: "mask.png", type: maskImage.mimeType || "image/png", dataUrl: maskImage.url, storageKey: maskImage.storageKey };
+        const references = [frameSource, maskSource];
+        const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, references);
+        const previewImage = payload.generate
+            ? { id: imageId, status: NODE_STATUS_IDLE, content: "", naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "" }
+            : { id: imageId, status: NODE_STATUS_SUCCESS, content: maskImage.url, storageKey: maskImage.storageKey, naturalWidth: 0, naturalHeight: 0, bytes: 0, mimeType: "image/png" };
+        const childMetadata: CanvasNodeMetadata = {
+            smart: true, generationMode: "image", maskEdit: true,
+            prompt, composerContent: prompt,
+            status: payload.generate ? NODE_STATUS_IDLE : NODE_STATUS_SUCCESS,
+            images: [previewImage],
+            ...generationMetadata,
+        };
+        const nextNodes: CanvasNodeData[] = [
+            ...nodesRef.current,
+            {
+                id: maskNodeId,
+                type: CanvasNodeType.Image,
+                title: t("canvas.projectPage.maskNodeTitle"),
+                position: { x: node.position.x, y: node.position.y + node.height + 96 },
+                width: node.width,
+                height: node.height,
+                metadata: { ...imageMetadata(maskImage), maskOverlay: true },
+            },
+            {
+                id: childId,
+                type: CanvasNodeType.Config,
+                title: userPrompt.slice(0, 32) || t("canvas.projectPage.maskResult"),
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: configNodeSize.width,
+                height: configNodeSize.height,
+                metadata: childMetadata,
+            },
+        ];
+        const nextConnections = [...connectionsRef.current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }, { id: nanoid(), fromNodeId: maskNodeId, toNodeId: childId }];
+        nodesRef.current = nextNodes;
+        connectionsRef.current = nextConnections;
+        setNodes(nextNodes);
+        setConnections(nextConnections);
+        updateProject(projectId, { nodes: nextNodes, connections: nextConnections });
+        setSelectedNodeIds(new Set([childId]));
+        setSelectedConnectionId(null);
+        setVideoEditMaskOpen(false);
+        setVideoEditPreviewNodeId(childId);
+        if (!payload.generate) return;
+        setRunningNodeId(childId);
+        const controller = startGenerationRequest(childId, node.id, childId);
+        try {
+            await flushCanvasProjectBeforeGeneration(projectId);
+            const size = resolveComfyImageSize(generationConfig.size);
+            await runCanvasImageTask(
+                {
+                    mode: "image",
+                    maskEdit: true,
+                    model: generationConfig.model,
+                    prompt,
+                    references,
+                    ...size,
+                    size: `${size.width}x${size.height}`,
+                    quality: generationConfig.quality,
+                    count: 1,
+                    imageIds: [imageId],
+                    params: node.metadata?.comfyParams,
+                    clientTaskId: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `video-edit-preview-${nanoid()}`,
+                    projectId,
+                    nodeId: childId,
+                    sourceNodeId: node.id,
+                },
+                controller.signal,
+            );
+        } catch (error) {
+            if (isGenerationCanceled(error)) return;
+            message.error(error instanceof Error ? error.message : t("canvas.projectPage.maskFailed"));
+        } finally {
+            finishGenerationRequest(childId, controller);
+            setRunningNodeId(null);
+        }
+    }, [effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, isAiConfigReady, isGenerationCanceled, message, openConfigDialog, projectId, startGenerationRequest, t, updateProject, videoEditFrameUrl]);
+
+    /** 阶段二：预览图确认后，用「编辑后的帧 + 源视频」经 Viggle 视频编辑模型重生成整条视频。 */
+    const videoEditGenerateVideo = useCallback(async () => {
+        if (!videoEditNode || !videoEditPreviewNode || !videoEditPreviewImage) return;
+        const prompt = videoEditPrompt.trim() || String(videoEditPreviewNode.metadata?.prompt || "");
+        const generationConfig = buildGenerationConfig(effectiveConfig, videoEditNode, "video");
+        const resultId = nanoid();
+        const spec = NODE_DEFAULT_SIZE[CanvasNodeType.Config];
+        const resultNode: CanvasNodeData = {
+            id: resultId,
+            type: CanvasNodeType.Config,
+            title: prompt.slice(0, 24) || "视频编辑结果",
+            position: { x: videoEditNode.position.x + videoEditNode.width + 96, y: videoEditNode.position.y },
+            width: spec.width,
+            height: spec.height,
+            metadata: {
+                smart: true, generationMode: "video", prompt, composerContent: prompt,
+                model: VIDEO_EDIT_MODEL, status: NODE_STATUS_IDLE,
+                size: generationConfig.size,
+                seconds: generationConfig.videoSeconds,
+                vquality: generationConfig.vquality,
+            },
+        };
+        const references = [{
+            id: videoEditPreviewNode.id,
+            name: `${videoEditPreviewNode.title || "video-edit-preview"}.png`,
+            type: videoEditPreviewImage.mimeType || "image/png",
+            dataUrl: videoEditPreviewImage.content,
+            storageKey: videoEditPreviewImage.storageKey,
+        }];
+        const latest = videoEditNode.metadata?.loopOutputHistory?.at(-1);
+        const sourceStorageKey = videoEditNode.metadata?.storageKey || latest?.storageKey;
+        const sourceContent = videoEditNode.metadata?.content || videoEditNode.metadata?.url || latest?.content || latest?.url || "";
+        const videoReferences = [{
+            id: videoEditNode.id,
+            name: videoEditNode.title || t("assets.kinds.video"),
+            url: sourceStorageKey ? backendMediaUrl(sourceStorageKey) : resolveComfyMediaUrl(sourceContent),
+            storageKey: sourceStorageKey,
+            mimeType: videoEditNode.metadata?.mimeType || "video/mp4",
+        }];
+        const nextNodes = [...nodesRef.current, resultNode];
+        nodesRef.current = nextNodes;
+        setNodes(nextNodes);
+        updateProject(projectId, { nodes: nextNodes, connections: connectionsRef.current });
+        setSelectedNodeIds(new Set([resultId]));
+        setSelectedConnectionId(null);
+        closeVideoEdit();
+        setRunningNodeId(resultId);
+        const controller = startGenerationRequest(resultId, videoEditNode.id, resultId);
+        try {
+            await flushCanvasProjectBeforeGeneration(projectId);
+            await runCanvasVideoTask(
+                {
+                    mode: "video",
+                    model: VIDEO_EDIT_MODEL,
+                    prompt,
+                    references,
+                    videoReferences,
+                    size: generationConfig.size,
+                    seconds: generationConfig.videoSeconds,
+                    resolution: generationConfig.vquality,
+                    // ViggleEdit 工作流字段：seed(node7)、短边分辨率 short_edge(node6)。
+                    params: { seed: -1, short_edge: 480 },
+                    clientTaskId: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `video-edit-${nanoid()}`,
+                    projectId,
+                    nodeId: resultId,
+                    sourceNodeId: videoEditNode.id,
+                },
+                controller.signal,
+            );
+        } catch (error) {
+            if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+        } finally {
+            finishGenerationRequest(resultId, controller);
+            setRunningNodeId(null);
+        }
+    }, [backendMediaUrl, closeVideoEdit, effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, isGenerationCanceled, message, projectId, resolveComfyMediaUrl, startGenerationRequest, t, updateProject, videoEditNode, videoEditPreviewImage, videoEditPreviewNode, videoEditPrompt]);
+
+    /**
+     * 视频编辑（Viggle Remake）：源视频保动作/镜头/音轨，参考图决定改成谁、什么场景。
+     * 参考图按选择顺序连线，后端与引擎都按连线顺序取图。
+     */
+    const viggleEditGenerate = useCallback(async (payload: CanvasViggleEditPayload) => {
+        const source = viggleEditNode;
+        if (!source) return;
+        const picked = payload.referenceNodeIds
+            .map((nodeId) => nodeById.get(nodeId))
+            .flatMap((item) => {
+                if (!item) return [];
+                const image = canvasNodePrimaryImage(item);
+                return image && (image.storageKey || image.content) ? [{ node: item, image }] : [];
+            });
+        if (!picked.length) {
+            message.error(t("canvas.viggleEdit.incomplete"));
+            return;
+        }
+        const prompt = payload.prompt;
+        const generationConfig = buildGenerationConfig(effectiveConfig, source, "video");
+        const resultId = nanoid();
+        const resultNode: CanvasNodeData = {
+            id: resultId,
+            type: CanvasNodeType.Config,
+            title: prompt.slice(0, 24) || t("canvas.viggleEdit.resultTitle"),
+            position: { x: source.position.x + source.width + 96, y: source.position.y },
+            // 16:9 起始框；生成完成后按产物实际宽高 fit。
+            width: 640,
+            height: 356,
+            metadata: {
+                smart: true, generationMode: "video", prompt, composerContent: prompt,
+                model: payload.model, status: NODE_STATUS_IDLE,
+                size: generationConfig.size,
+                seconds: generationConfig.videoSeconds,
+                vquality: generationConfig.vquality,
+            },
+        };
+        const latest = source.metadata?.loopOutputHistory?.at(-1);
+        const sourceStorageKey = source.metadata?.storageKey || latest?.storageKey;
+        const sourceContent = source.metadata?.content || source.metadata?.url || latest?.content || latest?.url || "";
+        const videoReferences = [{
+            id: source.id,
+            name: source.title || t("assets.kinds.video"),
+            url: sourceStorageKey ? backendMediaUrl(sourceStorageKey) : resolveComfyMediaUrl(sourceContent),
+            storageKey: sourceStorageKey,
+            mimeType: source.metadata?.mimeType || "video/mp4",
+        }];
+        const references = picked.map(({ node: item, image }) => ({
+            id: item.id,
+            name: `${item.title || item.id}.png`,
+            type: image.mimeType || "image/png",
+            dataUrl: image.content,
+            storageKey: image.storageKey,
+        }));
+        const nextNodes = [...nodesRef.current, resultNode];
+        const nextConnections = [
+            ...connectionsRef.current,
+            { id: nanoid(), fromNodeId: source.id, toNodeId: resultId, role: "reference", order: 0 },
+            ...picked.map(({ node: item }, index) => ({ id: nanoid(), fromNodeId: item.id, toNodeId: resultId, role: "reference", order: index + 1 })),
+        ];
+        nodesRef.current = nextNodes;
+        connectionsRef.current = nextConnections;
+        setNodes(nextNodes);
+        setConnections(nextConnections);
+        updateProject(projectId, { nodes: nextNodes, connections: nextConnections });
+        setSelectedNodeIds(new Set([resultId]));
+        setSelectedConnectionId(null);
+        setViggleEditNodeId(null);
+        setRunningNodeId(resultId);
+        const controller = startGenerationRequest(resultId, source.id, resultId);
+        try {
+            await flushCanvasProjectBeforeGeneration(projectId);
+            await runCanvasVideoTask(
+                {
+                    mode: "video",
+                    model: payload.model,
+                    prompt,
+                    references,
+                    videoReferences,
+                    size: generationConfig.size,
+                    seconds: generationConfig.videoSeconds,
+                    resolution: generationConfig.vquality,
+                    params: { seed: -1, short_edge: payload.shortEdge },
+                    clientTaskId: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `viggle-edit-${nanoid()}`,
+                    projectId,
+                    nodeId: resultId,
+                    sourceNodeId: source.id,
+                },
+                controller.signal,
+            );
+        } catch (error) {
+            if (!isGenerationCanceled(error)) message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+        } finally {
+            finishGenerationRequest(resultId, controller);
+            setRunningNodeId(null);
+        }
+    }, [backendMediaUrl, effectiveConfig, finishGenerationRequest, flushCanvasProjectBeforeGeneration, isGenerationCanceled, message, nodeById, projectId, resolveComfyMediaUrl, setConnections, setNodes, startGenerationRequest, t, updateProject, viggleEditNode]);
 
     const resizeImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageResizeParams) => {
         if (imageToolUrl?.nodeId !== node.id) return;
@@ -6459,7 +6883,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     position: { x: placement.x, y: placement.y },
                     width: spec.width,
                     height: spec.height,
-                    metadata: { status: NODE_STATUS_SUCCESS, productionAssetId: payload.assetId, propName: payload.title, propDescription: payload.description, propImage: payload.image },
+                    metadata: { status: NODE_STATUS_SUCCESS, productionAssetId: payload.assetId, propAssetId: payload.assetId, propName: payload.title, propDescription: payload.description, propImage: payload.image },
                 };
                 nodesRef.current = [...nodesRef.current, node];
                 setNodes((prev) => [...prev, node]);
@@ -6640,6 +7064,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         nodes={nodes}
                         isRunning={activeLoop}
                         mentionReferences={mentionReferencesByNodeId.get(loopNode.id) || EMPTY_REFERENCES}
+                        candidateReferences={candidateReferencesByNodeId.get(loopNode.id) || EMPTY_REFERENCES}
                         connectedNodes={getFixedReferenceNodes(loopNode.id, nodes, graphIndex)}
                         loopInputCount={loopImageInputCount(loopNode.id, nodes, connections, graphIndex)}
                         onConfigChange={handleConfigNodeChange}
@@ -6685,6 +7110,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         nodes={nodes}
                         isRunning={isRunning}
                         mentionReferences={mentionReferencesByNodeId.get(target.id) || EMPTY_REFERENCES}
+                        candidateReferences={candidateReferencesByNodeId.get(target.id) || EMPTY_REFERENCES}
                         connectedNodes={getFixedReferenceNodes(target.id, nodes, graphIndex)}
                         loopInputCount={loopImageInputCount(target.id, nodes, connections, graphIndex)}
                         onConfigChange={handleConfigNodeChange}
@@ -6720,6 +7146,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     nodes={nodes}
                     isRunning={isRunning}
                     mentionReferences={mentionReferencesByNodeId.get(target.id) || EMPTY_REFERENCES}
+                    candidateReferences={candidateReferencesByNodeId.get(target.id) || EMPTY_REFERENCES}
                     connectedNodes={getFixedReferenceNodes(target.id, nodes, graphIndex)}
                     loopInputCount={loopImageInputCount(target.id, nodes, connections, graphIndex)}
                     onConfigChange={handleConfigNodeChange}
@@ -7126,6 +7553,9 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node).catch(error => message.error(libraryErrorText(error)))}
                     onCompareVideo={openVideoComparison}
+                    onVideoEdit={openVideoEdit}
+                    onViggleEdit={(node) => setViggleEditNodeId(node.id)}
+                    onWorkflowParams={(node) => setWorkflowParamsNodeId(node.id)}
                     onTrimVideo={openVideoTrim}
                     onExtractAudio={(node) => void extractVideoAudio(node)}
                     extractingAudio={Boolean(toolbarNode && extractingAudioNodeIds.has(toolbarNode.id))}
@@ -7134,6 +7564,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onConvertToProp={convertImageNodeToProp}
                     onSaveCharacterToAsset={(node) => void saveCharacterNodeToAsset(node)}
                     onSaveSceneToAsset={(node) => void saveSceneNodeToAsset(node)}
+                    onSavePropToAsset={(node) => void savePropNodeToAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
@@ -7160,6 +7591,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     onFocusSelection={focusSelection}
                     onBatchRename={openBatchRename}
                     onUnifySize={unifySelectedNodeSizes}
+                    onBatchDownload={batchDownloadSelectedNodes}
+                    downloading={batchDownloading}
                     selectedCount={selectedNodeIds.size}
                     deleteDisabled={!hasDeletableSelectedNode}
                     showSelectionActions={!screenEditorOpen}
@@ -7266,6 +7699,77 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                         <CanvasNodeMaskEditDialog key="mask-edit" dataUrl={imageToolUrl.url} open onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode, payload)} />
                     ) : null}
 
+                    {/* 自由卡片：智能生成节点的工作流参数面板（工具栏入口触发） */}
+                    {(() => {
+                        const wpNode = workflowParamsNodeId ? nodeById.get(workflowParamsNodeId) || null : null;
+                        if (!wpNode) return null;
+                        const wpInputs = configInputsById.get(wpNode.id) || [];
+                        const wpMode = wpNode.metadata?.generationMode || "image";
+                        const referenceCount = wpMode === "image" ? wpInputs.filter((i) => i.type === "image").length
+                            : wpMode === "video" ? wpInputs.filter((i) => i.type === "video").length
+                            : wpMode === "audio" ? wpInputs.filter((i) => i.type === "audio").length : 0;
+                        return (
+                            <FreeCardWorkflowPanel
+                                open
+                                onClose={() => setWorkflowParamsNodeId(null)}
+                                node={wpNode}
+                                referenceCount={referenceCount}
+                                onConfigChange={handleConfigNodeChange}
+                            />
+                        );
+                    })()}
+
+                    {/* 视频编辑：阶段一抽帧进度 */}
+                    <Modal key="video-edit-capture" title="视频编辑" open={videoEditCapturing} centered footer={null} closable={false} maskClosable={false}>
+                        <div className="py-10 text-center text-sm opacity-70" data-canvas-no-zoom>正在抽取视频帧…</div>
+                    </Modal>
+
+                    {/* 视频编辑：阶段一复用图片蒙版涂抹弹窗 */}
+                    {videoEditNode && videoEditFrameUrl && videoEditMaskOpen ? (
+                        <CanvasNodeMaskEditDialog
+                            key="video-edit-mask"
+                            dataUrl={videoEditFrameUrl}
+                            open
+                            onClose={closeVideoEdit}
+                            onConfirm={(payload) => void videoEditGeneratePreview(videoEditNode, payload)}
+                        />
+                    ) : null}
+
+                    {/* 视频编辑：预览图确认 → 生成视频 */}
+                    <Modal
+                        key="video-edit-preview"
+                        title="视频编辑 · 预览图"
+                        open={Boolean(videoEditNode && videoEditPreviewNodeId && !videoEditMaskOpen)}
+                        centered
+                        width={720}
+                        onCancel={closeVideoEdit}
+                        footer={
+                            <div className="flex items-center justify-end gap-2">
+                                <Button onClick={() => setVideoEditMaskOpen(true)}>重新涂抹</Button>
+                                <Button onClick={closeVideoEdit}>取消</Button>
+                                <Button type="primary" disabled={!videoEditPreviewUrl} onClick={() => void videoEditGenerateVideo()}>生成视频</Button>
+                            </div>
+                        }
+                    >
+                        <div className="space-y-3 py-2" data-canvas-no-zoom data-canvas-shortcuts-ignore>
+                            <div className="text-sm opacity-70">
+                                {videoEditPreviewNode?.metadata?.status === "error"
+                                    ? String(videoEditPreviewNode.metadata.errorDetails || "预览图生成失败")
+                                    : videoEditPreviewUrl
+                                        ? "预览满意后点击「生成视频」，把该帧的修改应用到整条视频。"
+                                        : "预览图生成中…"}
+                            </div>
+                            <div className="flex min-h-[240px] items-center justify-center rounded-lg border border-black/10 bg-black/5 dark:border-white/10 dark:bg-white/5">
+                                {videoEditPreviewUrl ? (
+                                    <img src={videoEditPreviewUrl} alt="视频编辑预览帧" className="max-h-[52vh] max-w-full object-contain" />
+                                ) : (
+                                    <span className="text-sm opacity-50">预览图生成中…</span>
+                                )}
+                            </div>
+                            <div className="max-h-20 overflow-auto whitespace-pre-wrap break-words rounded-lg border p-2 text-xs opacity-70">{videoEditPrompt}</div>
+                        </div>
+                    </Modal>
+
                     {splitNode && imageToolUrl?.nodeId === splitNode.id ? <CanvasNodeSplitDialog key="split" dataUrl={imageToolUrl.url} open onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode, params)} /> : null}
 
                     {resizeNode && imageToolUrl?.nodeId === resizeNode.id ? (
@@ -7279,6 +7783,7 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                     {angleNode && imageToolUrl?.nodeId === angleNode.id ? <CanvasNodeAngleDialog key="angle" dataUrl={imageToolUrl.url} open onClose={() => setAngleNodeId(null)} onConfirm={(params) => void generateAngleNode(angleNode, params)} /> : null}
 
                     {styleTransferPair ? <CanvasNodeStyleTransferDialog key="style-transfer" targetUrl={styleTransferPair.targetUrl} styleUrl={styleTransferPair.styleUrl} open onClose={() => setStyleTransferPair(null)} onConfirm={(params) => void generateStyleTransferNode(styleTransferPair.target, styleTransferPair.style, params)} /> : null}
+                    {viggleEditNode ? <CanvasViggleEditDialog key="viggle-edit" open node={viggleEditNode} imageNodes={viggleImageNodes} models={viggleEditModels} onClose={() => setViggleEditNodeId(null)} onConfirm={viggleEditGenerate} /> : null}
 
                     {characterEditNodeId ? <CharacterNodeEditModal
                         key="character-edit"

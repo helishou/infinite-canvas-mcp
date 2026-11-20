@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
+import { buildNodeMentionReferences, getGenerationResourceNodes, getMentionCandidateResourceNodes, getMentionResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { getNodeImageReferenceCount } from "./canvas-node-image-reference-count";
 
@@ -59,4 +59,24 @@ test("显式恢复历史的零参考与多参考覆盖当前连接；循环使�
 test("普通图片节点编辑仍把自身图片作为参考", () => {
     const target = picture("target");
     assert.equal(getNodeImageReferenceCount(target, [target], [], "改图"), 1);
+});
+
+test("候选并集纳入配置与直连参考，不改变生成解析语义", () => {
+    const configRef = smart("config-ref", { generationMode: "text", content: "人物设定" });
+    const directImage = picture("direct-image");
+    const generator = picture("generator");
+    const config = smart("downstream");
+    const nodes = [configRef, directImage, generator, config];
+    const connections = [
+        { id: "configref-config", fromNodeId: configRef.id, toNodeId: config.id },
+        { id: "direct-generator", fromNodeId: directImage.id, toNodeId: generator.id },
+        { id: "generator-config", fromNodeId: generator.id, toNodeId: config.id },
+    ];
+    // 原候选与生成解析：configInputs 非空即早返回，直连图不在这两条口径里。
+    assert.deepEqual(getMentionResourceNodes(generator.id, nodes, connections).map((node) => node.id), [configRef.id]);
+    assert.deepEqual(getGenerationResourceNodes(generator.id, nodes, connections).map((node) => node.id), [configRef.id]);
+    // 候选并集：配置参考 + 直连图都在，且去重。
+    const candidates = getMentionCandidateResourceNodes(generator.id, nodes, connections).map((node) => node.id);
+    assert.deepEqual(candidates, [configRef.id, directImage.id]);
+    assert.equal(new Set(candidates).size, candidates.length);
 });

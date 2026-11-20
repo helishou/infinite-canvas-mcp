@@ -65,7 +65,7 @@ export function agentMessageToChatMessage(item: AgentChatItem, endpoint: string,
 }
 
 export function agentAttachmentToChatAttachment(item: AgentMessageAttachment, endpoint: string, token: string): AgentChatAttachment {
-    return { id: item.id, name: item.name, url: resolveAgentMessageAssetUrl(endpoint, token, item.dataUrl || item.url) };
+    return { id: item.id, name: item.name, url: resolveAgentMessageAssetUrl(endpoint, token, item.dataUrl || item.url), ...(item.type ? { type: item.type } : {}) };
 }
 
 export function formatAgentEvent(event: AgentEventPayload): Omit<AgentChatItem, "id"> | null {

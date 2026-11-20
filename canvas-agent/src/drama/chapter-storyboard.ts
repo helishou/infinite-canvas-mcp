@@ -304,6 +304,9 @@ export function toSceneStoryboardOps(plan: StoryboardPlan, environmentOfScene: M
             // start_frame / end_frame 一律不出现：v2 由 duration_frames 派生帧窗。
             shots: shots.map(shot => ({
                 id: shot.id,
+                // 后端按 source_scene_id 把镜头归属到剧本场次；缺了它，带 beat_ids 的场次会
+                // 因无法映射而整批拒绝（SCENE_STORYBOARD_SHOTS），台词自然也落不了库。
+                source_scene_id: sceneId,
                 scene_id: shot.scene_id,
                 timeline_id: shot.timeline_id,
                 story_order: shot.story_order,
@@ -311,6 +314,9 @@ export function toSceneStoryboardOps(plan: StoryboardPlan, environmentOfScene: M
                 visual: shot.visual,
                 camera: shot.camera,
                 duration_frames: shot.duration_frames,
+                // 台词必须跟着镜头落库，否则对白逐字核查拿不到任何镜头台词。
+                // 契约白名单字段是复数 dialogues，结构 Array<{speaker,text}>（与 demand-beats 一致）。
+                ...(shot.dialogue ? { dialogues: [{ speaker: shot.dialogue.speaker, text: shot.dialogue.text }] } : {}),
             })),
             segments: plan.segments
                 .filter(segment => segment.shot_ids.some(id => shotIds.has(id)))

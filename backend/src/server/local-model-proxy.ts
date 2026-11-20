@@ -1,6 +1,8 @@
 import type { Express, Request, Response } from "express";
 import { isIP } from "node:net";
 
+import { normalizeVideoCapabilities } from "../canvas/model-video-capability.js";
+
 const MODEL_LIST_TIMEOUT_MS = 12_000;
 
 function isLoopbackHost(hostname: string): boolean {
@@ -67,20 +69,31 @@ export function registerLocalModelProxyRoutes(app: Express, fetchUpstream: typeo
                 return void res.status(status).json({ ok: false, error: `本地模型服务读取列表失败（HTTP ${upstream.status}）` });
             }
 
-            const payload = await upstream.json() as { data?: Array<{ id?: unknown; capability?: unknown }> };
+            const payload = await upstream.json() as { data?: Array<{ id?: unknown; capability?: unknown; media_inputs?: unknown }> };
             const models = Array.isArray(payload.data)
                 ? [...new Set(payload.data.map((model) => model?.id).filter((id): id is string => typeof id === "string" && Boolean(id)))]
                     .sort((a, b) => a.localeCompare(b))
                 : [];
-            // models 保持标准形态（string[]）；items 额外带 capability，能读到的就用（例如 media-engine），
-            // 读不到就交给前端按名字猜——不改变 /v1/models 的标准语义。
+            // models 保持标准形态（string[]）；items 额外带 capability / maxAudios，
+            // 能读到的就用（media-engine 会报真实参考音频槽位数），读不到交给前端按名字猜——
+            // 不改变 /v1/models 的标准语义。
             const items = Array.isArray(payload.data)
                 ? payload.data
                     .filter((model) => typeof model?.id === "string" && Boolean(model.id))
-                    .map((model) => ({
-                        name: String(model.id),
-                        ...(typeof model.capability === "string" ? { capability: model.capability } : {}),
-                    }))
+                    .map((model) => {
+                        const media = model.media_inputs && typeof model.media_inputs === "object" && !Array.isArray(model.media_inputs)
+                            ? model.media_inputs as Record<string, unknown> : {};
+                        const audios = media.audios;
+                        const maxAudios = Array.isArray(audios) ? audios.length
+                            : (typeof audios === "number" && Number.isSafeInteger(audios) && audios >= 0 ? audios : undefined);
+                        return {
+                            name: String(model.id),
+                            ...(typeof model.capability === "string" ? { capability: model.capability } : {}),
+                            ...(maxAudios === undefined ? {} : { maxAudios }),
+                            // 引擎若真上报视频能力字段就原样透传；没上报就不带键，前端按「未知/不限制」处理。
+                            ...normalizeVideoCapabilities(model),
+                        };
+                    })
                 : [];
             return void res.json({ ok: true, models, items });
         } catch (error) {
@@ -117,12 +130,20 @@ export function registerLocalModelProxyRoutes(app: Express, fetchUpstream: typeo
                 return void res.status(status).json({ ok: false, error: `读取模型详情失败（HTTP ${upstream.status}）` });
             }
             const payload = await upstream.json() as Record<string, unknown>;
+            const media = payload.media_inputs && typeof payload.media_inputs === "object" && !Array.isArray(payload.media_inputs)
+                ? payload.media_inputs as Record<string, unknown> : {};
+            const audios = media.audios;
+            const maxAudios = Array.isArray(audios) ? audios.length
+                : (typeof audios === "number" && Number.isSafeInteger(audios) && audios >= 0 ? audios : undefined);
             return void res.json({
                 ok: true,
                 id: String(payload.id ?? req.body?.model ?? ""),
                 fields: Array.isArray(payload.fields) ? payload.fields : [],
                 parameterSpec: Array.isArray(payload.parameter_spec) ? payload.parameter_spec : [],
                 standardParams: payload.standard_params ?? null,
+                ...(maxAudios === undefined ? {} : { maxAudios }),
+                // 同 /api/local-models：只有引擎真上报才透传，缺失字段不伪造。
+                ...normalizeVideoCapabilities(payload),
             });
         } catch (error) {
             if (error instanceof DOMException && error.name === "TimeoutError") {

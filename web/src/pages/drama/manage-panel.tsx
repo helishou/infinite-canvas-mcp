@@ -34,6 +34,7 @@ import { PlanningNextStep } from "./planning-next-step";
 import { AssetSpecPanel } from "./asset-spec-panel";
 import { takePlanningHandoff } from "./planning-director-launch";
 import { nextPlanningStep, planningStepStates, topicFromLegacy, type PlanningStepKey } from "./planning-topic-logic";
+import { confirmDeleteDrama } from "./confirm-delete-drama";
 import { OutlineWizard, parseEpisodeLines, proposalLines } from "./planning-outline-wizard";
 import type { OutlineWizardStep } from "./planning-outline-wizard";
 
@@ -464,20 +465,11 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
         } finally { setSavingPlan(false); }
     };
     const deleteDrama = () => {
-        modal.confirm({
-            title: t("drama.deleteProject"),
-            content: t("drama.deleteProjectDescription", { name: folder.name }),
-            okText: t("drama.deleteProjectConfirm"),
-            okType: "danger",
-            cancelText: t("common.cancel"),
-            onOk: async () => {
-                try {
-                    await deleteDramaProject(folder.id);
-                    setDraft(null);
-                    navigate("/production");
-                    message.success(t("drama.deleted"));
-                } catch (error) { message.error(String(error)); }
-            },
+        void confirmDeleteDrama({
+            modal, message, t,
+            drama: folder,
+            onDelete: (options) => deleteDramaProject(folder.id, options),
+            onDeleted: () => { setDraft(null); navigate("/production"); },
         });
     };
     const handleCoverChange = async (event: ChangeEvent<HTMLInputElement>) => {

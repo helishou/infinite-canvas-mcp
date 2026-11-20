@@ -1,5 +1,5 @@
 import { readRawProject, readStoredProjectRows, rawProjectFromStoredRows, createStoredProject, writeStoredProjectDelta } from "./stores/canvas-project-storage.js";
-import { CURRENT_DATABASE_SCHEMA, DRAMA_PIPELINE_DDL } from "./database-schema.js";
+import { CURRENT_DATABASE_SCHEMA, DRAMA_PIPELINE_DDL, DRAMA_EPISODE_PLANNING_DDL, CLIP_VIDEO_VERSIONS_DDL } from "./database-schema.js";
 import { migrateStorageFormat } from "./storage-format-migration.js";
 import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import { syncEntityNodeEdits, syncH3SceneImageReferences, normalizeEntityNodeOperation } from "./drama/entity-nodes.js";
@@ -11,6 +11,7 @@ import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { mcpEfficiencyReport } from "./mcp-efficiency-report.js";
 import { decodeStoredJson, encodeStoredJson, storedJsonText, type StoredJson } from "./json-storage.js";
+import { analyzeNovelChapters } from "@basketikun/canvas-agent/drama/novel-chapters";
 import { productionImageModel, dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
 import { DB_FILE, MEDIA_DIR, ensureDataDirs } from "./config.js";
@@ -94,10 +95,69 @@ export type DramaEpisode = {
     title: string;
     synopsis: string;
     fullPlot: string;
+    /** 本集素材类型：novel / script / storyboard，空串表示老数据（按 novel 看待）。 */
+    sourceFormat: string;
+    /** 建集时导入的原文真值；与 fullPlot（生成/编辑后的剧情正文）分开存。 */
+    sourceText: string;
     canvasId: string | null;
     createdAt: string;
     updatedAt: string;
+    /** 强一致分集：本集覆盖的稳定章节 ID（来自 source_chapters.id），按章序排列。 */
+    chapterIds: string[];
 };
+
+/** 拆章结果里的一章：带后端持久化的稳定 ID 与章节级原文编辑版本。 */
+export type SourceChapter = {
+    id: string;
+    dramaId: string;
+    chapterIndex: number;
+    title: string;
+    body: string;
+    bodyHash: string;
+    chars: number;
+    /** 素材类型（novel/script/storyboard）；影策真值按集存，这里冗余在章上供按章编辑回读，写时同步到覆盖的集。 */
+    sourceFormat: string;
+    /** 章节原文编辑版本号：每次真正改动正文/标题/素材类型自增，供 PATCH 乐观锁。 */
+    revision: number;
+    /** 章节原文最后改动时间（ISO），与 revision 一起构成乐观锁。 */
+    updatedAt: string;
+};
+
+/** 素材类型合法值（影策 production.SourceNovel/SourceScript/SourceStoryboard）。 */
+export const SOURCE_CHAPTER_FORMATS = new Set(["novel", "script", "storyboard"]);
+
+/** 章节原文写入冲突（版本不符或目标不存在），由路由映射成 404/409。 */
+export class SourceChapterWriteError extends Error {
+    constructor(message: string, public readonly code: "NOT_FOUND" | "CONFLICT" | "VALIDATION") {
+        super(message);
+        this.name = "SourceChapterWriteError";
+    }
+}
+
+/** 剧目级分集规划游标：plan_cursor 指向下一待规划章序号，plan_done 后整份规划锁写。 */
+export type EpisodePlanningState = {
+    dramaId: string;
+    episodeMode: string;
+    planCursor: number;
+    planDone: boolean;
+    sourceFingerprint: string;
+    lastChapterIndex: number;
+    batchChapters: number;
+    batchChars: number;
+    updatedAt: string;
+};
+
+/** 批量建集的一集：chapterIds 是稳定章节 ID，chapterIndices 只用于快照/校验。 */
+export type PlannedEpisode = {
+    episodeNumber: number;
+    title: string;
+    synopsis: string;
+    hook: string;
+    cliffhanger: string;
+    chapterIds: string[];
+    chapterIndices: number[];
+};
+
 export type CanvasProject = Record<string, unknown> & { id: string };
 
 export type PluginDeclaration = {
@@ -141,8 +201,51 @@ export class BackendDatabase {
         this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
         try { this.migrate(); }
         catch (error) { this.db.close(); throw error; }
-        // 全自动流水线队列表：独立 DDL 补建，不升 schema version（见 database-schema.ts 注释）。
+        // 全自动流水线队列表 + 强一致分集表：独立 DDL 补建，不升 schema version（见 database-schema.ts 注释）。
         this.db.exec(DRAMA_PIPELINE_DDL);
+        this.db.exec(DRAMA_EPISODE_PLANNING_DDL);
+        this.db.exec(CLIP_VIDEO_VERSIONS_DDL);
+        this.ensureEpisodePlanningColumns();
+        this.ensureSourceChapterColumns();
+        this.ensureGenerationLogSourceColumn();
+    }
+
+    /** generation_logs 来源列补列（老库重开不丢历史日志）：幂等 ALTER，不升 schema version。 */
+    private ensureGenerationLogSourceColumn() {
+        const columns = this.db.prepare("PRAGMA table_info(generation_logs)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "source")) {
+            // 历史日志都是真实生成回写产生的，缺省 pipeline 是事实而非臆造。
+            this.db.exec("ALTER TABLE generation_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'pipeline'");
+        }
+    }
+
+    /** drama_episodes 补列用幂等 ALTER：SQLite 没有 ADD COLUMN IF NOT EXISTS。 */
+    private ensureEpisodePlanningColumns() {
+        const columns = this.db.prepare("PRAGMA table_info(drama_episodes)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "chapter_ids_json")) {
+            this.db.exec("ALTER TABLE drama_episodes ADD COLUMN chapter_ids_json TEXT NOT NULL DEFAULT '[]'");
+        }
+        // 原文素材两列对齐 full_plot 的默认值；老库重开不会丢原文，也不另建副本。
+        if (!columns.some((column) => column.name === "source_format")) {
+            this.db.exec("ALTER TABLE drama_episodes ADD COLUMN source_format TEXT NOT NULL DEFAULT ''");
+        }
+        if (!columns.some((column) => column.name === "source_text")) {
+            this.db.exec("ALTER TABLE drama_episodes ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
+        }
+    }
+
+    /** 章节级原文编辑链补列（老库 source_chapters 只有正文/哈希/字数）：幂等 ALTER，不升 schema version。 */
+    private ensureSourceChapterColumns() {
+        const columns = this.db.prepare("PRAGMA table_info(source_chapters)").all() as Array<{ name: string }>;
+        if (!columns.some((column) => column.name === "source_format")) {
+            this.db.exec("ALTER TABLE source_chapters ADD COLUMN source_format TEXT NOT NULL DEFAULT ''");
+        }
+        if (!columns.some((column) => column.name === "revision")) {
+            this.db.exec("ALTER TABLE source_chapters ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
+        }
+        if (!columns.some((column) => column.name === "updated_at")) {
+            this.db.exec("ALTER TABLE source_chapters ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''");
+        }
     }
 
     close() { this.db.close(); }
@@ -472,7 +575,12 @@ export class BackendDatabase {
         const url = `/media/${encodeURIComponent(storageKey)}`;
         return { type: "update_h3_segment", nodeId, segmentId, patch: {
             ...withH3ParameterEdits(segment, settings),
-            result: url, resultStorageKey: storageKey, results: [{ url, storageKey, mimeType: String(output?.mimeType || "video/mp4") }],
+            // restore 是真实写回：在当前结果条目上落来源标记 + 生成日志凭证，
+            // 段版本派生据此把「当前项」显示为 restore（切版本），其余历史版本仍读各自生成日志来源。
+            result: url, resultStorageKey: storageKey, results: [{
+                url, storageKey, mimeType: String(output?.mimeType || "video/mp4"),
+                generationLogId: log.id, source: "restore",
+            }],
             status: "success", progress: 1, runtimeTaskId: "", cacheFingerprint: "",
             firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "",
         } };
@@ -1437,26 +1545,305 @@ export class BackendDatabase {
         return { ...savedFolder, updatedAt, outline: String(folder.outline || ""), description: String(folder.description || ""), coverStorageKey: folder.coverStorageKey || null, tags, isDrama: this.isDramaProject(folder.id) };
     }
 
+    // ── 强一致分集：稳定章节 ID + plan_cursor 游标 + 单事务批量建集 ─────────────
+
+    /** 读剧目级规划游标；不存在返回 null。 */
+    getEpisodePlanningState(dramaId: string): EpisodePlanningState | null {
+        const row = this.db.prepare("SELECT * FROM drama_episode_planning_state WHERE drama_id=?").get(dramaId) as Record<string, unknown> | undefined;
+        return row ? this.mapPlanningStateRow(row) : null;
+    }
+
+    private mapPlanningStateRow(row: Record<string, unknown>): EpisodePlanningState {
+        return {
+            dramaId: String(row.drama_id),
+            episodeMode: String(row.episode_mode || "chapter"),
+            planCursor: Number(row.plan_cursor || 0),
+            planDone: Number(row.plan_done || 0) === 1,
+            sourceFingerprint: String(row.source_fingerprint || ""),
+            lastChapterIndex: Number(row.last_chapter_index || 0),
+            batchChapters: Number(row.batch_chapters || 12),
+            batchChars: Number(row.batch_chars || 30000),
+            updatedAt: String(row.updated_at || ""),
+        };
+    }
+
+    private mapSourceChapterRow(row: Record<string, unknown>): SourceChapter {
+        return {
+            id: String(row.id), dramaId: String(row.drama_id), chapterIndex: Number(row.chapter_index),
+            title: String(row.title || ""), body: String(row.body || ""), bodyHash: String(row.body_hash || ""), chars: Number(row.chars || 0),
+            sourceFormat: String(row.source_format || ""), revision: Number(row.revision || 0), updatedAt: String(row.updated_at || ""),
+        };
+    }
+
+    /**
+     * 首次切章写入 source_chapters 并给出持久 ID；指纹未变时直接复用，不再重跑切章。
+     * 稳定 ID 按 (drama_id, chapter_index) 落库，正文变了也保留同一 ID（只更新 hash/title）。
+     */
+    syncSourceChapters(dramaId: string, sourceScript: string, split: { excluded: readonly number[]; maxChars: number }, episodeMode = "chapter"): { chapters: SourceChapter[]; fingerprint: string; reused: boolean } {
+        const excluded = new Set((split.excluded || []).map(Number));
+        const maxChars = Number(split.maxChars) || 3000;
+        const fingerprint = crypto.createHash("sha256")
+            .update("source-chapters-v1").update("\0").update(String(sourceScript || "")).update("\0")
+            .update(JSON.stringify({ maxChars, excluded: [...excluded].sort((left, right) => left - right) })).digest("hex");
+        const now = new Date().toISOString();
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const state = this.getEpisodePlanningState(dramaId);
+            if (state && state.sourceFingerprint === fingerprint && state.lastChapterIndex > 0) {
+                const rows = this.db.prepare("SELECT * FROM source_chapters WHERE drama_id=? ORDER BY chapter_index ASC").all(dramaId) as Array<Record<string, unknown>>;
+                if (rows.length) {
+                    this.db.exec("COMMIT");
+                    return { chapters: rows.map((row) => this.mapSourceChapterRow(row)), fingerprint, reused: true };
+                }
+            }
+            // 后端复用 canvas-agent 的同一套切章规则（drama-planning-routes 的口径），保证章序号一致。
+            const splitResult = analyzeNovelChapters(String(sourceScript || ""), { maxChars, minChars: 200 });
+            const eligible = splitResult.chapters.filter((chapter) => !excluded.has(chapter.index));
+            const lastChapterIndex = eligible.reduce((max, chapter) => Math.max(max, chapter.index), 0);
+            for (const chapter of eligible) {
+                const bodyHash = crypto.createHash("sha256").update(chapter.body).digest("hex");
+                const prior = this.db.prepare("SELECT id FROM source_chapters WHERE drama_id=? AND chapter_index=?").get(dramaId, chapter.index) as { id: string } | undefined;
+                if (prior) {
+                    this.db.prepare("UPDATE source_chapters SET title=?, body=?, body_hash=?, chars=?, revision=revision+1, updated_at=? WHERE id=?").run(chapter.title, chapter.body, bodyHash, chapter.body.length, now, prior.id);
+                } else {
+                    this.db.prepare("INSERT INTO source_chapters (id, drama_id, chapter_index, title, body, body_hash, chars, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                        .run(crypto.randomUUID(), dramaId, chapter.index, chapter.title, chapter.body, bodyHash, chapter.body.length, now, now);
+                }
+            }
+            if (state) {
+                this.db.prepare("UPDATE drama_episode_planning_state SET source_fingerprint=?, last_chapter_index=?, updated_at=? WHERE drama_id=?").run(fingerprint, lastChapterIndex, now, dramaId);
+            } else {
+                this.db.prepare("INSERT INTO drama_episode_planning_state (drama_id, episode_mode, plan_cursor, plan_done, source_fingerprint, last_chapter_index, batch_chapters, batch_chars, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                    .run(dramaId, episodeMode, 0, 0, fingerprint, lastChapterIndex, 12, 30000, now);
+            }
+            this.db.exec("COMMIT");
+        } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
+        const rows = this.db.prepare("SELECT * FROM source_chapters WHERE drama_id=? ORDER BY chapter_index ASC").all(dramaId) as Array<Record<string, unknown>>;
+        return { chapters: rows.map((row) => this.mapSourceChapterRow(row)), fingerprint, reused: false };
+    }
+
+    /** 只读取已持久化的章节 IR（完成后复用，绝不重算）。 */
+    listSourceChapters(dramaId: string): SourceChapter[] {
+        const rows = this.db.prepare("SELECT * FROM source_chapters WHERE drama_id=? ORDER BY chapter_index ASC").all(dramaId) as Array<Record<string, unknown>>;
+        return rows.map((row) => this.mapSourceChapterRow(row));
+    }
+
+    /** 按稳定章 ID 读单章原文（含正文）；传 dramaId 时顺带做剧目归属校验。 */
+    getSourceChapter(chapterId: string, dramaId?: string): SourceChapter | null {
+        const row = dramaId
+            ? this.db.prepare("SELECT * FROM source_chapters WHERE id=? AND drama_id=?").get(chapterId, dramaId)
+            : this.db.prepare("SELECT * FROM source_chapters WHERE id=?").get(chapterId);
+        return row ? this.mapSourceChapterRow(row as Record<string, unknown>) : null;
+    }
+
+    /** 按集反查它覆盖的章节（含正文）：chapter_ids_json 的稳定 ID → source_chapters 行，按章序号升序。 */
+    listEpisodeChapters(episodeId: string): SourceChapter[] {
+        const episode = this.getDramaEpisode(episodeId);
+        if (!episode?.chapterIds?.length) return [];
+        const ids = [...new Set(episode.chapterIds)];
+        const placeholders = ids.map(() => "?").join(",");
+        const rows = this.db.prepare(`SELECT * FROM source_chapters WHERE id IN (${placeholders})`).all(...ids) as Array<Record<string, unknown>>;
+        const byId = new Map(rows.map((row) => [String(row.id), this.mapSourceChapterRow(row)] as const));
+        return ids.map((id) => byId.get(id)).filter((chapter): chapter is SourceChapter => Boolean(chapter))
+            .sort((left, right) => left.chapterIndex - right.chapterIndex);
+    }
+
+    /**
+     * 单章原文写入（影策 UpdateDramaChapter 同款语义）：只改正文/标题/素材类型，
+     * 不改章节数、稳定 ID 与分集结果；plan_done 后依然允许改，改完由前端提示「重新改编」。
+     * 写 source_chapters.body 并重算 body_hash/chars；revision/updatedAt 乐观锁 + 同值幂等重放。
+     */
+    updateSourceChapter(input: {
+        chapterId: string;
+        dramaId?: string;
+        body?: string;
+        title?: string;
+        sourceFormat?: string;
+        expectedRevision?: number;
+        expectedUpdatedAt?: string;
+    }): { chapter: SourceChapter; changed: boolean; affectedEpisodeIds: string[] } {
+        const now = new Date().toISOString();
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const row = (input.dramaId
+                ? this.db.prepare("SELECT * FROM source_chapters WHERE id=? AND drama_id=?").get(input.chapterId, input.dramaId)
+                : this.db.prepare("SELECT * FROM source_chapters WHERE id=?").get(input.chapterId)) as Record<string, unknown> | undefined;
+            if (!row) throw new SourceChapterWriteError("章节不存在", "NOT_FOUND");
+            const current = this.mapSourceChapterRow(row);
+
+            if (input.body !== undefined && (!input.body.trim() || input.body.length > 400000)) {
+                throw new SourceChapterWriteError("原文不能为空，且不能超过 40 万字", "VALIDATION");
+            }
+            if (input.title !== undefined && (!input.title.trim() || [...input.title.trim()].length > 200)) {
+                throw new SourceChapterWriteError("章节标题需为 1 到 200 字", "VALIDATION");
+            }
+            if (input.sourceFormat !== undefined && !SOURCE_CHAPTER_FORMATS.has(input.sourceFormat)) {
+                throw new SourceChapterWriteError("素材类型无效（novel/script/storyboard）", "VALIDATION");
+            }
+
+            const nextBody = input.body === undefined ? current.body : input.body;
+            const nextTitle = input.title === undefined ? current.title : input.title.trim();
+            const nextFormat = input.sourceFormat === undefined ? current.sourceFormat : input.sourceFormat;
+            // 幂等：没有任何有效字段变化 → 原样返回，不校验版本、不自增 revision。
+            if (nextBody === current.body && nextTitle === current.title && nextFormat === current.sourceFormat) {
+                this.db.exec("COMMIT");
+                return { chapter: current, changed: false, affectedEpisodeIds: [] };
+            }
+            if (input.expectedRevision !== undefined && Number(input.expectedRevision) !== current.revision) {
+                throw new SourceChapterWriteError(`章节原文已被其他窗口修改（期望版本 ${input.expectedRevision}，当前 ${current.revision}）`, "CONFLICT");
+            }
+            if (input.expectedUpdatedAt !== undefined && String(input.expectedUpdatedAt) !== current.updatedAt) {
+                throw new SourceChapterWriteError("章节原文已被其他窗口修改，请重新读取后再保存", "CONFLICT");
+            }
+            const bodyHash = crypto.createHash("sha256").update(nextBody).digest("hex");
+            const updated = this.db.prepare(
+                "UPDATE source_chapters SET body=?, body_hash=?, chars=?, title=?, source_format=?, revision=revision+1, updated_at=? WHERE id=? AND revision=? AND updated_at=?"
+            ).run(nextBody, bodyHash, nextBody.length, nextTitle, nextFormat, now, current.id, current.revision, current.updatedAt);
+            if (updated.changes !== 1) throw new SourceChapterWriteError("章节原文并发冲突，请重试", "CONFLICT");
+
+            const affectedEpisodeIds: string[] = [];
+            if (nextFormat !== current.sourceFormat) {
+                // 素材类型是集级字段（影策 UpdateDramaEpisode）：按章编辑时同步到所有覆盖该章的集。
+                const episodes = this.listDramaEpisodes(current.dramaId);
+                for (const episode of episodes) {
+                    if (!episode.chapterIds.includes(current.id)) continue;
+                    this.db.prepare("UPDATE drama_episodes SET source_format=?, updated_at=? WHERE id=?").run(nextFormat, now, episode.id);
+                    affectedEpisodeIds.push(episode.id);
+                }
+            }
+            this.db.exec("COMMIT");
+            return { chapter: this.getSourceChapter(current.id)!, changed: true, affectedEpisodeIds };
+        } catch (error) {
+            if (this.db.isTransaction) this.db.exec("ROLLBACK");
+            throw error;
+        }
+    }
+
+    /**
+     * 本集覆盖的原著章节序号（1 起，升序去重）：drama_episodes.chapter_ids_json 的稳定 ID
+     * → source_chapters.chapter_index。这是造型章节范围选图的唯一章序号真值源；
+     * 老剧目没走新分集规划、chapter_ids_json 为空时返回 []，此时造型选图回退角色主图。
+     */
+    resolveEpisodeChapterNumbers(episodeId: string): number[] {
+        const episode = this.getDramaEpisode(episodeId);
+        if (!episode?.chapterIds?.length) return [];
+        const byId = new Map(this.listSourceChapters(episode.dramaId).map((chapter) => [chapter.id, chapter.chapterIndex] as const));
+        const numbers = episode.chapterIds.map((id) => byId.get(id)).filter((index): index is number => typeof index === "number");
+        return [...new Set(numbers)].sort((left, right) => left - right);
+    }
+
+    /** 分集方式写游标状态；plan_done 后拒绝改（影策 UpdateDramaSettings 同款锁）。 */
+    setEpisodePlanningMode(dramaId: string, episodeMode: string): void {
+        const state = this.getEpisodePlanningState(dramaId);
+        if (state?.planDone) throw new Error("分集已完成，不能修改分集方式");
+        const now = new Date().toISOString();
+        if (state) {
+            this.db.prepare("UPDATE drama_episode_planning_state SET episode_mode=?, updated_at=? WHERE drama_id=?").run(episodeMode, now, dramaId);
+        } else {
+            this.db.prepare("INSERT INTO drama_episode_planning_state (drama_id, episode_mode, plan_cursor, plan_done, source_fingerprint, last_chapter_index, batch_chapters, batch_chars, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+                .run(dramaId, episodeMode, 0, 0, "", 0, 12, 30000, now);
+        }
+    }
+
+    /**
+     * 单事务批量建集：WHERE plan_cursor=? 做 CAS；ON CONFLICT DO NOTHING 保证幂等；
+     * plan_done=1 拒绝写入；同一批重放返回 replayed=true 且不追加集、不推进游标。
+     */
+    applyPlanBatch(input: {
+        dramaId: string;
+        expectedCursor: number;
+        lastChapterIndex: number;
+        groups: readonly PlannedEpisode[];
+        planJson: DramaProductionPlan;
+        expectedUpdatedAt?: string;
+    }): { episodes: DramaEpisode[]; nextCursor: number; planDone: boolean; replayed: boolean } {
+        const now = new Date().toISOString();
+        let nextCursor = 0;
+        let planDone = 0;
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+            const state = this.getEpisodePlanningState(input.dramaId);
+            if (!state) throw new Error("分集规划状态未初始化，请先预览分集");
+            const existingByNumber = new Map(input.groups.map((group) => [group.episodeNumber, this.getDramaEpisodeByNumber(input.dramaId, group.episodeNumber)] as const));
+            const isReplay = input.groups.length > 0 && input.groups.every((group) => {
+                const episode = existingByNumber.get(group.episodeNumber);
+                if (!episode) return false;
+                return episode.title === group.title
+                    && JSON.stringify([...episode.chapterIds].sort()) === JSON.stringify([...group.chapterIds].sort());
+            });
+            if (state.planCursor !== input.expectedCursor) {
+                if (isReplay) {
+                    this.db.exec("COMMIT");
+                    return { episodes: input.groups.map((group) => existingByNumber.get(group.episodeNumber)!), nextCursor: state.planCursor, planDone: state.planDone, replayed: true };
+                }
+                throw new Error(`规划游标已变化（期望 ${input.expectedCursor}，当前 ${state.planCursor}），请重新预览后再建集`);
+            }
+            if (state.planDone) throw new Error("分集已完成，不能修改分集结果");
+            if (state.lastChapterIndex !== input.lastChapterIndex) throw new Error("章节数已变化，请重新预览后再建集");
+            if (input.expectedUpdatedAt) {
+                const prior = this.db.prepare("SELECT updated_at FROM drama_projects WHERE folder_id=?").get(input.dramaId) as { updated_at?: string } | undefined;
+                if (String(prior?.updated_at || "") !== input.expectedUpdatedAt) throw new Error("剧目规划已被其他窗口修改，请重新读取后再建集");
+            }
+            const maxCovered = input.groups.reduce((max, group) => group.chapterIndices.reduce((inner, index) => Math.max(inner, index), max), 0);
+            nextCursor = Math.max(state.planCursor, maxCovered + 1);
+            planDone = nextCursor > input.lastChapterIndex ? 1 : 0;
+            for (const group of input.groups) {
+                this.db.prepare(
+                    "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, chapter_ids_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(drama_id, episode_number) DO NOTHING"
+                ).run(`episode-${input.dramaId}-${group.episodeNumber}-${crypto.randomUUID().slice(0, 8)}`, input.dramaId, group.episodeNumber, group.title, group.synopsis, "", null, JSON.stringify(group.chapterIds), now, now);
+            }
+            this.db.prepare("UPDATE drama_projects SET production_plan_json=?, updated_at=? WHERE folder_id=?").run(JSON.stringify(input.planJson), now, input.dramaId);
+            const changed = this.db.prepare("UPDATE drama_episode_planning_state SET plan_cursor=?, plan_done=?, updated_at=? WHERE drama_id=? AND plan_cursor=?")
+                .run(nextCursor, planDone, now, input.dramaId, state.planCursor).changes;
+            if (changed !== 1) throw new Error("规划游标并发冲突，请重试");
+            this.db.exec("COMMIT");
+        } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
+        return {
+            episodes: input.groups.map((group) => this.getDramaEpisodeByNumber(input.dramaId, group.episodeNumber)!).filter(Boolean),
+            nextCursor, planDone: planDone === 1, replayed: false,
+        };
+    }
+
     // ── drama_episodes ───────────────────────────────────────────
     // episode 主键是 id（nanoid），drama_id + episode_number 唯一。
     // upsertDramaEpisode 接受传入的 episode 对象，若 id 未填则随机生成；
     // 同 (drama_id, episode_number) 已存在时按 id 替换（保留原 id）。
-    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode {
+
+    /**
+     * 手工加集口（POST /drama/projects/:dramaId/episodes）的 PlanDone 门禁：
+     * 对齐影策 —— 规划未完成（planDone=false）时不能手工加集，完成后才允许
+     * 「逐集追加新的一集」（影策 repository_drama.go:140 `if !PlanDone return ErrDramaPlanPending`，
+     * detail.tsx:821 blockedReason=planDone?undefined:...；drama_actions.go:51 注释
+     * 「已完成分集…之后可在制作台逐集追加新的一集」）。
+     * 只拦「新增集号」，既有集编辑（改标题/梗概/绑画布等）不受影响。
+     * 无 planning 记录的新剧目（如首集）放行，保持原行为。
+     */
+    assertDramaEpisodeCreationAllowed(dramaId: string, episodeNumber: number): void {
+        const state = this.getEpisodePlanningState(dramaId);
+        if (state && !state.planDone && !this.getDramaEpisodeByNumber(dramaId, episodeNumber)) {
+            throw new Error("分集规划尚未完成，完成后才能手工追加新的一集");
+        }
+    }
+
+    upsertDramaEpisode(input: { id?: string; dramaId: string; episodeNumber: number; title: string; synopsis: string; fullPlot?: string; sourceFormat?: string; sourceText?: string; canvasId?: string | null }): DramaEpisode {
         const now = new Date().toISOString();
         const id = input.id || `episode-${input.dramaId}-${input.episodeNumber}-${Math.random().toString(36).slice(2, 8)}`;
         const existing = this.getDramaEpisodeByNumber(input.dramaId, input.episodeNumber);
         const createdAt = existing?.createdAt || now;
         const canvasId = input.canvasId === undefined ? existing?.canvasId ?? null : input.canvasId;
         const fullPlot = input.fullPlot ?? "";
+        // 原文两列未传时保留既有值：后续只改标题/画布不能把原文抹掉。
+        const sourceFormat = input.sourceFormat === undefined ? existing?.sourceFormat ?? "" : input.sourceFormat;
+        const sourceText = input.sourceText === undefined ? existing?.sourceText ?? "" : input.sourceText;
         if (existing) {
             this.db.prepare(
-                "UPDATE drama_episodes SET title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
-            ).run(input.title, input.synopsis, fullPlot, canvasId, now, existing.id);
+                "UPDATE drama_episodes SET title=?, synopsis=?, full_plot=?, source_format=?, source_text=?, canvas_id=?, updated_at=? WHERE id=?"
+            ).run(input.title, input.synopsis, fullPlot, sourceFormat, sourceText, canvasId, now, existing.id);
             return this.getDramaEpisode(existing.id)!;
         }
         this.db.prepare(
-            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, fullPlot, canvasId, createdAt, now);
+            "INSERT INTO drama_episodes (id, drama_id, episode_number, title, synopsis, full_plot, source_format, source_text, canvas_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        ).run(id, input.dramaId, input.episodeNumber, input.title, input.synopsis, fullPlot, sourceFormat, sourceText, canvasId, createdAt, now);
         return this.getDramaEpisode(id)!;
     }
 
@@ -1482,13 +1869,15 @@ export class BackendDatabase {
         return out;
     }
 
-    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }): DramaEpisode | null {
+    updateDramaEpisode(id: string, patch: { episodeNumber?: number; title?: string; synopsis?: string; fullPlot?: string; sourceFormat?: string; sourceText?: string; canvasId?: string | null }): DramaEpisode | null {
         const existing = this.getDramaEpisode(id);
         if (!existing) return null;
         const nextNumber = patch.episodeNumber ?? existing.episodeNumber;
         const nextTitle = patch.title ?? existing.title;
         const nextSynopsis = patch.synopsis ?? existing.synopsis;
         const nextFullPlot = patch.fullPlot ?? existing.fullPlot;
+        const nextSourceFormat = patch.sourceFormat ?? existing.sourceFormat;
+        const nextSourceText = patch.sourceText ?? existing.sourceText;
         const nextCanvasId = patch.canvasId === undefined ? existing.canvasId : patch.canvasId;
         const conflict = this.getDramaEpisodeByNumber(existing.dramaId, nextNumber);
         if (conflict && conflict.id !== id) throw new Error(`分集编号已存在: ${existing.dramaId}/${nextNumber}`);
@@ -1497,8 +1886,8 @@ export class BackendDatabase {
             if (canvasConflict && canvasConflict.id !== id) throw new Error(`画布已绑定到分集: ${canvasConflict.id}`);
         }
         this.db.prepare(
-            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, full_plot=?, canvas_id=?, updated_at=? WHERE id=?"
-        ).run(nextNumber, nextTitle, nextSynopsis, nextFullPlot, nextCanvasId, new Date().toISOString(), id);
+            "UPDATE drama_episodes SET episode_number=?, title=?, synopsis=?, full_plot=?, source_format=?, source_text=?, canvas_id=?, updated_at=? WHERE id=?"
+        ).run(nextNumber, nextTitle, nextSynopsis, nextFullPlot, nextSourceFormat, nextSourceText, nextCanvasId, new Date().toISOString(), id);
         return this.getDramaEpisode(id);
     }
 
@@ -1540,11 +1929,58 @@ export class BackendDatabase {
         };
     }
 
+    /**
+     * 删集的服务端权威判定（影策 repository_drama.go:288 dramaEpisodeHasVideo 同口径）。
+     * 只读本集既有的真值：succeeded 的 video/render 流水线作业 = 分镜视频/成片，
+     * episode_productions 制作稿里的 director.workflow.finalResource = 成片，
+     * episode_production_versions / published_version / archived_at = 历史版本。
+     * 不写第二份副本，也不拿剧目级 stage 代替本集事实；客户端初判仅供参考。
+     */
+    dramaEpisodeDeleteGuard(episode: DramaEpisode): {
+        episodeNumber: number;
+        confirmText: string;
+        required: boolean;
+        reasons: string[];
+        stats: { videoJobs: number; finalResource: boolean; versions: number; publishedVersion: number; archived: boolean };
+    } {
+        const episodeId = episode.id;
+        const videoJobs = Number((this.db.prepare("SELECT COUNT(*) AS count FROM drama_pipeline_jobs WHERE episode_id=? AND status='succeeded' AND kind IN ('video','render')").get(episodeId) as { count?: number } | undefined)?.count || 0);
+        const versions = Number((this.db.prepare("SELECT COUNT(*) AS count FROM episode_production_versions WHERE episode_id=?").get(episodeId) as { count?: number } | undefined)?.count || 0);
+        const production = this.db.prepare("SELECT draft_json, published_json, published_version, archived_at FROM episode_productions WHERE episode_id=?").get(episodeId) as { draft_json?: string | null; published_json?: string | null; published_version?: number | null; archived_at?: string | null } | undefined;
+        const finalResourceKey = (json: unknown): string => {
+            try {
+                const doc = JSON.parse(String(json || "{}")) as { director?: { workflow?: { finalResource?: { storageKey?: unknown; key?: unknown } } } };
+                const resource = doc?.director?.workflow?.finalResource;
+                return String(resource?.storageKey || resource?.key || "");
+            } catch { return ""; }
+        };
+        const finalResource = Boolean(finalResourceKey(production?.draft_json) || finalResourceKey(production?.published_json));
+        const publishedVersion = Number(production?.published_version || 0);
+        const archived = Boolean(production?.archived_at);
+        const reasons: string[] = [];
+        if (videoJobs > 0) reasons.push(`已生成 ${videoJobs} 段分镜视频`);
+        if (finalResource) reasons.push("已有成片");
+        if (archived) reasons.push("成片已归档");
+        if (publishedVersion > 0) reasons.push(`已发布 v${publishedVersion}`);
+        if (versions > 0) reasons.push(`有 ${versions} 个历史版本`);
+        const confirmText = `第 ${episode.episodeNumber} 集`;
+        return {
+            episodeNumber: episode.episodeNumber, confirmText,
+            required: reasons.length > 0, reasons,
+            stats: { videoJobs, finalResource, versions, publishedVersion, archived },
+        };
+    }
+
     deleteDramaEpisode(id: string): number {
         return Number(this.db.prepare("DELETE FROM drama_episodes WHERE id = ?").run(id).changes);
     }
 
     private mapDramaEpisodeRow(row: Record<string, unknown>): DramaEpisode {
+        let chapterIds: string[] = [];
+        try {
+            const parsed = JSON.parse(String(row.chapter_ids_json || "[]"));
+            if (Array.isArray(parsed)) chapterIds = parsed.map(String);
+        } catch { /* 坏数据当空，不挡住分集读取 */ }
         return {
             id: String(row.id),
             dramaId: String(row.drama_id),
@@ -1552,9 +1988,12 @@ export class BackendDatabase {
             title: String(row.title || ""),
             synopsis: String(row.synopsis || ""),
             fullPlot: String(row.full_plot || ""),
+            sourceFormat: String(row.source_format || ""),
+            sourceText: String(row.source_text || ""),
             canvasId: row.canvas_id ? String(row.canvas_id) : null,
             createdAt: String(row.created_at),
             updatedAt: String(row.updated_at),
+            chapterIds,
         };
     }
 
@@ -1973,13 +2412,13 @@ export class BackendDatabase {
         const now = new Date().toISOString();
         this.db.prepare(`
             INSERT INTO generation_logs
-                (id, project_id, node_id, segment_id, status, platform, workflow, model, task_mode, prompt,
+                (id, project_id, node_id, segment_id, status, platform, source, workflow, model, task_mode, prompt,
                  references_json, input_counts_json, runtime_task_id, prompt_id, started_at, finished_at,
                  duration_ms, outputs_json, error, params_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             id, input.projectId, input.nodeId || null, input.segmentId || null, input.status, input.platform,
-            input.workflow || null, input.model || null, input.taskMode || null, input.prompt || null,
+            input.source || "pipeline", input.workflow || null, input.model || null, input.taskMode || null, input.prompt || null,
             JSON.stringify(input.references || []), JSON.stringify(input.inputCounts || {}),
             input.runtimeTaskId || null, input.promptId || null,
             input.startedAt || now, input.finishedAt || null, input.durationMs || 0,
@@ -2001,13 +2440,13 @@ export class BackendDatabase {
         const next = { ...current, ...patch, updatedAt: new Date().toISOString() };
         this.db.prepare(`
             UPDATE generation_logs SET
-                node_id=?, segment_id=?, status=?, platform=?, workflow=?, model=?, task_mode=?, prompt=?,
+                node_id=?, segment_id=?, status=?, platform=?, source=?, workflow=?, model=?, task_mode=?, prompt=?,
                 references_json=?, input_counts_json=?, runtime_task_id=?, prompt_id=?,
                 started_at=?, finished_at=?, duration_ms=?, outputs_json=?, error=?, params_json=?, updated_at=?
             WHERE id=?
         `).run(
             next.nodeId || null, next.segmentId || null, next.status, next.platform,
-            next.workflow || null, next.model || null, next.taskMode || null, next.prompt || null,
+            next.source || "pipeline", next.workflow || null, next.model || null, next.taskMode || null, next.prompt || null,
             JSON.stringify(next.references || []), JSON.stringify(next.inputCounts || {}),
             next.runtimeTaskId || null, next.promptId || null,
             next.startedAt, next.finishedAt || null, next.durationMs || 0,
@@ -2975,6 +3414,7 @@ function generationLogFromRow(row: Record<string, unknown>): GenerationLog {
         segmentId: row.segment_id ? String(row.segment_id) : undefined,
         status: String(row.status) as GenerationLogStatus,
         platform: String(row.platform),
+        source: (row.source ? String(row.source) : "pipeline") as GenerationLog["source"],
         workflow: row.workflow ? String(row.workflow) : undefined,
         model: row.model ? String(row.model) : undefined,
         taskMode: row.task_mode ? String(row.task_mode) : undefined,

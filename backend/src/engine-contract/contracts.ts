@@ -110,9 +110,18 @@ export type MediaStore = {
 
 export type GenerationLogStatus = "queued" | "running" | "success" | "failed" | "cancelled";
 
+/**
+ * 版本来源真值：pipeline 流水线生成 / upload 制作台上传 / canvas 从精修画布采用 / restore 设为当前时切版本。
+ * 对齐影策 DramaTakeSource（pipeline/upload/canvas，见 drama_canvas.go:dramaTakeSource），
+ * 本地增补 restore：restore_h3_output 真实写回时把当前版本标为「切版本」。
+ */
+export type GenerationSource = "pipeline" | "upload" | "canvas" | "restore";
+
 export type GenerationLog = {
     id: string; projectId: string; nodeId?: string; segmentId?: string;
     status: GenerationLogStatus; platform: string;
+    /** 来源：生成日志由真实生成回写创建时恒为 pipeline；历史库缺值时按 pipeline 派生。 */
+    source?: GenerationSource;
     workflow?: string; model?: string; taskMode?: string; prompt?: string;
     references: Array<Record<string, unknown>>; inputCounts: Record<string, number>;
     runtimeTaskId?: string; promptId?: string;

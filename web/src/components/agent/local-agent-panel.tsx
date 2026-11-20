@@ -1108,13 +1108,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
 
     const addAttachments = async (files: FileList | File[] | null) => {
         if (!files) return;
-        const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
+        const mediaFiles = Array.from(files).filter((file) => /^(image|video)\//.test(file.type));
         const prev = useAgentStore.getState().attachments;
         try {
             const next = await Promise.all(
-                images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
+                mediaFiles.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
                     const dataUrl = await readDataUrl(file);
-                    const meta = await readImageMeta(dataUrl);
+                    const meta = file.type.startsWith("video/") ? { width: 0, height: 0 } : await readImageMeta(dataUrl);
                     const url = URL.createObjectURL(file);
                     attachmentUrlsRef.current.add(url);
                     return { id: createId(), name: file.name, type: file.type, size: file.size, width: meta.width, height: meta.height, url, dataUrl };
@@ -2117,9 +2117,13 @@ function createId() {
 }
 
 async function createMessageAttachmentMetadata(item: AgentAttachment) {
-    const url = Math.max(item.width, item.height) > MESSAGE_PREVIEW_LONG_EDGE || item.dataUrl.length > MESSAGE_PREVIEW_MAX_LENGTH
-        ? await resizeDataUrl(item.dataUrl, { targetLongEdge: MESSAGE_PREVIEW_LONG_EDGE, algorithm: "high" })
-        : item.dataUrl;
+    // 视频 dataUrl 不能被 new Image() 解码，resizeDataUrl 的 loadImage 没有 onerror，
+    // 会永久 pending 卡死发送；视频直接保留原 dataUrl，不缩放。
+    const url = item.type.startsWith("video/")
+        ? item.dataUrl
+        : Math.max(item.width, item.height) > MESSAGE_PREVIEW_LONG_EDGE || item.dataUrl.length > MESSAGE_PREVIEW_MAX_LENGTH
+            ? await resizeDataUrl(item.dataUrl, { targetLongEdge: MESSAGE_PREVIEW_LONG_EDGE, algorithm: "high" })
+            : item.dataUrl;
     return { id: item.id, name: item.name, type: item.type, size: item.size, width: item.width, height: item.height, url };
 }
 

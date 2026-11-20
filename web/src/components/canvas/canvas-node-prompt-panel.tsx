@@ -29,6 +29,8 @@ type CanvasNodePromptPanelProps = {
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
+    /** @ 候选专用并集（配置参考 + 直连参考）；只喂给编辑器候选，不改变生成/音频计数。 */
+    candidateReferences?: CanvasResourceReference[];
     nodes: CanvasNodeData[];
     connectedNodes?: CanvasNodeData[];
     loopInputCount?: number;
@@ -40,7 +42,8 @@ type CanvasNodePromptPanelProps = {
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], loopInputCount = 0, onDisconnectReference, onReorderReference, reorderableSourceNodeIds, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, onGenerate, onStop, mentionReferences = [], candidateReferences, connectedNodes = [], loopInputCount = 0, onDisconnectReference, onReorderReference, reorderableSourceNodeIds, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+    const editorReferences = candidateReferences ?? mentionReferences;
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -115,7 +118,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
             </div>
             <CanvasCollaborativeText
                 projectId={projectId} target={target} chips dialogue
-                references={mentionReferences}
+                references={editorReferences}
                 editorRef={editorRef}
                 onSubmit={submit}
                 className="canvas-authored-prompt thin-scrollbar h-20 w-full cursor-text resize-none rounded-lg border px-2.5 py-2 text-[13px] leading-5 outline-none"
@@ -174,7 +177,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                     <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
                     <CanvasCollaborativeText
                         projectId={projectId} target={target} chips dialogue
-                        references={mentionReferences}
+                        references={editorReferences}
                         className="canvas-authored-prompt thin-scrollbar h-[52dvh] min-h-80 w-full cursor-text overflow-y-auto rounded-xl border p-4 text-[15px] leading-6 outline-none"
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
                         placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}

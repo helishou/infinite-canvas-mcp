@@ -20,7 +20,7 @@ export function validateNodeUpdate(operation: Record<string, any>, previous?: Re
     }
     return patch;
 }
-const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags", "videoContinuation"]);
+const clipKeys = new Set([...H3_PARAM_KEYS, ...H3_NARRATIVE_FIELDS, ...Object.keys(BASE_H3_NODE_METADATA), "title", "taskMode", "h3ParameterPolicy", "h3ParameterOverrides", "referenceBindings", "referenceOrder", "h3CharacterGroups", "storyboardShots", "storyboardDurations", "storyboardModeEnabled", "storyboardCompositeEnabled", "storyboardPromptCache", "subjectDefinitions", "subjects", "tailFrameContinuation", "sourceShotId", "styleTemplateId", "strictPromptTags", "videoContinuation", "audioReferenceMode", "autoVoiceGroupIds", "voiceReferenceNotes", "voiceOverrides", "promptCustom"]);
 export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) {
     if (patch.h3ParameterOverrides !== undefined && (!Array.isArray(patch.h3ParameterOverrides) || patch.h3ParameterOverrides.some((key: unknown) => typeof key !== "string" || !(H3_PARAM_KEYS as readonly string[]).includes(key)))) throw new Error("H3 人工参数标记无效");
     for (const [key, value] of Object.entries(patch)) {
@@ -30,12 +30,26 @@ export function validateH3Edit(patch: Record<string, any>, allowLegacy = false) 
         if (typeof base === "boolean" && typeof value !== "boolean") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 boolean`);
         if (typeof base === "number" && (typeof value !== "number" || !Number.isFinite(value))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为有限 number`);
         if (["title", "prompt", ...H3_NARRATIVE_FIELDS.filter(field => field !== "timeline")].includes(key as any) && typeof value !== "string") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 string`);
-        if (["referenceBindings", "referenceOrder", "storyboardShots", "subjectDefinitions", "subjects", "timeline", "loraSlots"].includes(key) && !Array.isArray(value)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 array`);
+        if (["referenceBindings", "referenceOrder", "storyboardShots", "subjectDefinitions", "subjects", "timeline", "loraSlots", "autoVoiceGroupIds", "voiceReferenceNotes"].includes(key) && !Array.isArray(value)) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 array`);
         if (key === "referenceOrder" && (value.some((id: unknown) => typeof id !== "string" || !id) || new Set(value).size !== value.length)) throw new Error("INVALID_CLIP_FIELD: patch.referenceOrder 必须是无重复的 binding ID 数组");
         if (["h3CharacterGroups", "storyboardDurations", "storyboardPromptCache"].includes(key) && (!value || typeof value !== "object" || Array.isArray(value))) throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 object`);
         if (["storyboardModeEnabled", "storyboardCompositeEnabled"].includes(key) && typeof value !== "boolean") throw new Error(`INVALID_CLIP_FIELD: patch.${key} 必须为 boolean`);
         if (key === "duration" && (typeof value !== "number" && typeof value !== "string" || !Number.isFinite(Number(value)) || Number(value) <= 0)) throw new Error("INVALID_CLIP_FIELD: patch.duration 必须为正数");
         if (key === "taskMode" && !["t2v", "i2v", "fl2v", "l2v", "ref2va"].includes(String(value))) throw new Error("INVALID_CLIP_FIELD: patch.taskMode 无效");
+        if (key === "audioReferenceMode" && !["auto", "custom"].includes(String(value))) throw new Error("INVALID_CLIP_FIELD: patch.audioReferenceMode 必须为 auto 或 custom");
+        if (key === "promptCustom" && typeof value !== "boolean") throw new Error("INVALID_CLIP_FIELD: patch.promptCustom 必须为 boolean");
+        if (key === "autoVoiceGroupIds" && value.some((id: unknown) => typeof id !== "string" || !id)) throw new Error("INVALID_CLIP_FIELD: patch.autoVoiceGroupIds 必须为非空字符串 ID 数组");
+        if (key === "voiceReferenceNotes" && value.some((note: unknown) => {
+            const item = note && typeof note === "object" && !Array.isArray(note) ? note as Record<string, unknown> : null;
+            return !item || typeof item.groupId !== "string" || typeof item.characterName !== "string"
+                || typeof item.reason !== "string" || !["voice_sample_missing", "mode_not_supported", "audio_reference_limit"].includes(String(item.code))
+                || item.sent !== false;
+        })) throw new Error("INVALID_CLIP_FIELD: patch.voiceReferenceNotes 必须为 {groupId,characterName,code,reason,sent:false} 结构数组");
+        if (key === "voiceOverrides" && (!value || typeof value !== "object" || Array.isArray(value)
+            || Object.entries(value as Record<string, unknown>).some(([groupId, raw]) => !groupId
+                || !(typeof raw === "string" || raw && typeof raw === "object" && !Array.isArray(raw) && typeof (raw as Record<string, unknown>).storageKey === "string")))) {
+            throw new Error("INVALID_CLIP_FIELD: patch.voiceOverrides 必须为 {角色组ID: voiceStorageKey 或 {storageKey,url?,name?}} 结构对象");
+        }
     }
 }
 

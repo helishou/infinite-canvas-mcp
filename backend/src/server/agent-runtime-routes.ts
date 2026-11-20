@@ -4,6 +4,7 @@ import { createRunningHubProxy } from "../engine-contract/runninghub-proxy.js";
 import { engineTargets } from "../engine-contract/workflow-catalog.js";
 import type { VideoConcatBackend } from "../engine-contract/video-concat.js";
 import type { BackendEventBus } from "../events.js";
+import { resolveTaskLivePreview } from "../canvas/engine-preview.js";
 
 /** Agent 兼容运行时路由，实际任务由 Backend 服务和 TaskStore 承担。 */
 export function registerAgentRuntimeRoutes(app: Express, stores: Stores, videoConcat: VideoConcatBackend, events?: BackendEventBus) {
@@ -26,12 +27,12 @@ export function registerAgentRuntimeRoutes(app: Express, stores: Stores, videoCo
         res.status(202).json({ ok: true, task });
     });
     app.post("/agent/video-audio-extract/tasks/:id/cancel", (req, res) => { const task = videoConcat.cancel(req.params.id); events?.publish({ type: "task.updated", entityId: task.id, payload: task }); res.json({ ok: true, task }); });
-    app.get("/agent/runtime/tasks/:id", (req, res) => taskResponse(req.params.id, "", stores, req, res));
+    app.get("/agent/runtime/tasks/:id", (req, res) => { void taskResponse(req.params.id, "", stores, req, res); });
 }
 
-function taskResponse(id: string, prefix: string, stores: Stores, req: Request, res: Response) {
+async function taskResponse(id: string, prefix: string, stores: Stores, req: Request, res: Response) {
     const task = stores.tasks.get(id); if (!task || (prefix && !task.kind.startsWith(prefix))) return res.status(404).json({ ok: false, error: "task not found", code: "TASK_NOT_FOUND" });
-    return res.json({ ok: true, task, preview: null, events: stores.tasks.events(id, Number(req.query.after || 0)) });
+    return res.json({ ok: true, task, preview: await resolveTaskLivePreview(stores, id), events: stores.tasks.events(id, Number(req.query.after || 0)) });
 }
 function objectBody(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 /** 站点既可以从 query 传（GET/DELETE），也可以从 body 传（PUT/POST）。 */

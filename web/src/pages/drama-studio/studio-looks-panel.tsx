@@ -7,9 +7,14 @@ import {
     fetchBackendDramaEpisode,
     applyBackendCanvasOperations,
     backendMediaUrl,
+    fetchDramaCastImpact,
+    restyleDramaCast,
+    startCanvasGeneration,
+    fetchBackendTask,
 } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore, type ImageAsset } from "@/stores/use-asset-store";
+import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +36,8 @@ type LookImage = {
     fromChapter?: number;
     toChapter?: number;
     id?: string;
+    /** 面板内生成或上传自定义图后置位：重新生成需先解锁（对齐影策 look.locked）。 */
+    locked?: boolean;
 };
 type CharacterLook = {
     castId: string;
@@ -62,14 +69,17 @@ function chapterLabel(from?: number, to?: number) {
     return "不限章节";
 }
 
-export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas, onCountChange }: {
+export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onOpenCanvas, onCountChange }: {
+    /** 剧目 ID：单设定 restyle 影响集查询/提交必须带它，null 时只保留诚实提示。 */
+    dramaId: string | null;
     sharedAssetCanvasId: string | null;
     episodeIds?: string[];
     onOpenCanvas: () => void;
     /** 汇报剧目级额外妆造总数（每个角色本体之外），供分类 tab 显示真实计数。 */
     onCountChange?: (count: number) => void;
 }) {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
+    const config = useConfigStore((s) => s.config);
     const allAssets = useAssetStore((s) => s.assets);
     const imageAssets = useMemo(() => allAssets.filter((a): a is ImageAsset => a.kind === "image"), [allAssets]);
     const [characters, setCharacters] = useState<CharacterLook[]>([]);
@@ -82,6 +92,11 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
     const [preview, setPreview] = useState<{ key: string; title: string } | null>(null);
     const [form, setForm] = useState<LookForm>(emptyForm);
     const [restyle, setRestyle] = useState(true);
+    const [impact, setImpact] = useState<Awaited<ReturnType<typeof fetchDramaCastImpact>> | null>(null);
+    const [impactLoading, setImpactLoading] = useState(false);
+    const [impactTick, setImpactTick] = useState(0);
+    const [restyleSubmitting, setRestyleSubmitting] = useState(false);
+    const [generatingIndex, setGeneratingIndex] = useState<number | null>(null);
     const customRef = useRef<HTMLInputElement | null>(null);
 
     const episodeKey = (episodeIds || []).join("|");
@@ -142,10 +157,64 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
         setSelectedCast((cur) => characters.some((c) => c.castId === cur) ? cur : characters[0].castId);
     }, [characters]);
 
+    // 单设定 restyle：真实查询「引用该角色的剧情段」影响集，不用假数字。
+    useEffect(() => {
+        let disposed = false;
+        if (!dramaId || !selectedCast) { setImpact(null); return; }
+        setImpactLoading(true);
+        fetchDramaCastImpact(dramaId, selectedCast, undefined)
+            .then((result) => { if (!disposed) setImpact(result.ok ? result : null); })
+            .catch(() => { if (!disposed) setImpact(null); })
+            .finally(() => { if (!disposed) setImpactLoading(false); });
+        return () => { disposed = true; };
+    }, [dramaId, selectedCast, impactTick, refreshTick]);
+
     const selected = characters.find((c) => c.castId === selectedCast);
     const baseIndex = selected ? Math.min(Math.max(selected.primaryIndex, 0), Math.max(0, selected.images.length - 1)) : 0;
     const baseImage = selected?.images[baseIndex];
     const extra = selected ? selected.images.map((im, i) => ({ im, i })).filter(x => x.i !== baseIndex) : [];
+
+    /** 真提交单设定 restyle：先查真实影响集→用户确认→后端标脏引用段，正在生成的段由后端跳过。 */
+    const doRestyle = async (ch: CharacterLook) => {
+        if (!dramaId) {
+            message.warning("当前未定位到剧目，无法查询影响段；请从剧目页进入造型面板");
+            return;
+        }
+        setRestyleSubmitting(true);
+        try {
+            const result = await fetchDramaCastImpact(dramaId, ch.castId);
+            const generated = result.targets.filter((target) => target.hasVideo && !target.inputOutdated);
+            if (!generated.length) {
+                message.info(result.segments
+                    ? `查到 ${result.segments} 个引用段，但没有已出片、需要重做的视频`
+                    : "没有找到引用该角色的剧情段，无需重生成");
+                return;
+            }
+            let confirmed = false;
+            await new Promise<void>((resolve) => {
+                modal.confirm({
+                    title: `让引用「${ch.castName}」的剧情段视频重新生成？`,
+                    content: `真实影响 ${result.episodes} 集 · ${result.segments} 段；其中 ${generated.length} 段已出片将被标记为需重新生成，正在生成的段自动跳过。此操作写入画布段状态，不会删除原视频。`,
+                    okText: "确认提交重生成",
+                    cancelText: "取消",
+                    onOk: () => { confirmed = true; resolve(); },
+                    onCancel: () => resolve(),
+                });
+            });
+            if (!confirmed) return;
+            const submitted = await restyleDramaCast(dramaId, ch.castId, { restyleSegments: true });
+            if (submitted.affectedSegments) {
+                message.success(`已提交 ${submitted.affectedSegments} 个剧情段重新生成（引用该角色的视频已标脏）`);
+            } else {
+                message.info("没有可标脏的引用段（可能已全部过期或正在生成）");
+            }
+            setImpactTick((t) => t + 1);
+        } catch (error) {
+            message.error(`单设定 restyle 失败：${(error as Error).message}`);
+        } finally {
+            setRestyleSubmitting(false);
+        }
+    };
 
     /** 真实写回画布角色节点：metadata.characterImages[] 与 characterPrimaryIndex 整体替换。 */
     const commit = async (ch: CharacterLook, images: LookImage[], primaryIndex: number, withRestyle: boolean) => {
@@ -154,11 +223,10 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
             await applyBackendCanvasOperations(ch.canvasId, [
                 { type: "update_node", id: ch.nodeId, metadata: { characterImages: images, characterPrimaryIndex: primaryIndex } },
             ], ch.canvasRevision);
-            message.success(withRestyle
-                ? "造型已保存到画布节点；引用该角色的剧情段视频请到分镜里重新生成"
-                : "造型已保存到画布角色节点");
+            message.success("造型已保存到画布角色节点");
             setEditing(null);
             setRefreshTick((t) => t + 1);
+            if (withRestyle) await doRestyle(ch);
         } catch (error) {
             message.error(`保存造型失败：${(error as Error).message}`);
         } finally {
@@ -197,6 +265,7 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
             ...(Number(form.from) ? { fromChapter: Number(form.from) } : { fromChapter: undefined }),
             ...(Number(form.to) ? { toChapter: Number(form.to) } : { toChapter: undefined }),
             id: prior.id || `look-${nanoid()}`,
+            ...(form.storageKey ? { locked: true } : {}),
         };
         const next = [...selected.images];
         if (editing.index === null) next.push(im); else next[editing.index] = im;
@@ -204,9 +273,19 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
     };
     const removeLook = (index: number) => {
         if (!selected) return;
-        const next = selected.images.filter((_, j) => j !== index);
-        const primaryIndex = Math.min(selected.primaryIndex, Math.max(0, next.length - 1));
-        void commit(selected, next, primaryIndex, restyle);
+        const name = String(selected.images[index]?.name || `第 ${index + 1} 套造型`);
+        modal.confirm({
+            title: `删除造型「${name}」？`,
+            content: "会从画布角色节点移除这套妆造；引用该造型的参考图需重新生成。此操作写回画布角色节点。",
+            okText: "删除造型",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            onOk: () => {
+                const next = selected.images.filter((_, j) => j !== index);
+                const primaryIndex = Math.min(selected.primaryIndex, Math.max(0, next.length - 1));
+                void commit(selected, next, primaryIndex, restyle);
+            },
+        });
     };
     const pickLibraryImage = (id: string) => {
         const asset = imageAssets.find((a) => a.id === id);
@@ -224,15 +303,115 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
             message.error(`上传失败：${(error as Error).message}`);
         }
     };
-    const generateLook = (im: LookImage) => {
-        // 本地造型图的模型生成只能在画布角色节点上做（无独立后端接口）。
-        // 把该造型的外观描述放进剪贴板，打开画布后可直接粘到角色节点生成，避免按钮点了空转。
-        const outfit = String(im.outfitDescription || im.outfit || "").trim();
-        if (outfit) void navigator.clipboard?.writeText(outfit).catch(() => undefined);
-        message.info(outfit
-            ? "已复制该造型的外观描述，打开画布后粘贴到角色节点生成；完成后回到这里刷新"
-            : "造型图请在画布角色节点上生成，完成后回到这里刷新");
-        onOpenCanvas();
+    /**
+     * 面板内出图：复用画布既有出图链路，不新建造型表、不造后端接口。
+     * mode=image 提交到角色节点 → Backend 用造型 prompt + 本体图作参考新建图片结果节点并执行；
+     * 任务成功后把真实 storageKey 写回 metadata.characterImages[] 并锁定该造型。
+     * 本体图必须 ready（有 storageKey），否则 disable 并说明原因——造型图以它为底图保持同一张脸。
+     */
+    const generateLook = async (ch: CharacterLook, index: number, im: LookImage) => {
+        if (!baseImage?.storageKey) {
+            message.warning("请先生成或上传角色本体参考图，造型图需要以它为底图");
+            return;
+        }
+        const model = resolveModelForCapability(config, config.imageModel, "image");
+        if (!model) return void message.warning("没有可用的图片生成模型，请到制作设置里配置参考图模型");
+
+        const lookName = String(im.outfit || im.name || "造型").trim();
+        const outfit = String(im.outfitDescription || "").trim();
+        const identity = String(ch.description || "").trim();
+        const prompt = [
+            identity ? `角色本体设定：${identity}` : "",
+            `本次造型：${lookName}${outfit ? ` —— ${outfit}` : ""}`,
+            "五官与脸型严格沿用参考的角色本体图，保持同一张脸；只改变服装、发型与妆容。",
+        ].filter(Boolean).join("\n");
+
+        setGeneratingIndex(index);
+        try {
+            const started = await startCanvasGeneration({
+                mode: "image",
+                projectId: ch.canvasId,
+                nodeId: ch.nodeId,
+                prompt,
+                references: [{
+                    id: `look-base-${ch.castId}`,
+                    name: `${ch.castName}-本体`,
+                    storageKey: baseImage.storageKey,
+                    mimeType: "image/png",
+                }],
+                count: 1,
+                // 每次点击都是一次新的生成（含重新生成）；用随机 key 避免复用上次任务结果。
+                idempotencyKey: `look-gen:${ch.nodeId}:${im.id || `slot-${index}`}:${nanoid(8)}`,
+                model,
+            });
+
+            // 轮询权威任务：Backend 把结果写进结果节点，task.result.media 带真实 storageKey。
+            const deadline = Date.now() + 180_000;
+            let storageKey = "";
+            for (;;) {
+                const { task } = await fetchBackendTask(started.taskId);
+                if (!task) throw new Error("造型生成任务不存在");
+                if (task.status === "succeeded") {
+                    const media = task.result?.media?.[0] || task.result?.images?.[0];
+                    storageKey = String(media?.storageKey || "");
+                    break;
+                }
+                if (task.status === "failed" || task.status === "cancelled") throw new Error(String(task.error || "造型生成失败"));
+                if (Date.now() > deadline) throw new Error("造型生成超时");
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+            }
+            if (!storageKey) throw new Error("生成成功但没有可用的图片存储键");
+
+            // 写回真值：重新读取角色节点，避免生成期间 revision 变化导致基线过期。
+            const fresh = await fetchBackendProject(ch.canvasId);
+            const node = ((fresh.project?.nodes || []) as Array<Record<string, unknown>>)
+                .find((n) => String(n.id) === ch.nodeId);
+            if (!node) throw new Error("画布角色节点已不存在");
+            const md = (node.metadata || {}) as Record<string, unknown>;
+            const currentImages = (Array.isArray(md.characterImages) ? md.characterImages : []) as LookImage[];
+            const matches = (entry: LookImage, i: number) => im.id
+                ? String(entry.id) === String(im.id)
+                : i === index;
+            if (!currentImages.some(matches)) throw new Error("该造型已从画布移除，未写回生成结果");
+            const nextImages = currentImages.map((entry, i) => matches(entry, i)
+                ? {
+                    ...entry,
+                    storageKey,
+                    url: backendMediaUrl(storageKey),
+                    outfit: im.outfit || entry.outfit,
+                    outfitDescription: im.outfitDescription || entry.outfitDescription,
+                    name: im.name || im.outfit || entry.name,
+                    locked: true,
+                }
+                : entry);
+            await applyBackendCanvasOperations(ch.canvasId, [
+                { type: "update_node", id: ch.nodeId, metadata: { characterImages: nextImages } },
+            ], Number(fresh.project?.revision || 0));
+
+            message.success(`已生成「${lookName}」造型图并写回画布角色节点（已锁定）`);
+            setRefreshTick((t) => t + 1);
+        } catch (error) {
+            message.error(`造型图生成失败：${(error as Error).message}`);
+        } finally {
+            setGeneratingIndex(null);
+        }
+    };
+
+    const triggerGenerate = (index: number, im: LookImage) => {
+        if (!selected || !baseImage?.storageKey) return;
+        if (generatingIndex !== null) return;
+        // 已锁定的造型重新生成需先确认解锁（对齐影策 cast-looks.tsx:166）。
+        if (im.locked) {
+            modal.confirm({
+                title: `重新生成「${im.outfit || im.name || "造型"}」？`,
+                content: "将按已保存的外观描述生成新图，并覆盖当前已锁定的造型图。",
+                okText: "解锁并生成",
+                cancelText: "取消",
+                onOk: () => { void generateLook(selected, index, im); },
+            });
+            return;
+        }
+        void generateLook(selected, index, im);
     };
 
     return (
@@ -249,9 +428,20 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
                     共 {characters.length} 个角色 · 当前「{selected?.castName || "—"}」额外妆造 {extra.length}/{MAX_EXTRA_LOOKS} · 画布角色节点真实数据
                 </span>
                 <div className="ml-auto flex items-center gap-3">
-                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground" data-studio-look-restyle>
+                    <label className="flex items-center gap-1 text-[11px] text-muted-foreground" data-studio-look-restyle
+                        title="勾选后保存造型会真实查询引用该角色的剧情段，并把已出片视频标记为需重新生成（对齐影策单设定 restyle）">
                         <input type="checkbox" checked={restyle} onChange={(e) => setRestyle(e.target.checked)} />
                         让引用它的剧情段重新生成
+                        {dramaId && impact ? (
+                            <span className="ml-1 font-medium text-primary" data-studio-look-restyle-impact>
+                                {impact.episodes} 集 · {impact.segments} 段
+                            </span>
+                        ) : (
+                            <span className="ml-1 text-[10px] opacity-70" data-studio-look-restyle-hint>
+                                {dramaId ? (impactLoading ? "影响段查询中…" : "影响段暂不可查") : "需从剧目页进入才可查影响段"}
+                            </span>
+                        )}
+                        {restyleSubmitting ? <span className="ml-1 text-[10px] text-primary">提交中…</span> : null}
                     </label>
                     <button type="button" onClick={() => setRefreshTick((t) => t + 1)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"><RefreshCw className="size-3" /> 刷新</button>
                     <button type="button" onClick={onOpenCanvas} className="text-[11px] text-muted-foreground hover:text-foreground">在画布中精修造型 →</button>
@@ -282,7 +472,11 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
                                 <div className="min-w-0 text-[11px]">
                                     <div className="font-medium">{selected.castName}</div>
                                     <div className="mt-0.5 line-clamp-2 text-muted-foreground">{selected.description || "（无角色描述）"}</div>
-                                    <div className="mt-1 text-[10px] text-muted-foreground">{baseImage ? "主图已设为本体参考" : "本体参考图尚未生成"}</div>
+                                    <div className="mt-1 text-[10px] text-muted-foreground">
+                                        {baseImage?.storageKey
+                                            ? "主图已设为本体参考"
+                                            : "本体参考图尚未就绪：请先在画布生成或上传本体图，造型图需要以它为底图（当前已禁用生成）"}
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -308,7 +502,7 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
                                         placeholder="这套造型的服装、发型与妆容；五官脸型沿用角色本体"
                                         className="w-full resize-none rounded-md border border-border bg-background p-2 text-[11px] outline-none" />
                                     <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                                        <span>默认适用</span>
+                                        <span title="本段视频按本集章节序号自动选默认造型：范围包含本集第一章；多套命中取起点最晚、范围最窄；0 或留空不限，无命中回退角色本体">默认按章节自动选</span>
                                         <input aria-label="起始章" value={form.from} onChange={(e) => setForm({ ...form, from: e.target.value.replace(/\D/g, "") })} placeholder="起始章"
                                             className="h-8 w-20 rounded-md border border-border bg-background px-2 text-xs outline-none" />
                                         <span>至</span>
@@ -357,10 +551,17 @@ export function StudioLooksPanel({ sharedAssetCanvasId, episodeIds, onOpenCanvas
                                                     <div className="truncate text-xs font-medium" title={lookName}>{lookName}</div>
                                                     <div className="mt-1 text-[11px] text-muted-foreground">{chapterLabel(im.fromChapter, im.toChapter)}</div>
                                                     <div className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">{im.outfitDescription || "（无外观描述）"}</div>
+                                                    {im.locked ? <div className="mt-1 text-[10px] text-amber-500">已锁定（面板内生成或自定义图）</div> : null}
                                                     <div className="mt-2 flex flex-wrap items-center gap-1">
-                                                        <button type="button" onClick={() => generateLook(im)} data-studio-look-generate
-                                                            className={cn("flex items-center gap-1 rounded-md border border-border px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-muted")}>
-                                                            <Play className="size-3" /> {im.storageKey ? "到画布重新生成" : "到画布生成"}
+                                                        <button type="button" onClick={() => triggerGenerate(i, im)} data-studio-look-generate
+                                                            disabled={!baseImage?.storageKey || generatingIndex !== null}
+                                                            title={!baseImage?.storageKey
+                                                                ? "请先生成或上传角色本体参考图，造型图需要以它为底图"
+                                                                : im.locked
+                                                                    ? "已锁定：重新生成会覆盖当前造型图"
+                                                                    : im.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
+                                                            className={cn("flex items-center gap-1 rounded-md border border-border px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-50", generatingIndex === i && "text-primary")}>
+                                                            <Play className="size-3" /> {generatingIndex === i ? "生成中…" : im.locked ? "重新生成" : im.storageKey ? "重新生成" : "生成造型图"}
                                                         </button>
                                                         <button type="button" onClick={() => openEdit(i)} aria-label={`编辑造型 ${lookName}`}
                                                             className="rounded-md border border-border p-1 text-muted-foreground hover:bg-muted"><Pencil className="size-3" /></button>

@@ -188,7 +188,11 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
         } as ReferenceBinding;
     }).filter(Boolean) as ReferenceBinding[];
     const voice = recordOf(group.voice);
-    if (group.voiceEnabled === true && String(voice.url || "")) {
+    // 段级音色覆写可能只给 voiceStorageKey（无 url）；storageKey 同样是可用媒体身份，
+    // 不能因为本体没有 url 就把手指派的音色挡在参考绑定之外（resolveRef 以 storageKey 优先）。
+    const voiceUrl = String(voice.url || "");
+    const voiceStorageKey = String(voice.storageKey || "");
+    if (group.voiceEnabled === true && (voiceUrl || voiceStorageKey)) {
         refs.push({
             id: stableReferenceId("binding", `${groupId}:voice`),
             assetId: String(voice.assetId || "") || stableReferenceId("asset", `${characterNodeId}:voice`),
@@ -199,8 +203,8 @@ export function characterGroupBindings(group: Record<string, unknown>): Referenc
             usage: "reference",
             subjectId,
             mediaType: "audio",
-            url: String(voice.url),
-            storageKey: String(voice.storageKey || "") || undefined,
+            url: voiceUrl || voiceStorageKey,
+            storageKey: voiceStorageKey || undefined,
             sourceNodeId: characterNodeId,
             groupId,
         });

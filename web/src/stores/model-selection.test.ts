@@ -19,7 +19,7 @@ afterAll(() => {
     else Reflect.deleteProperty(globalThis, "localStorage");
 });
 
-const { defaultConfig, resolveModelForCapability, useConfigStore } = await import("../stores/use-config-store");
+const { defaultConfig, resolveModelForCapability, useConfigStore, modelMaxAudiosOf, segmentAudioLimitOf } = await import("../stores/use-config-store");
 const { buildGenerationConfig } = await import("../lib/canvas/canvas-generation-helpers");
 const { CanvasNodeType } = await import("../types/canvas");
 
@@ -34,8 +34,8 @@ const config: AiConfig = {
             apiKey: "test-key",
             apiFormat: "openai",
             models: [
-                { name: "video-b", capability: "video" },
-                { name: "video-a", capability: "video" },
+                { name: "video-b", capability: "video", maxAudios: 2 },
+                { name: "video-a", capability: "video", maxAudios: 5 },
                 { name: "image-a", capability: "image" },
             ],
         },
@@ -98,4 +98,13 @@ test("unavailable explicit selections are preserved for every generation capabil
     for (const capability of ["image", "video", "text", "audio"] as ModelCapability[]) {
         assert.equal(resolveModelForCapability(config, `removed::${capability}`, capability), `removed::${capability}`);
     }
+});
+
+test("段级参考音色上限按当前视频模型的 maxAudios 读取，非 ref2va 模式为 0", () => {
+    assert.equal(modelMaxAudiosOf(config, "replacement::video-b"), 2);
+    assert.equal(modelMaxAudiosOf(config, "replacement::video-a"), 5);
+    assert.equal(segmentAudioLimitOf(config, "replacement::video-b", "ref2va"), 2);
+    assert.equal(segmentAudioLimitOf(config, "replacement::video-a", "ref2va"), 5);
+    assert.equal(segmentAudioLimitOf(config, "replacement::video-b", "t2v"), 0);
+    assert.equal(segmentAudioLimitOf(config, "replacement::video-b", "i2v"), 0);
 });

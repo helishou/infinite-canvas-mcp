@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ReactNode } from "react";
-import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Move, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video } from "lucide-react";
+import { ChevronRight, X, Copy, Download, FileText, Image as ImageIcon, ListRestart, MapPinned, Move, Music2, Package, Puzzle, RefreshCw, Settings2, Star, Trash2, User, Video, CircleAlert, Check } from "lucide-react";
 
 import { isH3NodeType } from "@/lib/canvas/canvas-delta";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
@@ -31,6 +31,8 @@ import { shouldStartCanvasNodeDrag } from "./canvas-node-drag";
 import { CanvasNodePanelFrame } from "./canvas-node-panel-frame";
 import { useCanvasNodeLivePreview, type CanvasNodeLivePreview } from "@/services/canvas-node-live-preview";
 import { productionReadinessStore } from "@/stores/canvas/production-readiness";
+import { GenRing } from "./canvas-gen-indicator";
+import { nodeActiveCreatedAt, useCanvasTaskTiming, useElapsedSeconds } from "@/hooks/use-running-task-count";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 // 选中态取画布主题：浅色 #2f80ff / 深色 #60a5fa。写死亮蓝会让暗色主题下的
@@ -145,6 +147,26 @@ function isNodeGenerating(node: CanvasNodeData) {
     return Array.isArray(metadata.segments) && metadata.segments.some((segment) => pending(segment.status));
 }
 
+/**
+ * 生成完成揭幕（对齐影策 useGenerationReveal）：节点从 loading/queued 变为 success 时，
+ * 一次性返回 true（约 2.4s），用于播放「已完成」徽章的弹出→淡出动画。
+ */
+function useGenerationDoneReveal(generating: boolean, status: unknown) {
+    const prev = useRef<{ generating: boolean; status: unknown }>({ generating, status });
+    const [revealing, setRevealing] = useState(false);
+    const effectiveStatus = status === "success" || status === "error" ? status : undefined;
+    if (prev.current.generating && !generating && effectiveStatus === "success" && !revealing) {
+        setRevealing(true);
+    }
+    prev.current = { generating, status };
+    useEffect(() => {
+        if (!revealing) return;
+        const timer = window.setTimeout(() => setRevealing(false), 2400);
+        return () => window.clearTimeout(timer);
+    }, [revealing]);
+    return revealing;
+}
+
 /** 后端回写的运行进度（0–1）；生成中但进度未知时返回 undefined，角标只显示转圈。 */
 function nodeRunProgress(node: CanvasNodeData) {
     const progress = node.metadata?.runProgress;
@@ -166,7 +188,9 @@ function NodeLivePreviewLayer({ frame, theme, scale }: { frame: CanvasNodeLivePr
             style={{ background: "rgba(0,0,0,0.72)" }}
             data-canvas-live-preview={frame.nodeId || "unknown"}
         >
-            <img src={frame.dataUrl} alt="" draggable={false} className="h-full w-full select-none object-contain" />
+            {frame.mime?.startsWith("video/") || frame.dataUrl.startsWith("data:video/")
+                ? <video src={frame.dataUrl} autoPlay loop muted playsInline className="h-full w-full select-none object-contain" />
+                : <img src={frame.dataUrl} alt="" draggable={false} className="h-full w-full select-none object-contain" />}
             <div
                 className="absolute left-1 top-1 flex items-center gap-1 rounded-full px-1.5 py-0.5 font-medium text-white"
                 style={{ background: "rgba(0,0,0,0.62)", fontSize, lineHeight: 1.2 }}
@@ -240,7 +264,7 @@ function overviewVideoSource(node: CanvasNodeData, selectedSegmentId?: string) {
     return videoSourceFromSegment(segment);
 }
 
-function OverviewImagePreview({ image, label, theme }: { image: OverviewImage; label: string; theme: CanvasTheme }) {
+function OverviewImagePreview({ image, label, theme, generating }: { image: OverviewImage; label: string; theme: CanvasTheme; generating?: boolean }) {
     const backendConnected = useBackendStore((state) => state.connected);
     const backendToken = useBackendStore((state) => state.token);
     const subscribe = useCallback((listener: () => void) => subscribeImagePreview(image.storageKey, listener), [image.storageKey]);
@@ -272,6 +296,10 @@ function OverviewImagePreview({ image, label, theme }: { image: OverviewImage; l
     const src = image.storageKey ? previewUrlFor(image.storageKey) : source;
     return src ? (
         <img src={src} alt={label} draggable={false} loading="lazy" decoding="async" fetchPriority="low" className="pointer-events-none h-full w-full select-none object-cover" />
+    ) : generating ? (
+        <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
+            <GenRing theme={theme} size={28} compact />
+        </div>
     ) : (
         <div className="flex h-full w-full items-center justify-center" style={{ background: theme.toolbar.activeBg }}>
             <ImageIcon className="size-5 opacity-35" />
@@ -375,6 +403,8 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
     const readinessRollups = useSyncExternalStore(productionReadinessStore.subscribe, productionReadinessStore.getNodeRollupMap);
     const readiness = !generating && isH3 ? readinessRollups[data.id] : undefined;
     const readinessColor = readiness === "ready" ? "#22c55e" : readiness === "attention" ? "#f59e0b" : undefined;
+    const nodeStatus = (data.metadata as { status?: string } | undefined)?.status;
+    const doneReveal = useGenerationDoneReveal(generating, nodeStatus);
 
     return (
         <div
@@ -413,7 +443,7 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
         >
             {livePreview ? <NodeLivePreviewLayer frame={livePreview} theme={theme} scale={scale} /> : null}
             {image ? (
-                <OverviewImagePreview image={image} label={data.title || data.type} theme={theme} />
+                <OverviewImagePreview image={image} label={data.title || data.type} theme={theme} generating={generating} />
             ) : isH3 ? (
                 <OverviewH3Preview data={data} projectId={projectId} label={data.title || data.type} theme={theme} iconSize={overviewIconSize} />
             ) : videoSource ? (
@@ -451,18 +481,41 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
                     <span className="min-w-0 truncate">{isCharacter ? data.metadata?.characterName || data.title || summary : data.title || summary}</span>
                 </div>
             ) : null}
+            {/* 本卡计时：生成卡左上角 chip，与右上角状态点/百分比 chip 并存，按 nodeId 关联活跃任务。 */}
+            {generating ? <NodeElapsedChip projectId={projectId} nodeId={data.id} theme={theme} pad={generatingBadgePad} fontSize={generatingBadgeFontSize} /> : null}
             {generating ? (
                 <div
                     className="pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full font-medium"
                     style={{ background: theme.toolbar.panel, color: theme.node.text, padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
                 >
-                    {/* 缩略壳的存在意义就是省开销，角标只做静态色点，不加旋转/呼吸动画。 */}
+                    {/* 生成中角标：状态点脉冲（对齐影策 canvas-node-status-chip-dot，1.4s 呼吸）。 */}
                     <span
                         aria-hidden="true"
-                        className="block shrink-0 rounded-full"
+                        className="canvas-node-status-chip-dot block shrink-0 rounded-full"
                         style={{ width: generatingBadgeSize, height: generatingBadgeSize, background: generatingAccent }}
                     />
                     {showGeneratingPercent ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>{generatingPercent}%</span> : null}
+                </div>
+            ) : null}
+            {/* 生成失败徽章：对齐影策 NodeStatusBadge[data-tone=error]，红色常驻角标。 */}
+            {!generating && nodeStatus === "error" ? (
+                <div
+                    className="canvas-node-status-chip pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full bg-rose-500/90 font-medium text-white"
+                    style={{ padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
+                >
+                    <CircleAlert aria-hidden="true" style={{ width: generatingBadgeSize, height: generatingBadgeSize }} />
+                    {width * scale >= 96 ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>生成失败</span> : null}
+                </div>
+            ) : null}
+            {/* 生成完成徽章：对齐影策 NodeStatusBadge[data-tone=success]，弹出→停留→淡出一次性动画。 */}
+            {!generating && doneReveal ? (
+                <div
+                    className="canvas-node-done-chip pointer-events-none absolute right-1 top-1 z-20 flex items-center gap-1 rounded-full bg-emerald-500/90 font-medium text-white"
+                    style={{ padding: `${generatingBadgePad}px ${generatingBadgePad * 1.7}px` }}
+                    role="status"
+                >
+                    <Check aria-hidden="true" style={{ width: generatingBadgeSize, height: generatingBadgeSize }} strokeWidth={2.5} />
+                    {width * scale >= 96 ? <span style={{ fontSize: generatingBadgeFontSize, lineHeight: 1 }}>已完成</span> : null}
                 </div>
             ) : null}
             {readinessColor ? (
@@ -477,6 +530,25 @@ export const CanvasNodeOverview = React.memo(function CanvasNodeOverview({
         </div>
     );
 });
+
+/** 本卡计时 chip：只在有匹配 nodeId 的活跃任务时渲染，随其 createdAt 每整秒跳动，终态由父级 generating 移除。 */
+function NodeElapsedChip({ projectId, nodeId, theme, pad, fontSize }: { projectId: string; nodeId: string; theme: CanvasTheme; pad: number; fontSize: number }) {
+    const { t } = useTranslation();
+    const { active } = useCanvasTaskTiming(projectId);
+    const anchor = useMemo(() => nodeActiveCreatedAt(active, nodeId), [active, nodeId]);
+    const seconds = useElapsedSeconds(anchor, Boolean(anchor));
+    if (!anchor) return null;
+    return (
+        <span
+            data-canvas-card-timer={nodeId}
+            className="pointer-events-none absolute left-1 top-1 z-20 flex items-center rounded-full font-medium"
+            style={{ background: theme.toolbar.panel, color: theme.node.text, padding: `${pad}px ${pad * 1.7}px`, fontSize, lineHeight: 1 }}
+            title={t("canvas.task.cardElapsed")}
+        >
+            {t("canvas.task.cardElapsed")} {seconds}s
+        </span>
+    );
+}
 
 export const CanvasNodeViewportItem = React.memo(function CanvasNodeViewportItem(props: CanvasNodeProps) {
     const { dragPreviewPosition, resizePreviewBounds } = useCanvasNodePreview(props.projectId, props.data.id);
@@ -1298,10 +1370,8 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     const progress = nodeRunProgress(node);
     if (extracting) {
         return (
-            <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.activeStroke }}>
-                <div className="size-8 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-                <span className="text-[10px] tracking-[0.2em]">{t("canvas.videoFrames.extracting")}</span>
-                {progress === undefined ? null : <span className="text-[10px] tabular-nums opacity-70">{progress}%</span>}
+            <div className="flex h-full w-full flex-col items-center justify-center gap-2">
+                <GenRing theme={theme} size={32} progress={progress} label={t("canvas.videoFrames.extracting")} />
             </div>
         );
     }
@@ -1335,9 +1405,8 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
 function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
     const { t } = useTranslation();
     return (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
-            <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3">
+            <GenRing theme={theme} size={40} label={t("canvas.node.generating")} />
         </div>
     );
 }
@@ -1500,7 +1569,7 @@ function TextSlotStatus({ text }: { text: CanvasNodeText }) {
             {failed ? (
                 <span className="text-xs leading-5">{text.errorDetails || t("canvas.node.failed")}</span>
             ) : loading ? (
-                <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
+                <GenRing theme={theme} size={40} />
             ) : (
                 <span className="text-xs">{t("apiErrors.noContent")}</span>
             )}
@@ -2356,7 +2425,7 @@ function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
             {failed ? (
                 <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span>
             ) : (
-                <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
+                <GenRing theme={theme} size={40} />
             )}
             {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
         </div>

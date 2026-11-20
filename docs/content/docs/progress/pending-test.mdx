@@ -5,6 +5,8 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+- Deleting a drama asks about its assets: the confirm dialog counts the drama's asset-library entries and offers "Also delete this drama's assets (N)". Confirm with the box unchecked and the drama disappears while its assets stay in the library as unassigned (check the "Unassigned" filter in `/assets`). Then create a drama with a couple of manual assets, tick the box and confirm: those assets are gone (`GET /canvas/assets/:id` returns 404) while other dramas' assets are untouched. Check both entry points (directory card, drama profile → settings) and the `drama_delete_project { deleteAssets: true }` MCP path, which reports `deletedAssets`.
+
 - Continuity ledger write-back must project applicable coverage facts onto shots: for each explicit_hold/explicit_change row, bind the fact to the matching subject usage (or shot-level continuity_facts when no matching usage) and keep requirements in sync. A declared-but-unselected fact must produce `CONTINUITY_FACT_NOT_SELECTED` and hold compilation; verify a ledger-only write is rejected.
 
 - Canvas-side reclaim for engine video tasks: on a newly submitted Clip that fails while ComfyUI keeps running (for example a WS drop), call `h3_reclaim_task {taskId}` with the canvas task id. It must return to `running`, archive the real video, and write it back to the node without a second `/prompt` (verify the engine task shows exactly one submission). A task that was already `succeeded` or an older failure recorded before `engineTaskId` was persisted must be rejected with a clear message, not silently resubmitted.

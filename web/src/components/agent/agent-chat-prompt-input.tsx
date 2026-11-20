@@ -188,10 +188,10 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
                     syncFromEditor();
                 }}
                 onPaste={(event) => {
-                    const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
-                    if (images.length && onAddFiles) {
+                    const mediaFiles = Array.from(event.clipboardData.files).filter((file) => /^(image|video)\//.test(file.type));
+                    if (mediaFiles.length && onAddFiles) {
                         event.preventDefault();
-                        void onAddFiles(images);
+                        void onAddFiles(mediaFiles);
                         return;
                     }
                     event.preventDefault();

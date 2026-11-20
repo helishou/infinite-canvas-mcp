@@ -1,10 +1,10 @@
-import { App, Button, Drawer, Input, Segmented, Select, Space, Tooltip } from "antd";
+import { App, Button, Drawer, Input, InputNumber, Segmented, Select, Space, Tooltip } from "antd";
 import { ListPlus, Network, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { defaultBaseUrlForApiFormat, guessCapability, MODEL_INPUT_SCENARIOS, MODEL_SCENARIO_LABELS, normalizeChannelModels, WORKFLOW_ROUTE_UNSUPPORTED, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
-import { fetchChannelModelItems, fetchChannelModels } from "@/services/api/image";
+import { defaultBaseUrlForApiFormat, guessCapability, MODEL_INPUT_SCENARIOS, MODEL_SCENARIO_LABELS, normalizeChannelModels, normalizeModelVideoCapabilities, WORKFLOW_ROUTE_UNSUPPORTED, type ApiCallFormat, type ChannelModel, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { fetchChannelModelItems, fetchChannelModels, type ChannelModelHint } from "@/services/api/image";
 import { ModelScriptEditor } from "./model-script-editor";
 import { ModelSelectModal } from "./model-select-modal";
 
@@ -63,22 +63,30 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
 
     const applySelection = async (names: string[]) => {
         const map = new Map(draft.models.map((model) => [model.name, model]));
-        // 对面 /v1/models 带 capability 就用它（引擎会报 image/video/audio/text），否则按名字猜
-        const hints = new Map<string, string>();
+        // 对面 /v1/models 带 capability / maxAudios / 视频能力五项就用它（引擎真上报才带），
+        // 否则按名字猜。没上报的字段保持缺省，绝不伪造；已登记的手填值在引擎没上报时保留。
+        const hints = new Map<string, ChannelModelHint>();
         try {
-            for (const item of await fetchChannelModelItems(draft)) {
-                if (item.capability) hints.set(item.name, item.capability);
-            }
+            for (const item of await fetchChannelModelItems(draft)) hints.set(item.name, item);
         } catch {
             /* 拉不到提示不影响选模型 */
         }
-        setModels(names.map((name) => map.get(name) || {
-            name,
-            capability: isCodex ? "text" : ((hints.get(name) as ModelCapability | undefined) ?? guessCapability(name)),
+        setModels(names.map((name) => {
+            const hint = hints.get(name);
+            const existing = map.get(name);
+            return {
+                name,
+                capability: isCodex ? "text" : ((hint?.capability as ModelCapability | undefined) ?? existing?.capability ?? guessCapability(name)),
+                ...(hint?.maxAudios !== undefined || existing?.maxAudios !== undefined
+                    ? { maxAudios: hint?.maxAudios ?? existing?.maxAudios } : {}),
+                ...normalizeModelVideoCapabilities({ ...existing, ...hint }),
+            };
         }));
     };
 
     const setCapability = (name: string, capability: ModelCapability) => setModels(draft.models.map((model) => (model.name === name ? { ...model, capability } : model)));
+    const setMaxAudios = (name: string, value: number | null) => setModels(draft.models.map((model) => (model.name === name
+        ? { ...model, ...(value === null || !Number.isSafeInteger(value) || value < 0 ? { maxAudios: undefined } : { maxAudios: value }) } : model)));
     const setSupportsImages = (name: string, value: "auto" | "yes" | "no") => setModels(draft.models.map((model) => (model.name === name ? { ...model, supportsImages: value === "auto" ? undefined : value === "yes" } : model)));
     const setScript = (name: string, script: string) => setModels(draft.models.map((model) => (model.name === name ? { ...model, script: script || undefined } : model)));
     const removeModel = (name: string) => setModels(draft.models.filter((model) => model.name !== name));
@@ -203,6 +211,12 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                                         </Tooltip>
                                     )}
                                     <Segmented size="small" value={model.capability} options={isCodex ? capabilityOptions.filter(option => option.value === "text") : capabilityOptions} onChange={(value) => setCapability(model.name, value as ModelCapability)} />
+                                    {!isCodex && model.capability === "video" && (
+                                        <Tooltip title="单段参考音色上限（影策 MaxAudios）。引擎 /v1/models 暴露真实槽位数时自动填入；本地 H3 原生工作流无该声明时留空按 3 回落。0 = 不提交参考音色。">
+                                            <InputNumber aria-label={`${model.name} 参考音色上限`} size="small" min={0} max={9} precision={0} value={model.maxAudios} placeholder="默认3"
+                                                onChange={(value) => setMaxAudios(model.name, value)} className="w-24" />
+                                        </Tooltip>
+                                    )}
                                     {!isCodex && <Button size="small" type={model.script ? "primary" : "default"} ghost={Boolean(model.script)} onClick={() => setScriptTarget({ name: model.name, capability: model.capability, value: model.script || "" })}>
                                         {t(model.script ? "config.channelEditor.scriptReady" : "config.channelEditor.script")}
                                     </Button>}

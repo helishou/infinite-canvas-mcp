@@ -274,8 +274,8 @@ export function deleteBackendCanvasFolder(id: string) {
     return request<{ ok: boolean; deleted?: number }>("DELETE", `/canvas/folders/${encodeURIComponent(id)}`);
 }
 
-export function deleteBackendDramaProject(id: string, freeCanvasIds: string[] = []) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`, { freeCanvasIds });
+export function deleteBackendDramaProject(id: string, freeCanvasIds: string[] = [], options: { deleteAssets?: boolean } = {}) {
+    return request<{ ok: boolean; deleted?: number; deletedAssets?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`, { freeCanvasIds, ...(options.deleteAssets ? { deleteAssets: true } : {}) });
 }
 
 export type DramaEpisode = {
@@ -285,9 +285,15 @@ export type DramaEpisode = {
     title: string;
     synopsis: string;
     fullPlot: string;
+    /** 素材类型：novel / script / storyboard；老数据可能缺省。 */
+    sourceFormat?: string;
+    /** 建集时导入的原文；老数据可能缺省。 */
+    sourceText?: string;
     canvasId: string | null;
     createdAt: string;
     updatedAt: string;
+    /** 强一致分集：本集覆盖的稳定章节 ID。 */
+    chapterIds?: string[];
 };
 
 export function fetchBackendDramaEpisodes(dramaId: string) {
@@ -298,12 +304,97 @@ export function fetchBackendDramaEpisode(episodeId: string) {
     return sharedGet<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>(`/drama/episodes/${encodeURIComponent(episodeId)}`);
 }
 
+/** 单设定 restyle：只读预览「引用该角色的剧情段」影响集（对齐影策 getDramaCastImpact）。 */
+export function fetchDramaCastImpact(dramaId: string, assetId: string, groupId?: string, signal?: AbortSignal) {
+    const query = groupId ? `?groupId=${encodeURIComponent(groupId)}` : "";
+    return request<{
+        ok: boolean;
+        episodes: number;
+        segments: number;
+        targets: Array<{ episodeId: string; segmentId: string; title: string; hasVideo: boolean; inputOutdated: boolean; hasActiveTask: boolean }>;
+    }>("GET", `/drama/${encodeURIComponent(dramaId)}/cast/${encodeURIComponent(assetId)}/impact${query}`, undefined, { signal });
+}
+
+/** restyle=true 真把引用段的视频标脏；submitGeneration=true 同时真提交重生成（跳过在跑段）。 */
+export function restyleDramaCast(dramaId: string, assetId: string, input: { restyleSegments: boolean; groupId?: string; submitGeneration?: boolean }) {
+    return request<{
+        ok: boolean;
+        affectedSegments: number;
+        submitted?: number;
+        unchanged?: boolean;
+        impact?: { episodes: number; segments: number };
+        skipped?: { notGenerated: number; alreadyOutdated: number; activeTask: number };
+    }>("POST", `/drama/${encodeURIComponent(dramaId)}/cast/${encodeURIComponent(assetId)}/restyle`, input);
+}
+
 export function fetchBackendCanvasDrama(projectId: string) {
     return sharedGet<{ ok: boolean; projectId: string; episode?: DramaEpisode | null; drama?: { id: string; name: string } | null }>(`/canvas/projects/${encodeURIComponent(projectId)}/drama`);
 }
 
-export function createBackendDramaEpisode(dramaId: string, input: { episodeNumber: number; title?: string; synopsis?: string; fullPlot?: string; canvasId?: string | null }) {
+export type DramaSourceFormat = "novel" | "script" | "storyboard";
+
+export function createBackendDramaEpisode(dramaId: string, input: { episodeNumber: number; title?: string; synopsis?: string; fullPlot?: string; sourceFormat?: DramaSourceFormat | string; sourceText?: string; canvasId?: string | null }) {
     return request<{ ok: boolean; episode?: DramaEpisode }>("POST", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`, input);
+}
+
+/**
+ * 模型自动分集：预览只读不落库，apply 才写快照并按显式章序号建集。
+ * 与影策 submitPlan/ParsePlan 对齐的分组快照形状。
+ */
+export type DramaModelEpisodeGroup = {
+    title: string;
+    chapters: number[];
+    synopsis: string;
+    hook: string;
+    cliffhanger: string;
+    episodeNumber?: number;
+};
+export type DramaEpisodeGroupingPreview = {
+    ok: boolean;
+    dramaId: string;
+    model: string;
+    /** 全部分集已完成：groups/chapters 为空，不能再预览或建集。 */
+    done?: boolean;
+    batch?: { cursor: number; nextCursor: number; lastChapterIndex: number; chars: number; maxChapters: number; maxChars: number; remainingChapters: number };
+    planCursor?: number;
+    planDone?: boolean;
+    lastChapterIndex?: number;
+    message?: string;
+    chapters: { index: number; id?: string; title: string; chars: number }[];
+    groups: DramaModelEpisodeGroup[];
+};
+export function previewDramaEpisodeGrouping(dramaId: string, input: { model?: string; instruction?: string } = {}) {
+    return request<DramaEpisodeGroupingPreview>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/episode-grouping-preview`, input);
+}
+/** 服务端一次触发把所有批次规划完；中断后再次调用从当前游标续跑。 */
+export function autoPlanDramaEpisodeGrouping(dramaId: string, input: { model?: string; instruction?: string } = {}) {
+    return request<{
+        ok: boolean; dramaId: string; done?: boolean; message?: string; error?: string;
+        planCursor?: number; planDone?: boolean; lastChapterIndex?: number;
+        batches: { index: number; model: string; cursor: number; nextCursor: number; episodeNumbers: number[] }[];
+        episodes?: DramaEpisode[];
+    }>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/episode-grouping-auto`, input);
+}
+export function applyDramaEpisodeGrouping(dramaId: string, input: { groups: DramaModelEpisodeGroup[]; expectedUpdatedAt?: string }) {
+    return request<{ ok: boolean; dramaId: string; episodes?: DramaEpisode[]; groups?: DramaModelEpisodeGroup[]; updatedAt?: string; replayed?: boolean; planCursor?: number; planDone?: boolean; lastChapterIndex?: number }>(
+        "POST", `/drama/${encodeURIComponent(dramaId)}/planning/episode-grouping-apply`, input,
+    );
+}
+/** 分集方式写入 folder.productionPlan（与剧目规划同源），不另存本地假开关。 */
+export function patchDramaPlanningMode(dramaId: string, episodeMode: "auto" | "chapter", expectedUpdatedAt?: string) {
+    return request<{ ok: boolean; updatedAt?: string }>("PATCH", `/drama/${encodeURIComponent(dramaId)}/planning`, {
+        episodeMode, ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}),
+    });
+}
+/**
+ * 画风写回：与选题卡共用剧目规划 PATCH（后端 planningPatchSchema 的 topic.artStyle），
+ * 直接写进 drama_projects.production_plan_json.topic.artStyle，不新建字段/表。
+ * 两轴组合派生的画风 prompt 与自由输入的字符串都走这一条真值链路。
+ */
+export function patchDramaTopicArtStyle(dramaId: string, artStyle: string) {
+    return request<{ ok: boolean; updatedAt?: string; applied?: string[] }>("PATCH", `/drama/${encodeURIComponent(dramaId)}/planning`, {
+        topic: { artStyle },
+    });
 }
 
 /** 大纲单步生成：只拿候选文本，写入仍走剧目规划保存。 */
@@ -321,12 +412,92 @@ export function requestDramaOutlineProposal(dramaId: string, input: { step: stri
     return request<{ ok: boolean; step: string; text: string; model: string; error?: string }>("POST", `/drama/${encodeURIComponent(dramaId)}/planning/outline-proposal`, input);
 }
 
+/** 剧目级分集规划游标（不返回大正文），用于设置页完成锁定展示。 */
+export function fetchDramaPlanningState(dramaId: string) {
+    return sharedGet<{ ok: boolean; episodeMode?: string; planCursor?: number; planDone?: boolean; lastChapterIndex?: number; updatedAt?: string }>(`/drama/${encodeURIComponent(dramaId)}/planning`);
+}
+
 /** 剧目策划真值：原剧本正文（folder.productionPlan.sourceScript）。 */
 export function fetchDramaPlanningSource(dramaId: string) {
-    return sharedGet<{ ok: boolean; sourceScript?: string; updatedAt?: string }>(`/drama/${encodeURIComponent(dramaId)}/planning?include=sourceScript`);
+    return sharedGet<{ ok: boolean; sourceScript?: string; updatedAt?: string; planDone?: boolean; planCursor?: number; lastChapterIndex?: number }>(`/drama/${encodeURIComponent(dramaId)}/planning?include=sourceScript`);
+}
+
+/**
+ * 章节元信息（source_chapters.chars 真值，不含正文）：制作台开场「N章N字」的唯一字数来源。
+ * 后端契约 backend/src/server/drama-source-chapter-routes.ts 的 GET /drama/:dramaId/planning/chapters?include=meta。
+ */
+export function fetchDramaSourceChapterMeta(dramaId: string) {
+    return sharedGet<{
+        ok: boolean;
+        dramaId: string;
+        planCursor?: number;
+        planDone?: boolean;
+        chapters: Array<Pick<DramaSourceChapter, "id" | "chapterIndex" | "title" | "chars">>;
+    }>(`/drama/${encodeURIComponent(dramaId)}/planning/chapters?include=meta`);
 }
 export function patchDramaPlanningSource(dramaId: string, sourceScript: string, expectedUpdatedAt?: string) {
     return request<{ ok: boolean; updatedAt?: string; applied?: string[] }>("PATCH", `/drama/${encodeURIComponent(dramaId)}/planning`, { sourceScript, ...(expectedUpdatedAt ? { expectedUpdatedAt } : {}) });
+}
+
+/**
+ * 章节级原文真值（source_chapters.body）。按章编辑用，真值优先于剧目级 planning.sourceScript：
+ * 改编链 pipeline.runScript 已改为从「本集覆盖章节」组装 episodeSource，改章正文后重新改编即生效。
+ * 后端契约见 backend/src/server/drama-source-chapter-routes.ts。
+ */
+export type DramaSourceChapter = {
+    id: string;
+    dramaId: string;
+    chapterIndex: number;
+    title: string;
+    chars: number;
+    bodyHash: string;
+    sourceFormat: DramaSourceFormat | string;
+    revision: number;
+    updatedAt: string;
+    body: string;
+};
+
+/** 本集覆盖的章节（含正文），供按章编辑替代改剧目全文。 */
+export function getEpisodeChapters(episodeId: string) {
+    return sharedGet<{
+        ok: boolean;
+        episodeId: string;
+        dramaId: string;
+        episodeNumber: number;
+        episodeTitle: string;
+        sourceFormat?: string;
+        planDone: boolean;
+        chapterIds: string[];
+        chapters: DramaSourceChapter[];
+    }>(`/drama/episodes/${encodeURIComponent(episodeId)}/chapters`);
+}
+
+/** 单章原文（含正文）；dramaId 可选，用于校验章节归属防串剧目。 */
+export function getChapter(chapterId: string, dramaId?: string) {
+    const query = dramaId ? `?dramaId=${encodeURIComponent(dramaId)}` : "";
+    return sharedGet<{ ok: boolean; chapter: DramaSourceChapter; planDone: boolean }>(
+        `/drama/chapters/${encodeURIComponent(chapterId)}${query}`,
+    );
+}
+
+/** 按章保存原文；expectedRevision 乐观锁，409 冲突时前端回读重试。 */
+export function patchChapter(chapterId: string, patch: {
+    body?: string;
+    title?: string;
+    sourceFormat?: DramaSourceFormat;
+    expectedRevision?: number;
+    expectedUpdatedAt?: string;
+}) {
+    return request<{
+        ok: boolean;
+        chapter: DramaSourceChapter;
+        changed: boolean;
+        needsRescript: boolean;
+        planDone: boolean;
+        planCursor: number;
+        affectedEpisodeIds?: string[];
+        message?: string;
+    }>("PATCH", `/drama/chapters/${encodeURIComponent(chapterId)}`, patch);
 }
 
 export type AssetSpecKind = "character" | "scene" | "prop";
@@ -374,12 +545,29 @@ export function requestEpisodeScriptProposal(episodeId: string, input: { model?:
     return request<{ ok: boolean; episodeId: string; text: string; model: string; error?: string }>("POST", `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`, input);
 }
 
-export function updateBackendDramaEpisode(episodeId: string, patch: Partial<Pick<DramaEpisode, "episodeNumber" | "title" | "synopsis" | "fullPlot" | "canvasId">>) {
+export function updateBackendDramaEpisode(episodeId: string, patch: Partial<Pick<DramaEpisode, "episodeNumber" | "title" | "synopsis" | "fullPlot" | "sourceFormat" | "sourceText" | "canvasId">>) {
     return request<{ ok: boolean; episode?: DramaEpisode; canvas?: Record<string, unknown> | null }>("PATCH", `/drama/episodes/${encodeURIComponent(episodeId)}`, patch);
 }
 
-export function deleteBackendDramaEpisode(episodeId: string) {
-    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+/** DELETE 409 的结构化确认要求：前端据此把「确认一次」动态切成「输入第 N 集」。 */
+export type EpisodeConfirmRequiredDetails = {
+    confirmText: string;
+    reasons?: string[];
+    stats?: { videoJobs: number; finalResource: boolean; versions: number; publishedVersion: number; archived: boolean };
+    episodeId?: string;
+    episodeNumber?: number;
+};
+
+export function episodeConfirmRequired(error: unknown): EpisodeConfirmRequiredDetails | null {
+    if (!(error instanceof BackendApiError) || error.status !== 409) return null;
+    const details = error.details;
+    if (details.code !== "EPISODE_CONFIRM_REQUIRED" && details.reason !== "episodeConfirmRequired") return null;
+    if (typeof details.confirmText !== "string" || !details.confirmText) return null;
+    return details as unknown as EpisodeConfirmRequiredDetails;
+}
+
+export function deleteBackendDramaEpisode(episodeId: string, confirmText?: string) {
+    return request<{ ok: boolean; deleted?: number }>("DELETE", `/drama/episodes/${encodeURIComponent(episodeId)}`, confirmText === undefined ? undefined : { confirmText });
 }
 
 export type ProductionClipRefreshReceipt = {
@@ -401,8 +589,12 @@ export function ensureEpisodeCanvas(id: string) { return request<{ ok: boolean; 
 export function ensureSharedAssetCanvas(id: string) { return request<{ ok: boolean; project: Record<string, unknown>; context: ProductionCanvasContext }>("POST", `/drama/projects/${encodeURIComponent(id)}/asset-canvas/ensure`, {}); }
 export function prepareProductionTargets(owner: ProductionTarget, expectedRevision: number, targets: string[], operationId: string) { return request<{ ok: boolean; production: EpisodeProduction; mediaSubmitted: false }>("POST", `${productionPath(owner)}/prepare-targets`, { expectedRevision, targets, operationId }); }
 export function arrangeProductionScene(owner: ProductionTarget, expectedRevision: number, sceneId: string, operationId: string) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(owner)}/arrange-scene`, { expectedRevision, sceneId, operationId }); }
-export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number; storageKey: string; sha256: string; snapshot: { title: string }; evidence: string; reviewStatus: "unreviewed" | "approved"; createdAt: string };
+export type ApprovedSharedAsset = { id: string; assetId: string; dramaId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number; storageKey: string; sha256: string; snapshot: { title: string; content?: string; metadata?: Record<string, any> }; evidence: string; reviewStatus: "unreviewed" | "approved"; createdAt: string };
 export function fetchProductionSharedAssets(owner: ProductionTarget) { return request<{ ok: boolean; assets: ApprovedSharedAsset[]; versions: ApprovedSharedAsset[] }>("GET", `${productionPath(owner)}/shared-assets`); }
+/** 单个设定的真实版本记录：drama_asset_versions 按 (dramaId, assetId) 只读查询，含 storage_key/来源/快照。 */
+export function fetchDramaAssetVersions(dramaId: string, assetId: string) {
+    return sharedGet<{ ok: boolean; assetId: string; versions: ApprovedSharedAsset[] }>(`/drama/projects/${encodeURIComponent(dramaId)}/asset-versions?assetId=${encodeURIComponent(assetId)}`);
+}
 export type SharedAssetPromotionPreview = { episodeId: string; episodeRevision: number; publishedVersion: number; sourceHash: string; sourceCanvasId: string; sourceCanvasRevision: number; sourceNodeId: string; assetId: string; assetName: string; storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; sourceGenerationTaskId: string; dramaId: string; sharedCanvasId: string | null; sharedCanvasRevision: number | null; targetNodeId: string; approvedId: string | null; eligible: true };
 export function previewProductionSharedAssetPromotion(owner: ProductionTarget, assetId: string, expectedRevision: number) { return request<{ ok: boolean; preview: SharedAssetPromotionPreview; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions/preview`, { assetId, expectedRevision }); }
 export function promoteExistingProductionSharedAsset(owner: ProductionTarget, input: { assetId: string; expectedRevision: number; expectedSourceCanvasRevision: number; expectedSharedCanvasRevision: number | null; operationId: string }) { return request<{ ok: boolean; promotion: { approvedId: string; canvasId: string; nodeId: string; replayed: boolean }; mediaSubmitted: false }>("POST", `${productionPath(owner)}/shared-assets/promotions`, input); }
@@ -413,6 +605,83 @@ const productionPath = (target: ProductionTarget) => typeof target === "string"
         : `/canvas/projects/${encodeURIComponent(target.projectId)}/production`;
 export function fetchEpisodeProduction(episodeId: ProductionTarget) { return sharedGet<{ ok: boolean; production: EpisodeProduction }>(productionPath(episodeId)); }
 export function fetchProductionOperationReceipt(owner: ProductionTarget, operationId: string) { return request<{ ok: boolean; found: boolean; production?: EpisodeProduction }>("GET", `${productionPath(owner)}/operations/${encodeURIComponent(operationId)}/receipt`); }
+
+// ── 制作稿版本对比：全部字段由后端从 episode_production_versions.snapshot_json 真派生，前端只渲染 ──
+export type VersionCompareSummary = {
+    format: "v2-director" | "legacy" | "empty";
+    sceneCount: number;
+    shotCount: number;
+    segmentCount: number;
+    keyframeCount: number;
+    h3ClipCount: number;
+    promptCount: number;
+    promptsHash: string | null;
+    sourceHash: string | null;
+    finalStorageKey: string | null;
+    /** 发布时记录进 clip_video_versions 的逐段成片条数（真计数，不是快照里的 clip 计划数）；版本列表显示「N段成片」。 */
+    clipVideoCount: number;
+    shotIds: string[];
+    segmentIds: string[];
+    promptIds: string[];
+};
+export type VersionCompareVersion = { version: number; stage: string; createdAt: string; summary: VersionCompareSummary; clipVideoCount: number };
+export type CompareCountDimension = { key: string; label: string; from: number; to: number; delta: number; changed: boolean };
+export type CompareStringDimension = { key: string; label: string; from: string | null; to: string | null; changed: boolean };
+export type CompareFieldChange = { field: string; from: string; to: string };
+export type CompareEntityChange = { id: string; fields: CompareFieldChange[] };
+export type ComparePromptChange = { id: string; fromHash: string; toHash: string };
+/** 逐clip成片真值：storageKey/durationMs 都来自 clip_video_versions（画布段结果 + media_files）。 */
+export type ClipVideoTruth = {
+    clipId: string; segmentId: string; title: string; storageKey: string; durationMs: number | null;
+    source: string | null; generationLogId: string | null; status: string | null;
+};
+export type ClipVideoChange = {
+    clipId: string; title: string; from: ClipVideoTruth | null; to: ClipVideoTruth | null;
+    state: "added" | "removed" | "storageKeyChanged" | "durationChanged" | "regenMetadata";
+    storageKeyChanged: boolean; durationChanged: boolean;
+};
+export type CompareClipVideoDiff = {
+    recordedFrom: boolean; recordedTo: boolean; fromCount: number; toCount: number;
+    added: string[]; removed: string[]; changed: ClipVideoChange[];
+};
+export type VersionCompareRef = { version: number; stage: string; createdAt: string };
+export type VersionCompareDiff = {
+    episodeId: string;
+    from: VersionCompareRef;
+    to: VersionCompareRef;
+    changed: boolean;
+    dimensions: {
+        scenes: CompareCountDimension;
+        shots: CompareCountDimension;
+        segments: CompareCountDimension;
+        keyframes: CompareCountDimension;
+        h3Clips: CompareCountDimension;
+        prompts: CompareCountDimension;
+        finalStorageKey: CompareStringDimension;
+        sourceHash: CompareStringDimension;
+        promptsHash: CompareStringDimension;
+    };
+    shots: { added: string[]; removed: string[]; changed: CompareEntityChange[] };
+    segments: { added: string[]; removed: string[]; changed: CompareEntityChange[] };
+    prompts: { added: string[]; removed: string[]; changed: ComparePromptChange[] };
+    clipVideos: CompareClipVideoDiff;
+};
+/** GET 版本列表（倒序），摘要含镜头/段/成片 clip 计数与成片 storageKey。 */
+export function fetchVersionCompareVersions(episodeId: string) {
+    return request<{ ok: boolean; versions: VersionCompareVersion[] }>("GET", `${productionPath(episodeId)}/version-compare/versions`);
+}
+/** GET 两版本结构化 diff；版本不存在时后端返回 404（BackendApiError.status === 404）。 */
+export function fetchVersionCompare(episodeId: string, v1: number, v2: number) {
+    return request<{ ok: boolean; comparison: VersionCompareDiff }>("GET", `${productionPath(episodeId)}/version-compare/${v1}/${v2}`);
+}
+/** 当前画布逐clip成片真值（实时段结果），可与版本记录做诚实对比。 */
+export function fetchClipVideosCurrent(episodeId: string) {
+    return request<{ ok: boolean; clipVideos: ClipVideoTruth[] }>("GET", `${productionPath(episodeId)}/clip-videos/current`);
+}
+/** 指定版本已记录的逐clip成片真值；旧版本为空数组。 */
+export function fetchClipVideosAtVersion(episodeId: string, version: number) {
+    return request<{ ok: boolean; clipVideos: ClipVideoTruth[] }>("GET", `${productionPath(episodeId)}/clip-videos/${version}`);
+}
 export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
     const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
     return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
@@ -429,6 +698,48 @@ export async function fetchProductionClipNumbers(owner: ProductionTarget) {
     return clipNumbers;
 }
 export function editEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, ops: ProductionOperation[], operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/ops`, { operationId, expectedRevision, ops }); }
+// ── 段视频后处理重跑（对齐影策 ReprocessDramaSegmentVideo，本地不调模型不扣费）──────────
+/** GET 只读预览：前端据此决定「重新处理视频」按钮是否可用；不产生任何写入。 */
+export type SegmentVideoReprocessPreview = {
+    ok: boolean;
+    reprocessable: boolean;
+    alreadyReady?: boolean;
+    storageKey?: string;
+    generationLogId?: string;
+    status?: string;
+    code?: string;
+    reason?: string;
+};
+/** POST 结果码：REPROCESSED / ALREADY_READY / NO_GENERATED_VIDEO / MEDIA_MISSING / SPEC_STILL_MISMATCH / … */
+export type SegmentVideoReprocessResult = {
+    ok: boolean;
+    reprocessed?: boolean;
+    alreadyReady?: boolean;
+    code: string;
+    message?: string;
+    storageKey?: string;
+    generationLogId?: string;
+    episodeId?: string;
+    segmentId?: string;
+    revision?: number;
+    error?: string;
+};
+export function getSegmentVideoReprocessStatus(episodeId: string, segmentId: string, signal?: AbortSignal) {
+    return request<SegmentVideoReprocessPreview>(
+        "GET",
+        `/drama/episodes/${encodeURIComponent(episodeId)}/segments/${encodeURIComponent(segmentId)}/reprocess-video`,
+        undefined,
+        { signal },
+    );
+}
+export function reprocessSegmentVideo(episodeId: string, segmentId: string) {
+    return request<SegmentVideoReprocessResult>(
+        "POST",
+        `/drama/episodes/${encodeURIComponent(episodeId)}/segments/${encodeURIComponent(segmentId)}/reprocess-video`,
+        {},
+    );
+}
+
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
 export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
 export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return sharedGet<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>(`${productionPath(episodeId)}/versions`); }
@@ -489,6 +800,42 @@ export function actProductionSceneWork(target: ProductionTarget, action: "pause"
 export function reviewProductionSceneWork(target: ProductionTarget, input: { expectedRevision: number; workId?: string; assetIds?: string[]; inputHash: string; verdict: "approved" | "rejected"; evidence: string }, operationId = nanoid()) { const { expectedRevision, ...fields } = input; return submitProductionSceneAction(target, { action: "review", ...fields }, expectedRevision, operationId); }
 export type ProductionBatch = { executionSnapshot?: { inputBasis: "canvas" | "published"; canvasRevision: number; planHash: string } | null; runId: string; episodeId: string; version: number; sourceRevision: number; idempotencyKey: string; status: string; targets: string[]; plan: NonNullable<EpisodeProduction["impact"]>; engine: Record<string, unknown> | null; settings: Record<string, unknown>; submitted: Array<{ kind: "image" | "h3"; id: string; taskId: string; projectId?: string; nodeId?: string; segmentId?: string; status?: "running" | "succeeded" | "failed" }>; error: string | null; pauseRequested: boolean; createdAt: string; updatedAt: string };
 export function fetchProductionReadiness(target: ProductionTarget, options?: { runId?: string }) { return sharedGet<{ ok: boolean; readiness: ProductionReadiness }>(`${productionPath(target)}/readiness${options?.runId ? `?runId=${encodeURIComponent(options.runId)}` : ""}`); }
+
+/** 与影策 DramaJianyingDraftPreview 同形状；stale 是 available 的子集，不是独立第三类。 */
+export type DramaJianyingSegmentPreview = { index: number; title: string; included: boolean; stale: boolean; reason?: string; durationMs: number; durationEstimated: boolean };
+export type DramaJianyingDraftPreview = {
+    draftRoot: string; revision: string;
+    totalSegments: number; availableSegments: number; missingSegments: number; staleSegments: number;
+    durationMs: number; mediaBytes: number; captionCount: number;
+    segments: DramaJianyingSegmentPreview[]; warnings: string[];
+};
+export function previewJianyingDraft(target: ProductionTarget, input: { draftRoot?: string; captions?: boolean } = {}) {
+    return request<{ ok: boolean; preview: DramaJianyingDraftPreview }>("POST", `${productionPath(target)}/jianying/preflight`, input);
+}
+export type JianyingExportInput = {
+    draftRoot?: string; captions?: boolean; revision?: string;
+    allowIncomplete?: boolean; allowStale?: boolean; width?: number; height?: number;
+};
+/** 真导出：草稿在服务端构建并流式返回 ZIP；revision 由 preflight 返回，下载时后端现场复核（不一致 409）。 */
+export async function exportJianyingDraft(target: ProductionTarget, input: JianyingExportInput = {}): Promise<Blob> {
+    const path = `${productionPath(target)}/jianying/export`;
+    const token = getBackendTokenShared();
+    const backendUrl = getBackendUrl().replace(/\/$/, "");
+    const url = `${backendUrl}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+    let res: Response;
+    try {
+        res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+    } catch (error) {
+        const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        throw new BackendApiError(`无法连接 Backend：${path} → ${backendUrl}（${reason}）`, 0, { method: "POST", path, backendUrl, cause: reason });
+    }
+    if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        throw new BackendApiError(`剪映导出失败：${data?.error || `HTTP ${res.status}`}`, res.status,
+            { ...(data && typeof data === "object" ? data as Record<string, unknown> : {}), method: "POST", path });
+    }
+    return await res.blob();
+}
 export type ProductionContinuity = { owner: { kind: "canvas" | "episode" | "scene"; id: string }; snapshot: "draft" | "published"; revision: number; publishedVersion: number; sourceHash?: string | null; runtime?: Record<string, unknown> | null; status: "missing" | "unchecked" | "diagnosticOnly" | "stale" | "blocked" | "unresolved" | "passed" | "partial"; coverageStatus: string; semanticDiscovery: "not_performed"; checkedAt: string | null; diagnostics: { total: number; blocked: number; unresolved: number }; items: unknown[]; total: number; nextCursor: string | null; report?: Record<string, any> };
 export function fetchProductionContinuity(target: ProductionTarget, options?: { snapshot?: "draft" | "published"; view?: "summary" | "issues" | "timeline" | "shot"; targetId?: string; objectId?: string; pageSize?: number; cursor?: string }) {
     const query = new URLSearchParams(Object.fromEntries(Object.entries(options || {}).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])));
@@ -822,7 +1169,7 @@ export function deleteBackendMedia(storageKey: string) {
 export type BackendGenerationLog = {
     id: string; projectId: string; nodeId?: string; segmentId?: string;
     status: "queued" | "running" | "success" | "failed" | "cancelled";
-    platform: string; workflow?: string; model?: string; taskMode?: string; prompt?: string;
+    platform: string; source?: "pipeline" | "upload" | "canvas" | "restore"; workflow?: string; model?: string; taskMode?: string; prompt?: string;
     references: Array<Record<string, unknown>>; inputCounts: Record<string, number>;
     runtimeTaskId?: string; promptId?: string;
     startedAt: string; finishedAt?: string; durationMs: number;
@@ -830,7 +1177,7 @@ export type BackendGenerationLog = {
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean; mediaDuration?: boolean } = {}) {
     const params = new URLSearchParams();
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
@@ -845,6 +1192,8 @@ export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId
     if (typeof options.offset === "number" && options.offset > 0) params.set("offset", String(options.offset));
     // summary：纯展示列表裁掉 params/references/inputCounts 大列（类型上它们仍是必填，后端以空值填充）。
     if (options.summary) params.set("summary", "true");
+    // mediaDuration：让后端从 media_files.duration_ms 给视频产物补真实时长（生成日志顶层 durationMs 是生成耗时，不是视频时长）。
+    if (options.mediaDuration) params.set("mediaDuration", "true");
     const qs = params.toString();
     return request<{ ok: boolean; logs?: BackendGenerationLog[] }>("GET", `/generation-logs${qs ? `?${qs}` : ""}`);
 }
@@ -980,12 +1329,18 @@ export type DramaPipelineStatus = {
     };
     jobs?: Array<Record<string, unknown>>;
     byStage?: Record<string, number>;
+    /** 闸门放行记录（backend 持久化表，重启后恢复）：已 approve 的 episodeId / 已 release 的 target。 */
+    approvals?: string[];
+    releasedMedia?: string[];
+    /** 制作设置「样片模式」：第 1 集视频阶段也需人工 approve。 */
+    sampleMode?: boolean;
     logs?: Array<Record<string, unknown>>;
 };
 
 export type DramaPipelineStartOptions = {
-    storyboardModel?: string; assetExtractModel?: string; videoPromptModel?: string;
-    textThinking?: { storyboard?: string; extract?: string; prompt?: string };
+    storyboardModel?: string; assetExtractModel?: string; videoPromptModel?: string; planModel?: string;
+    imageResolution?: "1k" | "2k" | "4k"; sampleMode?: boolean;
+    textThinking?: { plan?: string; storyboard?: string; extract?: string; prompt?: string };
     videoModel?: string; referenceLimit?: number; independent?: boolean;
     /** 参考图模型按资产类型写入各集 production.settings.imageModelsByKind。 */
     imageModelsByKind?: { character?: string; scene?: string; prop?: string };

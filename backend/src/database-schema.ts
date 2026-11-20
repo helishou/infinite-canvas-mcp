@@ -167,6 +167,7 @@ CREATE TABLE "drama_episodes" (
                 canvas_id TEXT REFERENCES canvas_projects(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL, full_plot TEXT NOT NULL DEFAULT '',
+                source_format TEXT NOT NULL DEFAULT '', source_text TEXT NOT NULL DEFAULT '',
                 UNIQUE(drama_id, episode_number),
                 UNIQUE(canvas_id)
             );
@@ -267,6 +268,7 @@ CREATE TABLE generation_logs (
                 segment_id TEXT,
                 status TEXT NOT NULL,
                 platform TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'pipeline',
                 workflow TEXT,
                 model TEXT,
                 task_mode TEXT,
@@ -711,10 +713,46 @@ CREATE TRIGGER task_history_tombstone_guard
 `;
 
 /**
- * 全自动流水线作业队列（对齐影策 drama_jobs）。独立导出，用 CREATE TABLE IF NOT EXISTS
- * 在 db 构造时补建——不进 CURRENT_DATABASE_SCHEMA，避免升 schema version（现有库有版本
- * 记录时 migrate() 不会重放 schema）。
+ * 运行时补建表（不进 CURRENT_DATABASE_SCHEMA，避免升 schema version；现有库有版本记录时
+ * migrate() 不会重放 schema，故用 CREATE TABLE IF NOT EXISTS 在 db 构造时补建）：
+ * - 全自动流水线作业队列（对齐影策 drama_jobs）→ DRAMA_PIPELINE_DDL。
+ * - 强一致分集（对齐影策 chapterIDsJSON / plan_cursor / plan_done）→ DRAMA_EPISODE_PLANNING_DDL：
+ *   source_chapters 存每章稳定 ID（首次切章写入、之后只复用不重算）；
+ *   drama_episode_planning_state 存剧目级游标，批量建集用 plan_cursor 做 CAS、plan_done 锁写。
+ * - 逐clip成片真值 → CLIP_VIDEO_VERSIONS_DDL：快照 director.artifacts 只有 h3 clip 的哈希/状态/receipt，
+ *   没有成片 storageKey（唯一成片地址是整集 workflow.finalResource），逐段成片真值只在画布段上，
+ *   故发布版本时按 clip 捕获画布 resultStorageKey 落此表，供版本对比逐 clip 判定成片是否更换。
  */
+export const DRAMA_EPISODE_PLANNING_DDL = String.raw`
+CREATE TABLE IF NOT EXISTS source_chapters (
+    id TEXT PRIMARY KEY,
+    drama_id TEXT NOT NULL,
+    chapter_index INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    body_hash TEXT NOT NULL DEFAULT '',
+    chars INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    source_format TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(drama_id, chapter_index)
+);
+CREATE INDEX IF NOT EXISTS idx_source_chapters_drama ON source_chapters(drama_id, chapter_index);
+
+CREATE TABLE IF NOT EXISTS drama_episode_planning_state (
+    drama_id TEXT PRIMARY KEY,
+    episode_mode TEXT NOT NULL DEFAULT 'chapter',
+    plan_cursor INTEGER NOT NULL DEFAULT 0,
+    plan_done INTEGER NOT NULL DEFAULT 0,
+    source_fingerprint TEXT NOT NULL DEFAULT '',
+    last_chapter_index INTEGER NOT NULL DEFAULT 0,
+    batch_chapters INTEGER NOT NULL DEFAULT 12,
+    batch_chars INTEGER NOT NULL DEFAULT 30000,
+    updated_at TEXT NOT NULL
+);
+`;
+
 export const DRAMA_PIPELINE_DDL = String.raw`
 CREATE TABLE IF NOT EXISTS drama_pipeline_jobs (
     id TEXT PRIMARY KEY,
@@ -761,4 +799,39 @@ CREATE TABLE IF NOT EXISTS drama_pipeline_events (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_drama_pipeline_events_drama ON drama_pipeline_events(drama_id, id);
+
+-- 审批/媒体闸门放行记录（重启后恢复；对齐影策 approve/release 持久化）。
+-- kind='approve' 时 target=episodeId（或 'all'）；kind='release' 时 target=媒体 target（assets/episodes/all）。
+CREATE TABLE IF NOT EXISTS drama_pipeline_approvals (
+    drama_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (drama_id, kind, target)
+);
+CREATE INDEX IF NOT EXISTS idx_drama_pipeline_approvals_drama ON drama_pipeline_approvals(drama_id, kind);
+`;
+
+/**
+ * 逐clip成片真值表：逐段成片 storageKey 在画布节点上、不在版本快照里，故发布版本时按 clip
+ * 捕获画布当前段结果入库；duration_ms 从 media_files 读真实值，未归档/未查到就是 null（不编造）。
+ * 不进 CURRENT_DATABASE_SCHEMA（不升 schema version），老库重开由 db 构造时 CREATE IF NOT EXISTS 补建。
+ */
+export const CLIP_VIDEO_VERSIONS_DDL = String.raw`
+CREATE TABLE IF NOT EXISTS clip_video_versions (
+    episode_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    clip_id TEXT NOT NULL,
+    segment_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    storage_key TEXT NOT NULL,
+    duration_ms INTEGER,
+    source TEXT,
+    generation_log_id TEXT,
+    status TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (episode_id, version, clip_id)
+);
+CREATE INDEX IF NOT EXISTS idx_clip_video_versions_episode_clip ON clip_video_versions(episode_id, clip_id, version);
 `;

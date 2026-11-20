@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
+import { BackendDatabase } from "../db.js";
+import { BackendEventBus } from "../events.js";
+import { createStores } from "../stores/index.js";
 
-import { appendPreviousReference, appendTailFramePrompt, boundH3ParentTaskIds, buildH3ContinuationTask, collectH3Refs, resolveClipContinuation, routeTailFrameInput } from "./h3-runner.js";
+import { appendPreviousReference, appendTailFramePrompt, boundH3ParentTaskIds, buildH3ContinuationTask, collectH3Refs, resolveClipContinuation, routeTailFrameInput, CanvasH3Runner } from "./h3-runner.js";
 
 test("启动恢复只选仍绑定在节点或 Clip 上的 H3 父任务", () => {
     const projects = [{ id: "p", nodes: [
@@ -157,4 +160,94 @@ test("H3 参考图保持画布 refs 槽位顺序，不按旧 order 字段重排"
         ],
     });
     assert.deepEqual(refs.map((ref) => ref.name), ["苏晚", "沈昭", "S03-1"]);
+});
+
+// ---- skipCompleted 全完成 = 成功空跑：真契约回归防线 ----
+
+function skipFixture(t: TestContext, segments: Array<Record<string, unknown>>) {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "p", nodes: [
+        { id: "n", type: "minimax-h3", metadata: { segments } },
+        { id: "empty", type: "minimax-h3", metadata: { segments: [] } },
+    ], connections: [] });
+    const stores = createStores(db);
+    stores.settings.set("plugin:minimax-h3:defaults:v1", { sampler: "er_sde", megapixels: 0.6, loraSlots: [{ name: "turbo", strength: 0.75, enabled: true }] });
+    const submitted: string[] = [];
+    // 假视频调度器：子任务立刻 succeeded，记录本次真正提交的目标段。
+    const dispatcher = {
+        start(request: any, bind?: (task: any) => void) {
+            const id = String(request?.clientTaskId || `video-${submitted.length + 1}`);
+            submitted.push(String(request?.params?.canvasBinding?.segmentId || id));
+            const child = stores.tasks.create(id, "canvas-video", { model: request?.model }, request?.params || {});
+            bind?.(child);
+            stores.media.store(Buffer.from("fake-video"), { name: `${id}.mp4`, storageKey: id, mimeType: "video/mp4", category: "output" });
+            stores.tasks.update(id, { status: "succeeded", progress: 1, result: { media: [{ url: `/media/${id}`, storageKey: id, mimeType: "video/mp4" }] } });
+            return { taskId: id };
+        },
+        generationSettings() { return {}; },
+        resume() {},
+        cancel() {},
+    };
+    const events = new BackendEventBus();
+    const runner = new CanvasH3Runner(stores, events, dispatcher as never);
+    const nodeMeta = () => (((db.getCanvasProject("p")!.nodes as any[]).find((node) => node.id === "n")!).metadata as Record<string, any>);
+    const segment = (id: string) => nodeMeta().segments.find((item: any) => item.id === id) as Record<string, unknown>;
+    const settle = async (id: string) => {
+        for (let i = 0; i < 200; i++) {
+            const task = db.getTask(id);
+            if (task && ["succeeded", "failed", "cancelled", "awaiting_confirmation"].includes(task.status)) return task;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        throw new Error(`任务 ${id} 未能在超时前收口`);
+    };
+    return { db, stores, events, runner, submitted, segment, nodeMeta, settle };
+}
+
+const completedClip = (id: string) => ({ id, mode: "t2v", prompt: `${id} 已完成`, aspectRatio: "9:16", h3ParameterPolicy: "defaults", status: "success", result: `/media/${id}.mp4`, resultStorageKey: `video:${id}` });
+const pendingClip = (id: string) => ({ id, mode: "t2v", prompt: `${id} 待生成`, aspectRatio: "9:16", h3ParameterPolicy: "defaults" });
+
+test("skipCompleted 全完成：成功空跑，任务 succeeded 且不生成任何 Clip", async (t) => {
+    const f = skipFixture(t, [completedClip("s1"), completedClip("s2")]);
+    const task = f.runner.start({ projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: true } as any, "parent-all-done");
+    const finished = await f.settle(task.id);
+    assert.equal(finished.status, "succeeded");
+    assert.equal((finished.result as any)?.phase, "complete");
+    assert.deepEqual(f.submitted, []);
+    assert.ok(f.stores.tasks.events(task.id).some((event) => event.type === "h3_completed"));
+    assert.ok(f.events.since().some((event) => event.entityId === task.id && event.type === "task.completed"));
+    assert.equal(String(f.nodeMeta().status), "success");
+    assert.equal(String(f.segment("s1").result), "/media/s1.mp4");
+    assert.equal(String(f.segment("s2").result), "/media/s2.mp4");
+});
+
+test("skipCompleted 部分完成：只生成未完成段，已完成段保持原样", async (t) => {
+    const f = skipFixture(t, [completedClip("s1"), pendingClip("s2")]);
+    const task = f.runner.start({ projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: true } as any, "parent-partial");
+    const finished = await f.settle(task.id);
+    assert.equal(finished.status, "succeeded");
+    assert.deepEqual(f.submitted, ["s2"]);
+    assert.equal(String(f.segment("s1").result), "/media/s1.mp4");
+    assert.match(String(f.segment("s2").result), /^\/media\/h3-/);
+    assert.notEqual(String(f.segment("s2").result), String(f.segment("s1").result));
+});
+
+test("没有符合条件的 Clip：错误 nodeId / 节点无 segments 仍抛原错误", (t) => {
+    const f = skipFixture(t, [completedClip("s1")]);
+    for (const nodeId of ["missing", "empty"]) {
+        assert.throws(() => f.runner.start({ projectId: "p", nodeId, runFromCurrent: true, skipCompleted: true } as any, `parent-${nodeId}`), /没有符合条件的 H3 Clip/);
+    }
+    assert.deepEqual(f.submitted, []);
+});
+
+test("显式 segmentId 找不到：仍按原逻辑报错，不当成全完成空跑", (t) => {
+    const f = skipFixture(t, [completedClip("s1")]);
+    assert.throws(() => f.runner.start({ projectId: "p", nodeId: "n", segmentId: "nope", runFromCurrent: true, skipCompleted: true } as any, "parent-bad-segment"), /找不到所选 Clip/);
+    assert.deepEqual(f.submitted, []);
+});
+
+test("blockedPlans 非空：即使目标全完成也不算成功空跑", (t) => {
+    const f = skipFixture(t, [completedClip("s1")]);
+    const input = { projectId: "p", nodeId: "n", runFromCurrent: true, skipCompleted: true } as any;
+    assert.throws(() => (f.runner as any).buildRunPlan(input, [{ nodeId: "n", segmentId: "s1", clipNumber: 1, reason: "参考素材不完整" }]), /没有可运行的 H3 Clip/);
 });

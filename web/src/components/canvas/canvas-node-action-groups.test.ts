@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { canvasNodeDropdownActions, groupCanvasNodeActions, nearbyCanvasNodeActions } from "./canvas-node-action-groups";
 
-const builtInIds = ["info", "delete", "saveAsset", "download", "convertToCharacter", "convertToScene", "convertToProp", "copyPrompt", "reversePrompt", "replace", "resize", "maskEdit", "crop", "split", "upscale", "superResolve", "autoLevels", "angle", "view", "compareVideo", "trimVideo", "retry", "edit", "generateImage", "config", "decreaseFont", "increaseFont", "uploadImage", "uploadVideo", "uploadAudio", "saveCharacterToAsset", "saveSceneToAsset", "arrangeGroup", "toggleOrderedGroup", "groupLock", "discardShared"];
+const builtInIds = ["info", "delete", "saveAsset", "download", "convertToCharacter", "convertToScene", "convertToProp", "copyPrompt", "reversePrompt", "replace", "resize", "maskEdit", "crop", "split", "upscale", "superResolve", "autoLevels", "angle", "view", "compareVideo", "trimVideo", "retry", "edit", "generateImage", "config", "decreaseFont", "increaseFont", "uploadImage", "uploadVideo", "uploadAudio", "saveCharacterToAsset", "saveSceneToAsset", "savePropToAsset", "styleTransfer", "arrangeGroup", "toggleOrderedGroup", "groupLock", "discardShared"];
 
 test("every existing node action is reachable exactly once in the full menu", () => {
     const actions = builtInIds.map((id) => ({ id }));

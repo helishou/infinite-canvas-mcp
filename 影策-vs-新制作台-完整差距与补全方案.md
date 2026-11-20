@@ -148,3 +148,17 @@ Job 类型（`models_drama.go:51-61`）：bible / plan / cast_image / cast_extra
 - ②「镜头字段扩 speaker/dialogue/transition」**暂缓**：查实台词/说话人真值在 `source.utterances`（ShotEditor 的 lines 来自 utterances），而 `directorPatchFields` 没有 utterance 实体、shot 白名单也没有 transition 字段。硬写 shot.dialogues 会与 utterances 真值不一致（造字段），需先加后端 utterance patch op——属于另一层面，不做假对齐。
 
 tsc 31 基线、target 零错误。
+
+
+---
+
+## 九、遗留专项 TODO — B2 精修三入口（3D 导演台 / 动画时间轴）（2026-11-20）
+
+**状态：未做，需单独立项。不是"补缺口"，是新建一整套前端子系统。**
+
+- 影策真值：`web/src/components/canvas/previs/*`（viewport / gesture-transaction / actor-thumbnails / save-coordinator / diagnostics / clay-materials 等）、`lib/canvas/previs/*`（modes / view-modes / shortcuts / motion-library / mannequin / placement / motion / save / save-wiring）、`stores/canvas/use-previs-workbench-store.ts`、`types/previs.ts`。`segment-dialog.tsx:150-152` 的精修下拉三模式：`previs`（3D 导演台）/ `timeline`（动画时间轴）/ `canvas`（自由画布）。
+- 模型：PrevisScene = 场景对象 + 骨骼/人偶 + 摄影机 + 关键帧轨道 + 动作片段 + 播放头插值；独立 store、独立保存协调器与诊断记录。
+- 本地现状：`web/src`、`backend/src`、`canvas-agent/src` 全无 previs 场景/时间轴模型。只有泛化的「精修画布 / 在画布中精修」→ `openCanvas(projectId, segmentId)` 且不带 mode；`camera-library` 里的 `previsId` 只是 acheng 技能 001–132 检索号（非 3D 场景）；`video-reprocess` 是视频后处理重跑，非精修入口。
+- 为什么不做（用户铁律）：硬补只能造空壳死按钮，没有真实 3D 数据模型与引擎支撑 =「造数据 / 近似效果」。不违反「真值源可得才补」。
+- 立项范围（将来做时）：①新增 previs 场景数据模型（对象/关键帧/轨道/相机 + 序列化）；②3D viewport（放置/手势/材质/播放头插值）；③时间轴序列器；④保存协调器 + 与段视频生成的真值绑定；⑤精修三模式入口接 `segment-dialog` 等价位置。工作量：产品级（数十模块），需专项排期与验收。
+- 注：本轮（2026-11-20）已补齐清单其余全部项：C 类 6 项后端业务门禁、A 类（新补 A1/A2/A6/A7，A3/A4/A5/A8/A9 经核对已存在）、B1/B3/B4/B5。B2 是唯一遗留。

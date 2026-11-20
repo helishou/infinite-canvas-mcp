@@ -43,6 +43,10 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     const importTool = catalog.tools.find(tool => tool.name === "canvas_import_local_images");
     assert.ok(importTool?.inputSchema && "items" in (importTool.inputSchema.properties || {}), "import tool must advertise image items");
     assert.match(importTool?.description || "", /智能图片节点/u);
+    assert.ok(names.has("canvas_import_local_videos"), "the smart local-video importer must be exposed as a native MCP tool");
+    const videoImportTool = catalog.tools.find(tool => tool.name === "canvas_import_local_videos");
+    assert.ok(videoImportTool?.inputSchema && "items" in (videoImportTool.inputSchema.properties || {}), "video import tool must advertise video items");
+    assert.match(videoImportTool?.description || "", /智能视频节点/u);
     for (const name of retiredNames) {
         assert.equal(names.has(name), false);
     }
@@ -76,12 +80,36 @@ test("MCP exposes only current tools and retired names are unavailable", async t
     assert.equal(canvas.nodes[0].metadata.primaryImageId, canvas.nodes[0].metadata.images[0].id);
     assert.equal(canvas.nodes[0].metadata.role, "character_turnaround");
     assert.equal(writes, 0);
+    const videoPath = path.join(tempDir, "clip.mp4");
+    const videoBytes = Buffer.from("ftypmp42-video-fixture-bytes");
+    await writeFile(videoPath, videoBytes);
+    const videoImportResult = await client.callTool({ name: "canvas_import_local_videos", arguments: { items: [{ filePath: videoPath, title: "测试视频" }] } });
+    assert.notEqual(videoImportResult.isError, true, JSON.stringify(videoImportResult));
+    const videoReceipt = JSON.parse(String(videoImportResult.content.find((item: any) => item.type === "text")?.text || "{}"));
+    assert.equal(videoReceipt.projectId, canvas.id);
+    assert.equal(videoReceipt.count, 1);
+    assert.equal(uploadedBytes.equals(videoBytes), true, "the original video bytes must be uploaded unchanged");
+    assert.equal(videoReceipt.created[0].nodeType, "config");
+    assert.match(String(videoReceipt.created[0].id), /^config-video-/u);
+    assert.equal(canvas.nodes.length, 2);
+    const videoNode = canvas.nodes[1];
+    assert.equal(videoNode.type, "config");
+    assert.equal(videoNode.title, "测试视频");
+    assert.equal(videoNode.metadata.smart, true);
+    assert.equal(videoNode.metadata.generationMode, "video");
+    assert.equal(videoNode.metadata.status, "success");
+    assert.equal(videoNode.metadata.content, videoReceipt.created[0].url);
+    assert.equal(videoNode.metadata.storageKey, videoReceipt.created[0].storageKey);
+    assert.equal(videoNode.metadata.mimeType, "video/mp4");
+    assert.equal(videoNode.metadata.bytes, videoBytes.length);
+    assert.equal(videoNode.metadata.importSource.kind, "local-file");
+    assert.equal(writes, 0);
     assert.equal(client.getServerVersion()?.version, "0.1.0+mcp3");
     const invalid = await fetch(url + "/mcp", { method: "POST", headers: { "Content-Type": "application/json", "mcp-session-id": "expired" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "h3_update_clip", arguments: {} } }) });
     assert.equal(invalid.status, 404);
     const bytes = Buffer.byteLength(JSON.stringify(catalog.tools));
     assert.ok(bytes < 216777, `catalog must shrink from the observed baseline: ${bytes}`);
     console.log(JSON.stringify({ catalogTools: catalog.tools.length, catalogBytes: bytes, unifiedTools: productionToolNames.length }));
-    assert.equal(catalog.tools.length, 157);
+    assert.equal(catalog.tools.length, 166);
     assert.equal(names.size, catalog.tools.length, "catalog names must remain unique");
 });

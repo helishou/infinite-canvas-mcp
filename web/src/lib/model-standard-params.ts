@@ -1,5 +1,3 @@
-import type { WorkflowField } from "@/types/workflow";
-
 /** 引擎 `/v1/models/{id}` 的 standard_params 中我们关心的部分。 */
 export type ModelStandardRole = {
     role: string;
@@ -26,7 +24,7 @@ export type PresetFieldIds = {
  * 返回空对象表示该模型没有可预设的尺寸/时长字段，面板应退回平铺字段模式。
  */
 export function resolvePresetFieldIds(
-    fields: WorkflowField[],
+    fields: ReadonlyArray<{ id: string; input?: string | null }>,
     standardParams: ModelStandardParams | null | undefined,
 ): PresetFieldIds {
     const roles = standardParams?.roles || [];

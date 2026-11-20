@@ -5,6 +5,7 @@ import { type ResolvedConfig } from "../config.js";
 import { engineTargets, probeEngineTarget, type EngineTarget } from "../engine-contract/workflow-catalog.js";
 import type { Stores } from "../stores/types.js";
 import type { BackendEventBus } from "../events.js";
+import { resolveTaskLivePreview } from "../canvas/engine-preview.js";
 
 /**
  * ComfyUI 控制台已下线：本地 8188 直连取消，能力归执行引擎 `comfyui2api`。
@@ -100,7 +101,7 @@ export function registerComfyRoutes(
         res.json({ ok: true, task: tasks, data: tasks });
     });
 
-    app.get(routePath("/comfy/tasks/:id"), (req, res) => {
+    app.get(routePath("/comfy/tasks/:id"), async (req, res) => {
         const taskId = String(req.params.id);
         const task = stores.tasks.get(taskId);
         if (!task) {
@@ -135,8 +136,8 @@ export function registerComfyRoutes(
                 },
             });
         }
-        // 实时预览帧由引擎侧提供（GET /api/tasks/{id} → preview），画布任务不带。
-        res.json({ ok: true, task, preview: null, events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
+        // 实时预览帧现取自执行引擎（engine_submitted → /api/tasks/{id}）。
+        res.json({ ok: true, task, preview: await resolveTaskLivePreview(stores, taskId), events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
     });
 
     app.post(routePath("/comfy/tasks/:id/cancel"), (req, res) => {

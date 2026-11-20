@@ -15,6 +15,7 @@ import {
     resolveCanvasImageReferencesByIds,
     resolveCanvasSceneNodes,
 } from "./image-references.js";
+import { resolveCanvasVideoReferences, resolveCanvasVideoReferencesByIds } from "./video-references.js";
 import { prepareCanvasLoopRun } from "./generation-target.js";
 import { appendScenePalettePrompt, sceneNodesByIds } from "./scene-generation-context.js";
 import { CanvasTextDispatcher, type CanvasTextGenerationInput } from "./text-dispatcher.js";
@@ -203,6 +204,30 @@ export class CanvasGenerationService {
         return { ...resolved, prompt: appendScenePalettePrompt(String(resolved.prompt || ""), scenes) };
     }
 
+    private resolveVideoReferences(command: CanvasGenerationCommand): CanvasGenerationCommand {
+        // 视频参考只对视频生成有意义；网页端已经整理好 videoReferences 时以它为准。
+        if (command.mode !== "video") return command;
+        if (command.params?.canvasFrozenInput === true) return command;
+        if (!command.projectId) return command;
+        const project = this.stores.projects.get(command.projectId);
+        if (!project) return command;
+        const sourceNodeId = command.sourceNodeId || command.nodeId;
+        if (!sourceNodeId) return command;
+        const explicitReferenceNodeIds = Array.isArray(recordOf(command).referenceNodeIds)
+            ? (recordOf(command).referenceNodeIds as unknown[]).map(String)
+            : [];
+        // 显式参考节点 id 是调用方（MCP / Agent）声明的选择：按 id 解析，图片由
+        // resolveImageReferencesOnly 负责，视频在这里补齐，两边互不覆盖。
+        if (explicitReferenceNodeIds.length) {
+            const videos = resolveCanvasVideoReferencesByIds(project, sourceNodeId, explicitReferenceNodeIds);
+            if (videos.length || !command.videoReferences?.length) return { ...command, videoReferences: videos };
+            return command;
+        }
+        const videos = resolveCanvasVideoReferences(project, sourceNodeId);
+        if (videos.length) return { ...command, videoReferences: videos };
+        return command;
+    }
+
     private resolveImageReferencesOnly(command: CanvasGenerationCommand): CanvasGenerationCommand {
         // 蒙版局部修改的参考图由调用方按提示词顺序给定（图片1=原图、图片2=蒙版），
         // 必须原样透传：源节点常是智能节点（type=config），图谱回溯会把它上游的
@@ -275,7 +300,7 @@ export class CanvasGenerationService {
     private async startVideo(command: CanvasGenerationCommand) {
         if (this.video) {
             if (!command.model) throw new Error("画布视频生成缺少 model");
-            const resolved = this.resolveImageReferences(command);
+            const resolved = this.resolveVideoReferences(this.resolveImageReferences(command));
             const result = this.video.start({ ...resolved, model: command.model, prompt: String(resolved.prompt || ""),
                 ...(resolved.idempotencyKey && !resolved.clientTaskId ? { clientTaskId: resolved.idempotencyKey } : {}) });
             return { ...result, task: this.stores.tasks.get(result.taskId) || undefined };

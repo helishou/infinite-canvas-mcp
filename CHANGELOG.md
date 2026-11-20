@@ -3,6 +3,7 @@
 
 ## Unreleased
 
+- [新增] 删除剧目时可以直接勾掉该剧目的资产：确认框会统计该剧目的资产库条目，勾选「同时删除该剧目的资产（N 项）」即随剧目一并删除（`DELETE /drama/projects/:id` 新增 `deleteAssets`，MCP `drama_delete_project` 同步支持并回传 `deletedAssets`）；不勾选时资产照旧留在资产库、归属回落「未归属」。剧目卡片与剧目资料面板共用同一个确认框，默认不勾选。
 - [修复] 连续性账本写回后自动投影到镜头：coverage 声明但未勾选的事实会报 `CONTINUITY_FACT_NOT_SELECTED` 并阻断编译，避免“账本写完了但 H3 提示词不带状态”；同时修正镜头投影所需 requirements 与覆盖摘要。
 - [新增] 画布可回捞执行引擎里未丢的生成任务：引擎提交时把 `engineTaskId` 记进画布任务事件，新增 MCP 工具 `h3_reclaim_task {taskId}` 与 `POST /tasks/:id/reclaim`，失败/取消后按原 id 接回同一次执行并复用媒体归档与节点回写；不重投、不重载模型，旧任务没有映射时明确拒绝。
 - [修复] 引擎不再把「ComfyUI 重启/瞬断」直接当失败：`/history` 掉线时先按 clientId 观察 90 秒并接回原执行（事件 `comfy_offline`/`comfy_reclaimed`，窗口可用 `COMFY_OFFLINE_GRACE_MS` 调，默认 90 秒），队列被清空才明确报「未产出」；新增 `POST /api/tasks/{id}/reclaim` 供失败任务按 clientId 回捞产物，不重投、不重新加载模型。

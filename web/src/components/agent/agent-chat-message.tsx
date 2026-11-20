@@ -88,7 +88,7 @@ function localFilePath(value: string) {
     return /^\/(?:Users|home|private|tmp|Volumes|var\/folders)\//.test(pathname) ? decodeURIComponent(pathname) : "";
 }
 
-export type AgentChatAttachment = { id: string; name: string; url: string };
+export type AgentChatAttachment = { id: string; name: string; url: string; type?: string };
 export type AgentChatMessageItem = {
     id: string;
     role: "user" | "assistant" | "system" | "tool" | "error";

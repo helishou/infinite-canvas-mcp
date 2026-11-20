@@ -94,7 +94,7 @@ type CanvasStore = {
     renameFolder: (id: string, name: string) => void;
     updateFolder: (id: string, patch: Partial<Pick<CanvasFolder, "name" | "outline" | "description" | "coverStorageKey" | "tags">>) => void;
     deleteFolder: (id: string) => void;
-    deleteDramaProject: (id: string) => Promise<void>;
+    deleteDramaProject: (id: string, options?: { deleteAssets?: boolean }) => Promise<void>;
     moveProjectsToFolder: (ids: string[], folderId: string | null) => void;
     replaceFolders: (folders: CanvasFolder[]) => void;
     openProject: (id: string) => CanvasProject | null;
@@ -759,9 +759,9 @@ export const useCanvasStore = create<CanvasStore>()((set, get) => ({
         scheduleCanvasFolderSync();
         scheduleCanvasSync();
     },
-    deleteDramaProject: async (id) => {
+    deleteDramaProject: async (id, options) => {
         const freeCanvasIds = get().projects.filter((project) => project.folderId === id).map((project) => project.id);
-        await deleteBackendDramaProject(id, freeCanvasIds);
+        await deleteBackendDramaProject(id, freeCanvasIds, options);
         set((state) => ({
             folders: state.folders.filter((folder) => folder.id !== id),
             projects: state.projects.filter((project) => project.folderId !== id),

@@ -1,5 +1,5 @@
 import { Button, Dropdown, Tooltip, type MenuProps } from "antd";
-import { Plus, Upload, MousePointer2, Hand, Undo2, Redo2, Ellipsis, Focus, PencilLine, Grid2x2, Trash2, Group, Scaling } from "lucide-react";
+import { Plus, Upload, MousePointer2, Hand, Undo2, Redo2, Ellipsis, Focus, PencilLine, Grid2x2, Trash2, Group, Scaling, Download } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getNodePluginId, listNodeDefinitions, useNodeRegistryVersion } from "@/lib/canvas/node-registry";
 import { getNodeSpec } from "@/constant/canvas";
@@ -10,6 +10,8 @@ export function CanvasToolbar({
     onFocusSelection,
     onBatchRename,
     onUnifySize,
+    onBatchDownload,
+    downloading = false,
     selectedCount,
     deleteDisabled = false,
     showSelectionActions,
@@ -40,6 +42,10 @@ export function CanvasToolbar({
     onFocusSelection: () => void;
     onBatchRename: () => void;
     onUnifySize: () => void;
+    /** 批量下载选中节点：由页面接线（过滤 selectedNodeIds 后调 exportCanvasNodes）。 */
+    onBatchDownload?: () => void;
+    /** 下载进行中：按钮显示 loading 并阻止重复点击。 */
+    downloading?: boolean;
     selectedCount: number;
     deleteDisabled?: boolean;
     showSelectionActions: boolean;
@@ -96,6 +102,7 @@ export function CanvasToolbar({
             {selectedCount > 1 && <Tooltip title={t("canvas.navigation.unifySize")}><Button type="text" aria-label={t("canvas.navigation.unifySize")} onClick={onUnifySize} icon={<Scaling className="size-4" />} /></Tooltip>}
             {groupSelection && <Tooltip title={t("canvas.controls.group")}><Button type="text" aria-label={t("canvas.controls.group")} onClick={onAddGroup} icon={<Group className="size-4" />} /></Tooltip>}
             <Tooltip title={t("canvas.toolbar.arrange")}><Button type="text" aria-label={t("canvas.toolbar.arrange")} onClick={onArrange} icon={<Grid2x2 className="size-4" />} /></Tooltip>
+            <Tooltip title={t(downloading ? "canvas.toolbar.batchDownloading" : "canvas.toolbar.batchDownload")}><Button type="text" aria-label={t("canvas.toolbar.batchDownload")} loading={downloading} disabled={!onBatchDownload} onClick={onBatchDownload} icon={<Download className="size-4" />} /></Tooltip>
             <Tooltip title={t("canvas.deleteSelected")}><Button type="text" aria-label={t("canvas.deleteSelected")} danger disabled={deleteDisabled} onClick={onDelete} icon={<Trash2 className="size-4" />} /></Tooltip>
         </div>}
     </>;

@@ -496,6 +496,91 @@
         box-shadow: 0 0 0 var(--canvas-generating-ring, 4px) color-mix(in srgb, var(--canvas-generating, #d97706) 32%, transparent);
     }
 
+    /* ── 制作台节点生成动效（对齐影策：动感集中在进度环 + 三段进度条，不做整块呼吸） ── */
+    /* conic 彗尾环：conic-gradient 用 mask 裁成 2px 环，配 animate-spin 转出彗尾。 */
+    .canvas-gen-ring {
+        background: conic-gradient(from 0deg, transparent 0deg 64deg, var(--canvas-gen-accent, #f59e0b) 300deg, transparent 300deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+        mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+        animation-duration: 1.2s;
+    }
+    /* 中心点脉冲：opacity 0.35↔1，1.4s 循环。尺寸由内联 style 或各自规则控制。 */
+    .canvas-gen-core-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 9999px;
+        animation: canvas-node-status-pulse 1.4s ease-in-out infinite;
+    }
+    .canvas-node-status-chip-dot {
+        border-radius: 9999px;
+        animation: canvas-node-status-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes canvas-node-status-pulse {
+        0%, 100% { opacity: 0.35; }
+        50% { opacity: 1; }
+    }
+    /* 完成徽章：scale 弹出→停留→淡出，2.4s 一次性（对齐影策 canvas-node-done-chip）。 */
+    .canvas-node-done-chip {
+        animation: canvas-node-done-chip 2.4s ease-out both;
+        transform-origin: top right;
+    }
+    @keyframes canvas-node-done-chip {
+        0% { opacity: 0; transform: scale(0.92); }
+        12% { opacity: 1; transform: scale(1); }
+        70% { opacity: 1; transform: scale(1); }
+        100% { opacity: 0; transform: scale(0.96); }
+    }
+    /* 三段进度条：active 段流动光带（无真实进度时），done 段完成填充。 */
+    .generation-phase-steps-track {
+        position: relative;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 9999px;
+        background: var(--gen-steps-track, rgba(255,255,255,.12));
+    }
+    .generation-phase-steps-fill {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        border-radius: inherit;
+        background: var(--gen-steps-accent, #f59e0b);
+        transform: translateX(-101%);
+    }
+    .generation-phase-step[data-state="done"] .generation-phase-steps-fill {
+        transform: none;
+        animation: generation-phase-complete 360ms ease-out both;
+    }
+    .generation-phase-step[data-state="active"] .generation-phase-steps-fill:not([data-determinate]) {
+        width: 48%;
+        animation: generation-phase-flow 1.5s ease-in-out infinite;
+    }
+    .generation-phase-steps-fill[data-determinate] {
+        transition: transform 360ms ease-out;
+    }
+    @keyframes generation-phase-flow {
+        0% { transform: translateX(-105%); }
+        100% { transform: translateX(215%); }
+    }
+    @keyframes generation-phase-complete {
+        from { transform: translateX(-101%); }
+        to { transform: none; }
+    }
+    /* 减弱动画 / 画布交互中：统一暂停动效（影策同款配套）。 */
+    @media (prefers-reduced-motion: reduce) {
+        .canvas-gen-ring,
+        .canvas-gen-core-dot,
+        .canvas-node-status-chip-dot,
+        .canvas-node-done-chip,
+        .generation-phase-steps-fill { animation: none !important; }
+    }
+    .no-motion .canvas-gen-ring,
+    .no-motion .canvas-gen-core-dot,
+    .no-motion .generation-phase-steps-fill { animation: none !important; }
+    [data-canvas-viewport-interacting="true"] .canvas-gen-ring,
+    [data-canvas-viewport-interacting="true"] .generation-phase-steps-fill { animation-play-state: paused; }
+
     @keyframes canvas-batch-child-in {
         from {
             opacity: 0;
