@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchChannelModelDetail } from "@/services/api/image";
 import { resolveModelChannel, type AiConfig } from "@/stores/use-config-store";
 import type { WorkflowField } from "@/types/workflow";
+import { resolvePresetFieldIds, type ModelStandardParams, type PresetFieldIds } from "@/lib/model-standard-params";
 
 /**
  * OpenAI 兼容渠道（本地 media-engine 这类）上报的模型字段。
@@ -28,6 +29,7 @@ export function useChannelModelFields(options: {
 }) {
     const { config, open, comfyParams, excludeTypes = [], onParamsChange } = options;
     const [fields, setFields] = useState<WorkflowField[]>([]);
+    const [presetFieldIds, setPresetFieldIds] = useState<PresetFieldIds>({});
     const paramsRef = useRef(comfyParams);
     paramsRef.current = comfyParams;
     const changeRef = useRef(onParamsChange);
@@ -39,6 +41,7 @@ export function useChannelModelFields(options: {
     useEffect(() => {
         if (!open || !channel) {
             setFields([]);
+            setPresetFieldIds({});
             return;
         }
         let cancelled = false;
@@ -49,6 +52,7 @@ export function useChannelModelFields(options: {
                     (field) => !field.isPrompt && !excludeTypes.includes(field.type),
                 );
                 setFields(kept);
+                setPresetFieldIds(resolvePresetFieldIds(kept, detail.standardParams as ModelStandardParams | null));
                 if (!kept.length || !changeRef.current) return;
                 if (seededRef.current === model) return;
                 seededRef.current = model;
@@ -67,12 +71,15 @@ export function useChannelModelFields(options: {
                 }
             })
             .catch(() => {
-                if (!cancelled) setFields([]);
+                if (!cancelled) {
+                    setFields([]);
+                    setPresetFieldIds({});
+                }
             });
         return () => {
             cancelled = true;
         };
     }, [open, model, channel?.id, excludeTypes.join(",")]);
 
-    return { channel, fields };
+    return { channel, fields, presetFieldIds };
 }

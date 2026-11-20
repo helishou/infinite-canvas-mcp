@@ -3,7 +3,7 @@ import axios from "axios";
 import i18n from "@/i18n";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
 import { corsBlockedHint } from "@/lib/api-error";
-import { buildApiUrl, encodeChannelModel, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, useConfigStore, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
+import { buildApiUrl, encodeChannelModel, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelScript, useConfigStore, type AiConfig, type ModelChannel, type ModelVideoCapabilities } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { shouldProxyLocalModelList } from "./local-models";
 import { nanoid } from "nanoid";
@@ -1106,13 +1106,16 @@ const defaultGeminiConfig: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat" | "
  * 对面回 `capability`（media-engine 会报 image/video/audio）就用它，否则交给调用方按名字判断。
  * 本地地址没有 CORS，复用画布既有的 `/api/local-models` 代理，不新增接口。
  */
-export async function fetchChannelModelItems(channel: ModelChannel): Promise<Array<{ name: string; capability?: string }>> {
+/** 引擎 /v1/models 列表里能带回来的能力提示（含视频能力五项）。 */
+export type ChannelModelHint = { name: string; capability?: string; maxAudios?: number } & ModelVideoCapabilities;
+
+export async function fetchChannelModelItems(channel: ModelChannel): Promise<ChannelModelHint[]> {
     if (channel.kind === "hermes" || channel.kind === "codex-cli") {
         return (await fetchChannelModels(channel)).map((name) => ({ name }));
     }
     if (shouldProxyLocalModelList(channel.baseUrl, channel.apiFormat)) {
         const { request } = await import("@/services/backend-api");
-        const response = await request<{ models?: string[]; items?: Array<{ name: string; capability?: string }> }>("POST", "/api/local-models", {
+        const response = await request<{ models?: string[]; items?: ChannelModelHint[] }>("POST", "/api/local-models", {
             baseUrl: channel.baseUrl,
             apiKey: channel.apiKey,
             apiFormat: channel.apiFormat,
@@ -1128,7 +1131,7 @@ export async function fetchChannelModelItems(channel: ModelChannel): Promise<Arr
  * 服务端会在详情里带上 `fields`（工作流字段）——本地引擎用它把「自定义参数」暴露给画布；
  * 普通 OpenAI 服务没有这些扩展字段，返回空数组，界面自然只显示常用参数。
  */
-export async function fetchChannelModelDetail(selectedModel: string): Promise<{ fields: WorkflowField[]; standardParams: unknown }> {
+export async function fetchChannelModelDetail(selectedModel: string): Promise<{ fields: WorkflowField[]; standardParams: import("@/lib/model-standard-params").ModelStandardParams | null; maxAudios?: number }> {
     const { config } = useConfigStore.getState();
     const channel = resolveModelChannel(config, selectedModel);
     if (!channel?.baseUrl) return { fields: [], standardParams: null };
@@ -1136,12 +1139,12 @@ export async function fetchChannelModelDetail(selectedModel: string): Promise<{ 
     const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/i.test(channel.baseUrl);
     if (loopback) {
         const { request } = await import("@/services/backend-api");
-        const response = await request<{ ok?: boolean; fields?: WorkflowField[]; standardParams?: unknown }>("POST", "/api/local-model-detail", {
+        const response = await request<{ ok?: boolean; fields?: WorkflowField[]; standardParams?: import("@/lib/model-standard-params").ModelStandardParams; maxAudios?: number }>("POST", "/api/local-model-detail", {
             baseUrl: channel.baseUrl,
             apiKey: channel.apiKey,
             model,
         });
-        return { fields: response.fields || [], standardParams: response.standardParams ?? null };
+        return { fields: response.fields || [], standardParams: response.standardParams ?? null, ...(Number.isSafeInteger(response.maxAudios) && Number(response.maxAudios) >= 0 ? { maxAudios: Number(response.maxAudios) } : {}) };
     }
     const detail = await fetchChannelModels(channel); // 远端先确认可达，再取详情
     if (!detail.includes(model)) return { fields: [], standardParams: null };
@@ -1149,6 +1152,6 @@ export async function fetchChannelModelDetail(selectedModel: string): Promise<{ 
         headers: channel.apiKey ? { authorization: `Bearer ${channel.apiKey}` } : {},
     });
     if (!response.ok) return { fields: [], standardParams: null };
-    const payload = await response.json() as { fields?: WorkflowField[]; standard_params?: unknown };
+    const payload = await response.json() as { fields?: WorkflowField[]; standard_params?: import("@/lib/model-standard-params").ModelStandardParams };
     return { fields: payload.fields || [], standardParams: payload.standard_params ?? null };
 }

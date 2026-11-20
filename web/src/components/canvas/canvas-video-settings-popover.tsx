@@ -80,7 +80,7 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
 
     const activeWorkflowDetail = workflowDetail?.name === workflowName ? workflowDetail : null;
     // 引擎（OpenAI 兼容渠道）模型没有画布工作流，字段从 /v1/models/{id} 取，默认值一并铺进去
-    const { fields: channelFields } = useChannelModelFields({
+    const { fields: channelFields, presetFieldIds } = useChannelModelFields({
         config,
         open,
         comfyParams,
@@ -114,6 +114,7 @@ export function CanvasVideoSettingsPopover({ config, targetLabel, onConfigChange
     const panel = open && buttonRect ? <VideoSettingsPortal
         buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} targetLabel={targetLabel}
         config={config} onConfigChange={onConfigChange} customFields={customFields} customFieldValues={comfyParams}
+        presetFieldIds={presetFieldIds}
         showRunTarget={hasRunningHubBinding} runTarget={runTarget} onRunTargetChange={onRunTargetChange}
         onCustomFieldChange={onComfyParamsChange ? (id, value) => {
             const next = { ...(comfyParamsRef.current || {}), [id]: value };
@@ -146,6 +147,7 @@ function VideoSettingsPortal({
     onConfigChange,
     customFields,
     customFieldValues,
+    presetFieldIds,
     onCustomFieldChange,
     showRunTarget,
     runTarget,
@@ -160,6 +162,7 @@ function VideoSettingsPortal({
     onConfigChange: (key: keyof AiConfig, value: string) => void;
     customFields: NonNullable<Parameters<typeof VideoSettingsPanel>[0]["customFields"]>;
     customFieldValues?: Record<string, unknown>;
+    presetFieldIds?: Parameters<typeof VideoSettingsPanel>[0]["presetFieldIds"];
     onCustomFieldChange?: (id: string, value: unknown) => void;
     showRunTarget: boolean;
     runTarget: "local" | "cloud" | "hybrid";
@@ -190,6 +193,6 @@ function VideoSettingsPortal({
             onClick={(event) => event.stopPropagation()}
         >
             <CanvasSettingsContext targetLabel={targetLabel} />
-            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" customFields={customFields} customFieldValues={customFieldValues} onCustomFieldChange={onCustomFieldChange} showRunTarget={showRunTarget} runTarget={runTarget} onRunTargetChange={onRunTargetChange} />
+            <VideoSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" customFields={customFields} customFieldValues={customFieldValues} presetFieldIds={presetFieldIds} onCustomFieldChange={onCustomFieldChange} showRunTarget={showRunTarget} runTarget={runTarget} onRunTargetChange={onRunTargetChange} />
         </div></CanvasPortal>;
 }

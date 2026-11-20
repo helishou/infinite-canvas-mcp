@@ -10,6 +10,7 @@ import { WorkflowCustomFields } from "@/components/workflow-custom-fields";
 import { type WorkflowField } from "@/services/api/workflows";
 import { h3VideoSettingChanges, isLocalH3VideoModel, resolveH3VideoSettings } from "@/lib/h3-video-settings";
 import { normalizeVideoSizeValue } from "@/lib/video-size";
+import type { PresetFieldIds } from "@/lib/model-standard-params";
 export { normalizeVideoSizeValue } from "@/lib/video-size";
 
 const resolutionOptions = [
@@ -52,6 +53,12 @@ type VideoSettingsPanelProps = {
     onCustomFieldChange?: (id: string, value: unknown) => void;
     /** 选中了内部实现但没解析出字段时的说明；null 表示无需提示。 */
     implementationMissing?: string | null;
+    /**
+     * 引擎模型上报的标准角色对应的字段 id（width/height/seconds）。
+     * 有值时把这几个字段渲染成预设（尺寸卡片/秒数档 + 精确尺寸折叠），
+     * 其余字段仍走 WorkflowCustomFields 平铺，做到「预设 + 高级参数」分层。
+     */
+    presetFieldIds?: PresetFieldIds;
     showRunTarget?: boolean;
     runTarget?: "local" | "cloud" | "hybrid";
     onRunTargetChange?: (value: "local" | "cloud" | "hybrid") => void;
@@ -67,6 +74,7 @@ export function VideoSettingsPanel({
     customFieldValues,
     onCustomFieldChange,
     implementationMissing,
+    presetFieldIds,
     showRunTarget = false,
     runTarget = "local",
     onRunTargetChange,
@@ -100,11 +108,69 @@ export function VideoSettingsPanel({
         change("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
     };
 
+    // ---- 引擎模型：标准角色 → 预设区 + 高级参数折叠 ----
+    const presetWidthId = presetFieldIds?.width;
+    const presetHeightId = presetFieldIds?.height;
+    const hasSizePreset = Boolean(presetWidthId && presetHeightId);
+    const hasSecondPreset = Boolean(presetFieldIds?.seconds);
+    const usePresetLayout = showsImplementationFields && (hasSizePreset || hasSecondPreset);
+    const fieldSize = hasSizePreset
+        ? (() => {
+            const width = Number(customFieldValues?.[presetWidthId!]);
+            const height = Number(customFieldValues?.[presetHeightId!]);
+            return width > 0 && height > 0 ? `${Math.round(width)}x${Math.round(height)}` : normalizeVideoSizeValue(config.size);
+        })()
+        : size;
+    const fieldDimensions = readSizeDimensions(fieldSize);
+    const advancedFields = usePresetLayout
+        ? (customFields || []).filter((field) => field.id !== presetWidthId && field.id !== presetHeightId && field.id !== presetFieldIds?.seconds)
+        : (customFields || []);
+    // 尺寸预设写字段 id（fields 会覆盖标准 size），秒数走标准 seconds 参数。
+    const writePresetSize = (width: number, height: number) => {
+        const w = Math.max(1, Math.floor(width));
+        const h = Math.max(1, Math.floor(height));
+        if (presetWidthId) onCustomFieldChange?.(presetWidthId, w);
+        if (presetHeightId) onCustomFieldChange?.(presetHeightId, h);
+        onConfigChange("size", `${w}x${h}`);
+    };
+    const writePresetQuality = (value: string) => {
+        const quality = Number(value.replace(/p$/i, ""));
+        if (!Number.isFinite(quality) || quality < 1) return;
+        const base = fieldDimensions.width && fieldDimensions.height
+            ? fieldDimensions
+            : { width: 1280, height: 720 };
+        const scale = quality / Math.min(base.width, base.height);
+        writePresetSize(base.width * scale, base.height * scale);
+    };
+    const writePresetSeconds = (value: string) => change("videoSeconds", value);
+    const writePresetOptionSize = (value: string) => {
+        if (value === "auto") return;
+        const next = readSizeDimensions(value);
+        if (next.width && next.height) writePresetSize(next.width, next.height);
+    };
+    // 预设区统一取值/写入：通用模型走 config，引擎模型走字段 + 标准 seconds。
+    const viewResolution = usePresetLayout
+        ? (fieldDimensions.width || fieldDimensions.height ? String(Math.min(fieldDimensions.width, fieldDimensions.height)) : normalizeVideoResolutionValue(config.vquality))
+        : resolution;
+    const viewSize = usePresetLayout ? fieldSize : size;
+    const viewSeconds = seconds;
+    const viewDimensions = usePresetLayout ? fieldDimensions : dimensions;
+    const onQuality = usePresetLayout ? writePresetQuality : (value: string) => change("vquality", value);
+    const onSize = usePresetLayout ? writePresetOptionSize : (value: string) => change("size", value);
+    const onSeconds = usePresetLayout ? writePresetSeconds : (value: string) => change("videoSeconds", value);
+    const onDimension = usePresetLayout
+        ? (key: "width" | "height", value: number | null) => {
+            const next = Math.max(1, Math.floor(value || viewDimensions[key] || 720));
+            writePresetSize(key === "width" ? next : viewDimensions.width, key === "height" ? next : viewDimensions.height);
+        }
+        : updateDimension;
+    const visibleSizeOptions = usePresetLayout ? sizeOptions.filter((item) => item.value !== "auto") : sizeOptions;
+
     return (
         <ImageSettingsTheme theme={theme}>
             <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.video.title")}</div> : null}
-                {showsImplementationFields ? (
+                {showsImplementationFields && !usePresetLayout ? (
                     <SettingsSection title={t("settingsPanels.video.workflowFields")} theme={theme}>
                         <WorkflowCustomFields fields={customFields || []} values={customFieldValues || {}} onChange={(id, value) => onCustomFieldChange?.(id, value)} />
                     </SettingsSection>
@@ -132,29 +198,29 @@ export function VideoSettingsPanel({
                         {implementationMissing}
                     </div>
                 ) : null}
-                {!showsImplementationFields ? (
+                {!showsImplementationFields || usePresetLayout ? (
                     <SettingsSection title={t("settingsPanels.groups.videoOutput")} theme={theme}>
                         <SettingGroup title={t("settingsPanels.video.quality")} color={theme.node.muted}>
                             <div className="grid grid-cols-3 gap-2.5">
                                 {resolutionOptions.map((item) => (
-                                    <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => change("vquality", item.value)}>
+                                    <OptionPill key={item.value} selected={viewResolution === item.value} theme={theme} onClick={() => onQuality(item.value)}>
                                         {item.label}
                                     </OptionPill>
                                 ))}
-                                <ResolutionInput value={resolution} theme={theme} onChange={(value) => change("vquality", value)} />
+                                <ResolutionInput value={viewResolution} theme={theme} onChange={onQuality} />
                             </div>
                         </SettingGroup>
                         <SettingGroup title={t("settingsPanels.video.size")} color={theme.node.muted}>
                             <div className="grid grid-cols-3 gap-2.5">
-                                {sizeOptions.map((item) => (
+                                {visibleSizeOptions.map((item) => (
                                     <button
                                         key={item.value}
                                         type="button"
-                                        aria-pressed={size === item.value}
+                                        aria-pressed={viewSize === item.value}
                                         className="flex h-[78px] min-w-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent text-sm transition hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                                        style={{ borderColor: size === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+                                        style={{ borderColor: viewSize === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
                                         onMouseDown={(event) => event.stopPropagation()}
-                                        onClick={() => change("size", item.value)}
+                                        onClick={() => onSize(item.value)}
                                     >
                                         <SizePreview width={item.width} height={item.height} color={theme.node.text} />
                                         <span>{t(`settingsPanels.video.sizes.${item.labelKey}`)}</span>
@@ -166,11 +232,11 @@ export function VideoSettingsPanel({
                         <SettingGroup title={t("settingsPanels.video.seconds")} color={theme.node.muted}>
                             <div className="grid grid-cols-3 gap-2.5">
                                 {(h3 ? [6, 10, 12, 15] : secondOptions).map((value) => (
-                                    <OptionPill key={value} selected={seconds === String(value)} theme={theme} onClick={() => change("videoSeconds", String(value))}>
+                                    <OptionPill key={value} selected={viewSeconds === String(value)} theme={theme} onClick={() => onSeconds(String(value))}>
                                         {value}s
                                     </OptionPill>
                                 ))}
-                                <NumberInput value={seconds} min={1} max={h3 ? 15 : 20} theme={theme} onChange={(value) => change("videoSeconds", value)} />
+                                <NumberInput value={viewSeconds} min={1} max={h3 ? 15 : 20} theme={theme} onChange={onSeconds} />
                             </div>
                         </SettingGroup>
                         {h3 ? (
@@ -178,13 +244,18 @@ export function VideoSettingsPanel({
                                 {h3Preview ? t("h3Video.preview", { size: h3Preview.parameters.size, seconds: h3Preview.parameters.seconds, megapixels: h3Preview.fields.megapixels }) : t(size === "auto" ? "h3Video.autoPreview" : "h3Video.durationError")}
                             </div>
                         ) : null}
-                        <SettingsDisclosure title={t("settingsPanels.groups.preciseSize")} summary={size} theme={theme}>
+                        <SettingsDisclosure title={t("settingsPanels.groups.preciseSize")} summary={viewSize} theme={theme}>
                             <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2.5">
-                                <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("width", value)} />
+                                <DimensionInput prefix="W" value={viewDimensions.width} disabled={viewSize === "auto"} theme={theme} onChange={(value) => onDimension("width", value)} />
                                 <span className="text-lg opacity-45">↔</span>
-                                <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("height", value)} />
+                                <DimensionInput prefix="H" value={viewDimensions.height} disabled={viewSize === "auto"} theme={theme} onChange={(value) => onDimension("height", value)} />
                             </div>
                         </SettingsDisclosure>
+                    </SettingsSection>
+                ) : null}
+                {usePresetLayout && advancedFields.length ? (
+                    <SettingsSection title={t("settingsPanels.video.workflowFields")} theme={theme}>
+                        <WorkflowCustomFields fields={advancedFields} values={customFieldValues || {}} onChange={(id, value) => onCustomFieldChange?.(id, value)} />
                     </SettingsSection>
                 ) : null}
             </div>

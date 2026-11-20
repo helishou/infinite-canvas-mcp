@@ -95,6 +95,32 @@ test("video retains every generic size, duration and custom numeric control", ()
     assert.equal((advanced.match(/disabled=""/g) || []).length, 2);
 });
 
+test("video engine preset mode keeps size/duration presets and folds remaining workflow fields", () => {
+    const presetFields: WorkflowField[] = [
+        { id: "width", name: "宽", input: "width", node: "1", type: "number", default: 864 },
+        { id: "height", name: "高", input: "height", node: "1", type: "number", default: 480 },
+        { id: "frames", name: "帧数", input: "length", node: "1", type: "number", default: 124 },
+        { id: "seed", name: "种子", input: "noise_seed", node: "2", type: "number", default: 42 },
+        { id: "sampler", name: "采样器", input: "sampler_name", node: "3", type: "dropdown", options: ["er_sde", "euler"], default: "er_sde" },
+    ];
+    const html = video({ model: "engine-local::H3 展开流" }, {
+        customFields: presetFields,
+        customFieldValues: { width: 864, height: 480, frames: 124, seed: 42, sampler: "er_sde" },
+        onCustomFieldChange: noChange,
+        presetFieldIds: { width: "width", height: "height", seconds: "frames" },
+    });
+    // 预设区照常渲染
+    for (const value of ["1280x720", "720x1280", "1024x1024"]) assert.ok(html.includes(value));
+    assert.ok(buttons(html).some((button) => button.text === "6s"));
+    // 字段当前值成为预设选中态（864x480 不是标准预设，精确尺寸里应出现）
+    assert.match(html, /value="864"/);
+    assert.match(html, /value="480"/);
+    // 非预设字段（种子/采样器）仍作为高级参数保留
+    assert.ok(html.includes("种子"));
+    assert.ok(html.includes("采样器"));
+    assert.ok(html.includes("er_sde"));
+});
+
 test("video workflow fields replace standard controls only when fields exist", () => {
     const workflow = video({}, { customFields: fields, customFieldValues: { seed: 17 }, onCustomFieldChange: noChange });
     assert.match(workflow, /Test workflow seed/);
