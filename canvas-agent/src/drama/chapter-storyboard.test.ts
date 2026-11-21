@@ -6,6 +6,9 @@ const base: ChapterStoryboardInput = {
     chapterId: "EP-1",
     fps: 24,
     clipSeconds: 5,
+    // 用极快档：这些用例的 2/2.5/3s hint 本就是验证「秒数按帧率量化」的机制，
+    // rapid 档 (1.5-3s) 不会 clamp 这些值，保留原断言语义。影策节奏默认走 relaxed，见单独用例。
+    pacing: "rapid",
     scenes: [
         {
             sceneKey: "temple",
@@ -33,7 +36,8 @@ test("秒数按帧率量化；段长必须落在 4–15 秒，不足 4 秒的尾
 });
 
 test("时长足够时仍按 5 秒目标切段", () => {
-    const plan = planChapterStoryboard({ ...base, scenes: [{ ...base.scenes[0], beats: [
+    // slow 档 (3-10s) 容纳 4s hint，验证分段装箱机制（不受 rapid 的 3s 上限 clamp）
+    const plan = planChapterStoryboard({ ...base, pacing: "slow", scenes: [{ ...base.scenes[0], beats: [
         { title: "一", visual: "a", seconds: 4 },
         { title: "二", visual: "b", seconds: 4 },
         { title: "三", visual: "c", seconds: 4 },
@@ -55,6 +59,7 @@ test("所有镜头都被恰好一个 Clip 覆盖，且顺序与镜头表一致",
 test("单镜超过单段上限时独占一段并给出诊断，不静默改镜头时长", () => {
     const plan = planChapterStoryboard({
         ...base,
+        pacing: "slow", // slow 档 (3-10s) 容纳 8s 长镜，验证「超过单段上限独占一段」
         scenes: [{ ...base.scenes[0], beats: [{ title: "长镜", visual: "长达八秒的长镜头。", seconds: 8 }] }],
     });
     assert.equal(plan.shots[0].duration_frames, 192);

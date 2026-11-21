@@ -101,6 +101,40 @@ const SAMPLE_APPROVED_TARGET = "sample";
 /** 持久化 reviewApproval → 审批闸门的对账间隔；后端 HTTP 尚未就绪时下一 tick 自动重试。 */
 const REVIEW_RECONCILE_COOLDOWN_MS = 60_000;
 
+/**
+ * 影策 PromptRules 档位 → 提示词硬文本（与 web/use-studio-data.ts:975-987 手动路径同源）。
+ * performance(1-10)/cameraDynamics(1-10) 各映射成 5 档文字，注入 SegmentWriterInput.style/cameraMotion。
+ * 越界值收敛到 1-10；缺省按 5（自然档）。导出便于单测锁定档位边界。
+ */
+export function performanceStyleText(value: number | undefined): string {
+    const perf = Math.max(1, Math.min(10, Number(value ?? 5)));
+    return perf <= 2 ? "表演克制内敛，情绪只在眼神与细微表情变化"
+        : perf <= 4 ? "表演自然收敛，情绪变化有分寸不夸张"
+        : perf <= 6 ? "表演自然到位，情绪变化落在线条与呼吸上，像在演戏"
+        : perf <= 8 ? "表演投入饱满，情绪外放但有层次，面部表情与肢体同步"
+        : "表演强烈张力，情绪大幅起伏，表情与身体语言充分夸张";
+}
+
+/** 运镜动感(1-10) → 5 档运镜风格文字（与手动路径 use-studio-data.ts:983-987 同源）。 */
+export function cameraMotionStyleText(value: number | undefined): string {
+    const cam = Math.max(1, Math.min(10, Number(value ?? 5)));
+    return cam <= 2 ? "运镜以稳定静态机位为主，几乎不运动"
+        : cam <= 4 ? "运镜克制，仅缓慢推拉，稳而有分寸"
+        : cam <= 6 ? "运镜有明确动机，稳中带动感，跟随人物动作"
+        : cam <= 8 ? "运镜灵活，推拉摇移配合节奏，增强画面动势"
+        : "运镜强烈动感，跟拍环绕甩镜并用，节奏凌厉";
+}
+
+/** 从 SKILL.md 抽出可作为 instruction 的方法要点（对齐前端 studio-skill-picker.tsx:35 skillInstruction，1900 字上限）。 */
+function skillInstructionFromMarkdown(content: string, title: string): string {
+    const text = String(content || "").replace(/\r\n/g, "\n");
+    const fmMatch = text.match(/^---\n([\s\S]*?)\n---/);
+    const desc = fmMatch ? (fmMatch[1].match(/^description:\s*(.+)$/m)?.[1] || "").trim() : "";
+    let body = fmMatch ? text.slice(fmMatch[0].length) : text;
+    body = body.replace(/^#+\s*/gm, "").replace(/```[\s\S]*?```/g, "").replace(/\n{2,}/g, "\n").trim();
+    return [`写作方法参考「${title}」`, desc ? `方法意图：${desc}` : "", body].filter(Boolean).join("\n").slice(0, 1900);
+}
+
 /** 影策七段机；queued/done 是边界，真正入队的作业阶段是 script/assets/prompts/video/render。 */
 export const PIPELINE_STAGES = ["queued", "script", "assets", "prompts", "review", "video", "render", "done"] as const;
 export type PipelineStage = (typeof PIPELINE_STAGES)[number];
@@ -400,6 +434,42 @@ export function needsReview(
     return false;
 }
 
+// ── 预算上限（budgetMicrocredits）────────────────────────────────────────
+
+/**
+ * 生成步骤缺省单价（微积分）。本仓没有模型计价/用量回传接口：影策的
+ * unitPriceMicrocredits 只存在于外部渠道配置，画布 generation task 也不回传 usage。
+ * 因此在关键生成步骤后按此表做保守估算累计；task 真带 usage 时以真值为准（见下）。
+ */
+export const DEFAULT_STEP_COST_MICROCREDITS: Record<"text" | "image" | "video", number> = {
+    text: 150,
+    image: 1000,
+    video: 5000,
+};
+
+/** 从生成任务回包提取真实花费（微积分）；没有可信字段时回退估算值。 */
+export function taskCostMicrocredits(task: Record<string, any> | undefined, fallbackMicrocredits: number): number {
+    const candidates: unknown[] = [
+        task?.usage?.costMicrocredits, task?.usage?.microcredits,
+        task?.usageResponse?.costMicrocredits, task?.usageResponse?.microcredits,
+        task?.result?.usage?.costMicrocredits, task?.result?.usage?.microcredits,
+        task?.result?.usageResponse?.costMicrocredits,
+    ];
+    for (const value of candidates) {
+        if (value === undefined || value === null || value === "") continue;
+        const n = Number(value);
+        if (Number.isFinite(n) && n >= 0) return n;
+    }
+    return fallbackMicrocredits;
+}
+
+/** 累计花费是否达到预算上限（0/未设/非法值=不限）。 */
+export function budgetReached(spentMicrocredits: number, limitMicrocredits: number | undefined): boolean {
+    const limit = Number(limitMicrocredits ?? 0);
+    const spent = Number(spentMicrocredits ?? 0);
+    return Number.isFinite(limit) && limit > 0 && Number.isFinite(spent) && spent >= limit;
+}
+
 // ── 编排器 ───────────────────────────────────────────────────────────────
 
 export type DramaPipelineOptions = {
@@ -418,6 +488,15 @@ export type DramaPipelineOptions = {
     globalLimit?: number;
 };
 
+/** 写作技能引用（对齐前端 SkillRef；content/instruction 允许前端预解析后直传，免后端再查技能库）。 */
+export type DramaPipelineTextSkill = {
+    name: string;
+    title?: string;
+    path?: string;
+    content?: string;
+    instruction?: string;
+};
+
 /** 制作设置按剧目下发的运行期选项（与影策制作台设置页一一对应；不落 pipeline SQLite，重启后需重新下发）。 */
 export type DramaPipelineRuntimeOptions = {
     /** 文字步骤模型（拆镜/提取/提示词），覆盖后端全局文本模型。 */
@@ -426,6 +505,16 @@ export type DramaPipelineRuntimeOptions = {
     videoPromptModel?: string;
     /** 每步思考等级，写进 /canvas/generation 的 params.reasoningEffort。 */
     textThinking?: { plan?: string; storyboard?: string; extract?: string; prompt?: string };
+    /** 影策 PromptRules：表演强度 1-10（前端设置项原名 performanceIntensity 兼容别名）。runPrompts 映射成 5 档文字注入 style。 */
+    performance?: number;
+    performanceIntensity?: number;
+    /** 影策 PromptRules：运镜动感 1-10。runPrompts 映射成 5 档文字注入 cameraMotion。 */
+    cameraDynamics?: number;
+    /** 开篇钩子/结尾悬念：透传给 script-proposal 作为创作方向（手动改编同源）。 */
+    hook?: string;
+    cliffhanger?: string;
+    /** 写作技能引用：拆镜(storyboard)/提示词(prompt) 步骤真实注入方法要点。 */
+    textSkills?: { extract?: DramaPipelineTextSkill | null; storyboard?: DramaPipelineTextSkill | null; prompt?: DramaPipelineTextSkill | null };
     /** 分集规划/剧本提案模型（影策 planModel）：透传给 script-proposal 的 model。 */
     planModel?: string;
     /** 参考图分辨率档位（影策 imageResolution）：1k/2k/4k，dispatcher 换算成像素 size。 */
@@ -436,6 +525,8 @@ export type DramaPipelineRuntimeOptions = {
     videoAspectRatio?: DramaVideoAspectRatio;
     /** 样片模式（影策 sampleMode）：第 1 集视频阶段需人工 approve 才继续。 */
     sampleMode?: boolean;
+    /** 预算上限（影策 budgetMicrocredits，微积分）：0/不设=不限；累计生成花费达限自动暂停流水线。 */
+    budgetMicrocredits?: number;
     /** 段视频自选模型（写进 H3 节点 params.selectedVideoModel）。 */
     videoModel?: string;
     /** 参考图模型按资产类型写入各集 production.settings.imageModelsByKind。 */
@@ -496,6 +587,8 @@ export class DramaPipeline {
     private readonly retryAt = new Map<string, number>();
     /** 上次成功对账持久化 reviewApproval 的时间戳（dramaId → ts）；失败会清掉以便下一 tick 重试。 */
     private readonly reviewReconcileAt = new Map<string, number>();
+    /** dramaId → 本剧目累计生成花费（微积分）/预算是否已耗尽（内存计数，重启或重新 start 归零）。 */
+    private readonly budgetState = new Map<string, { spent: number; exceeded: boolean }>();
 
     constructor(options: DramaPipelineOptions) {
         this.store = options.store;
@@ -552,6 +645,70 @@ export class DramaPipeline {
         return this.runOptions.get(dramaId) || {};
     }
 
+    /** 本剧目预算上限（0/不设/非法=不限）。 */
+    private budgetLimitOf(dramaId: string): number {
+        const raw = Number(this.optionsOf(dramaId).budgetMicrocredits ?? 0);
+        return Number.isFinite(raw) && raw > 0 ? raw : 0;
+    }
+
+    /** 预算是否已耗尽：与 needsReview 闸门同一层，供调度器与 resume 读取。 */
+    private budgetHeld(dramaId: string): boolean {
+        return this.budgetState.get(dramaId)?.exceeded === true;
+    }
+
+    /** 本剧目预算快照（供 status 可观测；不落库，随进程重启/重新 start 归零）。 */
+    budgetOf(dramaId: string): { limitMicrocredits: number; spentMicrocredits: number; exceeded: boolean } {
+        return {
+            limitMicrocredits: this.budgetLimitOf(dramaId),
+            spentMicrocredits: this.budgetState.get(dramaId)?.spent || 0,
+            exceeded: this.budgetHeld(dramaId),
+        };
+    }
+
+    /**
+     * 关键生成步骤完成后计费：优先用任务回包的真实 usage，否则按步骤估算累加。
+     * 达限即暂停整条流水线（复用 sampleMode 的暂停语义）+ 记日志；后续 job 由 jobAllowed 拦住。
+     */
+    chargeGeneration(dramaId: string, kind: "text" | "image" | "video", task?: Record<string, any>): { spentMicrocredits: number; limitMicrocredits: number; exceeded: boolean } {
+        if (!dramaId) return this.budgetOf(dramaId);
+        const limit = this.budgetLimitOf(dramaId);
+        const state = this.budgetState.get(dramaId) || { spent: 0, exceeded: false };
+        const cost = taskCostMicrocredits(task, DEFAULT_STEP_COST_MICROCREDITS[kind]);
+        state.spent = Math.round((state.spent + cost) * 1000) / 1000; // 抑制浮点漂移
+        this.budgetState.set(dramaId, state);
+        if (!state.exceeded && budgetReached(state.spent, limit)) {
+            state.exceeded = true;
+            this.store.log(dramaId, `预算耗尽：${kind} 步骤 +${cost} 微积分后累计 ${state.spent}/${limit}，流水线自动暂停（budgetMicrocredits）`, "warn");
+            this.pause(dramaId, `budget_exceeded:${state.spent}/${limit}`);
+        }
+        return this.budgetOf(dramaId);
+    }
+
+    /**
+     * textSkills 槽位 → SegmentWriterInput 的 skillName/skillPath/skillContent。
+     * 优先用前端预解析的 content/instruction；只有 name 时经 /api/skill-market/detail 读 SKILL.md。
+     * 技能加载失败只记日志不阻断流水线（技能是增强，不是生成前置条件）。
+     */
+    private async resolveTextSkill(ref: DramaPipelineTextSkill | null | undefined, dramaId: string): Promise<{ skillName?: string; skillPath?: string; skillContent?: string }> {
+        if (!ref) return {};
+        const skillName = String(ref.title || ref.name || "").trim() || undefined;
+        const skillPath = String(ref.path || "").trim() || undefined;
+        let raw = String(ref.content || ref.instruction || "").trim();
+        if (!raw && ref.name) {
+            try {
+                const detail = await this.request("GET", `/api/skill-market/detail?name=${encodeURIComponent(ref.name)}`);
+                raw = String(detail?.data?.content || "").trim();
+            } catch (error) {
+                this.store.log(dramaId, `写作技能「${ref.name}」加载失败，本次按内置格式撰写（不阻断）：${errText(error)}`, "warn");
+            }
+        }
+        return {
+            ...(skillName ? { skillName } : {}),
+            ...(skillPath ? { skillPath } : {}),
+            ...(raw ? { skillContent: skillInstructionFromMarkdown(raw, skillName || ref.name) } : {}),
+        };
+    }
+
     /** 某剧目某池的并发上限：制作设置覆盖 > 构造期默认。 */
     private poolLimitOf(dramaId: string, pool: PoolName): number {
         const configured = Number(this.optionsOf(dramaId).concurrency?.[pool as "text" | "video" | "render"] || 0);
@@ -583,6 +740,9 @@ export class DramaPipeline {
     async start(dramaId: string, opts: DramaPipelineStartOpts): Promise<Record<string, unknown>> {
         await this.ensureTopic(dramaId);
         if (opts?.options) this.runOptions.set(dramaId, opts.options);
+        // 预算是本次运行期的累计计数：重新 start 即新一轮，归零后按下发的 budgetMicrocredits 重新计。
+        this.budgetState.set(dramaId, { spent: 0, exceeded: false });
+        if (this.budgetLimitOf(dramaId) > 0) this.store.log(dramaId, `预算上限已下发：${this.budgetLimitOf(dramaId)} 微积分（0/不设=不限）`);
         this.assertModelsReady(dramaId); // C4：缺模型能力拒绝开工（入队前；此时 runOptions 已下发）
         const row = this.store.upsert({
             dramaId,
@@ -713,6 +873,8 @@ export class DramaPipeline {
     }
 
     private jobAllowed(pipeline: PipelineRow, job: JobRow, approvals: Set<string>, released: Set<string>): boolean {
+        // 预算闸门：达限后不再放行任何新作业（与 sampleMode 审批闸门同层）。
+        if (this.budgetHeld(pipeline.drama_id)) return false;
         const retryAt = this.retryAt.get(job.id) || 0;
         if (Date.now() < retryAt) return false;
 
@@ -805,15 +967,39 @@ export class DramaPipeline {
         const episode = episodeRes?.episode as Record<string, any> | undefined;
         if (!episode) throw new Error("EPISODE_NOT_FOUND");
 
-        // 1) 单集分场剧本（后端路由已自动把 hook/cliffhanger 写回导演源稿）。
+        // 1) 单集分场剧本（后端路由已自动把生成出的 hook/cliffhanger 写回导演源稿）。
         //    梗概(自然语言) 与 分场脚本 分离：synopsis 存梗概(对齐影策)，fullPlot 存分场正文(供集间承接/原文对照兜底)。
-        //    planModel 透传 model（脚本路由 schema 已支持）；textThinking.plan 用 instruction 软注入。
+        //    影策设置透传：planModel→model；textThinking.plan→reasoningEffort（真进 generateText params，
+        //    对齐 storyboard/extract/prompt）；hook/cliffhanger→结构化字段 + instruction 创作方向（与手动改编同源）。
         const scriptOpts = this.optionsOf(dramaId);
         const planEffort = String(scriptOpts.textThinking?.plan || "").trim();
-        const proposal = await this.request("POST", `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`, {
-            ...(scriptOpts.planModel ? { model: scriptOpts.planModel } : {}),
-            ...(planEffort && planEffort !== "auto" ? { instruction: `请以 ${planEffort} 的思考深度完成分场规划。` } : {}),
-        });
+        const hook = String(scriptOpts.hook || "").trim();
+        const cliffhanger = String(scriptOpts.cliffhanger || "").trim();
+        const beats: string[] = [];
+        if (hook) beats.push(`开篇钩子：${hook}`);
+        if (cliffhanger) beats.push(`结尾悬念：${cliffhanger}`);
+        const softInstruction = beats.length ? beats.join("；").slice(0, 2000) : undefined;
+        const proposalUrl = `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`;
+        const baseBody = { ...(scriptOpts.planModel ? { model: scriptOpts.planModel } : {}) };
+        const enrichedBody = {
+            ...baseBody,
+            ...(hook ? { hook } : {}),
+            ...(cliffhanger ? { cliffhanger } : {}),
+            ...(planEffort && planEffort !== "auto" ? { reasoningEffort: planEffort } : {}),
+            ...(softInstruction ? { instruction: softInstruction } : {}),
+        };
+        let proposal: any;
+        try {
+            proposal = await this.request("POST", proposalUrl, enrichedBody);
+        } catch (error) {
+            // 兼容尚未升级的 script-proposal 路由（strict schema 只收 model/instruction）：
+            // 400 时回退到纯 instruction（钩子/悬念与思考深度全部并入软指令），不让整条流水线断在这里。
+            const message = error instanceof Error ? error.message : String(error);
+            if (!/\bHTTP 400\b/.test(message)) throw error;
+            const fallback = [softInstruction, planEffort && planEffort !== "auto" ? `请以 ${planEffort} 的思考深度完成分场规划` : ""]
+                .filter(Boolean).join("；").slice(0, 2000);
+            proposal = await this.request("POST", proposalUrl, { ...baseBody, ...(fallback ? { instruction: fallback } : {}) });
+        }
         const text = String(proposal?.text || "").trim();
         if (!text) throw new Error("SCRIPT_PROPOSAL_EMPTY: 改编没有返回分场文本");
         const synopsis = String(proposal?.synopsis || "").trim();
@@ -880,6 +1066,9 @@ export class DramaPipeline {
             ruleLines.push(`场景衔接：${{ hard: "硬切", fade: "黑场过渡", flash: "闪白" }[rules.transitionMode] || rules.transitionMode}${rules.transitionMs ? `（约 ${rules.transitionMs}ms）` : ""}。`);
         }
         if (rules.pacing && rules.pacing !== "标准") ruleLines.push(`整体节奏：${rules.pacing}。`);
+        // 写作技能（分镜拆分）真实注入拆镜步骤：契约无 skill 字段，并入 chapterBody 的【制作设置·分镜要求】。
+        const storyboardSkill = await this.resolveTextSkill(opts.textSkills?.storyboard, dramaId);
+        if (storyboardSkill.skillContent) ruleLines.push(`${storyboardSkill.skillContent}。`);
         const sourceBlock = episodeSource
             ? `\n\n【小说原文·台词必须逐字从这里提取到 beat 的 dialogue/speaker，不得改写或遗漏引号内的对白】\n${episodeSource}`
             : "";
@@ -892,7 +1081,7 @@ export class DramaPipeline {
         const storyboardText = await this.generateText([demandPrompt.system, "", demandPrompt.user].join("\n"), {
             model: opts.storyboardModel,
             reasoningEffort: opts.textThinking?.storyboard,
-        });
+        }, dramaId);
         let draft: { demand: string; scenes: ChapterScenePlan[] };
         try {
             draft = parseChapterDemand(storyboardText, { environments });
@@ -905,12 +1094,20 @@ export class DramaPipeline {
             });
         }
 
+        // 影策节奏：把制作台的中文 pacing 档位映射到英文枚举，传给 planChapterStoryboard 做硬约束。
+        // 未配置时用 relaxed（舒缓）：解决旧逻辑"所有镜头写死3秒→急得跟投胎"的问题。
+        const pacingMap: Record<string, string> = {
+            "极快": "rapid", "快": "fast", "标准": "standard", "舒缓": "relaxed", "慢": "slow",
+            rapid: "rapid", fast: "fast", standard: "standard", relaxed: "relaxed", slow: "slow",
+        };
+        const pacing = pacingMap[String(rules.pacing || "").trim()] || "relaxed";
         const plan = planChapterStoryboard({
             chapterId: episodeId,
             scenes: draft.scenes,
             fps: this.fpsOf(source),
             // 对齐影策：剧情段目标 8–15 秒（影策真实段多为 10–11 秒），不再用旧的 5 秒。
             clipSeconds: 10,
+            pacing,
         });
         const ops = toSceneStoryboardOps(plan, environmentOfScene);
         production = (await this.productionOps(episodeId, production.revision, ops as Record<string, unknown>[])).production;
@@ -976,7 +1173,7 @@ export class DramaPipeline {
             const raw = await this.generateText([assetPrompt.system, "", assetPrompt.user].join("\n"), {
                 model: assetOpts0.assetExtractModel,
                 reasoningEffort: assetOpts0.textThinking?.extract,
-            });
+            }, dramaId);
             try { assets = parseAssetExtract(raw); }
             catch { assets = fallbackAssetExtract({ chapterTitle: String(episode.title || ""), synopsis }); }
         }
@@ -1084,7 +1281,7 @@ export class DramaPipeline {
                     try {
                         const key = await this.generateAssetReference(episodeId, canvasId, canvasNodes, item,
                             String(kindModel[item.kind as "character" | "scene" | "prop"] || "").trim() || defaultModel,
-                            assetOpts.imageResolution);
+                            assetOpts.imageResolution, dramaId);
                         generated += 1;
                         this.store.log(dramaId, `资产 ${item.assetId} 参考图已写回：${key}`);
                     } catch (error) {
@@ -1104,7 +1301,7 @@ export class DramaPipeline {
     /** 单资产真实出图 + 写回：定位实体节点 → 生图 → 轮询 → bind-image（真实 storageKey）。 */
     private async generateAssetReference(episodeId: string, canvasId: string, canvasNodes: Array<Record<string, any>>,
         item: { assetId: string; kind: string; name: string; entityId: string; prompt: string }, model: string,
-        imageResolution?: "1k" | "2k" | "4k"): Promise<string> {
+        imageResolution?: "1k" | "2k" | "4k", dramaId?: string): Promise<string> {
         if (!model) throw new Error("ASSET_IMAGE_MODEL_MISSING: 请在设置里选择图片模型（ai.config.imageModel）");
         const entity = findPipelineAssetEntityNode(canvasNodes, { kind: item.kind, name: item.name, entityId: item.entityId });
         if (!entity) throw new Error(`ASSET_IMAGE_ENTITY_MISSING: 找不到 ${item.kind}「${item.name}」的 production-entity 节点`);
@@ -1125,6 +1322,7 @@ export class DramaPipeline {
         const taskId = String(started?.taskId || "");
         if (!taskId) throw new Error("ASSET_IMAGE_NO_TASK: 生图任务没有返回 taskId");
         const task = await this.waitTask(taskId, false);
+        if (dramaId) this.chargeGeneration(dramaId, "image", task);
         const storageKey = generatedMediaStorageKey(task);
         if (!storageKey) throw new Error(`ASSET_IMAGE_NO_MEDIA: 任务 ${taskId} 没有产出 storageKey`);
         await this.request("POST", "/drama/pipeline/assets/bind-image", {
@@ -1157,6 +1355,16 @@ export class DramaPipeline {
             ruleStyle.push(`转场${{ hard: "硬切", fade: "黑场过渡", flash: "闪白" }[promptRules.transitionMode] || promptRules.transitionMode}${promptRules.transitionMs ? `约${promptRules.transitionMs}ms` : ""}`);
         }
         if (promptRules.pacing && promptRules.pacing !== "标准") ruleStyle.push(`节奏${promptRules.pacing}`);
+
+        // 影策 PromptRules：表演强度/运镜动感 1-10 档 → 5 档硬文本（与手动路径同源）。
+        // performanceIntensity 是前端设置项原名，作为兼容别名；两者都不配时按 5（自然档）注入。
+        const perfValue = promptOpts.performance ?? promptOpts.performanceIntensity;
+        const perfStyle = performanceStyleText(perfValue);
+        const cameraMotion = cameraMotionStyleText(promptOpts.cameraDynamics);
+        // 表演档位与分镜规则软约束合并成 style，二者不互相覆盖。
+        const styleParts = [perfStyle, ...ruleStyle];
+        // 写作技能（提示词撰写）真值：优先前端预解析 content，否则按 name 读 SKILL.md；循环外解析一次。
+        const promptSkill = await this.resolveTextSkill(promptOpts.textSkills?.prompt, dramaId);
 
         const shotById = new Map(shots.map(shot => [String(shot.id), shot]));
         const canvasNodes: Array<Record<string, any>> = Array.isArray(canvas.nodes) ? canvas.nodes : [];
@@ -1207,7 +1415,11 @@ export class DramaPipeline {
                 totalSec: cursor / fps,
                 shots: writerShots,
                 ...(index > 0 && !independent ? { previousEnding: String(segments[index - 1]?.ending || "") } : {}),
-                ...(ruleStyle.length ? { style: ruleStyle.join("，") } : {}),
+                style: styleParts.join("，"),
+                cameraMotion,
+                ...(promptSkill.skillContent ? { skillContent: promptSkill.skillContent } : {}),
+                ...(promptSkill.skillName ? { skillName: promptSkill.skillName } : {}),
+                ...(promptSkill.skillPath ? { skillPath: promptSkill.skillPath } : {}),
                 firstFrame: index > 0 && !independent,
                 independent,
                 noReferenceBindings: noRefs,
@@ -1216,7 +1428,7 @@ export class DramaPipeline {
             const raw = await this.generateText([prompt.system, "", prompt.user].join("\n"), {
                 model: promptOpts.videoPromptModel,
                 reasoningEffort: promptOpts.textThinking?.prompt,
-            });
+            }, dramaId);
             let cleaned = cleanWrittenPrompt(raw);
             if (!cleaned) continue;
 
@@ -1227,7 +1439,7 @@ export class DramaPipeline {
                 this.generateText([CONDENSE_SYSTEM_PROMPT, "", buildSegmentCondensePrompt(text, limit, noRefs)].join("\n"), {
                     model: promptOpts.videoPromptModel,
                     reasoningEffort: promptOpts.textThinking?.prompt,
-                }).then(cleanWrittenPrompt));
+                }, dramaId).then(cleanWrittenPrompt));
             cleaned = condense.text;
             if (noRefs) {
                 const before = cleaned;
@@ -1361,6 +1573,8 @@ export class DramaPipeline {
             if (!taskId) throw new Error(`H3_RUN_NO_TASK: 节点 ${node.id}`);
             this.store.markRunning(job.id, taskId);
             const task = await this.waitTask(taskId, false);
+            const dramaId = String(job.drama_id || "");
+            if (dramaId) this.chargeGeneration(dramaId, "video", task);
             results.push({ nodeId: node.id, taskId, status: task?.status, result: task?.result || null });
         }
         return { nodes: h3Nodes.length, results };
@@ -1483,7 +1697,7 @@ export class DramaPipeline {
         throw new Error("COMPILE_TIMEOUT");
     }
 
-    private async generateText(prompt: string, overrides?: { model?: string; reasoningEffort?: string }): Promise<string> {
+    private async generateText(prompt: string, overrides?: { model?: string; reasoningEffort?: string }, dramaId?: string): Promise<string> {
         const fallback = this.resolveTextModel?.() || "";
         const chosen = String(overrides?.model || "").trim();
         const model = chosen || fallback;
@@ -1499,6 +1713,7 @@ export class DramaPipeline {
         const taskId = String(started?.taskId || "");
         if (!taskId) throw new Error("TEXT_GENERATION_NO_TASK");
         const task = await this.waitTask(taskId, false);
+        if (dramaId) this.chargeGeneration(dramaId, "text", task);
         const text = (Array.isArray(task?.result?.texts) ? task.result.texts : [])
             .map((item: any) => String(item?.content || "")).join("\n").trim();
         if (!text) throw new Error("TEXT_GENERATION_EMPTY");
@@ -1526,7 +1741,7 @@ export class DramaPipeline {
             const raw = await this.generateText([DIALOGUE_SYSTEM_PROMPT, "", buildDialogueUserPrompt(shotRefs, names)].join("\n"), {
                 model: promptOpts.videoPromptModel,
                 reasoningEffort: promptOpts.textThinking?.prompt,
-            });
+            }, dramaId);
             const derived = parseDerivedUtterances(raw, shotRefs, names, source);
             this.store.log(dramaId, `运行期补对白：${derived.length}/${shotRefs.length} 个镜头（仅内存，不写回制作稿）`);
             return derived;
@@ -1698,6 +1913,11 @@ export class DramaPipeline {
     }
 
     resume(dramaId: string): void {
+        if (this.budgetHeld(dramaId)) {
+            // 预算耗尽时不允许「恢复」绕过闸门；须用更高/新的 budgetMicrocredits 重新 start。
+            this.store.log(dramaId, `预算已耗尽（${this.budgetOf(dramaId).spentMicrocredits} 微积分），拒绝恢复；请调整 budgetMicrocredits 后重新 start`, "warn");
+            return;
+        }
         this.assertModelsReady(dramaId); // C4：恢复=重新开工，同样拒绝缺模型能力
         this.store.setStatus(dramaId, "running", null);
         this.store.log(dramaId, "流水线恢复");
@@ -1749,6 +1969,7 @@ export class DramaPipeline {
             approvals: this.store.approvalTargets(dramaId, "approve"),
             releasedMedia: this.store.approvalTargets(dramaId, "release"),
             sampleMode: Boolean(this.optionsOf(dramaId).sampleMode),
+            budget: this.budgetOf(dramaId),
             jobs: jobs.map(job => ({
                 id: job.id, stage: job.stage, kind: job.kind, status: job.status,
                 attempt: job.attempt, episodeId: job.episode_id, error: job.error,

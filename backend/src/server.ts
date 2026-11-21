@@ -76,6 +76,7 @@ import { registerVideoShotDetectionRoute } from "./server/video-shot-detection.j
 import { registerCameraLibraryRoutes } from "./server/camera-library.js";
 import { registerAchengSkillsRoutes } from "./server/acheng-skills-routes.js";
 import { registerSkillMarketRoutes } from "./server/skill-market-routes.js";
+import { registerStyleProfileRoutes } from "./server/style-profile-routes.js";
 import { resolveTaskLivePreview } from "./canvas/engine-preview.js";
 
 const logger = createLogger("backend");
@@ -320,6 +321,7 @@ export function startServer(
   registerCameraLibraryRoutes(app);
   registerAchengSkillsRoutes(app);
   registerSkillMarketRoutes(app);
+  registerStyleProfileRoutes(app);
   app.post("/canvas/draft-sessions/:owner/acquire", (req, res) => {
     const owner = String(req.params.owner || "").trim();
     const holderId =

@@ -12,11 +12,13 @@ import {
     type ReasoningEffort,
 } from "@/stores/use-config-store";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
-import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
+import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, fetchBackendDramaEpisodes, fetchEpisodeProduction, editEpisodeProduction, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
 import { DRAMA_STYLE_FORMS, DRAMA_STYLE_THEMES, composeDramaStyleId, findComposedDramaStyle, findComposedDramaStyleByPrompt, type DramaStyleFormId, type DramaStyleThemeId } from "@/lib/drama/style-composition";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { TOPIC_OPTIONS } from "@basketikun/canvas-agent/drama/topic-options";
-import { ASSET_KIND_SKILL } from "@basketikun/canvas-agent/drama/asset-spec";
+import { ASSET_KIND_SKILL, ASSET_SCHEMES, defaultSchemeFor, schemeAppliesTo, type AssetSchemeId } from "@basketikun/canvas-agent/drama/asset-spec";
+import type { DirectorReviewPolicy } from "@basketikun/canvas-agent/drama/production-contract";
+import { PRODUCTION_STAGE_KEYS } from "@/pages/drama/production-progress";
 import { DRAMA_VIDEO_ASPECT_RATIOS, DRAMA_VIDEO_RESOLUTION_TIERS, dramaVideoResolutionShortSide, dramaVideoResolutionToH3, type DramaVideoAspectRatio } from "@basketikun/canvas-agent/drama/video-resolution";
 import { SkillPickerField, type SkillRef } from "./studio-skill-picker";
 import { cn } from "@/lib/utils";
@@ -32,10 +34,16 @@ import { cn } from "@/lib/utils";
  *   手动「重新改编本集 / 撰写段提示词」也分别注入 hook/cliffhanger/技能/表演强度/运镜动感。
  * - 真实直写：参考图模型在保存时按 imageModelsByKind 写进当前集制作稿 settings；
  *   剧目级 videoResolution + 画幅在 video 段启动前由后端写进每个 H3 Clip 的
- *   aspectRatio/megapixels 保存值（h3-runner 的 UI 守卫要求保存值与出片一致），真正影响出片尺寸。
- * - 只读展示：视觉风格/对白语言来自剧目规划真实值；设定版式由资产技能模板决定；
+ *   aspectRatio/megapixels 保存值（h3-runner 的 UI 守卫要求保存值与出片一致）。
+ *   参考图默认方案（referenceLayout）可选真实 AssetSchemeId，点「应用到本剧全部设定」
+ *   会把 view_layout 按资产类型真写进每集资产卡（与项目资产的 AssetSchemePicker 同一字段），
+ *   不是只读装饰；审阅策略 reviewPolicy 选择后真写进制作稿 settings.reviewPolicy。
+ * - 只读展示：视觉风格/对白语言来自剧目规划真实值；productionStage 从当前集制作稿
+ *   draft.settings.productionStage 真值只读展示（与 agent 总流程/制作进度条同源），不提供假开关；
  *   视频模型声明的默认档位仅作提示，可选档位走真实下发链路，不是假开关。
- * - 「重做参考图」本地无等价后端能力，做引导去画布精修的入口，不造假按钮。
+ * - 软约束提示：episodeSeconds / transitionMs 写入 storyboardRules，只影响拆镜提示词的
+ *   时长与转场要求，不强制成片剪辑，UI 明确标注。
+ * - 「重做参考图」本地无等价后端能力，只提供前往画布手动重做的引导，不造假按钮。
  */
 
 /** 思考等级用本地文本设置里真实存在的档位（text-settings-panel.tsx）。 */
@@ -47,8 +55,46 @@ const THINKING_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
     { value: "xhigh", label: "极高" },
 ];
 
-/** 设定版式用本地真实存在的资产图类型（asset-spec.ts 的 ASSET_KIND_SKILL.imageKind），不编造影策的「声纹/四格资产板」。 */
-const LAYOUT_OPTIONS: string[] = [...new Set(Object.values(ASSET_KIND_SKILL).map((s) => s.imageKind))];
+/** 剧目级默认参考图方案：选项直接来自共享 ASSET_SCHEMES（影策 AssetSchemePicker 的本地真值）。 */
+const ASSET_SCHEME_OPTIONS = ASSET_SCHEMES.map((s) => ({ value: s.id as AssetSchemeId, name: s.name, description: s.description }));
+
+/** 审阅策略：与 production-contract.directorReviewPolicySchema 同档，按 mode 收敛 shared/scene。 */
+const REVIEW_POLICY_MODES = ["none", "automatic", "mixed", "manual"] as const;
+const DEFAULT_REVIEW_POLICY: DirectorReviewPolicy = { mode: "none", shared: "none", scene: "none" };
+const REVIEW_POLICY_MODE_LABELS: Record<string, string> = {
+    none: "不审阅", automatic: "自动审阅", mixed: "混合", manual: "人工审阅",
+};
+const REVIEW_POINT_LABELS: Record<string, string> = { none: "不审阅", automatic: "自动", manual: "人工" };
+
+function normalizeReviewPolicy(value: unknown): DirectorReviewPolicy {
+    const p = (value && typeof value === "object" ? value : {}) as Partial<DirectorReviewPolicy>;
+    if (!REVIEW_POLICY_MODES.includes(p.mode as (typeof REVIEW_POLICY_MODES)[number])) return { ...DEFAULT_REVIEW_POLICY };
+    if (p.mode === "none") return { mode: "none", shared: "none", scene: "none" };
+    if (p.mode === "mixed") {
+        return {
+            mode: "mixed",
+            shared: p.shared === "manual" ? "manual" : "automatic",
+            scene: p.scene === "manual" ? "manual" : "automatic",
+        };
+    }
+    // automatic / manual：schema 要求 shared/scene 与 mode 同档，不保存非法组合。
+    return { mode: p.mode, shared: p.mode, scene: p.mode } as DirectorReviewPolicy;
+}
+
+/** 切换审阅预设时保持 mixed 两个审核点的既有选择，其余档位按 schema 收敛。 */
+function reviewPolicyForMode(mode: (typeof REVIEW_POLICY_MODES)[number], current: DirectorReviewPolicy): DirectorReviewPolicy {
+    if (mode === "none") return { mode: "none", shared: "none", scene: "none" };
+    if (mode === "mixed") return {
+        mode: "mixed",
+        shared: current.shared === "manual" ? "manual" : "automatic",
+        scene: current.scene === "manual" ? "manual" : "automatic",
+    };
+    return { mode, shared: mode, scene: mode } as DirectorReviewPolicy;
+}
+
+const PRODUCTION_STAGE_LABELS: Record<string, string> = {
+    script: "剧本", assets: "资产", spatial: "空间", shots: "分镜", keyframes: "关键帧", clips: "成片",
+};
 
 /** 剧目级视频分辨率档位（短边像素）+「模型默认」；档位真值来自共享 drama/video-resolution 模块。 */
 const VIDEO_RESOLUTION_OPTIONS: Array<{ value: string; label: string }> = [
@@ -101,6 +147,9 @@ export type StudioProductionSettings = {
     sampleMode: boolean;
     // 审阅方式（影策 reviewMode：sample|every|auto）：启动流水线时真实下发服务端闸门
     reviewMode: "sample" | "every" | "auto";
+    // 导演审阅策略（production-contract directorReviewPolicySchema）：与 reviewMode 两套独立闸门，
+    // 选择后真写进制作稿 settings.reviewPolicy；控制共享资产/场次审核点是否需人工审阅。
+    reviewPolicy: DirectorReviewPolicy;
     // 每集确认前的生成节奏（影策 mediaMode：manual|auto）：启动流水线时真实下发 media 放行门
     mediaMode: "manual" | "auto";
     // 每段最多参考图（影策 referenceLimit：0=按模型上限）：启动流水线时真实下发
@@ -143,6 +192,7 @@ export const DEFAULT_STUDIO_SETTINGS: StudioProductionSettings = {
     voiceProfiles: [],
     sampleMode: false,
     reviewMode: "auto",
+    reviewPolicy: { ...DEFAULT_REVIEW_POLICY },
     mediaMode: "auto",
     referenceLimit: 0,
     // 差异#6
@@ -172,6 +222,8 @@ export function loadStudioSettings(dramaId: string | null): StudioProductionSett
             textThinking: { ...DEFAULT_STUDIO_SETTINGS.textThinking, ...(parsed.textThinking || {}) },
             textSkills: { ...DEFAULT_STUDIO_SETTINGS.textSkills, ...(parsed.textSkills || {}) },
             voiceProfiles: Array.isArray(parsed.voiceProfiles) ? parsed.voiceProfiles : [],
+            // 老剧目没有该字段时按默认（不审阅），非法组合按 schema 收敛，不让坏值进 UI。
+            reviewPolicy: normalizeReviewPolicy(parsed.reviewPolicy),
         };
     } catch {
         return { ...DEFAULT_STUDIO_SETTINGS };
@@ -276,6 +328,110 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
     const folders = useCanvasStore((state) => state.folders);
     const patch = <K extends keyof StudioProductionSettings>(key: K, value: StudioProductionSettings[K]) =>
         onChange({ ...settings, [key]: value });
+
+    // ===== 审阅策略 reviewPolicy：与 reviewMode 不同的第二套闸门，选择后真写进制作稿 settings.reviewPolicy =====
+    const [reviewPolicySaving, setReviewPolicySaving] = useState(false);
+    const [reviewPolicyNote, setReviewPolicyNote] = useState("");
+    const persistReviewPolicy = async (policy: DirectorReviewPolicy) => {
+        patch("reviewPolicy", policy);
+        if (!dramaId) return;
+        setReviewPolicySaving(true);
+        setReviewPolicyNote("");
+        try {
+            const { episodes } = await fetchBackendDramaEpisodes(dramaId);
+            const usable = (episodes || []).filter((ep) => Boolean(ep?.id));
+            if (!usable.length) throw new Error("剧目还没有分集，策略待制作稿就绪后可再保存");
+            let applied = 0;
+            for (const ep of usable) {
+                const { production } = await fetchEpisodeProduction(ep.id);
+                if (!production) continue;
+                await editEpisodeProduction(ep.id, production.revision, [
+                    { type: "set_settings", patch: { reviewPolicy: policy } } as never,
+                ]);
+                applied += 1;
+            }
+            if (!applied) throw new Error("分集制作稿尚未就绪");
+            setReviewPolicyNote(`已写入 ${applied} 集制作稿 settings.reviewPolicy，导演审阅闸门真实生效`);
+        } catch (error) {
+            setReviewPolicyNote(`写入制作稿失败：${error instanceof Error ? error.message : String(error)}（本地设置已更新，可在制作稿就绪后重新保存）`);
+        } finally {
+            setReviewPolicySaving(false);
+        }
+    };
+
+    // ===== 参考图默认方案：选中真实 AssetSchemeId，可批量写进每集资产卡 view_layout =====
+    const [layoutApplying, setLayoutApplying] = useState(false);
+    const [layoutNote, setLayoutNote] = useState("");
+    const applyReferenceLayout = async () => {
+        const scheme = settings.referenceLayout;
+        if (!dramaId || !ASSET_SCHEME_OPTIONS.some((o) => o.value === scheme)) return;
+        setLayoutApplying(true);
+        setLayoutNote("");
+        try {
+            const { episodes } = await fetchBackendDramaEpisodes(dramaId);
+            let cards = 0;
+            let episodesChanged = 0;
+            for (const ep of episodes || []) {
+                const { production } = await fetchEpisodeProduction(ep.id);
+                if (!production) continue;
+                const draft = (production.draft || {}) as Record<string, any>;
+                const rows = Array.isArray(draft?.director?.source?.asset_cards) ? draft.director.source.asset_cards as Array<Record<string, unknown>> : [];
+                const ops: Array<Record<string, unknown>> = [];
+                for (const card of rows) {
+                    const id = String(card?.id || card?.asset_id || "");
+                    const rawKind = String(card?.asset_kind || card?.kind || "").toLowerCase();
+                    if (!id || !["character", "scene", "prop"].includes(rawKind)) continue;
+                    const kind = rawKind as "character" | "scene" | "prop";
+                    const effective = scheme === "auto" ? defaultSchemeFor(kind) : scheme as AssetSchemeId;
+                    if (!schemeAppliesTo(effective, kind)) continue;
+                    ops.push({ type: "patch_director_source", entity: "asset_card", id, patch: { view_layout: effective } });
+                }
+                if (!ops.length) continue;
+                await editEpisodeProduction(ep.id, production.revision, ops as never);
+                cards += ops.length;
+                episodesChanged += 1;
+            }
+            const label = scheme === "auto" ? "按资产类型自动匹配" : ASSET_SCHEME_OPTIONS.find((o) => o.value === scheme)?.name || scheme;
+            setLayoutNote(`已把「${label}」写入 ${episodesChanged} 集共 ${cards} 张资产卡的 view_layout（流水线按方案拼提示词）`);
+        } catch (error) {
+            setLayoutNote(`应用失败：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+            setLayoutApplying(false);
+        }
+    };
+
+    // ===== productionStage：只读展示制作稿真值（与 agent 总流程同一字段），不做假开关 =====
+    const [stageTruth, setStageTruth] = useState<{ current: string; done: string[]; episodeNo: number } | null>(null);
+    const [stageNote, setStageNote] = useState("");
+    useEffect(() => {
+        let alive = true;
+        setStageTruth(null);
+        setStageNote("");
+        if (!dramaId) return () => { alive = false; };
+        void (async () => {
+            try {
+                const { episodes } = await fetchBackendDramaEpisodes(dramaId);
+                const first = (episodes || [])[0];
+                if (!first?.id) { if (alive) setStageNote("还没有分集制作稿，暂无阶段游标"); return; }
+                const { production } = await fetchEpisodeProduction(first.id);
+                const raw = (production?.draft as Record<string, any> | undefined)?.settings?.productionStage;
+                const value = raw && typeof raw === "object"
+                    ? {
+                        current: String(raw.current || ""),
+                        done: Array.isArray(raw.done) ? raw.done.map(String) : [],
+                        episodeNo: first.episodeNumber,
+                    }
+                    : null;
+                if (alive) {
+                    setStageTruth(value);
+                    if (!value) setStageNote("该集制作稿尚未初始化生产阶段游标（老项目不拦截）");
+                }
+            } catch {
+                if (alive) setStageNote("制作稿读取失败，阶段信息暂不可用");
+            }
+        })();
+        return () => { alive = false; };
+    }, [dramaId]);
 
     // 分集方式的真值在 folder.productionPlan.episodeMode；缺省（老剧目）按 chapter 解释。
     const episodeFolder = useMemo(() => folders.find((f) => f.id === dramaId) || null, [folders, dramaId]);
@@ -561,9 +717,13 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                     <Field label="单集时长" hint="≈ 1.5 分钟">
                         <input type="number" min={30} max={600} step={5} value={settings.episodeSeconds}
                             onChange={(e) => patch("episodeSeconds", Math.max(30, Math.min(600, Number(e.target.value) || 90)))}
+                            data-studio-episode-seconds
                             className="h-8 w-24 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" />
                         <span className="text-[10px] text-muted-foreground">秒 · 当前约 {(settings.episodeSeconds / 60).toFixed(1)} 分钟</span>
                     </Field>
+                    <p className="pl-28 text-[10px] leading-relaxed text-amber-600/90" data-studio-soft-hint="episode-seconds">
+                        软约束，影响拆镜提示词：写入 storyboardRules.episodeSeconds 作为拆镜/提示词的时长目标，不强制成片剪辑时长。
+                    </p>
                     <Field label="剧情段时长" hint="秒 / 段 · 软约束">
                         <input type="number" min={2} max={segmentSecondsCap} value={settings.segmentRange.min}
                             onChange={(e) => patch("segmentRange", { ...settings.segmentRange, min: Math.max(2, Math.min(segmentSecondsCap, Number(e.target.value) || 2)) })}
@@ -648,15 +808,27 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                             ))}
                         </div>
                     </Field>
-                    <Field label="设定版式" hint="由技能模板决定">
-                        <select value={settings.referenceLayout} disabled
-                            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-muted/40 px-2 text-xs text-muted-foreground outline-none"
-                            data-studio-reference-layout title="版式由资产技能模板（ASSET_KIND_SKILL.imageKind）真实决定，此处只读展示偏好">
-                            <option value="auto">跟随资产类型（自动）</option>
-                            {LAYOUT_OPTIONS.map((layout) => <option key={layout} value={layout}>{layout}</option>)}
+                    <Field label="默认参考图方案" hint="AssetSchemePicker">
+                        <select value={settings.referenceLayout} disabled={layoutApplying}
+                            onChange={(e) => { patch("referenceLayout", e.target.value); setLayoutNote(""); }}
+                            data-studio-reference-layout
+                            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs text-foreground outline-none focus:border-primary disabled:opacity-50">
+                            <option value="auto">按资产类型自动匹配（auto）</option>
+                            {ASSET_SCHEME_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.name} · {option.description}</option>
+                            ))}
                         </select>
                     </Field>
-                    <p className="pl-1 text-[10px] text-muted-foreground">实际版式由资产设定卡按技能模板拼装（见下方预览），此处只读。</p>
+                    <div className="flex flex-wrap items-center gap-2 pl-1">
+                        <button type="button" onClick={() => void applyReferenceLayout()}
+                            disabled={!dramaId || layoutApplying}
+                            data-studio-reference-layout-apply
+                            className="h-7 rounded-md border border-primary/40 bg-primary/10 px-2.5 text-[11px] text-primary transition hover:bg-primary/20 disabled:opacity-50">
+                            {layoutApplying ? "写入中…" : "应用到本剧全部设定"}
+                        </button>
+                        <span className="text-[10px] text-muted-foreground">真写回：选中写入本剧设置随「保存设置」落盘；应用后按资产类型写进每集资产卡 view_layout，与「项目资产 → 参考图方案」同一字段，可单条覆盖。</span>
+                    </div>
+                    {layoutNote ? <p className="pl-1 text-[10px] text-emerald-600" data-studio-reference-layout-note>{layoutNote}</p> : null}
                     <div className="rounded-md border border-border bg-background/40 p-2.5" data-studio-ref-preview>
                         <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">实际发送预览（只读 · 来自本地技能模板）</div>
                         <ul className="space-y-0.5 text-[11px] leading-relaxed">
@@ -668,20 +840,20 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                     </div>
                 </Section>
 
-                <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图" desc="影策可按当前方案重做角色 / 道具 / 场景参考图；锁定的设定不会变。">
+                <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图（手动）" desc="本地没有「按当前方案一键重做参考图」的后端能力；这里只把对应分类的设定定位到资产库，由你在画布里手动重新生成并采用。">
                     <p className="text-xs leading-relaxed text-muted-foreground">
-                        上方已保存当前方案（画风 / 模型 / 版式）。按分类重做会跳到项目资产库并预选对应设定，用「一键准备全部参考图」按新方案重新生成并写回画布。
+                        上方已保存当前方案（画风 / 模型 / 默认参考图方案）。点下方按钮会跳到项目资产库并预选对应设定；到设定详情点「生成参考图」，在画布生成后采用写回。不会自动重做，也不会覆盖未确认的旧图。
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2" data-studio-redo-refs>
                         {(["角色", "道具", "场景"] as const).map((kind) => (
                             <button key={kind} type="button" disabled={!dramaId || !onRedoRefs}
                                 onClick={() => onRedoRefs?.(kind)}
                                 className="h-8 rounded-md border border-border px-3 text-xs text-foreground transition hover:bg-muted disabled:opacity-50">
-                                重做{kind}参考图
+                                前往画布手动重做{kind}参考图
                             </button>
                         ))}
                     </div>
-                    <p className="mt-1.5 text-[10px] text-muted-foreground">重做会重新生成对应分类参考图；旧版本保留在生成日志中。</p>
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">这里只做定位跳转；真正的重做与采用在画布完成，旧版本保留在设定详情的版本记录中。</p>
                 </Section>
 
                 <Section marker="continuity" icon={<Rows3 className="size-4" />} title="段落衔接" desc="尾帧续接：第2段起用上段尾帧做首帧、依次衔接；并行出片：各段只按参考图独立成片、不带尾帧首帧。保存后撰写段提示词真实生效。">
@@ -721,8 +893,14 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                             ))}
                         </div>
                     </Field>
-                    <Field label="转场时长"><input type="range" min={0} max={1000} step={50} value={settings.transitionMs}
-                        onChange={(e) => patch("transitionMs", Number(e.target.value))} className="flex-1" /><span className="w-14 text-right tabular-nums">{settings.transitionMs}ms</span></Field>
+                    <Field label="转场时长">
+                        <input type="range" min={0} max={1000} step={50} value={settings.transitionMs}
+                            onChange={(e) => patch("transitionMs", Number(e.target.value))} className="flex-1" data-studio-transition-ms />
+                        <span className="w-14 text-right tabular-nums">{settings.transitionMs}ms</span>
+                    </Field>
+                    <p className="pl-28 text-[10px] leading-relaxed text-amber-600/90" data-studio-soft-hint="transition-ms">
+                        软约束，影响拆镜提示词：写入 storyboardRules.transitionMs 作为转场描述要求，不改变成片的实际剪辑时长。
+                    </p>
                     <Field label="表演强度"><input type="range" min={1} max={10} value={settings.performanceIntensity}
                         onChange={(e) => patch("performanceIntensity", Number(e.target.value))} className="flex-1" /><span className="w-6 text-center tabular-nums">{settings.performanceIntensity}</span></Field>
                     <Field label="运镜动感"><input type="range" min={1} max={10} value={settings.cameraDynamics}
@@ -812,7 +990,8 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                         className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" /></Field>
                 </Section>
 
-                <Section icon={<Music2 className="size-4" />} title="音色库" desc="影策 voice-profiles：登记音色档案与声音样本 storageKey。登记后可在「项目资产 → 角色 → 声音样本」里直接绑定，真实写进 character.voice，随角色开口段发送。">
+                <Section marker="voice-library" icon={<Music2 className="size-4" />} title="音色库" desc="影策 voice-profiles：登记音色档案与声音样本 storageKey。这里登记后，在「项目资产 → 角色 → 声音样本」的下拉里即可选中该档案；选中立即真写进对应角色的 character.voice（含 storageKey），随角色开口段发送，不是只存本地的下拉装饰。">
+                    <p className="pl-1 text-[10px] leading-relaxed text-muted-foreground">样本 storageKey 需是素材库里真实存在的音频；「音色描述」会作为该角色声线写回 voice_description。未填样本 storageKey 的档案不会进入绑定下拉。</p>
                     <div className="space-y-2">
                         {settings.voiceProfiles.map((vp, index) => (
                             <div key={vp.id} className="flex items-center gap-2 rounded-md border border-border bg-background/40 p-2">
@@ -857,6 +1036,65 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                             </label>
                         ))}
                     </div>
+                </Section>
+
+                <Section marker="review-policy" icon={<Eye className="size-4" />} title="审阅策略（导演审阅闸门 · reviewPolicy）" desc="production-contract 的 directorReviewPolicySchema：控制导演产物里「共享资产」与「场次」两个审核点是自动通过还是需人工审阅。选择后真写进当前集制作稿 settings.reviewPolicy（set_settings op），不是只读 schema 展示。">
+                    <div className="grid gap-1.5" data-studio-review-policy>
+                        {REVIEW_POLICY_MODES.map((mode) => (
+                            <label key={mode} className={cn("flex cursor-pointer items-start gap-2 rounded-md border p-2 text-xs transition",
+                                settings.reviewPolicy.mode === mode ? "border-primary bg-primary/5" : "border-border hover:bg-muted/40")}>
+                                <input type="radio" name="studio-review-policy-mode" className="mt-0.5 size-3.5"
+                                    disabled={reviewPolicySaving}
+                                    checked={settings.reviewPolicy.mode === mode}
+                                    onChange={() => void persistReviewPolicy(reviewPolicyForMode(mode, settings.reviewPolicy))} />
+                                <span className="min-w-0">
+                                    <span className="block font-medium">{REVIEW_POLICY_MODE_LABELS[mode]}</span>
+                                    <span className="block text-[10px] text-muted-foreground">
+                                        {mode === "none" ? "两个审核点都不打断" : mode === "automatic" ? "共享资产与场次均自动审阅" : mode === "manual" ? "共享资产与场次均需人工审阅" : "两个审核点分别指定（下方可调）"}
+                                    </span>
+                                </span>
+                            </label>
+                        ))}
+                    </div>
+                    {settings.reviewPolicy.mode === "mixed" ? (
+                        <div className="grid grid-cols-2 gap-2" data-studio-review-policy-points>
+                            {(["shared", "scene"] as const).map((point) => (
+                                <label key={point} className="flex items-center gap-2 text-xs">
+                                    <span className="w-16 shrink-0 text-muted-foreground">{point === "shared" ? "共享资产" : "场次"}</span>
+                                    <select value={settings.reviewPolicy[point]} disabled={reviewPolicySaving}
+                                        onChange={(e) => void persistReviewPolicy({ ...settings.reviewPolicy, [point]: e.target.value as "automatic" | "manual" })}
+                                        className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-xs outline-none">
+                                        {(["automatic", "manual"] as const).map((v) => <option key={v} value={v}>{REVIEW_POINT_LABELS[v]}</option>)}
+                                    </select>
+                                </label>
+                            ))}
+                        </div>
+                    ) : null}
+                    <p className="text-[10px] leading-relaxed text-amber-600/90" data-studio-review-policy-relation>
+                        与「审阅方式 reviewMode」是两套独立闸门、叠加生效：reviewMode 管流水线集级的人工确认（样片/每集/全自动），reviewPolicy 管导演产物的共享资产与场次审核点。即使 reviewMode=auto，reviewPolicy=manual 的审核点仍需人工审阅；两者都通过才继续生成。
+                    </p>
+                    {reviewPolicyNote ? <p className="text-[10px] text-emerald-600" data-studio-review-policy-note>{reviewPolicyNote}</p> : null}
+                </Section>
+
+                <Section marker="production-stage" icon={<Gauge className="size-4" />} title="制作阶段（只读）" desc="六段制作阶段游标是制作稿的真值，设置页只读展示、不造假开关：数据源为当前集 draft.settings.productionStage，与 agent 总流程和制作进度条同一字段。">
+                    <div className="flex flex-wrap gap-1.5" data-studio-production-stage>
+                        {PRODUCTION_STAGE_KEYS.map((key) => {
+                            const done = Boolean(stageTruth?.done.includes(key));
+                            const current = stageTruth?.current === key;
+                            return (
+                                <span key={key} className={cn("rounded-md border px-2 py-1 text-[11px]",
+                                    current ? "border-primary bg-primary/10 text-primary"
+                                        : done ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
+                                            : "border-border text-muted-foreground")}>
+                                    {PRODUCTION_STAGE_LABELS[key] || key}{current ? " · 当前" : done ? " · 完成" : ""}
+                                </span>
+                            );
+                        })}
+                    </div>
+                    <p className="text-[10px] text-muted-foreground" data-studio-production-stage-truth>
+                        {stageTruth ? `第 ${stageTruth.episodeNo} 集当前阶段：${PRODUCTION_STAGE_LABELS[stageTruth.current] || stageTruth.current || "未设置"}；已完成：${stageTruth.done.map((k) => PRODUCTION_STAGE_LABELS[k] || k).join("、") || "无"}` : (stageNote || "读取中…")}
+                    </p>
+                    <p className="text-[10px] leading-relaxed text-muted-foreground">阶段游标由制作流程按序推进并写回制作稿；设置页不提供手动改写入口，避免绕过开工报告的真值。</p>
                 </Section>
 
                 <Section icon={<Play className="size-4" />} title="生成节奏" desc="影策 mediaMode：手动先出剧本与提示词、确认后再生成视频；自动一路跑到成片。保存后启动流水线真实生效（manual 模式下素材就绪后需在「待处理」页放行媒体）。">

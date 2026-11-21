@@ -8,7 +8,17 @@ import type { DramaPipeline } from "../drama/pipeline.js";
 import type { BackendDatabase } from "../db.js";
 import { adoptSharedAssetImage, bindPipelineAssetImage, restoreAssetsFromCanvas } from "../drama/pipeline-asset-image.js";
 
-const pipelineOptionsSchema = z.object({
+/** 写作技能引用：name/title/path 对齐前端 SkillRef；content/instruction 允许前端预解析后直传。 */
+const pipelineTextSkillSchema = z.object({
+    name: z.string(),
+    title: z.string().optional(),
+    path: z.string().optional(),
+    content: z.string().optional(),
+    instruction: z.string().optional(),
+});
+
+/** 制作设置运行期选项契约（budgetMicrocredits 为影策同名预算上限，0/不设=不限）。 */
+export const pipelineOptionsSchema = z.object({
     storyboardModel: z.string().optional(),
     assetExtractModel: z.string().optional(),
     videoPromptModel: z.string().optional(),
@@ -19,6 +29,20 @@ const pipelineOptionsSchema = z.object({
     videoAspectRatio: z.enum(["16:9", "9:16"]).optional(),
     sampleMode: z.boolean().optional(),
     textThinking: z.object({ plan: z.string().optional(), storyboard: z.string().optional(), extract: z.string().optional(), prompt: z.string().optional() }).optional(),
+    // 影策 PromptRules：表演强度/运镜动感 1-10 档，全自动 runPrompts 映射为 5 档文字注入 style/cameraMotion。
+    // performanceIntensity 是前端设置项原名，作为兼容别名一并接受。
+    performance: z.number().int().min(1).max(10).optional(),
+    performanceIntensity: z.number().int().min(1).max(10).optional(),
+    cameraDynamics: z.number().int().min(1).max(10).optional(),
+    // 开篇钩子/结尾悬念：全自动 script-proposal 透传的创作方向。
+    hook: z.string().optional(),
+    cliffhanger: z.string().optional(),
+    // 写作技能（拆镜/提示词步骤）：不落库，仅本次运行期透传。
+    textSkills: z.object({
+        extract: pipelineTextSkillSchema.optional().nullable(),
+        storyboard: pipelineTextSkillSchema.optional().nullable(),
+        prompt: pipelineTextSkillSchema.optional().nullable(),
+    }).optional(),
     videoModel: z.string().optional(),
     imageModelsByKind: z.object({ character: z.string().optional(), scene: z.string().optional(), prop: z.string().optional() }).optional(),
     referenceLimit: z.number().int().min(0).max(20).optional(),
@@ -32,6 +56,8 @@ const pipelineOptionsSchema = z.object({
         pacing: z.string().optional(),
     }).optional(),
     concurrency: z.object({ text: z.number().optional(), video: z.number().optional(), render: z.number().optional() }).optional(),
+    // 预算上限（影策 budgetMicrocredits，单位微积分）：0/不设=不限；累计生成花费达限自动暂停流水线。
+    budgetMicrocredits: z.number().min(0).optional(),
 }).partial();
 
 const startSchema = z.object({

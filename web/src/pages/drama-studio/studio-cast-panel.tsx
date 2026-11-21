@@ -189,8 +189,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     const allAssets = useAssetStore((s) => s.assets);
     const audioAssets = useMemo(() => allAssets.filter((a): a is AudioAsset => a.kind === "audio"), [allAssets]);
     // 音色库里登记了有效 sampleRef 的档案，作为声音选项合并进素材库音频（真实写 character.voice）。
+    // 带上 description：选中档案后同时作为该角色 voice_description（声线）写回，不只是塞一个 storageKey。
     const profileAudioOptions = useMemo(
-        () => (voiceProfiles || []).filter(p => p.sampleRef.trim()).map(p => ({ id: `voiceprofile:${p.id}`, title: `${p.name || p.id}（音色库）`, storageKey: p.sampleRef.trim(), url: "" })),
+        () => (voiceProfiles || []).filter(p => p.sampleRef.trim()).map(p => ({ id: `voiceprofile:${p.id}`, title: `${p.name || p.id}（音色库）`, description: p.description.trim(), storageKey: p.sampleRef.trim(), url: "" })),
         [voiceProfiles],
     );
     const [kind, setKind] = useState<CastKind>(initialKind || "角色");
@@ -1016,6 +1017,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                 ? { assetId: picked.id, storageKey: picked.data.storageKey || "", url: picked.data.url || "", name: picked.title }
                 : {};
         const pickedTitle = profile?.title || picked?.title || "";
+        // 音色库档案的「音色描述」就是角色声线，选中后真写进 character.voice_description；
+        // 普通素材库音频仍沿用标题（历史行为）。两者都写 character.voice（含 storageKey）。
+        const voiceDescription = profile ? (profile.description || pickedTitle) : pickedTitle;
         setSaving(true);
         try {
             if (current.scope === "shared" && current.canvasId && current.nodeId) {
@@ -1025,13 +1029,13 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                         characterVoiceAssetId: voiceRecord.assetId || "",
                         characterVoiceStorageKey: voiceRecord.storageKey || "",
                         characterVoiceUrl: voiceRecord.url || "",
-                        characterVoiceDescription: pickedTitle,
+                        characterVoiceDescription: voiceDescription,
                     } },
                 ], current.canvasRevision);
             } else {
                 const ops: ProductionOperation[] = [{
                     type: "patch_director_source", entity: "character", id: current.entityId,
-                    patch: { voice: voiceRecord, voice_description: pickedTitle },
+                    patch: { voice: voiceRecord, voice_description: voiceDescription },
                 }];
                 await editEpisodeProduction(current.episodeId as never, current.revision, ops);
             }
@@ -1502,11 +1506,12 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                 <input value={shownDraft.voice} onChange={(e) => patchDraft({ voice: e.target.value })} placeholder="少年音，坚毅，语速偏快" className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none" />
                                             </label>
                                             <label className="block">
-                                                <span className="mb-1 block text-muted-foreground">声音样本（素材库音频，随角色开口段发送）</span>
+                                                <span className="mb-1 block text-muted-foreground">声音样本（选中即写进 character.voice，含音色库档案）</span>
                                                 <select
                                                     value={current.voiceAssetId || current.voiceStorageKey || ""}
                                                     disabled={saving || voiceBusy}
                                                     onChange={(e) => void handleVoiceChange(e.target.value)}
+                                                    data-studio-cast-voice-select
                                                     className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none"
                                                 >
                                                     <option value="">不绑定样本</option>

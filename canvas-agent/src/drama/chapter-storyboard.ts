@@ -13,7 +13,20 @@
  * 这里不猜剧情、不改写画面描述，只做时长量化、分段与稳定 ID，让「同一章跑两次」得到
  * 同一批 ID，重跑幂等、不会在制作稿里堆重复镜头。
  */
-
+import {
+    ShotMs as yingceShotMs,
+    PacingRelaxed,
+    DialogueStandard,
+    DialogueCustom,
+    SegmentFixed,
+    SegmentShotsForVideo,
+    segmentLimits,
+    customDialogueRule,
+    ShotTarget,
+    LineTarget,
+    type CustomDialogueParams,
+    type DurationOptions,
+} from "./pacing.js";
 
 export type ChapterBeat = {
     /** 镜头标题，进 Shot.title。 */
@@ -54,6 +67,30 @@ export type ChapterStoryboardInput = {
     timelineId?: string;
     /** Clip 执行模式；默认 T2VA（无参考图）。绑定了身份/场景参考时传 Ref2VA。 */
     executionMode?: SegmentExecutionMode;
+    /** 影策节奏档位（rapid/fast/standard/relaxed/slow）：beat.seconds 作为 hint 经 ShotMs 夹到该档范围。默认 relaxed（舒缓，情绪戏可到8秒）。 */
+    pacing?: string;
+    /** 影策对白密度（dense/standard/sparse/custom），影响台词撑长镜头的计算。默认 standard。 */
+    dialogueMode?: string;
+    /**
+     * 自定义对白四参数；仅当 dialogueMode=custom 时生效。
+     * speechRate/lineSeconds/lineMaxRunes/linePauseMs 由 pacing.normalized 夹到影策合法范围。
+     */
+    customDialogueRule?: CustomDialogueParams;
+    /**
+     * 剧情段切分模式：auto / fixed / range（影策 SegmentMode）。
+     * 不传时保持旧的「目标 clipSeconds 装箱」行为，向后兼容；传入后用 SegmentShotsForVideo 真实切段。
+     */
+    segmentMode?: string;
+    /** fixed 模式单段秒数；默认取 clipSeconds。 */
+    segmentSeconds?: number;
+    /** range 模式单段秒数下限；默认 8。 */
+    segmentMinSeconds?: number;
+    /** range 模式单段秒数上限；默认取 clipSeconds（或 15）。 */
+    segmentMaxSeconds?: number;
+    /**
+     * 目标单集秒数；仅用于 ShotTarget/LineTarget 轻量估算诊断，不改写 LLM 产出的镜头/台词。
+     */
+    episodeSeconds?: number;
 };
 
 /** 编译器（canvas_source_contract.py）只认这七个景别，写别的值直接判非法。 */
@@ -102,6 +139,14 @@ export type StoryboardPlan = {
     totalSeconds: number;
     /** 非致命提示：镜头被抬到最短时长、单镜超过单段上限而独占一段等。 */
     diagnostics: string[];
+    /** 仅在传入 episodeSeconds 时给出：影策 ShotTarget/LineTarget 估算与实际产出对照。 */
+    episodeTargets?: {
+        episodeSeconds: number;
+        shotTarget: number;
+        lineTarget: number;
+        actualShots: number;
+        actualLines: number;
+    };
 };
 
 const DEFAULT_FPS = 24;
@@ -175,11 +220,19 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
     const timelineId = (input.timelineId || "main").trim() || "main";
     // 编译器只认 T2VA/I2VA/FL2VA/L2VA/Ref2VA；无参考图的分镜走 T2VA。
     const mode: SegmentExecutionMode = input.executionMode || "T2VA";
+    const resolvedPacing = input.pacing || PacingRelaxed;
+    const resolvedDialogueMode = input.dialogueMode || DialogueStandard;
+    // 影策自定义对白：custom 档用四参数构造规则（经 Normalized 夹紧/补齐），其余档沿用预设。
+    const customRule = resolvedDialogueMode === DialogueCustom
+        ? customDialogueRule(input.customDialogueRule ?? {})
+        : undefined;
     const scenes = (input.scenes || []).filter(scene => scene && Array.isArray(scene.beats));
     if (!scenes.length) throw new Error("CHAPTER_STORYBOARD_EMPTY: 章节草案没有场次");
     if (!input.chapterId?.trim()) throw new Error("CHAPTER_STORYBOARD_CHAPTER: 缺少章节标识");
 
     const shots: PlannedShot[] = [];
+    /** 与 shots 一一对应的场景名，供 SegmentShotsForVideo 做「场景切换断开」。 */
+    const shotScenes: string[] = [];
     const segments: PlannedSegment[] = [];
     const diagnostics: string[] = [];
     let order = 0;
@@ -189,14 +242,35 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
         if (!environmentId) throw new Error(`CHAPTER_STORYBOARD_ENVIRONMENT: 场次 ${scene.sceneKey || "(未命名)"} 缺少 environmentId`);
         const beats = scene.beats.filter(beat => beat && String(beat.visual || "").trim());
         if (!beats.length) throw new Error(`CHAPTER_STORYBOARD_BEATS: 场次 ${scene.sceneKey || environmentId} 没有可用镜头`);
+        // 场景切换断开用得到：优先场景名，其次场次键 / 环境 ID。
+        const sceneLabel = String(scene.sceneName || scene.sceneKey || environmentId).trim() || environmentId;
 
         const sceneShots: PlannedShot[] = [];
         beats.forEach((beat, beatIndex) => {
-            const seconds = Number(beat.seconds);
-            const rawFrames = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * fps) : minFrames;
+            // 影策节奏：beat.seconds 是时长 hint，经 ShotMs 按 pacing 档位夹到范围（默认 relaxed 2.5–8s），
+            // 并按 beat.dialogue 台词长度拟合（保证逐字台词说得完）。不再把 hint 直接乘 fps（旧逻辑全给3秒→镜头急）。
+            const rawHint = Number(beat.seconds);
+            // 影策节奏修复：LLM 常给所有镜头 3 秒（或走兜底），情绪戏会被压成短镜。
+            // 按画面文字识别情绪/关键场面，主动把 hint 提到 6-7 秒，再交给 ShotMs 按 pacing 档位夹。
+            const visual = String(beat.visual || "");
+            const emotionalRe = /笑|泪|哭|望|回身|回首|转身|坐|跪|睡|沉默|痴|惊|喜|怒|哀|惧|愣|怔|叹|犹豫|对视|抱|握|留|信|酒|求|墓|别|死|醒|知|真相|跌坐|心爱|不弃|独坐|酣睡/;
+            const actionRe = /奔|冲|追|打|斗|战|刺|斩|逃|飞|跃|跌|倒|吞|袭|赶|挥|拔|射|杀/;
+            let hint = Number.isFinite(rawHint) && rawHint > 0 ? rawHint : 3;
+            if (emotionalRe.test(visual)) hint = Math.max(hint, 7);
+            else if (actionRe.test(visual)) hint = Math.max(hint, 4);
+            const shotMs = yingceShotMs(
+                hint,
+                String(beat.dialogue || ""),
+                resolvedPacing,
+                resolvedDialogueMode,
+                customRule,
+            );
+            const rawFrames = Math.round(shotMs / 1000 * fps);
             const durationFrames = Math.max(minFrames, rawFrames);
-            if (Number.isFinite(seconds) && seconds > 0 && durationFrames !== rawFrames) diagnostics.push(`镜头「${beat.title}」时长过短，已抬到 ${minFrames} 帧`);
-            if (!Number.isFinite(seconds) || seconds <= 0) diagnostics.push(`镜头「${beat.title}」缺少有效时长，按 ${minFrames} 帧处理`);
+            if (Number.isFinite(hint) && hint > 0 && durationFrames !== Math.round(hint * fps)) {
+                diagnostics.push(`镜头「${beat.title}」时长按节奏档位从 ${hint}s 调整为 ${(durationFrames / fps).toFixed(1)}s`);
+            }
+            if (!Number.isFinite(hint) || hint <= 0) diagnostics.push(`镜头「${beat.title}」缺少有效时长，按节奏档位默认处理`);
             if (durationFrames > clipFrames) diagnostics.push(`镜头「${beat.title}」${durationFrames} 帧超过单段 ${clipFrames} 帧，将独占一段`);
             const shot: PlannedShot = {
                 id: stableId("shot", input.chapterId, scene.sceneKey || environmentId, beatIndex, beat.title, beat.visual),
@@ -214,19 +288,55 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
             if (speaker && text) shot.dialogue = { speaker, text };
             else if (text && !speaker) diagnostics.push(`镜头「${beat.title}」有台词但没说话人，未写入对白`);
             sceneShots.push(shot);
+            shotScenes.push(sceneLabel);
         });
         order += sceneShots.length;
         shots.push(...sceneShots);
-        segments.push(...planSceneSegments(input.chapterId, scene, sceneShots, clipFrames, diagnostics, mode, fps));
+        // 未指定 segmentMode 时保持旧的装箱行为，向后兼容；指定后在循环外走影策真实切段。
+        if (!input.segmentMode) {
+            segments.push(...planSceneSegments(input.chapterId, scene, sceneShots, clipFrames, diagnostics, mode, fps));
+        }
+    }
+
+    if (input.segmentMode) {
+        segments.push(...planYingceSegments(input, shots, shotScenes, mode, fps, diagnostics));
     }
 
     const totalFrames = shots.reduce((sum, shot) => sum + shot.duration_frames, 0);
+    const totalSeconds = Number((totalFrames / fps).toFixed(3));
+
+    // 影策 episodeSeconds 硬估算：ShotTarget/LineTarget 只做诊断对照，不强改 LLM 产出。
+    let episodeTargets: StoryboardPlan["episodeTargets"];
+    if (Number.isFinite(input.episodeSeconds) && (input.episodeSeconds ?? 0) > 0) {
+        const targetSeconds = Number(input.episodeSeconds);
+        const shotTarget = ShotTarget(targetSeconds, resolvedPacing);
+        const lineTarget = LineTarget(targetSeconds, resolvedDialogueMode);
+        const actualLines = shots.filter(shot => shot.dialogue).length;
+        episodeTargets = {
+            episodeSeconds: targetSeconds,
+            shotTarget,
+            lineTarget,
+            actualShots: shots.length,
+            actualLines,
+        };
+        diagnostics.push(
+            `episodeSeconds=${targetSeconds}s 估算：镜头 ${shotTarget} 镜 / 台词 ${lineTarget} 条；实际 ${shots.length} 镜 / ${actualLines} 条（仅诊断，不改写）`,
+        );
+        if (shots.length < Math.floor(shotTarget * 0.6)) {
+            diagnostics.push(`镜头数明显少于估算：实际 ${shots.length} 镜，估算 ${shotTarget} 镜；可增加镜头或降低单镜时长`);
+        }
+        if (actualLines < Math.floor(lineTarget * 0.6)) {
+            diagnostics.push(`台词数明显少于估算：实际 ${actualLines} 条，估算 ${lineTarget} 条；可补充对白或旁白`);
+        }
+    }
+
     return {
         shots,
         segments,
         totalFrames,
-        totalSeconds: Number((totalFrames / fps).toFixed(3)),
+        totalSeconds,
         diagnostics,
+        ...(episodeTargets ? { episodeTargets } : {}),
     };
 }
 
@@ -283,6 +393,73 @@ function planSceneSegments(chapterId: string, scene: ChapterScenePlan, shots: Pl
         const covered = new Set(segments.flatMap(segment => segment.shot_ids));
         if (covered.size !== shots.length) diagnostics.push(`场次 ${scene.sceneKey || scene.environmentId} 的 Clip 未完整覆盖镜头`);
     }
+    return segments;
+}
+
+/**
+ * 影策真实切段（segmentMode=auto/fixed/range）：整章镜头一次性交给 SegmentShotsForVideo。
+ * 模型档位取编译器硬限 4–15 秒，segmentLimits 会把用户设定收紧到该范围（auto 直接取模型上下界）；
+ * 段内 3–9 镜、场景切换断开（fixed 除外）、不足下限的段合并、尾段 rebalance 全部由影策纯函数完成。
+ */
+function planYingceSegments(
+    input: ChapterStoryboardInput,
+    shots: PlannedShot[],
+    shotScenes: string[],
+    mode: SegmentExecutionMode,
+    fps: number,
+    diagnostics: string[],
+): PlannedSegment[] {
+    const model: DurationOptions = { Values: [], Min: 4, Max: 15, Step: 1 };
+    const positive = (value: number | undefined, fallback: number) =>
+        Number.isFinite(value) && (value ?? 0) > 0 ? Number(value) : fallback;
+    const fixedSeconds = positive(input.segmentSeconds, positive(input.clipSeconds, DEFAULT_CLIP_SECONDS));
+    const limits = segmentLimits({
+        SegmentMode: input.segmentMode || SegmentFixed,
+        SegmentSeconds: fixedSeconds,
+        SegmentMinSeconds: positive(input.segmentMinSeconds, 8),
+        SegmentMaxSeconds: positive(input.segmentMaxSeconds, fixedSeconds),
+        Pacing: input.pacing,
+        Dialogue: input.dialogueMode,
+        SpeechRate: input.customDialogueRule?.speechRate,
+        LineSeconds: input.customDialogueRule?.lineSeconds,
+        LineMaxRunes: input.customDialogueRule?.lineMaxRunes,
+        LinePauseMs: input.customDialogueRule?.linePauseMs,
+    }, model);
+
+    const durations = shots.map(shot => (shot.duration_frames / fps) * 1000);
+    const ranges = SegmentShotsForVideo(shotScenes, durations, limits);
+    // 后端硬约束 SCENE_STORYBOARD_SCOPE：一个 Clip 的 shot_ids 不能跨场次。
+    // SegmentShotsForVideo 的 fixed 模式刻意不在场景切换处断开，这里按镜头实际归属
+    // （scene_id，与 toSceneStoryboardOps 的分组键一致）再切细；auto/range 的场景断开结果不变。
+    const segments: PlannedSegment[] = [];
+    let index = 0;
+    for (const range of ranges) {
+        let start = range.Start;
+        for (let k = range.Start + 1; k <= range.End; k += 1) {
+            if (k === range.End || shots[k].scene_id !== shots[k - 1].scene_id) {
+                if (start < k) {
+                    const shotIds = shots.slice(start, k).map(shot => shot.id);
+                    segments.push({
+                        id: stableId("clip", input.chapterId, `yingce-${limits.Mode}-${index}`, shotIds.join(",")),
+                        shot_ids: shotIds,
+                        mode,
+                    });
+                    index += 1;
+                }
+                start = k;
+            }
+        }
+    }
+
+    const minFrames = Math.round(4 * fps);
+    const maxFrames = Math.round(15 * fps);
+    for (const segment of segments) {
+        const frames = segment.shot_ids.reduce((sum, id) => sum + (shots.find(shot => shot.id === id)?.duration_frames ?? 0), 0);
+        if (frames < minFrames) diagnostics.push(`剧情段 ${(frames / fps).toFixed(1)} 秒低于 4 秒下限，编译会被拒；请加长镜头或增加镜头数`);
+        if (frames > maxFrames) diagnostics.push(`剧情段 ${(frames / fps).toFixed(1)} 秒超过 15 秒上限，编译会被拒；请拆分镜头`);
+    }
+    const covered = new Set(segments.flatMap(segment => segment.shot_ids));
+    if (covered.size !== shots.length) diagnostics.push("影策切段的 Clip 未完整覆盖镜头");
     return segments;
 }
 

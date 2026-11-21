@@ -12,6 +12,7 @@
  */
 
 import type { ChapterBeat, ChapterScenePlan } from "./chapter-storyboard.js";
+import { ShotTarget, LineTarget, PacingRelaxed, DialogueStandard } from "./pacing.js";
 
 export type ChapterDemandDraft = {
     /** 写进分集 synopsis 的需求正文；必须含【场景：】【时间：】【镜头 N】标记。 */
@@ -28,9 +29,11 @@ export type ChapterDemandPromptInput = {
     environments: ChapterDemandEnvironment[];
     /** 单镜时长上限，用于提示模型别给过长镜头。 */
     maxShotSeconds?: number;
+    /** 目标单集秒数；给出时用影策 ShotTarget/LineTarget 作为软参考写进提示词，不强制模型照搬。 */
+    episodeSeconds?: number;
 };
 
-const DEFAULT_MAX_SHOT_SECONDS = 5;
+const DEFAULT_MAX_SHOT_SECONDS = 8; // 影策 relaxed 舒缓档上限，情绪戏可给到8秒
 /** 兜底切节拍时每段的字数，约等于一个镜头能承载的信息量。 */
 const FALLBACK_BEAT_CHARS = 120;
 
@@ -39,19 +42,25 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     const environments = input.environments.length
         ? input.environments.map(item => `- ${item.id}｜${item.name}`).join("\n")
         : "（本集还没有登记场景环境，请把 environmentId 留空并在 sceneName 里写场景名）";
-    const system = [
+    const systemLines = [
         "你是短剧分镜编剧。把给定章节改写成可拍摄的分镜草案，只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。",
         "JSON 结构：",
         '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","camera":"运镜（可空）","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）"}]}]}',
         "硬性要求：",
-        `1. 每个 beat 的 seconds 在 1–${maxShotSeconds} 之间，整数或 .5；不要写超长镜头。`,
+        `1. 每个 beat 的 seconds 是时长提示（3–${maxShotSeconds} 秒，整数或 .5）：动作/冲突镜给 3–4 秒短镜，情绪戏/对话/关键场面给 6–${maxShotSeconds} 秒长镜，普通叙事给 4–5 秒。按剧情需要分配，不要所有镜头都用同一个秒数。`,
         "2. environmentId 只能从下面清单里选；清单为空时才允许留空串。",
         "3. 有 dialogue 必须同时给 speaker，否则这条台词会被丢弃。",
         "4. demand 是给人看的需求正文：【场景：X】与【时间：Y】各占一行（不要写在同一行），每个镜头用【镜头 N】单独起行，镜头正文原样叙述，不要写 JSON。",
         "5. 不要新增原文没有的人物关系；不要写音乐、字幕、转场特效。",
-        "场景环境清单：",
-        environments,
-    ].join("\n");
+    ];
+    if (Number.isFinite(input.episodeSeconds) && (input.episodeSeconds ?? 0) > 0) {
+        const targetSeconds = Number(input.episodeSeconds);
+        systemLines.push(
+            `6. 目标单集约 ${targetSeconds} 秒：影策估算约 ${ShotTarget(targetSeconds, PacingRelaxed)} 镜、${LineTarget(targetSeconds, DialogueStandard)} 条台词/旁白。这是软参考，按剧情实际需要取舍。`,
+        );
+    }
+    systemLines.push("场景环境清单：", environments);
+    const system = systemLines.join("\n");
     const user = [
         `章节标题：${input.chapterTitle}`,
         "章节正文：",
@@ -134,15 +143,19 @@ export function fallbackChapterDemand(input: {
 }): ChapterDemandDraft {
     const environmentId = String(input.environmentId || "").trim();
     if (!environmentId) throw new Error("CHAPTER_DEMAND_ENVIRONMENT: 兜底需要场次环境 ID");
-    const secondsPerBeat = Math.max(1, Number(input.secondsPerBeat) || 3);
+    const secondsPerBeat = Math.max(1, Number(input.secondsPerBeat) || 4);
     const beatChars = Math.max(40, Math.floor(input.beatChars ?? FALLBACK_BEAT_CHARS));
     const paragraphs = String(input.chapterBody || "").split(/\n{2,}|\n/).map(line => line.trim()).filter(Boolean);
     const beats: ChapterBeat[] = [];
+    // 影策节奏：兜底也按剧情内容给时长 hint，不再一律 3 秒。含情绪/关键动作词的镜头给 6-7 秒长镜，其余 4 秒。
+    const emotionalRe = /笑|泪|哭|望|回身|回首|坐|跪|睡|沉默|痴|惊|喜|怒|哀|惧|愣|怔|叹|犹豫|对视|抱|握|留|信|酒|哭诉|求/;
+    const actionRe = /奔|冲|追|打|斗|战|刺|斩|逃|飞|跃|跌|倒|吞|袭|赶|挥|拔|射/;
     for (const paragraph of paragraphs) {
         for (let offset = 0; offset < paragraph.length; offset += beatChars) {
             const slice = paragraph.slice(offset, offset + beatChars).trim();
             if (!slice) continue;
-            beats.push({ title: `节拍 ${beats.length + 1}`, visual: slice, seconds: secondsPerBeat });
+            const hint = emotionalRe.test(slice) ? 7 : actionRe.test(slice) ? 4 : secondsPerBeat;
+            beats.push({ title: `节拍 ${beats.length + 1}`, visual: slice, seconds: hint });
         }
     }
     if (!beats.length) throw new Error("CHAPTER_DEMAND_BEATS: 章节正文为空，无法兜底");

@@ -8,7 +8,8 @@ const environments = [{ id: "env-temple", name: "破庙" }, { id: "env-street", 
 test("提示词带上环境清单、JSON 结构与时长上限", () => {
     const { system, user } = buildChapterDemandPrompt({ chapterTitle: "第二章 破庙", chapterBody: "雨夜。", environments });
     assert.ok(system.includes("env-temple｜破庙"));
-    assert.ok(system.includes("1–5"));
+    assert.ok(system.includes("3–8")); // 影策节奏：让 LLM 按剧情给 3-8 秒时长提示（动作短/情绪长）
+    assert.ok(system.includes("情绪戏"));
     assert.ok(system.includes("【镜头 N】"));
     assert.ok(user.includes("第二章 破庙"));
     assert.ok(user.includes("雨夜。"));
