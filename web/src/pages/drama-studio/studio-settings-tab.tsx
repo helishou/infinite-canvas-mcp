@@ -12,7 +12,7 @@ import {
     type ReasoningEffort,
 } from "@/stores/use-config-store";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
-import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, fetchBackendDramaEpisodes, fetchEpisodeProduction, editEpisodeProduction, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
+import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, fetchBackendDramaEpisodes, fetchEpisodeProduction, editEpisodeProduction, regenerateDramaAssetReference, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
 import { DRAMA_STYLE_FORMS, DRAMA_STYLE_THEMES, composeDramaStyleId, findComposedDramaStyle, findComposedDramaStyleByPrompt, type DramaStyleFormId, type DramaStyleThemeId } from "@/lib/drama/style-composition";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { TOPIC_OPTIONS } from "@basketikun/canvas-agent/drama/topic-options";
@@ -43,7 +43,8 @@ import { cn } from "@/lib/utils";
  *   视频模型声明的默认档位仅作提示，可选档位走真实下发链路，不是假开关。
  * - 软约束提示：episodeSeconds / transitionMs 写入 storyboardRules，只影响拆镜提示词的
  *   时长与转场要求，不强制成片剪辑，UI 明确标注。
- * - 「重做参考图」本地无等价后端能力，只提供前往画布手动重做的引导，不造假按钮。
+ * - 「重做参考图」现在有一键入口：按资产卡 + 当前方案真出图并写回（后端 regenerate-reference）；
+ *   手动跳转仅作为不想覆盖旧图时的引导，不造假按钮。
  */
 
 /** 思考等级用本地文本设置里真实存在的档位（text-settings-panel.tsx）。 */
@@ -538,6 +539,37 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
         return String(topic?.language || "");
     }, [folders, dramaId]);
 
+    // ===== 一键按当前方案重做参考图（影策 regenerateDramaCasts 缺口）=====
+    // 真出图 → bind-image 写回 → 标脏引用段；资产 ID 由用户从资产库设定详情复制。
+    const [regenAssetId, setRegenAssetId] = useState("");
+    const [regenBusy, setRegenBusy] = useState(false);
+    const [regenResult, setRegenResult] = useState("");
+    const [regenError, setRegenError] = useState("");
+    const runOneClickRegen = async () => {
+        const assetId = regenAssetId.trim();
+        if (!dramaId || !assetId) {
+            setRegenError("请先填写资产 ID（形如 asset-character-xxxxxx）");
+            return;
+        }
+        setRegenBusy(true);
+        setRegenResult("");
+        setRegenError("");
+        try {
+            const result = await regenerateDramaAssetReference(dramaId, assetId, {
+                artStyle: artStyle.trim() || undefined,
+            });
+            if (!result.ok || !result.storageKey) {
+                setRegenError(result.error || "重做失败，未写回资产参考图");
+                return;
+            }
+            setRegenResult(`已写回 ${result.storageKey} · 分集 ${result.episodeId} · 节点 ${result.nodeId} · 标脏段 ${result.affectedSegments ?? 0}`);
+        } catch (error) {
+            setRegenError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setRegenBusy(false);
+        }
+    };
+
     // ===== 视觉风格两轴（表现形式 × 题材）=====
     // 真值仍是单轴 topic.artStyle；两轴组合派生 prompt 后复用剧目规划 PATCH 写回同一字段。
     const [artStyleDraft, setArtStyleDraft] = useState(artStyle);
@@ -840,9 +872,27 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                     </div>
                 </Section>
 
-                <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图（手动）" desc="本地没有「按当前方案一键重做参考图」的后端能力；这里只把对应分类的设定定位到资产库，由你在画布里手动重新生成并采用。">
-                    <p className="text-xs leading-relaxed text-muted-foreground">
-                        上方已保存当前方案（画风 / 模型 / 默认参考图方案）。点下方按钮会跳到项目资产库并预选对应设定；到设定详情点「生成参考图」，在画布生成后采用写回。不会自动重做，也不会覆盖未确认的旧图。
+                <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图" desc="一键按资产卡设定 + 当前方案真出图并写回；不想覆盖旧图时，仍可用下方按钮到资产库手动重做。">
+                    <div className="rounded-md border border-border bg-background/40 p-2.5" data-studio-regen-one-click>
+                        <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">一键按当前方案重做（真出图 · 真写回）</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <input type="text" value={regenAssetId}
+                                onChange={(e) => setRegenAssetId(e.target.value)}
+                                placeholder="资产 ID，如 asset-character-xxxxxx"
+                                className="h-8 min-w-56 flex-1 rounded-md border border-border bg-background px-2 text-xs"
+                                aria-label="要重做的资产 ID" />
+                            <button type="button" disabled={!dramaId || !regenAssetId.trim() || regenBusy}
+                                onClick={runOneClickRegen}
+                                className="h-8 rounded-md border border-primary px-3 text-xs text-foreground transition hover:bg-primary/10 disabled:opacity-50">
+                                {regenBusy ? "正在出图…" : "一键按当前方案重做"}
+                            </button>
+                        </div>
+                        <p className="mt-1.5 text-[10px] text-muted-foreground">资产 ID 可在「项目资产 · 设定详情」复制；默认用 2.1 图片模型、横版 16:9，成功后自动标脏引用该设定的剧情段。</p>
+                        {regenResult ? <p className="mt-1.5 text-[11px] text-emerald-600" data-studio-regen-result>{regenResult}</p> : null}
+                        {regenError ? <p className="mt-1.5 text-[11px] text-destructive" role="alert" data-studio-regen-error>{regenError}</p> : null}
+                    </div>
+                    <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                        手动入口：点下方按钮会跳到项目资产库并预选对应设定；到设定详情点「生成参考图」，在画布生成后采用写回。手动路径不会自动重做，也不会覆盖未确认的旧图。
                     </p>
                     <div className="mt-2 flex flex-wrap gap-2" data-studio-redo-refs>
                         {(["角色", "道具", "场景"] as const).map((kind) => (
@@ -853,7 +903,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                             </button>
                         ))}
                     </div>
-                    <p className="mt-1.5 text-[10px] text-muted-foreground">这里只做定位跳转；真正的重做与采用在画布完成，旧版本保留在设定详情的版本记录中。</p>
+                    <p className="mt-1.5 text-[10px] text-muted-foreground">手动路径只做定位跳转；真正的重做与采用在画布完成，旧版本保留在设定详情的版本记录中。</p>
                 </Section>
 
                 <Section marker="continuity" icon={<Rows3 className="size-4" />} title="段落衔接" desc="尾帧续接：第2段起用上段尾帧做首帧、依次衔接；并行出片：各段只按参考图独立成片、不带尾帧首帧。保存后撰写段提示词真实生效。">

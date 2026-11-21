@@ -1063,7 +1063,11 @@ export class DramaPipeline {
             ruleLines.push(`对白密度：${{ dense: "密集，多场对话", restrained: "克制，少对白多动作", custom: "按剧情需要" }[rules.dialogueDensity] || rules.dialogueDensity}。`);
         }
         if (rules.transitionMode && rules.transitionMode !== "smart") {
-            ruleLines.push(`场景衔接：${{ hard: "硬切", fade: "黑场过渡", flash: "闪白" }[rules.transitionMode] || rules.transitionMode}${rules.transitionMs ? `（约 ${rules.transitionMs}ms）` : ""}。`);
+            // 对齐影策 transition 规范值：hard=cut硬切 / fade=fadeblack黑场过渡 / flash=fadewhite闪白；
+            // smart=auto 智能档不注入硬文本，交给拆镜按场景自行判断（影策 auto 语义）。
+            ruleLines.push(`场景衔接：${{ hard: "硬切(cut)", fade: "黑场淡入淡出(fadeblack)", flash: "闪白(fadewhite)" }[rules.transitionMode] || rules.transitionMode}${rules.transitionMs ? `（约 ${rules.transitionMs}ms）` : ""}。`);
+        } else if (rules.transitionMode === "smart") {
+            ruleLines.push("场景衔接：智能(auto)，按场景切换自行选择硬切或过渡。");
         }
         if (rules.pacing && rules.pacing !== "标准") ruleLines.push(`整体节奏：${rules.pacing}。`);
         // 写作技能（分镜拆分）真实注入拆镜步骤：契约无 skill 字段，并入 chapterBody 的【制作设置·分镜要求】。
@@ -1352,7 +1356,9 @@ export class DramaPipeline {
             ruleStyle.push(`对白${{ dense: "密集", restrained: "克制", custom: "按需" }[promptRules.dialogueDensity] || promptRules.dialogueDensity}`);
         }
         if (promptRules.transitionMode && promptRules.transitionMode !== "smart") {
-            ruleStyle.push(`转场${{ hard: "硬切", fade: "黑场过渡", flash: "闪白" }[promptRules.transitionMode] || promptRules.transitionMode}${promptRules.transitionMs ? `约${promptRules.transitionMs}ms` : ""}`);
+            ruleStyle.push(`转场${{ hard: "硬切(cut)", fade: "黑场淡入淡出(fadeblack)", flash: "闪白(fadewhite)" }[promptRules.transitionMode] || promptRules.transitionMode}${promptRules.transitionMs ? `约${promptRules.transitionMs}ms` : ""}`);
+        } else if (promptRules.transitionMode === "smart") {
+            ruleStyle.push("转场智能(auto)，按场景切换自行选择");
         }
         if (promptRules.pacing && promptRules.pacing !== "标准") ruleStyle.push(`节奏${promptRules.pacing}`);
 

@@ -31,6 +31,7 @@ import { DirectImageBackend } from "./engine-contract/chatgpt-image.js";
 import { CanvasImageDispatcher } from "./canvas/image-dispatcher.js";
 import { registerCanvasGenerationRoutes } from "./server/canvas-generation-routes.js";
 import { registerDramaRestyleRoutes } from "./server/drama-restyle-routes.js";
+import { registerDramaAssetRegenerateRoutes } from "./server/drama-asset-regenerate-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
 import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
@@ -267,6 +268,8 @@ async function startBackendHttpServer() {
   );
   registerCanvasGenerationRoutes(app, canvasGeneration);
   registerDramaRestyleRoutes(app, runtime.db, runtime.stores, canvasGeneration);
+  // 影策审计缺口#6：按当前方案一键重做参考图（资产卡反查 → 真出图 → 写回 → 可选标脏）。
+  registerDramaAssetRegenerateRoutes(app, runtime.db, runtime.stores, canvasGeneration);
   const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
 
   // 成片自动重合成（影策 finalStale 真链路）：复用 VideoConcatBackend 这个后端合成引擎。

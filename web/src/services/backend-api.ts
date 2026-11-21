@@ -327,6 +327,29 @@ export function restyleDramaCast(dramaId: string, assetId: string, input: { rest
     }>("POST", `/drama/${encodeURIComponent(dramaId)}/cast/${encodeURIComponent(assetId)}/restyle`, input);
 }
 
+/** 影策「按当前方案一键重做参考图」：真出图 + bind-image 写回 + 可选标脏引用段。 */
+export type RegenerateDramaAssetReferenceInput = {
+    prompt?: string;
+    artStyle?: string;
+    size?: string;
+    model?: string;
+    restyleSegments?: boolean;
+    episodeId?: string;
+};
+
+export function regenerateDramaAssetReference(dramaId: string, assetId: string, input: RegenerateDramaAssetReferenceInput = {}) {
+    return request<{
+        ok: boolean;
+        storageKey?: string;
+        episodeId?: string;
+        nodeId?: string;
+        assetId?: string;
+        taskId?: string;
+        affectedSegments?: number;
+        error?: string;
+    }>("POST", `/drama/${encodeURIComponent(dramaId)}/assets/${encodeURIComponent(assetId)}/regenerate-reference`, input);
+}
+
 export function fetchBackendCanvasDrama(projectId: string) {
     return sharedGet<{ ok: boolean; projectId: string; episode?: DramaEpisode | null; drama?: { id: string; name: string } | null }>(`/canvas/projects/${encodeURIComponent(projectId)}/drama`);
 }
