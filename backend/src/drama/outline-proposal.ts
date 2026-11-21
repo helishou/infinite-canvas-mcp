@@ -198,13 +198,13 @@ export function parseEpisodeScriptBeats(text: string): { text: string; hook: str
 
 export async function proposeEpisodeScript(
     stores: Pick<Stores, "settings">,
-    input: { episodeNumber: number; title: string; synopsis: string; outline: string; worldContext?: string; threeActs?: readonly string[]; ending?: string; source: string; previousTail?: string; model?: string; instruction?: string; signal?: AbortSignal },
+    input: { episodeNumber: number; title: string; synopsis: string; outline: string; worldContext?: string; threeActs?: readonly string[]; ending?: string; source: string; previousTail?: string; model?: string; instruction?: string; reasoningEffort?: string; signal?: AbortSignal },
 ) {
     const aiConfig = stores.settings.get("ai.config");
     const model = resolveOutlineModel(aiConfig, input.model);
     if (!model) throw new Error("请先在设置里为「文本模型」选择一个模型，或在剧目规划里指定大纲模型");
     if (!input.synopsis.trim() && !input.outline.trim() && !trimSource(input.source)) throw new Error("先写好本集简介或全剧大纲，再来生成分场");
-    const provider = resolveTextProvider(aiConfig, model, { systemPrompt: EPISODE_SYSTEM_PROMPT, reasoningEffort: "auto" });
+    const provider = resolveTextProvider(aiConfig, model, { systemPrompt: EPISODE_SYSTEM_PROMPT, reasoningEffort: input.reasoningEffort || "auto" });
     const raw = await requestOpenAiText(provider, buildEpisodeScriptPrompt(input), [], input.signal);
     const cleaned = String(raw || "").replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "").trim();
     if (!cleaned) throw new Error("模型返回了空内容");

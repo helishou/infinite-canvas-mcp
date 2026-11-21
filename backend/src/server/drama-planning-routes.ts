@@ -421,9 +421,13 @@ export function registerDramaEpisodeGroupingRoutes(router: Router, db: BackendDa
     });
 }
 
-const scriptBodySchema = z.object({
+export const scriptBodySchema = z.object({
     model: z.string().trim().max(200).optional(),
     instruction: z.string().trim().max(2000).optional(),
+    // 影策制作设置：钩子/悬念作为用户倾向引导分场生成，思考等级透传文本模型。
+    hook: z.string().trim().max(500).optional(),
+    cliffhanger: z.string().trim().max(500).optional(),
+    reasoningEffort: z.string().trim().max(50).optional(),
 }).strict();
 
 /**
@@ -454,6 +458,12 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
         } catch { /* 无章映射时回退整份原文 */ }
         if (!episodeSource) episodeSource = plan.sourceScript;
         try {
+            // 影策制作设置真生效：把用户指定的钩子/悬念倾向合进 instruction（作为补充要求引导分场），
+            // 思考等级随请求透传给 proposeEpisodeScript（不再写死 auto）。
+            const instructionBits = [parsed.data.instruction];
+            if (parsed.data.hook?.trim()) instructionBits.push(`开场钩子倾向：${parsed.data.hook.trim()}`);
+            if (parsed.data.cliffhanger?.trim()) instructionBits.push(`结尾悬念倾向：${parsed.data.cliffhanger.trim()}`);
+            const instruction = instructionBits.filter(Boolean).join("\n");
             const result = await proposeEpisodeScript(stores, {
                 episodeNumber: episode.episodeNumber,
                 title: String(episode.title || ""),
@@ -465,7 +475,8 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
                 source: episodeSource,
                 previousTail,
                 model: parsed.data.model,
-                instruction: parsed.data.instruction,
+                instruction,
+                reasoningEffort: parsed.data.reasoningEffort,
             });
             // 生成出的钩子/悬念顺手写进导演源稿；这是尽力而为的增强，失败不能挡住分场文本返回。
             if (result.hook || result.cliffhanger) {
