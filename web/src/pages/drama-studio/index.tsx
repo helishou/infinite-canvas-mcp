@@ -615,6 +615,7 @@ function DramaStudioInner() {
                 pacing: studioSettings.pacing,
             },
             // 前端 assemble 对应后端 render 池；image 池后端暂未使用，不下发。
+            budgetMicrocredits: studioSettings.budgetMicrocredits, // 影策预算护栏，0/不设=不限
             concurrency: {
                 text: studioSettings.concurrency.text,
                 video: studioSettings.concurrency.video,

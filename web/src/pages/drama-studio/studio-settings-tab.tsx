@@ -129,6 +129,8 @@ export type StudioProductionSettings = {
     // 同时生成数（#32）：text/video/assemble 三池真实下发 pipelineOpts.concurrency（assemble→render）。
     // image 池后端无剧目级并发覆盖字段，不设假开关。
     concurrency: { text: number; video: number; assemble: number };
+    // 预算上限（影策 budgetMicrocredits）：微积分；0/不设=不限。达标暂停流水线（budget_exceeded）。
+    budgetMicrocredits: number;
     // 镜头节奏（#33）
     pacing: "极快" | "快" | "标准" | "舒缓" | "慢";
     transitionMs: number;
@@ -194,6 +196,7 @@ export const DEFAULT_STUDIO_SETTINGS: StudioProductionSettings = {
     sampleMode: false,
     reviewMode: "auto",
     reviewPolicy: { ...DEFAULT_REVIEW_POLICY },
+    budgetMicrocredits: 0,
     mediaMode: "auto",
     referenceLimit: 0,
     // 差异#6
@@ -932,6 +935,15 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                             <span className="w-6 text-center tabular-nums">{settings.concurrency[key]}</span>
                         </Field>
                     ))}
+                </Section>
+
+                <Section icon={<Gauge className="size-4" />} title="预算上限（budgetMicrocredits）" desc="影策同名预算护栏：微积分计，0/不限。流水线按文字/图/段视频累计花费，达到上限自动暂停（pause_reason=budget_exceeded），resume 也会拒绝，防止超支。真实 usage 回包优先、否则用保守估算单价。">
+                    <Field label="预算（微积分）">
+                        <input type="number" min={0} step={1000} value={settings.budgetMicrocredits}
+                            onChange={(e) => patch("budgetMicrocredits", Math.max(0, Number(e.target.value) || 0))}
+                            className="flex-1" data-studio-budget-input />
+                        <span className="text-[10px] text-muted-foreground">0=不限</span>
+                    </Field>
                 </Section>
 
                 <Section icon={<SlidersHorizontal className="size-4" />} title="镜头节奏与表演" desc="五档节奏真实下发后端 storyboardRules.pacing；表演强度/运镜动感 1–10 档在手动「撰写段提示词」时映射成表演与运镜风格文字（全自动流水线沿用分镜规则软约束，不单独下发这两档）。">
