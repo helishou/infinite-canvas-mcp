@@ -316,6 +316,7 @@ export function MediaPreviewModal({ item: request, onClose, projectId }: { item:
                     url={url}
                     name={item?.name || "video"}
                     projectId={projectId}
+                    autoPlay
                     onContextMenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();

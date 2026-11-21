@@ -4,8 +4,8 @@ import { Play, Scissors } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { trimCanvasVideo } from "@/services/api/canvas-video-trim";
 
-export function CanvasVideoTrimPreview({ url, name, projectId, videoRef, onContextMenu }: {
-    url: string; name: string; projectId?: string; videoRef: RefObject<HTMLVideoElement | null>; onContextMenu: MouseEventHandler<HTMLVideoElement>;
+export function CanvasVideoTrimPreview({ url, name, projectId, autoPlay, videoRef, onContextMenu }: {
+    url: string; name: string; projectId?: string; autoPlay?: boolean; videoRef: RefObject<HTMLVideoElement | null>; onContextMenu: MouseEventHandler<HTMLVideoElement>;
 }) {
     const { t } = useTranslation();
     const { message } = App.useApp();
@@ -59,13 +59,14 @@ export function CanvasVideoTrimPreview({ url, name, projectId, videoRef, onConte
     };
 
     return <div className="flex min-w-0 flex-col gap-3" style={{ width: "min(960px, 88vw)", color: token.colorText }} data-canvas-shortcuts-ignore>
-        <video ref={videoRef} src={url} controls playsInline onContextMenu={onContextMenu}
+        <video ref={videoRef} src={url} controls playsInline autoPlay={autoPlay} onContextMenu={onContextMenu}
             style={{ width: "100%", maxHeight: "55vh", background: "#000" }}
             onLoadedMetadata={(event) => {
                 const value = event.currentTarget.duration;
                 const finite = Number.isFinite(value) && value > 0 ? value : 0;
                 const { videoWidth, videoHeight } = event.currentTarget;
                 setDuration(finite); setResolution(videoWidth > 0 && videoHeight > 0 ? { width: videoWidth, height: videoHeight } : null); setStart(0); setEnd(finite || null); setFailed(false);
+                if (autoPlay) void event.currentTarget.play().catch(() => {});
             }}
             onError={() => { setFailed(true); setDuration(0); setResolution(null); }}
             onTimeUpdate={(event) => {

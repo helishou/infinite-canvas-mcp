@@ -6,6 +6,29 @@ import { parseChangelog, type ReleaseInfo } from "@/lib/release";
 
 const latestVersionUrl = "https://raw.githubusercontent.com/basketikun/infinite-canvas/main/VERSION";
 const latestChangelogUrl = "https://raw.githubusercontent.com/basketikun/infinite-canvas/main/CHANGELOG.md";
+const skippedVersionKey = "infinite-canvas:skipped-version";
+
+function normalizeVersion(version: string) {
+    return version.trim().replace(/^v/i, "");
+}
+
+function readSkippedVersion() {
+    try {
+        return localStorage.getItem(skippedVersionKey) || "";
+    } catch {
+        return "";
+    }
+}
+
+function broadcastSkippedVersion(value: string | null) {
+    try {
+        if (typeof StorageEvent !== "undefined") {
+            window.dispatchEvent(new StorageEvent("storage", { key: skippedVersionKey, newValue: value }));
+        }
+    } catch {
+        // 隐私模式下存储/事件可能不可用，忽略即可
+    }
+}
 
 function readLocalReleases(): ReleaseInfo[] {
     return __APP_RELEASES__ || [];
@@ -32,7 +55,38 @@ export function useVersionCheck() {
     const [releases, setReleases] = useState<ReleaseInfo[]>(localReleases);
     const [checking, setChecking] = useState(false);
     const [open, setOpen] = useState(false);
-    const hasNewVersion = isNewerVersion(latestVersion, currentVersion);
+    const [skippedVersion, setSkippedVersion] = useState(readSkippedVersion);
+    const hasNewVersion = isNewerVersion(latestVersion, currentVersion) && normalizeVersion(skippedVersion) !== normalizeVersion(latestVersion);
+
+    const skipThisVersion = useCallback((version: string) => {
+        const value = version.trim();
+        try {
+            localStorage.setItem(skippedVersionKey, value);
+        } catch {
+            // 隐私模式下 localStorage 可能抛错，仍保留本次会话内的跳过状态
+        }
+        setSkippedVersion(value);
+        broadcastSkippedVersion(value);
+    }, []);
+
+    const clearSkippedVersion = useCallback(() => {
+        try {
+            localStorage.removeItem(skippedVersionKey);
+        } catch {
+            // 同上，忽略存储异常
+        }
+        setSkippedVersion("");
+        broadcastSkippedVersion(null);
+    }, []);
+
+    useEffect(() => {
+        const handleStorage = (event: StorageEvent) => {
+            if (event.key !== skippedVersionKey) return;
+            setSkippedVersion(event.newValue || "");
+        };
+        window.addEventListener("storage", handleStorage);
+        return () => window.removeEventListener("storage", handleStorage);
+    }, []);
 
     const checkLatestVersion = useCallback(async () => {
         try {
@@ -56,6 +110,7 @@ export function useVersionCheck() {
                 const [version, changelog] = await Promise.all([versionResponse.text(), changelogResponse.text()]);
                 setLatestVersion(version.trim() || currentVersion);
                 if (changelog.trim()) setReleases(parseChangelog(changelog));
+                clearSkippedVersion();
                 if (showMessage) message.success(t("version.updated"));
                 return true;
             } catch {
@@ -67,7 +122,7 @@ export function useVersionCheck() {
                 setChecking(false);
             }
         },
-        [currentVersion, localReleases, message, t],
+        [clearSkippedVersion, currentVersion, localReleases, message, t],
     );
 
     useEffect(() => {
@@ -76,8 +131,9 @@ export function useVersionCheck() {
 
     const openReleaseModal = useCallback(() => {
         setOpen(true);
+        clearSkippedVersion();
         void checkLatestRelease();
-    }, [checkLatestRelease]);
+    }, [checkLatestRelease, clearSkippedVersion]);
 
     return {
         open,
@@ -88,5 +144,7 @@ export function useVersionCheck() {
         checking,
         hasNewVersion,
         checkLatestRelease,
+        skipThisVersion,
+        clearSkippedVersion,
     };
 }

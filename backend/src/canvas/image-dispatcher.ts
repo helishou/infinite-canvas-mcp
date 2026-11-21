@@ -100,6 +100,8 @@ export type CanvasImageGenerationResult = {
     height?: number | null;
   }>;
   failure?: Error;
+  /** 引擎实际落图 seed（-1 随机哨兵已解开）；写进日志的 params.actualSubmission。 */
+  seed?: number;
 };
 
 type DispatcherHooks = {
@@ -458,6 +460,10 @@ export class CanvasImageDispatcher {
     this.stores.tasks.update(task.id, { status: "running", progress: 0.02 });
     const result = await this.dispatch(plan, task.id);
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
+    // 引擎回传的实际 seed 写进任务结果与日志 actualSubmission（沿用 db.writeBackH3Task 的回写范式），
+    // 前端「实际提交配置」据此显示 Seed；seed=0 合法，用 ?? 不用 ||。
+    const actualSubmission = typeof result.seed === "number" && Number.isFinite(result.seed) ? { seed: result.seed } : undefined;
+    const taskResult = { media: result.media, ...(actualSubmission ? { actualSubmission } : {}) };
     // 画幅验收已移除：工作流输出尺寸由工作流自身决定，不再按请求比例判失败，仅回填真实宽高。
     if (plan.executor === "comfy-workflow") {
       for (const media of result.media) {
@@ -471,7 +477,7 @@ export class CanvasImageDispatcher {
         }
       }
     }
-    await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: { media: result.media } });
+    await hooks?.onCompleted?.(result, { ...task, status: "succeeded", progress: 1, result: taskResult });
     if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
     if (result.failure) {
       this.stores.tasks.update(task.id, { status: "failed", error: result.failure.message });
@@ -486,12 +492,14 @@ export class CanvasImageDispatcher {
     this.stores.tasks.update(task.id, {
       status: "succeeded",
       progress: 1,
-      result: { media: result.media },
+      result: taskResult,
     });
-    this.stores.tasks.addEvent(task.id, "result", { media: result.media });
+    this.stores.tasks.addEvent(task.id, "result", taskResult);
     if (logId) {
+      const currentParams = this.logs.get?.(logId)?.params;
       this.logs.update(logId, {
         status: "success",
+        ...(actualSubmission ? { params: { ...(currentParams && typeof currentParams === "object" ? currentParams : {}), actualSubmission } } : {}),
         outputs: result.media.map((media) => ({
           url: media.url,
           storageKey: media.storageKey,
@@ -866,7 +874,11 @@ export class CanvasImageDispatcher {
       this.assertNotCancelled(taskId);
       const media = await importEngineMedia(this.stores.media, started.media, (url) => engine.fetchMedia(url));
       if (!media.length) throw new Error(`执行引擎没有回传任何产物（${workflowName}）`);
-      return { taskId, media };
+      return {
+        taskId,
+        media,
+        ...(typeof started.seed === "number" && Number.isFinite(started.seed) ? { seed: started.seed } : {}),
+      };
     } finally {
       this.engineTasks.delete(childTaskId);
       this.untrackChild(taskId, childTaskId);

@@ -55,7 +55,7 @@ const PRESETS: ComfyPreset[] = [
 
 /** 从 ComfyUI 任务历史的状态对象中抽取可读的错误信息。
  * ComfyUI 节点执行失败时，status.messages 里含 ["execution_error", { node_id, node_type, exception_message, ... }]。 */
-function extractComfyErrorMessage(status: any): string {
+export function extractComfyErrorMessage(status: any): string {
     if (!status) return "ComfyUI 执行失败（无状态信息）";
     const messages: unknown[] = Array.isArray(status.messages) ? status.messages : [];
     for (const entry of messages) {
@@ -68,6 +68,62 @@ function extractComfyErrorMessage(status: any): string {
     }
     if (typeof status.status_str === "string") return `ComfyUI 执行失败（${status.status_str}）`;
     try { return `ComfyUI 执行失败：${JSON.stringify(status).slice(0, 1500)}`; } catch { return "ComfyUI 执行失败"; }
+}
+
+/**
+ * 把 ComfyUI /prompt 回执里的 node_errors 排成可读的多行文本。
+ * 保留 "Prompt outputs failed validation" 头部（上层 failureLayer 分类依赖 validation 关键字）；
+ * 缺 class_type / errors、非对象、循环引用一律容错，最后回落成截断的原始 JSON。
+ */
+export function formatComfyNodeErrors(nodeErrors: unknown): string {
+    const header = "Prompt outputs failed validation";
+    const fallback = () => {
+        try { return `${header}: ${JSON.stringify(nodeErrors).slice(0, 1500)}`; }
+        catch { return `${header}: [node_errors 无法序列化]`; }
+    };
+    if (!nodeErrors || typeof nodeErrors !== "object" || Array.isArray(nodeErrors)) return fallback();
+    try {
+        const lines = Object.entries(nodeErrors as Record<string, unknown>).map(([id, raw]) => {
+            const node = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+            const classType = node.class_type == null || node.class_type === "" ? "?" : String(node.class_type);
+            const errors = Array.isArray(node.errors) ? node.errors : [];
+            const detail = errors.map((entry) => {
+                if (entry && typeof entry === "object") {
+                    const item = entry as Record<string, unknown>;
+                    return String(item.message || item.details || item.type || "");
+                }
+                return String(entry ?? "");
+            }).filter(Boolean).join("; ");
+            let extra = detail;
+            if (!extra) {
+                try { extra = JSON.stringify(raw).slice(0, 300); } catch { extra = "无错误详情"; }
+            }
+            return `${id}(${classType}): ${extra}`;
+        });
+        return lines.length ? `${header}:\n${lines.join("\n")}` : fallback();
+    } catch {
+        return fallback();
+    }
+}
+
+/**
+ * HTTP 非 200 的 details 文本：先试着按 JSON 解析，命中 node_errors 走排版；
+ * 只有 error.message 时保留其校验头；解析失败回落原文。
+ */
+export function formatComfyPromptErrorDetails(details: string): string {
+    if (!details) return "";
+    try {
+        const parsed = JSON.parse(details) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            if (parsed.node_errors !== undefined) return formatComfyNodeErrors(parsed.node_errors);
+            const error = parsed.error;
+            if (error && typeof error === "object") {
+                const message = String((error as Record<string, unknown>).message ?? "");
+                if (message) return message;
+            }
+        }
+    } catch { /* 非 JSON 原文，照原样回传 */ }
+    return details;
 }
 
 export type H3ActualSubmission = {
@@ -539,7 +595,8 @@ export class ComfyUiBackend {
      * 下一段每步都从磁盘重读权重——实测同一段从 41s/it 退化到 617s/it（3'41" → 10'33"）。
      * 连续生成模式（keepModelCache）根本不会走到这里，条件缓存自然保留。
      */
-    private async releaseComfyModels(comfyUrl: string) {
+    /** 供执行器 OOM 重试复用：POST /free 彻底释放执行缓存和模型。 */
+    async releaseComfyModels(comfyUrl: string) {
         const response = await fetch(`${comfyUrl}/free`, {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -2391,9 +2448,9 @@ export async function submitComfyPrompt(options: {
         options.signal.throwIfAborted();
         try {
             const response = await fetch(`${options.comfyUrl}/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: options.workflow, client_id: options.clientId }), signal: options.signal });
-            if (!response.ok) { const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
+            if (!response.ok) { const raw = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000); const details = formatComfyPromptErrorDetails(raw); throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`); }
             const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
-            if (!body.prompt_id) throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+            if (!body.prompt_id) throw new Error(body.node_errors ? formatComfyNodeErrors(body.node_errors) : "ComfyUI did not return prompt_id");
             return { prompt_id: body.prompt_id, ...(body.node_errors === undefined ? {} : { node_errors: body.node_errors }) };
         } catch (error) {
             const code = notSentCode(error);

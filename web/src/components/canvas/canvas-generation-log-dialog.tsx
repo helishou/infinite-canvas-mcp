@@ -265,6 +265,11 @@ function LogCard({ log, compact, canvasLabel, currentStorageKey, onSelectResult,
     const logParams = log.params && typeof log.params === "object" ? log.params as Record<string, unknown> : {};
     const loopInputs = Array.isArray(logParams.loopInputImages) ? logParams.loopInputImages.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item))) : [];
     const actualSubmission = actualSubmissionText(log.params);
+    // 生图日志的 seed 走 backend 写回的 params.actualSubmission；缺失（老日志/非引擎渠道）显示「-」。
+    const submissionSeed = logParams.actualSubmission && typeof logParams.actualSubmission === "object"
+        ? (logParams.actualSubmission as Record<string, unknown>).seed
+        : undefined;
+    const imageSeedText = typeof submissionSeed === "number" && Number.isFinite(submissionSeed) ? String(submissionSeed) : "-";
     const generationSettings = generationSettingsText(log.params);
     const videoContinuation = videoContinuationText(log.params);
     const latentContinuation = latentContinuationText(log.params);
@@ -279,7 +284,7 @@ function LogCard({ log, compact, canvasLabel, currentStorageKey, onSelectResult,
     return <div className="rounded-lg border border-border p-3 ">
         <div className="flex items-start justify-between gap-3"><div className="flex flex-wrap items-center gap-1.5">{!compact && <Tag color={KIND_COLOR[kind]}>{typeLabel}</Tag>}<Tag color={statusColor}>{compact ? t(`productionCanvas.historyStatus.${log.status}`) : log.status}</Tag>{canvasLabel ? <Tag>{canvasLabel}</Tag> : null}{!compact && <><Tag>{log.platform}</Tag>{log.taskMode ? <Tag>{log.taskMode}</Tag> : null}{log.model ? <Tag>{log.model}</Tag> : null}</>}<span className="text-xs text-muted-foreground">{new Date(log.createdAt).toLocaleString()} · {Math.round(log.durationMs / 1000)}s</span></div>{onDelete && <Button type="text" danger size="small" icon={<Trash2 className="size-3.5" />} onClick={onDelete} />}</div>
         <details open={!compact || undefined}><summary className={compact ? "mt-3 cursor-pointer text-xs text-muted-foreground" : "hidden"}>{t("productionCanvas.historyInputs")}</summary>
-        <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span></div>
+        <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground"><span>节点：{log.nodeId || "-"}</span><span>Clip：{log.segmentId || "-"}</span><span>任务：{log.runtimeTaskId || log.promptId || "等待任务 ID"}</span>{kind === "image" ? <span>Seed：{imageSeedText}</span> : null}</div>
         {references.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-muted-foreground">输入 refs：</span>{references.map((reference, index) => <ReferencePreview key={`${log.id}-ref-${index}`} reference={reference} index={index} onPreview={openPreview} />)}</div> : null}
         {loopInputs.length ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="self-start pt-1 text-muted-foreground">本轮组图：</span>{loopInputs.map((image, index) => <ReferencePreview key={`${log.id}-loop-${index}`} reference={image} index={index} onPreview={openPreview} />)}</div> : null}
         {!loopInputs.length && Number(log.inputCounts?.loopInputs || 0) > 0 ? <div className="mt-2 text-xs text-muted-foreground">本轮组图：{log.inputCounts.loopInputs} 张（此历史日志未保存缩略图）</div> : null}

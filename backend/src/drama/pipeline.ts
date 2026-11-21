@@ -159,6 +159,71 @@ const listOf = (value: unknown): string[] => Array.isArray(value)
 const cleanName = (value: unknown): string => textOf(value).replace(/[（(][^）)]*[）)]/g, "").replace(/^[、,，\s]+|[、,，\s]+$/g, "");
 
 /**
+ * 归一比较键（抄影策 internal/production/timing.go NormalizeName）：
+ * 小写 + 去首尾空白 + 去所有空格/标点/符号，使「妻，」「 妻 」「Narrator」归到同一稳定 key。
+ */
+export function normalizeName(value: unknown): string {
+    return String(value ?? "").toLowerCase().trim().replace(/[\s\p{P}\p{S}]/gu, "");
+}
+
+const NARRATOR_KEYS = new Set(["旁白", "narrator", "画外音"]);
+
+/** 旁白判定（抄影策 timing.go IsNarrator）：归一后命中 旁白/narrator/画外音。 */
+export function isNarrator(speaker: unknown): boolean {
+    return NARRATOR_KEYS.has(normalizeName(speaker));
+}
+
+/**
+ * 角色别名索引（抄影策 timing.go CastIndex）：归一 key → 标准名，一个标准名可注册多个别名。
+ *
+ * 注册来源：names 里的标准名（原写法 + cleanName 去括号写法）优先占位；
+ * 再叠加 character_registry[].aliases/alias、asset_cards、subject_registry 里的别名，
+ * 全部指向同一标准名（若该标准名命中 names 则以 names 里的写法为准，保证 speaker 仍是已知角色）。
+ * source 无 aliases 数据时，仅凭 names 也能把去括号写法与去空格标点写法归一到同一角色。
+ */
+export function buildCastIndex(source: Record<string, any> | undefined, names: string[]): Map<string, string> {
+    const index = new Map<string, string>();
+    const register = (key: unknown, canonical: string) => {
+        const normalized = normalizeName(key);
+        if (normalized && canonical && !index.has(normalized)) index.set(normalized, canonical);
+    };
+    // 标准名优先：names 先注册，别名不得覆盖。
+    for (const name of names) {
+        const canonical = cleanName(name) || textOf(name);
+        if (!canonical) continue;
+        register(name, canonical);        // 原写法（归一后）
+        register(canonical, canonical);   // cleanName 去括号写法（归一后）
+    }
+    const canonicalInNames = (value: unknown): string => {
+        const cleaned = cleanName(value);
+        return names.find(name => cleanName(name) === cleaned) || cleaned;
+    };
+    for (const row of rowsOf(source?.character_registry)) {
+        const canonical = canonicalInNames(row.name ?? row.characterName);
+        if (!canonical) continue;
+        register(canonical, canonical);
+        for (const alias of listOf(row.aliases ?? row.alias)) register(alias, canonical);
+    }
+    for (const row of rowsOf(source?.asset_cards)) {
+        const kind = textOf(row.asset_kind ?? row.kind);
+        if (kind && kind !== "character") continue;
+        const canonical = canonicalInNames(row.asset_name ?? row.name ?? row.character_name);
+        if (!canonical) continue;
+        register(canonical, canonical);
+        for (const alias of listOf(row.aliases ?? row.alias)) register(alias, canonical);
+    }
+    for (const row of rowsOf(source?.subject_registry)) {
+        const kind = textOf(row.kind);
+        if (kind && kind !== "character") continue;
+        const canonical = canonicalInNames(row.name);
+        if (!canonical) continue;
+        register(canonical, canonical);
+        for (const alias of listOf(row.aliases ?? row.alias)) register(alias, canonical);
+    }
+    return index;
+}
+
+/**
  * 已知角色名真值优先级：character_registry → asset_cards(仅 character 类) → subject_registry(仅 character)，
  * 蟒妻这类注册表全空时，从 script_scenes 表头「场N｜场景｜时段｜崇良、妻｜动作」第4列兜底；
  * 最后用 shot.visual/title 只做「已知名字是否出现在该镜头」的匹配，不发明新名字。
@@ -237,7 +302,12 @@ export function buildDialogueUserPrompt(shots: PromptShotRef[], names: string[])
  * 容错：```json 围栏 / 前后闲聊 / 字段缺失 / index 越界 / speaker 未登记 / 单句超20字 / 多于2句，均逐条过滤。
  * 结构性失败（无 JSON、无 shots、解析异常）抛错，由调用方 warn 降级。
  */
-export function parseDerivedUtterances(raw: string, shots: PromptShotRef[], names: string[]): Array<Record<string, any>> {
+export function parseDerivedUtterances(
+    raw: string,
+    shots: PromptShotRef[],
+    names: string[],
+    castSource?: Record<string, any>,
+): Array<Record<string, any>> {
     const source = String(raw || "");
     const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
     const body = fenced ? fenced[1] : source;
@@ -248,7 +318,14 @@ export function parseDerivedUtterances(raw: string, shots: PromptShotRef[], name
     const rows: Array<Record<string, any>> = Array.isArray(parsed?.shots) ? parsed.shots : [];
     if (!rows.length) throw new Error("DIALOGUE_JSON_EMPTY");
     const byIndex = new Map(shots.map(shot => [shot.index, shot]));
+    const castIndex = buildCastIndex(castSource, names);
     const canonical = (value: string): string => {
+        // 旁白 speaker 保留，不当作未登记角色丢弃（影策 IsNarrator）。
+        if (isNarrator(value)) return "旁白";
+        // 影策 CastIndex：归一 key 精确查表，命中即返回标准名。
+        const byKey = castIndex.get(normalizeName(value));
+        if (byKey) return byKey;
+        // 降级：原精确 + 包含匹配，保留对旧行为的兼容。
         const exact = names.find(name => name === value);
         if (exact) return exact;
         return names.find(name => name.length >= 1 && (value.includes(name) || name.includes(value))) || "";
@@ -1450,7 +1527,7 @@ export class DramaPipeline {
                 model: promptOpts.videoPromptModel,
                 reasoningEffort: promptOpts.textThinking?.prompt,
             });
-            const derived = parseDerivedUtterances(raw, shotRefs, names);
+            const derived = parseDerivedUtterances(raw, shotRefs, names, source);
             this.store.log(dramaId, `运行期补对白：${derived.length}/${shotRefs.length} 个镜头（仅内存，不写回制作稿）`);
             return derived;
         } catch (error) {

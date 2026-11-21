@@ -867,8 +867,13 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       // 只按当前对话类型给一侧，另一侧已保存的模型会从下拉里消失，表现就是「引擎被还原」。
       const errors: Array<{ message: string }> = [];
       let native: Awaited<ReturnType<typeof listCodexModels>>["data"] = [];
-      try { native = (await listCodexModels(emit)).data; }
-      catch (error) { errors.push({ message: error instanceof Error ? error.message : "无法读取 Codex CLI 模型列表" }); }
+      // 只有真正需要 Codex 原生模型时才调用：Hermes 会话的模型下拉不需要它，
+      // 无条件调用会启动本机 Codex app-server，联网不可用时把本接口拖到 5 秒并刷慢操作告警。
+      const needsCodexNative = source === "codex" || !useHermes();
+      if (needsCodexNative) {
+        try { native = (await listCodexModels(emit)).data; }
+        catch (error) { errors.push({ message: error instanceof Error ? error.message : "无法读取 Codex CLI 模型列表" }); }
+      }
       if (source === "codex") return void res.json({ ok: true, data: native, ...(errors.length ? { errors } : {}) });
       const channels = hermes ? hermes.models(native).data : [];
       // 只留一个 isDefault：渠道已有默认（settings.agentModel）时，原生行不能再自称默认，
@@ -1050,11 +1055,16 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       const workspace = ensureSiteWorkspace(config);
       // 历史面板要看到「所有」对话：Hermes 与 Codex 各存一套索引，按当前引擎二选一会让另一边凭空消失。
       const searchTerm = String(req.query.searchTerm || "");
-      const codexThreads = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm }).catch(() => ({ data: [], nextCursor: null }) as { data: unknown[]; nextCursor: null });
+      const source = String(req.query.source || "");
+      // 只请求 Hermes 一侧时不要拉 Codex：无条件 listCodexThreads 会启动本机
+      // Codex app-server，联网不可用时把本接口拖到 5 秒并刷慢操作告警。
+      const codexThreads = source === "hermes" || source === "llm"
+        ? { data: [] as unknown[], nextCursor: null }
+        : await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm }).catch(() => ({ data: [], nextCursor: null }) as { data: unknown[]; nextCursor: null });
       const hermesThreads = hermes ? hermes.list(workspace.workspacePath, searchTerm) : { data: [] as unknown[], nextCursor: null };
-      const result = req.query.source === "codex"
+      const result = source === "codex"
         ? codexThreads
-        : req.query.source === "llm" || req.query.source === "hermes"
+        : source === "llm" || source === "hermes"
           ? hermesThreads
           : {
               data: [...(codexThreads.data || []), ...((hermesThreads.data || []) as unknown[])].sort((left, right) => Number((right as { updatedAt?: number }).updatedAt || 0) - Number((left as { updatedAt?: number }).updatedAt || 0)),

@@ -441,6 +441,8 @@ export default {
         title: "我的资产",
         description: "按剧目管理角色、图片、视频、音频和文本资产，制作时快速查找复用。",
         search: "搜索标题、内容、标签或来源",
+        searchByPrompt: "搜索标题、内容、提示词、标签或来源",
+        copyPrompt: "复制提示词",
         type: "类型",
         export: "导出资产",
         import: "导入资产",
@@ -1903,6 +1905,7 @@ stopTitle: "停止生成？", stopDescription: "当前生成请求会被中断�
         updated: "已获取最新版本信息",
         updateFailed: "获取最新版本信息失败",
         types: { added: "新增", fixed: "修复", changed: "调整", optimized: "优化", docs: "文档" },
+        skipThisVersion: "跳过本次更新",
     },
     localAnalytics: {
         title: "本地使用统计",

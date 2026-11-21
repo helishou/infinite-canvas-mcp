@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { fetchBackendGenerationLogs, fetchBackendTasks, type BackendGenerationLog, type BackendRuntimeTask } from "@/services/backend-api";
-import { taskProgress } from "@/lib/canvas/task-progress";
+import { frameInterpolationTiming, isFrameInterpolationTask, taskProgress } from "@/lib/canvas/task-progress";
 import { useBackendStore } from "@/stores/use-backend-store";
 import { useTaskConfirmationStore } from "@/stores/use-task-confirmation-store";
 import { taskConfirmationReminders } from "@/lib/confirmation-reminders";
@@ -90,6 +90,19 @@ export function useRunningTaskCount(projectId: string) {
 
     const groups = useMemo(() => groupActiveTasks([...active.values()]), [active]);
 
+    // 插帧任务后端进度会长时间停滞；用最早一个运行中插帧任务的 createdAt 作锚，
+    // 复用 useElapsedSeconds 的 1s tick 给角标进度补一条随时间前进的下限。
+    const interpolationAnchor = useMemo(() => {
+        let earliest: string | undefined;
+        for (const group of groups) {
+            const createdAt = group.parent.createdAt;
+            if (group.parent.status !== "running" || !createdAt || !isFrameInterpolationTask(group.parent)) continue;
+            if (!earliest || Date.parse(createdAt) < Date.parse(earliest)) earliest = createdAt;
+        }
+        return earliest;
+    }, [groups]);
+    const interpolationElapsedSeconds = useElapsedSeconds(interpolationAnchor, Boolean(interpolationAnchor));
+
     useEffect(() => {
         setProgressHistory((current) => {
             let changed = false;
@@ -112,7 +125,7 @@ export function useRunningTaskCount(projectId: string) {
     for (const group of groups) {
         if (group.parent.status === "running") {
             running += 1;
-            runningProgresses.push(taskProgress(group.parent, group.children, progressHistory[group.parent.id]));
+            runningProgresses.push(taskProgress(group.parent, group.children, progressHistory[group.parent.id], frameInterpolationTiming(group.parent, interpolationElapsedSeconds)));
         } else if (group.parent.status === "queued") {
             queued += 1;
         } else if (group.parent.status === "awaiting_confirmation") {

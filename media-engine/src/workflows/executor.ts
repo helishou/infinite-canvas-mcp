@@ -2,7 +2,7 @@ import { comfyWorkflowSwitch } from "../comfyui/workflow-switch.js";
 import { ComfyExecutionClock, comfyTimeoutMessage, readComfyQueueState, resolveComfyTimeoutMs } from "../comfyui/execution-clock.js";
 import type { WorkflowConfig, WorkflowField, RuntimeTask, EnginePersistence } from "../contracts.js";
 import type { ComfyUiBackend } from "../comfyui/bridge.js";
-import { collectOutputMedia } from "../comfyui/bridge.js";
+import { collectOutputMedia, extractComfyErrorMessage, formatComfyNodeErrors, formatComfyPromptErrorDetails } from "../comfyui/bridge.js";
 import type { MediaStore, TaskStore } from "../contracts.js";
 import type { EngineEventBus } from "../events.js";
 import { redactInlineMedia } from "../runtime/redact-inline-media.js";
@@ -45,6 +45,15 @@ type RunResult = {
      */
     warning?: string;
 };
+
+/** OOM 判据与 backend/src/error-taxonomy.ts 的 DEVICE_OUT_OF_MEMORY 保持一致。 */
+function isComfyOomError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /OOM|out of memory|OutOfMemory|显存不足|CUDA error/i.test(message);
+}
+
+/** 与 backend/src/error-taxonomy.ts fixForCode(DEVICE_OUT_OF_MEMORY).summary 同一文案。 */
+const COMFY_OOM_FIX = "降低分辨率/帧数或释放显存后作为新意图提交；原样重提必定再次 OOM";
 
 /**
  * 整体工作流失败时，尝试从指定的输出节点抢救已有产物。
@@ -971,10 +980,27 @@ export class WorkflowExecutor {
         // 同一 nodeId、同一 prompt、同一产物 storageKey，只有耗时和任务 ID 不同。
         // 父日志（platform:"canvas-image"）字段更全：模型、参考图、loopInputImages、t2i/i2i。
         const skipLog = Boolean(parentTaskId);
+        let oomRetried = false;
         try {
             this.tasks.update(task.id, { status: "running", progress: 0.05 });
-            const finalResult = await this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name,
+            const runOnce = () => this.executeWorkflow(task, prepared, url, controller, clientId, outputNodes, name,
                 previewNodeId ? { nodeId: previewNodeId, taskIds: [task.id, parentTaskId] } : undefined);
+            let finalResult: Awaited<ReturnType<typeof runOnce>>;
+            try {
+                finalResult = await runOnce();
+            } catch (firstError) {
+                // OOM：先 POST /free 彻底释放模型与执行缓存，再原样重跑一次。只重试一次，避免死循环。
+                if (!isComfyOomError(firstError) || oomRetried || controller.signal.aborted) throw firstError;
+                oomRetried = true;
+                const firstMessage = firstError instanceof Error ? firstError.message : String(firstError);
+                this.tasks.addEvent(task.id, "oom_retry", { attempt: 1, error: firstMessage });
+                try {
+                    await this.bridge.releaseComfyModels(url);
+                } catch (freeError) {
+                    console.warn(`[workflows:run] OOM 后释放模型失败: ${freeError instanceof Error ? freeError.message : String(freeError)}`);
+                }
+                finalResult = await runOnce();
+            }
             // 必须在标记成功之前归一槽位：父任务一旦成功，下一段立刻按 clip_00001 取种子。
             // 归一失败不判任务失败（视频已产出），留事件并让下一段取种时给出明确报错。
             if (latentV15SlotFolder) {
@@ -1010,7 +1036,12 @@ export class WorkflowExecutor {
             });
             return { taskId: task.id, ...finalResult };
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            let message = error instanceof Error ? error.message : String(error);
+            // OOM 重试仍失败：用 error-taxonomy 的中文 fix 覆盖写回执，原始错误留在事件里。
+            if (oomRetried && isComfyOomError(error)) {
+                this.tasks.addEvent(task.id, "oom_retry_exhausted", { originalError: message, fix: COMFY_OOM_FIX });
+                message = COMFY_OOM_FIX;
+            }
             await this.releaseAfterRun(url);
             if (this.tasks.get(task.id)?.status !== "cancelled") {
                 this.tasks.update(task.id, { status: "failed", error: message });
@@ -1267,12 +1298,13 @@ export class WorkflowExecutor {
                     throw workflowRequestError("提交 ComfyUI 工作流", promptEndpoint, error);
                 }
                 if (!response.ok) {
-                    const details = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
+                    const raw = (await response.text()).trim().replace(/\s+/g, " ").slice(0, 4000);
+                    const details = formatComfyPromptErrorDetails(raw);
                     throw new Error(`ComfyUI /prompt failed: HTTP ${response.status}${details ? `: ${details}` : ""}`);
                 }
                 const body = await response.json() as { prompt_id?: string; node_errors?: unknown };
                 if (!body.prompt_id) {
-                    throw new Error(body.node_errors ? JSON.stringify(body.node_errors) : "ComfyUI did not return prompt_id");
+                    throw new Error(body.node_errors ? formatComfyNodeErrors(body.node_errors) : "ComfyUI did not return prompt_id");
                 }
                 return { ...body, prompt_id: body.prompt_id };
             }, controller.signal);
@@ -1352,7 +1384,8 @@ export class WorkflowExecutor {
                     if (statusStr === "error" || statusStr === "failed") {
                         const rescued = outputNodes.length ? await rescueOutputsFromFailure(item?.outputs, outputNodes, comfyUrl, this.media, controller) : null;
                         if (rescued) return { promptId, outputs: rescued.outputs, media: rescued.media, status: { status_str: "success", completed: true }, warning: `工作流整体失败（${statusStr}），已采用指定输出节点的产物` };
-                        throw new Error(`ComfyUI 执行失败：${statusStr}`);
+                        // 带上 ComfyUI 的节点异常详情：OOM 等关键字要靠它判重试，不能只剩「error」。
+                        throw new Error(`ComfyUI 执行失败：${statusStr}：${extractComfyErrorMessage(item?.status)}`);
                     }
                     // An output node finishing is not the prompt finishing.
                     if (statusStr === "success" || item?.status?.completed === true) {

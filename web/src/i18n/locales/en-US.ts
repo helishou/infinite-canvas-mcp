@@ -440,6 +440,8 @@ export default {
         title: "My Assets",
         description: "Organize characters, images, video, audio, and text by drama for quick reuse during production.",
         search: "Search titles, content, tags, or sources",
+        searchByPrompt: "Search titles, content, prompt, tags, or sources",
+        copyPrompt: "Copy prompt",
         type: "Type",
         export: "Export assets",
         import: "Import assets",
@@ -1902,6 +1904,7 @@ stopTitle: "Stop generation?", stopDescription: "The current request will be int
         updated: "Latest version information loaded",
         updateFailed: "Failed to load the latest version information",
         types: { added: "Added", fixed: "Fixed", changed: "Changed", optimized: "Optimized", docs: "Docs" },
+        skipThisVersion: "Skip this update",
     },
     localAnalytics: {
         title: "Local usage analytics",

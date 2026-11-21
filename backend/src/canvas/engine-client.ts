@@ -200,8 +200,8 @@ export class CanvasEngineClient {
         throw new EngineRequestError("等待视频任务超时；任务仍在运行，可用 task_id 轮询", 504, taskId);
     }
 
-    async generateImages(request: EngineImageRequest): Promise<{ taskId: string; media: EngineMedia[] }> {
-        const body = await this.request<{ data?: Array<{ url?: string }>; task_id?: string }>("/v1/images/generations", {
+    async generateImages(request: EngineImageRequest): Promise<{ taskId: string; media: EngineMedia[]; seed?: number }> {
+        const body = await this.request<{ data?: Array<{ url?: string }>; task_id?: string; seed?: number }>("/v1/images/generations", {
             method: "POST",
             body: JSON.stringify({
                 model: request.model,
@@ -213,7 +213,11 @@ export class CanvasEngineClient {
                 ...(request.count && request.count > 1 ? { n: request.count } : {}),
             }),
         });
-        return { taskId: String(body.task_id ?? ""), media: (body.data ?? []).map((item) => ({ url: String(item.url ?? "") })) };
+        return {
+            taskId: String(body.task_id ?? ""),
+            media: (body.data ?? []).map((item) => ({ url: String(item.url ?? "") })),
+            ...(typeof body.seed === "number" && Number.isFinite(body.seed) ? { seed: body.seed } : {}),
+        };
     }
 
     async cancel(taskId: string): Promise<void> {

@@ -68,6 +68,20 @@ test("类型与搜索筛选同样进入侧栏计数", () => {
     assert.equal(countByDrama(assets, { ...base, keyword: "a2" }, "d2"), 0);
 });
 
+test("关键字仅命中 metadata.prompt 时，列表与侧栏计数都算命中", () => {
+    const promptAssets = [
+        asset("p1", "image", { metadata: { prompt: "赛博雨夜 neon alley" } }),
+        asset("p2", "video", { metadata: { prompt: "   " } }),
+        asset("p3", "audio", { metadata: { prompt: 42 } }),
+    ];
+    const filters: AssetLibraryFilters = { ...base, keyword: "neon alley" };
+    assert.deepEqual(filterAssets(promptAssets, filters).map(item => item.id), ["p1"]);
+    assert.equal(countByDrama(promptAssets, filters, ALL_DRAMAS), 1);
+    assert.equal(countByFolder(promptAssets, filters, null), 1);
+    // 空白字符串与非字符串不进索引，不能把 "42" 之类搜出来。
+    assert.equal(countByDrama(promptAssets, { ...base, keyword: "42" }, ALL_DRAMAS), 0);
+});
+
 test("每个入口显示的数字就是点进去看到的条数", () => {
     const filters: AssetLibraryFilters = { ...base, keyword: "a" };
     for (const dramaId of [ALL_DRAMAS, UNASSIGNED_DRAMA, "d1", "d2"]) {

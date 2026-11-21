@@ -22,13 +22,19 @@ export function isTagFolder(folderId: string | null) {
     return Boolean(folderId && folderId.startsWith(TAG_FOLDER_PREFIX));
 }
 
+/** metadata 是 Record<string, unknown>：只有非空字符串提示词才进索引，避免把对象/数字搜成 "[object Object]"。 */
+function assetPromptText(asset: Asset) {
+    const prompt = asset.metadata?.prompt;
+    return typeof prompt === "string" && prompt.trim() ? prompt : "";
+}
+
 export function assetSearchText(asset: Asset) {
     const extra = asset.kind === "text" ? asset.data.content
         : asset.kind === "character" ? `${asset.data.name} ${asset.data.description} ${asset.data.voiceName} ${asset.data.voiceDescription || ""} ${asset.data.images.length} images`
         : asset.kind === "scene" ? `${asset.data.name} ${asset.data.description} ${asset.data.colorCardPrompt}`
         : asset.kind === "prop" ? `${asset.data.name} ${asset.data.description}`
         : asset.data.mimeType;
-    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? "" : (asset.tags || []).join(" "), extra].join(" ").toLowerCase();
+    return [asset.title, asset.source || "", asset.note || "", asset.kind === "character" || asset.kind === "scene" || asset.kind === "prop" ? "" : (asset.tags || []).join(" "), extra, assetPromptText(asset)].join(" ").toLowerCase();
 }
 
 export function matchesAssetDrama(asset: Asset, dramaId: string, dramaIds: readonly string[]) {

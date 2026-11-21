@@ -25,7 +25,7 @@ type VersionReleaseModalProps = {
 
 export function VersionReleaseModal({ className, style }: VersionReleaseModalProps) {
     const { t } = useTranslation();
-    const { open, setOpen, openReleaseModal, latestVersion, releases, checking, hasNewVersion, checkLatestRelease } = useVersionCheck();
+    const { open, setOpen, openReleaseModal, latestVersion, releases, checking, hasNewVersion, checkLatestRelease, skipThisVersion } = useVersionCheck();
 
     return (
         <>
@@ -41,7 +41,27 @@ export function VersionReleaseModal({ className, style }: VersionReleaseModalPro
                     {hasNewVersion ? <span className="absolute -right-1.5 -top-1 size-1.5 rounded-full bg-green-500" /> : null}
                 </span>
             </button>
-            <Modal title={t("version.title")} open={open} width={680} centered footer={null} onCancel={() => setOpen(false)}>
+            <Modal
+                title={t("version.title")}
+                open={open}
+                width={680}
+                centered
+                footer={
+                    <div className="flex justify-end">
+                        <button
+                            type="button"
+                            className="cursor-pointer rounded-md border border-border bg-transparent px-3 py-1.5 text-xs text-muted-foreground transition hover:text-foreground"
+                            onClick={() => {
+                                skipThisVersion(latestVersion);
+                                setOpen(false);
+                            }}
+                        >
+                            {t("version.skipThisVersion")}
+                        </button>
+                    </div>
+                }
+                onCancel={() => setOpen(false)}
+            >
                 <div className="mb-5 grid grid-cols-2 gap-3">
                     <div className="rounded-lg border border-border p-3 ">
                         <div className="text-xs text-muted-foreground">{t("version.currentVersion")}</div>

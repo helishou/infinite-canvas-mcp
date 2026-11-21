@@ -5,9 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Empty, Modal, Progress, Segmented, Select, Tag, Tooltip, message } from "antd";
 import { ChevronDown, ChevronRight, FileText, ListChecks, RefreshCw, Square } from "lucide-react";
 import { backendMediaUrl, cancelBackendTask, fetchBackendCanvasFolders, fetchBackendDramaEpisodes, fetchBackendProject, fetchBackendTasks, resolveBackendH3Confirmation, retryBackendTask, type BackendRuntimeTask } from "@/services/backend-api";
-import { useRunningTaskCount } from "@/hooks/use-running-task-count";
+import { useElapsedSeconds, useRunningTaskCount } from "@/hooks/use-running-task-count";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { taskProgress } from "@/lib/canvas/task-progress";
+import { frameInterpolationTiming, isFrameInterpolationTask, taskProgress } from "@/lib/canvas/task-progress";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasGenerationLogDialog } from "./canvas-generation-log-dialog";
 
@@ -116,6 +116,18 @@ function modelShortName(model?: string | null): string | undefined {
 type CanvasChoice = { id: string; label: string };
 const ALL_CANVASES = "__all_drama_canvases__";
 
+/** 任务信息行的已用时间：活跃任务按 createdAt 秒级跳动，终态按 createdAt→updatedAt 结算。 */
+function TaskElapsedText({ task }: { task: BackendRuntimeTask }) {
+    const { t } = useTranslation();
+    const active = task.status === "running" || task.status === "queued" || task.status === "awaiting_confirmation";
+    const seconds = useElapsedSeconds(task.createdAt, active && Boolean(task.createdAt));
+    if (!task.createdAt) return null;
+    const finishedMs = task.updatedAt ? Date.parse(task.updatedAt) - Date.parse(task.createdAt) : NaN;
+    const text = active ? `${seconds}s` : Number.isFinite(finishedMs) && finishedMs >= 0 ? `${Math.round(finishedMs / 1000)}s` : null;
+    if (!text) return null;
+    return <span>{t("canvas.task.elapsed")} {text}</span>;
+}
+
 export function CanvasTaskCenter({ open, projectId, dramaId, onClose }: { open: boolean; projectId: string; dramaId?: string | null; onClose: () => void }) {
     const { t } = useTranslation();
     const [locallyPaused, setLocallyPaused] = useState(new Set<string>());
@@ -199,6 +211,19 @@ export function CanvasTaskCenter({ open, projectId, dramaId, onClose }: { open: 
 
     const groups = useMemo(() => groupTasks(tasks), [tasks]);
 
+    // 插帧任务后端进度会长时间停滞；用最早一个运行中插帧任务的 createdAt 作锚，
+    // 复用 useElapsedSeconds 的 1s tick 给弹窗进度条补一条随时间前进的下限。
+    const interpolationAnchor = useMemo(() => {
+        let earliest: string | undefined;
+        for (const group of groups) {
+            const createdAt = group.parent.createdAt;
+            if (group.parent.status !== "running" || !createdAt || !isFrameInterpolationTask(group.parent)) continue;
+            if (!earliest || Date.parse(createdAt) < Date.parse(earliest)) earliest = createdAt;
+        }
+        return earliest;
+    }, [groups]);
+    const interpolationElapsedSeconds = useElapsedSeconds(interpolationAnchor, Boolean(interpolationAnchor));
+
     useEffect(() => {
         setProgressHistory((current) => {
             let changed = false;
@@ -278,7 +303,8 @@ export function CanvasTaskCenter({ open, projectId, dramaId, onClose }: { open: 
             {groups.map((group) => {
                 const { parent, children } = group;
                 const hasChildren = children.length > 0;
-                const progress = taskProgress(parent, children, progressHistory[parent.id]);
+                const timing = frameInterpolationTiming(parent, interpolationElapsedSeconds);
+                const progress = taskProgress(parent, children, progressHistory[parent.id], timing);
                 const isExpanded = expanded.has(parent.id);
                 const terminal = TERMINAL_STATUSES.has(parent.status);
                 return <div key={parent.id} className="rounded-lg border border-border">
@@ -307,6 +333,7 @@ export function CanvasTaskCenter({ open, projectId, dramaId, onClose }: { open: 
                             <span>节点：<span title={parent.nodeId || ""}>{nodeLabel(parent, labels)}</span></span>
                             <span>Clip：<span title={parent.segmentId || ""}>{clipLabel(parent, labels)}</span></span>
                             <span>执行器：{parent.executor || "-"}</span>
+                            <TaskElapsedText task={parent} />
                             {hasChildren ? <span className="font-medium text-muted-foreground">{summarizeChildren(children)}</span> : null}
                         </div>
                         {parent.status === "awaiting_confirmation" && parent.result?.confirmation?.pending?.[0] ? <div className="mt-2 text-xs">
@@ -333,7 +360,7 @@ export function CanvasTaskCenter({ open, projectId, dramaId, onClose }: { open: 
                                         {!childTerminal && child.status !== "awaiting_confirmation" ? <Button danger type="text" size="small" icon={<Square className="size-3.5" />} onClick={() => void cancel(child.id)}>取消</Button> : null}
                                     </div>
                                 </div>
-                                <Progress percent={Math.round((child.progress || 0) * 100)} size="small" status={progressStatus(child.status)} />
+                                <Progress percent={Math.round(taskProgress(child, [], progressHistory[child.id], timing) * 100)} size="small" status={progressStatus(child.status)} />
                                 <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                                     <span>节点：<span title={child.nodeId || ""}>{nodeLabel(child, labels)}</span></span>
                                     <span>Clip：<span title={child.segmentId || ""}>{clipLabel(child, labels)}</span></span>

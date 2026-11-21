@@ -93,6 +93,41 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
         setExpanded(true);
     };
 
+    // 底部「模型/设置 + 发送」条：主面板与放大 Modal 共用同一份 JSX，
+    // 保留 min-w-0 + shrink-0 链，确保放大态下限 560px 时设置项与发送按钮同行不被裁切。
+    const generationControls = (
+        <div className="mt-2 flex min-w-0 items-center gap-1.5">
+            <CanvasGenerationControls
+                node={node}
+                mode={mode}
+                config={config}
+                onConfigChange={onConfigChange}
+                referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
+                imageReferenceCount={referenceCount}
+                textCount={node.metadata?.textCount || 1}
+                onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
+                layout="compact"
+                className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] items-center gap-1.5"
+                onImageSettingsOpenChange={onImageSettingsOpenChange}
+                onImageCompatibilityChange={setImageCompatible}
+                onImagePromptRequiredChange={setImagePromptRequired}
+            />
+            <Tooltip title={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}>
+                <Button
+                    type="primary"
+                    size="small"
+                    className="!grid !h-7 !w-7 !min-w-7 shrink-0 place-items-center !rounded-md !p-0"
+                    danger={isRunning}
+                    disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (mode === 'image' && !imageCompatible) || (promptRequired && !prompt.trim()))}
+                    onClick={() => (isRunning ? onStop(node.id) : submit())}
+                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                >
+                    {isRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+                </Button>
+            </Tooltip>
+        </div>
+    );
+
     return (
         <div
             data-canvas-no-zoom
@@ -142,37 +177,8 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                     ]}
                 />
             ) : null}
-            <div className="mt-2 flex min-w-0 items-center gap-1.5">
-                <CanvasGenerationControls
-                    node={node}
-                    mode={mode}
-                    config={config}
-                    onConfigChange={onConfigChange}
-                    referenceCounts={{ image: referenceCount, audio: audioReferenceCount }}
-                    imageReferenceCount={referenceCount}
-                    textCount={node.metadata?.textCount || 1}
-                    onTextCountChange={(next: number) => onConfigChange(node.id, { textCount: next })}
-                    layout="compact"
-                    className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] items-center gap-1.5"
-                    onImageSettingsOpenChange={onImageSettingsOpenChange}
-                    onImageCompatibilityChange={setImageCompatible}
-                    onImagePromptRequiredChange={setImagePromptRequired}
-                />
-                <Tooltip title={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}>
-                    <Button
-                        type="primary"
-                        size="small"
-                        className="!grid !h-7 !w-7 !min-w-7 shrink-0 place-items-center !rounded-md !p-0"
-                        danger={isRunning}
-                        disabled={!isRunning && (!textStatus.ready || textStatus.blocked || (mode === 'image' && !imageCompatible) || (promptRequired && !prompt.trim()))}
-                        onClick={() => (isRunning ? onStop(node.id) : submit())}
-                        aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                    >
-                        {isRunning ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
-                    </Button>
-                </Tooltip>
-            </div>
-            <Modal title={`${t("canvas.promptPanel.editorTitle")} · ${node.title || t("canvas.node.untitled")}`} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
+            {generationControls}
+            <Modal title={`${t("canvas.promptPanel.editorTitle")} · ${node.title || t("canvas.node.untitled")}`} open={expanded} centered width="clamp(560px, min(92vw, calc(100vw - 64px)), 920px)" style={{ maxWidth: "calc(100vw - 24px)" }} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
                     <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} historyReferences={visibleHistoryReferences} onClearHistoryReferences={clearHistoryReferences} onDisconnect={onDisconnectReference} onReorder={onReorderReference} reorderableSourceNodeIds={reorderableSourceNodeIds} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
                     <CanvasCollaborativeText
@@ -182,6 +188,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onConfigChange, 
                         style={{ background: "transparent", borderColor: theme.toolbar.border, color: theme.node.text }}
                         placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
                     />
+                    {generationControls}
                 </div>
             </Modal>
         </div>

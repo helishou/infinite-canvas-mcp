@@ -1601,8 +1601,10 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
         const videoStatus = str(clip?.status);
         const videoError = str(clip?.errorDetails).trim() || str(clipFailureByTarget[segId]).trim();
         const videoDuration = Number(clip?.duration || 0) || sec;
-        const prompt = str(art?.prompt || "");
-        const refs = rows(art?.references);
+        // 创作真值优先取画布段（clip.prompt/referenceBindings），artifact 只是过时的编译快照，作兜底。
+        const prompt = str(clip?.prompt || "") || str(art?.prompt || "");
+        const canvasRefs = Array.isArray(clip?.referenceBindings) ? clip!.referenceBindings! : [];
+        const refs = canvasRefs.length ? rows(canvasRefs) : rows(art?.references);
         // 后端派生真值：draft segment.state 挂 promptStatus/wait/upstream/references；无 state 时全部缺省，不编造。
         const segState = seg.state && typeof seg.state === "object" && !Array.isArray(seg.state) ? seg.state as StudioSegmentState : undefined;
         const stateRefs: StudioSegmentState["references"] = Array.isArray(segState?.references) ? segState!.references! : [];
@@ -1632,9 +1634,14 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
         });
         const hasVideo = Boolean(art && str(art.status) !== "stale" && (art.receipt || art.result));
         // 影策优先级真值来自 segment.state；画布 H3 段 status/errorDetails/inputOutdated 仍是本地真实字段，一并传入。
+        // 画布段已成为创作真值（prompt/refs 优先取画布）：当画布段确有提示词且生成成功时，
+        // artifact 的 stale 只是过时编译快照，不该再显示「提示词已过期」；仅画布无提示词时才沿用 artifact 状态派生。
+        const canvasHasPrompt = Boolean(clip?.prompt && str(clip!.prompt).trim());
+        const canvasOk = canvasHasPrompt && ["success", "ready", "succeeded"].includes(videoStatus);
+        const effectivePromptStatus = canvasOk ? undefined : segState?.promptStatus;
         const state = segmentCardState({
-            prompt, artStatus: str(art?.status), videoStatus, inputOutdated: videoInputOutdated, hasVideo, errorDetails: videoError,
-            promptStatus: segState?.promptStatus,
+            prompt, artStatus: canvasOk ? "ready" : str(art?.status), videoStatus, inputOutdated: videoInputOutdated, hasVideo, errorDetails: videoError,
+            promptStatus: effectivePromptStatus,
             promptError: segState?.promptError,
             waitReason: segState?.waitReason,
             upstreamStage: segState?.upstreamStage,

@@ -21,7 +21,8 @@ export type WorkflowDurationTarget = {
  */
 export function durationToFrames(seconds: number, fps = 24): number {
     const frames = Math.max(5, Math.round(seconds * fps));
-    return frames + (5 - frames % 17) % 17;
+    // 向上吸附到 17n+5 网格（H3 硬约束），保证产出不短于配置时长。
+    return frames + (17 - (frames - 5) % 17) % 17;
 }
 
 /** 秒槽保留三位小数，避免被 buildParams 的 Math.round 抹成整数（6.5s 不能变 7s）。 */

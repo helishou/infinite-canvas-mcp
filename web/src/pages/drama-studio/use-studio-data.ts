@@ -128,6 +128,9 @@ export type StudioClipMedia = {
     generatedAt?: string;
     /** 画布 H3 节点 metadata.errorDetails（节点级真实失败原因）。段卡片失败态据此显示原因，无则不编造。 */
     errorDetails?: string;
+    /** 画布 H3 段的创作真值：提示词与参考图绑定。制作台段卡优先显示画布内容，artifact 只作 fallback。 */
+    prompt?: string;
+    referenceBindings?: ReadonlyArray<Record<string, unknown>>;
 };
 
 /** 段 targetId → 画布 H3 节点 errorDetails：失败段无成片、进不了 clipMedia，靠这张表也能显示失败原因。 */
@@ -499,12 +502,14 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                     // 节点级失败原因按段 targetId 归集（只记录有真实原因的；[object Object] 等非文本忽略）。
                     if (targetId && nodeError && nodeError !== "[object Object]") errorsByTarget[targetId] = nodeError;
                     const key = String(s.resultStorageKey || "");
-                    if (!key.startsWith("video:")) continue;
                     const results = Array.isArray(s.results) ? s.results : [];
                     // 与 resultStorageKey 对齐地取结果条目：restore_h3_output 回切旧版本时，末尾条目未必是当前视频。
                     const chosen = results.find((item) => String((item as Record<string, unknown>).storageKey || "") === key)
                         ?? (results.length ? results[results.length - 1] : s);
                     const r = chosen as Record<string, unknown>;
+                    // 画布段的提示词/参考图绑定是创作真值，即使该段还没有成片也要带出（段卡据此显示，不再只依赖过时 artifact）。
+                    const canvasPrompt = String(s.prompt || "");
+                    const canvasRefs = Array.isArray(s.referenceBindings) ? s.referenceBindings as Array<Record<string, unknown>> : [];
                     out.push({
                         id: String(s.id || String(node.id)),
                         // 段卡片的 segId 就是 productionClipProjection.targetId；没有投影就不猜关联。
@@ -516,6 +521,8 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                         inputOutdated: Boolean(s.inputOutdated),
                         generationLogId: String(r.generationLogId || s.generationLogId || "") || undefined,
                         errorDetails: nodeError && nodeError !== "[object Object]" ? nodeError : undefined,
+                        prompt: canvasPrompt,
+                        referenceBindings: canvasRefs,
                     });
                 }
             }

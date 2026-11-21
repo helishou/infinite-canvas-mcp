@@ -22,6 +22,10 @@ import {
     buildDialogueUserPrompt,
     parseDerivedUtterances,
     sanitizeNoReferencePrompt,
+    normalizeName,
+    isNarrator,
+    buildCastIndex,
+    type PromptShotRef,
 } from "./pipeline.js";
 import { buildSegmentWriterPrompt, buildSegmentCondensePrompt } from "@basketikun/canvas-agent/drama/segment-writer";
 import { PipelineStore } from "./pipeline-store.js";
@@ -301,4 +305,65 @@ test("有真绑定：模板与 condense 保留原写法，输出不被 sanitize"
         assert.ok(String(h.state.ops[0].patch.prompt).includes("参考图N"));
         assert.equal(h.store.logs(DRAMA).filter((row) => String(row.message).includes("已清除提示词中的参考图编号")).length, 0);
     } finally { await h.close(); }
+});
+
+// ── 角色别名归一（抄影策 NormalizeName / CastIndex / IsNarrator，修复段4-6对白丢失） ──
+
+test("NormalizeName：去空格/标点/符号，大小写不敏感，别名变体可被同一索引归一", () => {
+    assert.equal(normalizeName("妻，"), "妻");
+    assert.equal(normalizeName(" 妻 "), "妻");
+    assert.equal(normalizeName("NARRATOR"), "narrator");
+    // 三个变体经归一后都能由同一别名索引归到同一标准名（同一 key 的效果）。
+    const index = buildCastIndex(
+        { character_registry: [{ name: "巨蟒", aliases: ["巨蟒（妻）", "蟒妻", "妻"] }] },
+        ["巨蟒"],
+    );
+    assert.equal(index.get(normalizeName("巨蟒（妻）")), "巨蟒");
+    assert.equal(index.get(normalizeName("蟒妻")), "巨蟒");
+    assert.equal(index.get(normalizeName("妻，")), "巨蟒");
+});
+
+test("CastIndex：多别名映射到同一标准名（影策 TestCastIndexMatchesAliases）", () => {
+    const index = buildCastIndex(
+        { character_registry: [{ name: "萧炎", aliases: ["炎儿", "萧少爷"] }] },
+        ["萧炎"],
+    );
+    assert.equal(index.get(normalizeName("炎儿")), "萧炎");
+    assert.equal(index.get(normalizeName("萧少爷")), "萧炎");
+    assert.equal(index.get(normalizeName("萧炎")), "萧炎");
+    assert.equal(index.get(normalizeName("不存在的角色")), undefined);
+});
+
+test("parseDerivedUtterances：段4-6 变体说话人（巨蟒（妻）/蟒妻/妻，）归一到已登记角色，对白不被丢", () => {
+    const refs: PromptShotRef[] = [
+        { index: 0, shotId: "shot-4", visual: "巨蟒化妻入屋", title: "变生", camera: "", characters: ["巨蟒"] },
+        { index: 1, shotId: "shot-5", visual: "蟒妻回身", title: "夜归", camera: "", characters: ["妻"] },
+        { index: 2, shotId: "shot-6", visual: "崇良惊惧", title: "惊变", camera: "", characters: ["崇良"] },
+    ];
+    const names = ["崇良", "妻", "巨蟒"];
+    const source = { character_registry: [{ name: "巨蟒", aliases: ["巨蟒（妻）", "蟒妻"] }] };
+    const raw = JSON.stringify({ shots: [
+        { index: 0, speaker: "巨蟒（妻）", text: "你为何在此。" },
+        { index: 1, speaker: "蟒妻", text: "我等你多时。" },
+        { index: 2, speaker: "妻，", text: "快走。" },
+    ] });
+    const derived = parseDerivedUtterances(raw, refs, names, source);
+    assert.equal(derived.length, 3, "三条带变体的对白一条都不丢");
+    assert.equal(derived[0].speaker, "巨蟒");
+    assert.equal(derived[1].speaker, "巨蟒");
+    assert.equal(derived[2].speaker, "妻");
+    assert.deepEqual(derived.map(item => item.start.shotId), ["shot-4", "shot-5", "shot-6"]);
+});
+
+test("parseDerivedUtterances：旁白/画外音/Narrator 说话人保留为「旁白」不被丢", () => {
+    assert.ok(isNarrator("旁白") && isNarrator("画外音") && isNarrator("Narrator"));
+    assert.ok(!isNarrator("巨蟒"));
+    const refs: PromptShotRef[] = [
+        { index: 0, shotId: "shot-n", visual: "远景", title: "多年以后", camera: "", characters: [] },
+    ];
+    const raw = JSON.stringify({ shots: [{ index: 0, speaker: "画外音", text: "多年以后。" }] });
+    const derived = parseDerivedUtterances(raw, refs, ["崇良", "妻"]);
+    assert.equal(derived.length, 1);
+    assert.equal(derived[0].speaker, "旁白");
+    assert.equal(derived[0].text, "多年以后。");
 });

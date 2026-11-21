@@ -488,8 +488,16 @@ export default function AssetsPage() {
     };
 
     const copyAssetText = async (asset: Asset) => {
-        if (asset.kind !== "text") return;
-        copyText(asset.data.content, t("assets.textCopied"));
+        if (asset.kind === "text") {
+            copyText(asset.data.content, t("assets.textCopied"));
+            return;
+        }
+        const prompt = asset.metadata?.prompt;
+        if (typeof prompt === "string" && prompt.trim()) {
+            copyText(prompt, t("common.promptCopied"));
+            return;
+        }
+        message.warning(t("canvas.nodeToolbar.noPrompt"));
     };
 
     const downloadImage = async (asset: Asset) => {
@@ -716,7 +724,7 @@ export default function AssetsPage() {
                                 // antd 自带的搜索按钮不会继承 input 的 aria-label，屏幕阅读器只会念「按钮」。
                                 enterButton={<Button type="primary" aria-label={t("assets.search")} icon={<Search className="size-4" />} />}
                                 value={keyword}
-                                placeholder={t("assets.search")}
+                                placeholder={t("assets.searchByPrompt")}
                                 onChange={(event) => {
                                     setPage(1);
                                     setKeyword(event.target.value);
@@ -1315,6 +1323,8 @@ function AssetCard({ asset, selected, onSelect, onOpen, onEdit, onCopy, onDownlo
 function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }: { asset: Asset | null; onClose: () => void; onCopy: (asset: Asset) => void; onDownload: (asset: Asset) => void; onDownloadCharacter: (asset: Asset) => void }) {
     const { t } = useTranslation();
     const cover = useResolvedCoverUrl(asset);
+    const rawPrompt = asset?.metadata?.prompt;
+    const promptText = typeof rawPrompt === "string" && rawPrompt.trim() ? rawPrompt : "";
     return (
         <Drawer title={t("assets.details")} open={Boolean(asset)} size="large" onClose={onClose}>
             {asset ? (
@@ -1394,10 +1404,21 @@ function AssetDrawer({ asset, onClose, onCopy, onDownload, onDownloadCharacter }
                             <Typography.Paragraph className="mt-1">{asset.note}</Typography.Paragraph>
                         </div>
                     ) : null}
+                    {promptText ? (
+                        <div>
+                            <Typography.Text type="secondary">{t("workbench.prompt")}</Typography.Text>
+                            <Typography.Paragraph className="mt-1 whitespace-pre-wrap">{promptText}</Typography.Paragraph>
+                        </div>
+                    ) : null}
                     <Space>
                         {asset.kind === "text" ? (
                             <Button type="primary" icon={<Copy className="size-4" />} onClick={() => onCopy(asset)}>
                                 {t("assets.copyText")}
+                            </Button>
+                        ) : null}
+                        {asset.kind !== "text" && promptText ? (
+                            <Button icon={<Copy className="size-4" />} onClick={() => onCopy(asset)}>
+                                {t("assets.copyPrompt")}
                             </Button>
                         ) : null}
                         {asset.kind === "image" || asset.kind === "video" || asset.kind === "audio" || asset.kind === "scene" || asset.kind === "prop" ? (
