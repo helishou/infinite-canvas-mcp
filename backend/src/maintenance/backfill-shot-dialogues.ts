@@ -8,12 +8,17 @@
  *   # 上面是 dry-run（只读，打印将要回填的映射）；确认无误后加 --apply 真正写入。
  *
  * 可选参数：
- *   --chapter-file <path>   用指定文本文件作为本章原文（默认从剧目 sourceScript 按集号拆章）
- *   --backup-dir <path>     备份目录（默认 <DATA_DIR>/backups/shot-dialogue-backfill）
+ *   --chapter-file <path>         用指定文本文件作为本章原文（最高优先级）
+ *   --chapter-source chapters|sourceScript  原文来源（默认 chapters：与前端对白核查/拆镜同源；
+ *                                 sourceScript 仅在其无正文时回退）
+ *   --utterance-strategy verbatim-first|preserve-existing
+ *                                 已有 utterance 的处理策略（默认 verbatim-first：原文逐字优先，
+ *                                 同镜位的 LLM 改写版被替换；preserve-existing 只补不覆盖）
+ *   --backup-dir <path>           备份目录（默认 <DATA_DIR>/backups/shot-dialogue-backfill）
  *
  * 写入链路（与 syncSharedProductionOwners 一致，改真值源而非投影）：
  *   1. 备份原 episode_productions.draft_json（可回滚）
- *   2. 改 director.source.shots[].dialogues（真值源）
+ *   2. 改 director.source.shots[].dialogues + utterance_refs、director.source.utterances（真值源）
  *   3. 重算 director.sourceHash = directorHash(director.source)
  *   4. artifacts 标 stale、executionAuthorized=false、workflow.currentWork.sourceHash 同步
  *   5. UPDATE episode_productions SET revision+1, draft_json=withoutDirectorProjection(draft)
@@ -21,6 +26,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { DB_FILE } from "../config.js";
 import { BackendDatabase } from "../db.js";
@@ -31,6 +37,8 @@ import {
     quotedSourceLines,
     splitChapters,
     type ShotLike,
+    type UtteranceLike,
+    type UtteranceStrategy,
 } from "../drama/shot-dialogue-backfill.js";
 
 type Args = {
@@ -39,20 +47,30 @@ type Args = {
     apply: boolean;
     chapterFile?: string;
     backupDir?: string;
+    chapterSource: "chapters" | "sourceScript";
+    utteranceStrategy: UtteranceStrategy;
 };
 
 function parseArgs(argv: string[]): Args {
-    const result: Partial<Args> = { apply: false };
+    const result: Partial<Args> = { apply: false, chapterSource: "chapters", utteranceStrategy: "verbatim-first" };
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === "--apply") { result.apply = true; continue; }
-        if (["--drama-id", "--episode-id", "--chapter-file", "--backup-dir"].includes(arg)) {
+        if (["--drama-id", "--episode-id", "--chapter-file", "--backup-dir", "--chapter-source", "--utterance-strategy"].includes(arg)) {
             const value = argv[++i];
             if (!value || value.startsWith("--")) throw new Error(`${arg} 缺少值`);
             if (arg === "--drama-id") result.dramaId = value;
             if (arg === "--episode-id") result.episodeId = value;
             if (arg === "--chapter-file") result.chapterFile = path.resolve(value);
             if (arg === "--backup-dir") result.backupDir = path.resolve(value);
+            if (arg === "--chapter-source") {
+                if (value !== "chapters" && value !== "sourceScript") throw new Error(`--chapter-source 只支持 chapters|sourceScript，收到 ${value}`);
+                result.chapterSource = value;
+            }
+            if (arg === "--utterance-strategy") {
+                if (value !== "verbatim-first" && value !== "preserve-existing") throw new Error(`--utterance-strategy 只支持 verbatim-first|preserve-existing，收到 ${value}`);
+                result.utteranceStrategy = value;
+            }
             continue;
         }
         throw new Error(`未知参数: ${arg}`);
@@ -69,15 +87,82 @@ function shotLines(shots: ShotLike[]): string[] {
     });
 }
 
+type EpisodeRef = { id: string; dramaId: string; episodeNumber: number; title: string };
+type ChapterResolution = {
+    text: string;
+    title: string;
+    source: "file" | "source_chapters" | "sourceScript";
+    chapterIndexes: number[];
+};
+
+/**
+ * 原文真值解析：--chapter-file > source_chapters（与 pipeline 的 /episodes/:id/chapters
+ * 及前端 DialogueCheckNotice 同源，按章 index 排序）> sourceScript 拆章回退。
+ * 老剧目 sourceScript 与 source_chapters.body 是不同版本；必须用后者，否则前端逐字核查
+ * 永远显示「未逐字保留」。plan 与 apply 共用此函数，避免两阶段读到不同原文。
+ */
+export function resolveChapterText(db: DatabaseSync, args: Pick<Args, "chapterFile" | "chapterSource">, ep: EpisodeRef): ChapterResolution {
+    if (args.chapterFile) {
+        return { text: fs.readFileSync(args.chapterFile, "utf8"), title: path.basename(args.chapterFile), source: "file", chapterIndexes: [] };
+    }
+    if (args.chapterSource === "chapters") {
+        const epRow = db.prepare("SELECT chapter_ids_json FROM drama_episodes WHERE id=?").get(ep.id) as { chapter_ids_json?: string } | undefined;
+        let ids: string[] = [];
+        try {
+            const parsed = JSON.parse(String(epRow?.chapter_ids_json || "[]"));
+            if (Array.isArray(parsed)) ids = parsed.map(String);
+        } catch { /* 坏数据当空 */ }
+        const uniqueIds = [...new Set(ids)];
+        let rows: Array<{ id: string; chapter_index: number; title: string; body: string }> = [];
+        if (uniqueIds.length) {
+            const placeholders = uniqueIds.map(() => "?").join(",");
+            rows = db.prepare(`SELECT id,chapter_index,title,body FROM source_chapters WHERE id IN (${placeholders})`).all(...uniqueIds) as typeof rows;
+        }
+        // 没有章 ID 映射的老数据：按 drama_id + 集号（chapter_index）直接定位。
+        if (!rows.length) {
+            rows = db.prepare("SELECT id,chapter_index,title,body FROM source_chapters WHERE drama_id=? AND chapter_index=? ORDER BY chapter_index")
+                .all(ep.dramaId, ep.episodeNumber) as typeof rows;
+        }
+        rows.sort((a, b) => Number(a.chapter_index) - Number(b.chapter_index));
+        const bodies = rows.map(r => String(r.body || "").trim()).filter(Boolean);
+        if (bodies.length) {
+            return {
+                text: bodies.join("\n\n"),
+                title: String(rows[0].title || `第 ${ep.episodeNumber} 章`),
+                source: "source_chapters",
+                chapterIndexes: rows.map(r => Number(r.chapter_index)),
+            };
+        }
+    }
+    // fallback：整份 sourceScript 按「第 N 章」拆章（老数据 / 无章映射）。
+    const planRow = db.prepare("SELECT production_plan_json FROM drama_projects WHERE folder_id=?").get(ep.dramaId) as { production_plan_json: string } | undefined;
+    if (!planRow) throw new Error(`找不到剧目规划: ${ep.dramaId}`);
+    const sourceScript = String(JSON.parse(planRow.production_plan_json)?.sourceScript || "");
+    const chapter = splitChapters(sourceScript).find(c => c.no === ep.episodeNumber)
+        || splitChapters(sourceScript).find(c => c.title === ep.title);
+    if (!chapter) throw new Error(`无法从 sourceScript 定位第 ${ep.episodeNumber} 章；请用 --chapter-file 指定本章原文`);
+    return { text: `${chapter.title}\n${chapter.body}`, title: chapter.title, source: "sourceScript", chapterIndexes: [chapter.no] };
+}
+
+function utteranceLines(utterances: UtteranceLike[]): string[] {
+    return utterances.map(u => String(u?.text || ""));
+}
+
 type Plan = {
     episode: { id: string; dramaId: string; episodeNumber: number; title: string };
     revision: number;
-    chapterSource: "file" | "sourceScript";
+    chapterSource: "file" | "source_chapters" | "sourceScript";
+    chapterIndexes: number[];
     chapterTitle: string;
     sourceLines: string[];
     missingBefore: string[];
     shotsWithoutDialogues: number;
+    utterancesBefore: number;
     assignments: ReturnType<typeof backfillShots>["assignments"];
+    addedUtterances: number;
+    replacedUtterances: number;
+    retainedUtterances: number;
+    droppedUtterances: number;
     missingAfter: string[];
     sourceHashConsistent: boolean;
     archived: boolean;
@@ -98,44 +183,47 @@ function plan(args: Args): Plan {
         const director = draft?.director;
         if (!director || !Array.isArray(director?.source?.shots)) throw new Error("该制作稿没有 director.source.shots，跳过");
 
-        let chapterText: string;
-        let chapterTitle: string;
-        let chapterSource: "file" | "sourceScript";
-        if (args.chapterFile) {
-            chapterText = fs.readFileSync(args.chapterFile, "utf8");
-            chapterTitle = path.basename(args.chapterFile);
-            chapterSource = "file";
-        } else {
-            const planRow = db.prepare("SELECT production_plan_json FROM drama_projects WHERE folder_id=?").get(args.dramaId) as { production_plan_json: string } | undefined;
-            if (!planRow) throw new Error(`找不到剧目规划: ${args.dramaId}`);
-            const sourceScript = String(JSON.parse(planRow.production_plan_json)?.sourceScript || "");
-            const chapters = splitChapters(sourceScript);
-            const chapter = chapters.find(c => c.no === Number(ep.episode_number))
-                || chapters.find(c => c.title === ep.title);
-            if (!chapter) throw new Error(`无法从 sourceScript 定位第 ${ep.episode_number} 章；请用 --chapter-file 指定本章原文`);
-            chapterText = `${chapter.title}\n${chapter.body}`;
-            chapterTitle = chapter.title;
-            chapterSource = "sourceScript";
-        }
+        const episode: EpisodeRef = { id: ep.id, dramaId: String(ep.drama_id), episodeNumber: Number(ep.episode_number), title: ep.title };
+        const chapter = resolveChapterText(db, args, episode);
+        const chapterText = chapter.text;
+        const chapterTitle = chapter.title;
+        const chapterSource = chapter.source;
 
         const shots = director.source.shots as ShotLike[];
-        const registryNames = Array.isArray(director.source.character_registry)
-            ? (director.source.character_registry as Array<Record<string, unknown>>).map(r => String(r?.name || ""))
+        const characterRegistry = Array.isArray(director.source.character_registry)
+            ? director.source.character_registry as Array<Record<string, unknown>>
+            : [];
+        const registryNames = characterRegistry.map(r => String(r?.name || ""));
+        const subjectRegistry = Array.isArray(director.source.subject_registry)
+            ? director.source.subject_registry as Array<Record<string, unknown>>
+            : [];
+        const existingUtterances = Array.isArray(director.source.utterances)
+            ? director.source.utterances as UtteranceLike[]
             : [];
         const sourceLines = quotedSourceLines(chapterText);
-        const missingBefore = missingDialogue(sourceLines, shotLines(shots));
+        const missingBefore = missingDialogue(sourceLines, [...shotLines(shots), ...utteranceLines(existingUtterances)]);
         const shotsWithoutDialogues = shots.filter(s => !Array.isArray(s?.dialogues) || (s.dialogues as unknown[]).length === 0).length;
-        const result = backfillShots({ chapterText, shots, characterRegistryNames: registryNames });
-        const missingAfter = missingDialogue(sourceLines, shotLines(result.shots));
+        const result = backfillShots({
+            chapterText, shots, characterRegistryNames: registryNames,
+            characterRegistry, subjectRegistry, utterances: existingUtterances,
+            utteranceStrategy: args.utteranceStrategy,
+        });
+        const missingAfter = missingDialogue(sourceLines, [...shotLines(result.shots), ...utteranceLines(result.utterances)]);
         return {
-            episode: { id: ep.id, dramaId: String(ep.drama_id), episodeNumber: Number(ep.episode_number), title: ep.title },
+            episode,
             revision: Number(prodRow.revision),
             chapterSource,
+            chapterIndexes: chapter.chapterIndexes,
             chapterTitle,
             sourceLines,
             missingBefore,
             shotsWithoutDialogues,
+            utterancesBefore: existingUtterances.length,
             assignments: result.assignments,
+            addedUtterances: result.addedUtterances,
+            replacedUtterances: result.replacedUtterances,
+            retainedUtterances: result.retainedUtterances,
+            droppedUtterances: result.droppedUtterances,
             missingAfter,
             sourceHashConsistent: directorHash(director.source) === director.sourceHash,
             archived: Boolean(prodRow.archived_at),
@@ -165,17 +253,21 @@ function apply(args: Args, p: Plan): {
     backup: string;
     revision: number;
     added: number;
-    verify: { missingBefore: string[]; missingAfter: string[]; assignmentsInDb: number; sourceHashConsistent: boolean; revision: number };
+    addedUtterances: number;
+    replacedUtterances: number;
+    droppedUtterances: number;
+    verify: { missingBefore: string[]; missingAfter: string[]; assignmentsInDb: number; utterancesInDb: number; sourceHashConsistent: boolean; revision: number };
 } {
     if (p.archived) throw new Error("该分集已归档（archived_at），拒绝修改");
-    if (!p.assignments.length) throw new Error("没有可回填的台词，拒绝写入");
+    const anyChange = Boolean(p.assignments.length || p.addedUtterances || p.replacedUtterances || p.droppedUtterances);
+    if (!anyChange) throw new Error("没有可回填或可替换的台词，拒绝写入");
     if (p.missingAfter.length) throw new Error("回填后仍有缺失台词，拒绝写入");
 
     const db = new BackendDatabase(DB_FILE);
     try {
         db.db.exec("PRAGMA busy_timeout=10000");
         db.db.exec("BEGIN IMMEDIATE");
-        let result: { backup: string; revision: number; added: number };
+        let result: { backup: string; revision: number; added: number; addedUtterances: number; replacedUtterances: number; droppedUtterances: number };
         try {
             result = doWrite(db);
             db.db.exec("COMMIT");
@@ -187,10 +279,12 @@ function apply(args: Args, p: Plan): {
         const row = db.db.prepare("SELECT revision,draft_json FROM episode_productions WHERE episode_id=?").get(args.episodeId) as { revision: number; draft_json: string };
         const stored = JSON.parse(row.draft_json) as Record<string, any>;
         const storedShots = (stored?.director?.source?.shots || []) as ShotLike[];
+        const storedUtterances = (stored?.director?.source?.utterances || []) as UtteranceLike[];
         return { ...result, verify: {
             missingBefore: p.missingBefore,
-            missingAfter: missingDialogue(p.sourceLines, shotLines(storedShots)),
+            missingAfter: missingDialogue(p.sourceLines, [...shotLines(storedShots), ...utteranceLines(storedUtterances)]),
             assignmentsInDb: storedShots.reduce((n, s) => n + (Array.isArray(s?.dialogues) ? s.dialogues!.length : 0), 0),
+            utterancesInDb: storedUtterances.length,
             sourceHashConsistent: directorHash(stored.director.source) === stored.director.sourceHash,
             revision: Number(row.revision),
         } };
@@ -198,7 +292,7 @@ function apply(args: Args, p: Plan): {
         db.close();
     }
 
-    function doWrite(db: BackendDatabase): { backup: string; revision: number; added: number } {
+    function doWrite(db: BackendDatabase): { backup: string; revision: number; added: number; addedUtterances: number; replacedUtterances: number; droppedUtterances: number } {
             // 在事务内重新读最新行，避免覆盖并发写入。
             const row = db.db.prepare("SELECT revision,draft_json,archived_at FROM episode_productions WHERE episode_id=?").get(args.episodeId) as
                 { revision: number; draft_json: string; archived_at: string | null } | undefined;
@@ -213,14 +307,31 @@ function apply(args: Args, p: Plan): {
                 .map((a: Record<string, unknown>) => ({ ...a, status: "stale" }));
             director.executionAuthorized = false;
 
-            // 用同一算法在最新真值源上重算（幂等、防并发漂移）。
-            const chapterText = args.chapterFile ? fs.readFileSync(args.chapterFile, "utf8") : rebuildChapterText(args.dramaId, p.episode.episodeNumber, p.chapterTitle);
-            const registryNames = Array.isArray(director.source.character_registry)
-                ? (director.source.character_registry as Array<Record<string, unknown>>).map(r => String(r?.name || ""))
+            // 用同一算法、同一原文真值源在最新 draft 上重算（幂等、防并发漂移）。
+            // plan 与 apply 共用 resolveChapterText，避免两阶段读到不同版本的原文台词。
+            const readDb = new DatabaseSync(DB_FILE, { readOnly: true });
+            let chapterText: string;
+            try { chapterText = resolveChapterText(readDb, args, p.episode).text; } finally { readDb.close(); }
+            const characterRegistry = Array.isArray(director.source.character_registry)
+                ? director.source.character_registry as Array<Record<string, unknown>>
                 : [];
-            const result = backfillShots({ chapterText, shots: director.source.shots as ShotLike[], characterRegistryNames: registryNames });
-            if (!result.added) return { backup: "", revision: Number(row.revision), added: 0 };
+            const registryNames = characterRegistry.map(r => String(r?.name || ""));
+            const subjectRegistry = Array.isArray(director.source.subject_registry)
+                ? director.source.subject_registry as Array<Record<string, unknown>>
+                : [];
+            const existingUtterances = Array.isArray(director.source.utterances)
+                ? director.source.utterances as UtteranceLike[]
+                : [];
+            const result = backfillShots({
+                chapterText, shots: director.source.shots as ShotLike[], characterRegistryNames: registryNames,
+                characterRegistry, subjectRegistry, utterances: existingUtterances,
+                utteranceStrategy: args.utteranceStrategy,
+            });
+            const anyChange = Boolean(result.added || result.addedUtterances || result.replacedUtterances || result.droppedUtterances);
+            if (!anyChange) return { backup: "", revision: Number(row.revision), added: 0, addedUtterances: 0, replacedUtterances: 0, droppedUtterances: 0 };
             director.source.shots = result.shots;
+            // 合并后的完整 utterances 写回真值源：按 text 去重、已有逐字台词保留、改写版被替换。
+            director.source.utterances = result.utterances;
             director.sourceHash = directorHash(director.source);
             if (director.workflow?.currentWork) director.workflow.currentWork = { ...director.workflow.currentWork, sourceHash: director.sourceHash };
 
@@ -229,21 +340,8 @@ function apply(args: Args, p: Plan): {
             const updatedAt = new Date().toISOString();
             db.db.prepare("UPDATE episode_productions SET revision=?,draft_json=?,updated_at=? WHERE episode_id=?")
                 .run(revision, JSON.stringify(withoutDirectorProjection(draft as never)), updatedAt, args.episodeId);
-            return { backup, revision, added: result.added };
+            return { backup, revision, added: result.added, addedUtterances: result.addedUtterances, replacedUtterances: result.replacedUtterances, droppedUtterances: result.droppedUtterances };
     }
-}
-
-/** apply 阶段重建章节正文（只读 sourceScript；与 plan 同一拆章逻辑）。 */
-function rebuildChapterText(dramaId: string, episodeNumber: number, chapterTitle: string): string {
-    if (chapterTitle.endsWith(".txt") || chapterTitle.endsWith(".md")) return fs.readFileSync(chapterTitle, "utf8");
-    const db = new DatabaseSync(DB_FILE, { readOnly: true });
-    try {
-        const planRow = db.prepare("SELECT production_plan_json FROM drama_projects WHERE folder_id=?").get(dramaId) as { production_plan_json: string } | undefined;
-        const sourceScript = String(JSON.parse(planRow?.production_plan_json || "{}")?.sourceScript || "");
-        const chapter = splitChapters(sourceScript).find(c => c.no === episodeNumber) || splitChapters(sourceScript).find(c => c.title === chapterTitle);
-        if (!chapter) throw new Error("apply 阶段无法重建章节原文");
-        return `${chapter.title}\n${chapter.body}`;
-    } finally { db.close(); }
 }
 
 function main() {
@@ -258,8 +356,11 @@ function main() {
     console.log(JSON.stringify({ ok: true, dryRun: false, ...result }, null, 2));
 }
 
-try { main(); }
-catch (error) {
-    console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }, null, 2));
-    process.exitCode = 1;
+// 直接执行才跑 main；被单测 import（复用 resolveChapterText）时保持纯模块。
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+    try { main(); }
+    catch (error) {
+        console.error(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }, null, 2));
+        process.exitCode = 1;
+    }
 }
