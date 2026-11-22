@@ -1,7 +1,9 @@
 /**
  * 强制重写段提示词单测：
  * - 默认（execute 的 prompts 段）仍跳过画布已有非空 prompt 的段，不重复跑 LLM；
- * - forceRewrite=true / rewritePrompts(episodeId) 忽略旧 prompt，逐段用真 LLM 重写并 update_h3_segment 写回。
+ * - forceRewrite=true / rewritePrompts(episodeId) 忽略旧 prompt，逐段用真 LLM 重写并
+ *   update_h3_segment 写回 prompt / referenceBindings / referenceOrder / taskMode；
+ * - 二次 runPrompts 跳过已写段；写入四字段经真画布 op 与编译投影后仍存活。
  * 用本地 HTTP 服务替身只隔离网络边界；DramaPipeline、buildSegmentWriterPrompt、generateText、
  * cleanWrittenPrompt、condense 与写回链路都是真实代码路径。
  */
@@ -11,7 +13,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { H3_RUNTIME_SEGMENT_FIELDS } from "@basketikun/canvas-agent/runtime-fields";
+import { BackendDatabase } from "../db.js";
 import { DRAMA_PIPELINE_DDL } from "../database-schema.js";
+import { CLIP_PROJECTION_FIELDS, clipInputHash } from "./clip-inputs.js";
 import { DramaPipeline } from "./pipeline.js";
 import { PipelineStore } from "./pipeline-store.js";
 
@@ -31,14 +36,20 @@ const EP = "ep-force-rewrite";
 const DRAMA = "d-force-rewrite";
 const CANVAS = "canvas-force-rewrite";
 const OLD_PROMPT = "旧的烂提示词-待重写";
-const NEW_PROMPT = "全新重写提示词-A1B2C3";
+/** LLM 原始回包（中文编号，写作模板约定）。 */
+const GENERATED_PROMPT = "全新重写提示词-A1B2C3 参考图1与参考图2";
+/** 写回画布前的对齐结果：中文编号 → <Picture N>。 */
+const ALIGNED_PROMPT = "全新重写提示词-A1B2C3 <Picture 1>与<Picture 2>";
 const SHOT_VISUAL = "雪夜街道，主角撑伞远去";
 
-type Op = { type: string; nodeId: string; segmentId: string; patch: { prompt?: string; [k: string]: unknown } };
+type Op = { type: string; nodeId: string; segmentId: string; patch: { prompt?: string; [k: string]: unknown }; patchDelete?: string[] };
 
 interface Fixture {
     p: DramaPipeline;
-    state: { generationCalls: number; generationPrompts: string[]; ops: Op[]; episodeReads: number };
+    state: {
+        generationCalls: number; generationPrompts: string[]; ops: Op[];
+        episodeReads: number; revision: number; expectedRevisions: number[];
+    };
     close: () => Promise<void>;
 }
 
@@ -50,7 +61,9 @@ async function fixture(): Promise<Fixture> {
     raw.close();
     const store = new PipelineStore(file);
 
-    const state: Fixture["state"] = { generationCalls: 0, generationPrompts: [], ops: [], episodeReads: 0 };
+    const state: Fixture["state"] = {
+        generationCalls: 0, generationPrompts: [], ops: [], episodeReads: 0, revision: 7, expectedRevisions: [],
+    };
     const canvasNodes = [{
         id: "h3-node-1",
         type: "h3",
@@ -58,12 +71,34 @@ async function fixture(): Promise<Fixture> {
     }];
     const production = {
         revision: 1,
-        draft: { director: { source: {
-            fps_num: 24, fps_den: 1,
-            segments: [{ id: "seg-1", title: "第一段", shot_ids: ["shot-1"], ending: "夜色渐深" }],
-            shots: [{ id: "shot-1", visual: SHOT_VISUAL, duration_frames: 48, camera: { description: "缓慢推镜" } }],
-            utterances: [{ text: "我等你", speaker: "甲", start: { shotId: "shot-1" } }],
-        } } },
+        draft: { director: {
+            // director.assets 是归档图真值；asset_cards.name 普遍为 None，名字只从 asset_plan 取。
+            assets: {
+                ASSET_SCENE: { storageKey: "image:scene-night" },
+                ASSET_CHAR: { storageKey: "image:char-jia" },
+                ASSET_PROP: { storageKey: "image:prop-umbrella" },
+            },
+            shotInputs: { "shot-1": { assetIds: ["ASSET_PROP"], keyframePolicy: "none" } },
+            source: {
+                fps_num: 24, fps_den: 1,
+                asset_plan: [
+                    { id: "ASSET_SCENE", kind: "scene", asset_name: "雪夜街道", entity_id: "ENV_NIGHT" },
+                    { id: "ASSET_CHAR", kind: "character", asset_name: "甲", entity_id: "CHAR_JIA" },
+                    { id: "ASSET_PROP", kind: "prop", asset_name: "油纸伞" },
+                ],
+                asset_cards: [
+                    { id: "ASSET_SCENE", name: null }, { id: "ASSET_CHAR", name: null }, { id: "ASSET_PROP", name: null },
+                ],
+                scene_registry: [{ id: "ENV_NIGHT", name: "雪夜街道" }],
+                character_registry: [{ id: "CHAR_JIA", name: "甲" }],
+                segments: [{ id: "seg-1", title: "第一段", shot_ids: ["shot-1"], ending: "夜色渐深" }],
+                shots: [{
+                    id: "shot-1", scene_id: "ENV_NIGHT", characters: ["CHAR_JIA"],
+                    visual: SHOT_VISUAL, duration_frames: 48, camera: { description: "缓慢推镜" },
+                }],
+                utterances: [{ text: "我等你", speaker: "甲", start: { shotId: "shot-1" } }],
+            },
+        } },
     };
 
     const server = http.createServer((req, res) => {
@@ -89,14 +124,29 @@ async function fixture(): Promise<Fixture> {
                 return send({ ok: true, taskId: `task-${state.generationCalls}` });
             }
             if (req.method === "GET" && /^\/tasks\/task-\d+$/.test(url)) {
-                return send({ ok: true, task: { status: "succeeded", result: { texts: [{ content: NEW_PROMPT }] } } });
+                return send({ ok: true, task: { status: "succeeded", result: { texts: [{ content: GENERATED_PROMPT }] } } });
             }
             if (req.method === "GET" && url === `/canvas/projects/${CANVAS}`) {
-                return send({ ok: true, project: { id: CANVAS, revision: 7 } });
+                return send({ ok: true, project: { id: CANVAS, revision: state.revision } });
             }
             if (req.method === "POST" && url === `/canvas/projects/${CANVAS}/ops`) {
                 const parsed = JSON.parse(body || "{}");
-                if (Array.isArray(parsed.operations)) state.ops.push(...parsed.operations as Op[]);
+                state.expectedRevisions.push(Number(parsed.expectedRevision || 0));
+                if (Array.isArray(parsed.operations)) {
+                    state.ops.push(...parsed.operations as Op[]);
+                    // 模拟画布落盘：下一次 runPrompts 应看到已写 prompt 而跳过。
+                    for (const op of parsed.operations as Op[]) {
+                        if (op.type !== "update_h3_segment") continue;
+                        const saved = canvasNodes[0].metadata.segments.find((s) => s.id === op.segmentId);
+                        if (!saved) continue;
+                        if (typeof op.patch?.prompt === "string") saved.prompt = op.patch.prompt as string;
+                        if (Array.isArray(op.patch?.referenceBindings)) (saved as any).referenceBindings = op.patch.referenceBindings;
+                        if (Array.isArray(op.patch?.referenceOrder)) (saved as any).referenceOrder = op.patch.referenceOrder;
+                        if (typeof op.patch?.taskMode === "string") (saved as any).taskMode = op.patch.taskMode;
+                        if (op.patchDelete?.includes("refItems")) delete (saved as any).refItems;
+                    }
+                }
+                state.revision += 1;
                 return send({ ok: true });
             }
             return send({ ok: false, error: `unexpected ${req.method} ${url}` }, 404);
@@ -131,7 +181,7 @@ test("默认不传 forceRewrite：画布已有非空 prompt 的段被跳过，�
     } finally { await f.close(); }
 });
 
-test("forceRewrite=true：非空 prompt 的段被真 LLM 重写，并 update_h3_segment 写回新提示词", async () => {
+test("forceRewrite=true：写回 prompt/referenceBindings/referenceOrder/taskMode 四字段，且中文编号已对齐", async () => {
     const f = await fixture();
     try {
         const result = await (f.p as any).runPrompts(EP, DRAMA, { forceRewrite: true });
@@ -140,11 +190,28 @@ test("forceRewrite=true：非空 prompt 的段被真 LLM 重写，并 update_h3_
         assert.equal(result.skipped, 0, "force 模式下旧 prompt 不再跳过");
         assert.equal(f.state.generationCalls, 1, "真跑了一次文本 LLM");
         assert.match(f.state.generationPrompts[0], /雪夜街道/, "生成请求带真实素材稿（含镜头画面）");
+        assert.match(f.state.generationPrompts[0], /【参考图清单】/, "生成请求带参考图清单段落");
+        assert.match(f.state.generationPrompts[0], /参考图1：雪夜街道/, "清单用 asset_plan.asset_name");
+        assert.match(f.state.generationPrompts[0], /参考：参考图1、参考图2、参考图3/, "每镜 references 进入素材稿");
         assert.equal(f.state.ops.length, 1);
-        assert.equal(f.state.ops[0].type, "update_h3_segment");
-        assert.equal(f.state.ops[0].nodeId, "h3-node-1");
-        assert.equal(f.state.ops[0].patch.prompt, NEW_PROMPT, "写回的是新生成的提示词");
-        assert.notEqual(f.state.ops[0].patch.prompt, OLD_PROMPT, "旧烂提示词已被替换");
+
+        const op = f.state.ops[0];
+        assert.equal(op.type, "update_h3_segment");
+        assert.equal(op.nodeId, "h3-node-1");
+        const patch = op.patch as Record<string, any>;
+        for (const field of ["prompt", "referenceBindings", "referenceOrder", "taskMode"]) {
+            assert.ok(Object.hasOwn(patch, field), `patch 必须显式带 ${field}`);
+        }
+        assert.equal(patch.prompt, ALIGNED_PROMPT, "写回的是对齐后的新提示词");
+        assert.match(patch.prompt, /<Picture 1>/);
+        assert.doesNotMatch(patch.prompt, /参考图/, "中文参考图编号已全部转成 <Picture N>");
+        assert.notEqual(patch.prompt, OLD_PROMPT, "旧烂提示词已被替换");
+        assert.deepEqual((patch.referenceBindings as any[]).map((b) => b.assetId), ["ASSET_SCENE", "ASSET_CHAR", "ASSET_PROP"]);
+        assert.deepEqual((patch.referenceBindings as any[]).map((b) => b.label), ["<Picture 1>", "<Picture 2>", "<Picture 3>"]);
+        assert.deepEqual(patch.referenceOrder, (patch.referenceBindings as any[]).map((b) => b.id));
+        assert.equal(patch.taskMode, "ref2va");
+        assert.ok(op.patchDelete?.includes("refItems"), "清掉旧勾选态");
+        assert.equal(f.state.expectedRevisions[0], 7, "expectedRevision 即时重读当前项目 revision");
     } finally { await f.close(); }
 });
 
@@ -155,6 +222,57 @@ test("rewritePrompts(episodeId)：从 episode 查 dramaId，再以 forceRewrite 
         assert.deepEqual(result, { segments: 1, written: 1, skipped: 0 });
         assert.ok(f.state.episodeReads >= 1, "通过 episode 查询拿到所属 dramaId");
         assert.equal(f.state.generationCalls, 1);
-        assert.equal(f.state.ops[0].patch.prompt, NEW_PROMPT);
+        assert.equal(f.state.ops[0].patch.prompt, ALIGNED_PROMPT);
+    } finally { await f.close(); }
+});
+
+test("幂等：首次写入后二次 runPrompts 跳过，不再跑 LLM / 不再发 op", async () => {
+    const f = await fixture();
+    try {
+        const first = await (f.p as any).runPrompts(EP, DRAMA, { forceRewrite: true });
+        assert.equal(first.written, 1);
+        const second = await (f.p as any).runPrompts(EP, DRAMA);
+        assert.equal(second.written, 0);
+        assert.equal(second.skipped, 1, "已写 prompt 的段被跳过");
+        assert.equal(f.state.generationCalls, 1, "二次运行没有再跑文本 LLM");
+        assert.equal(f.state.ops.length, 1, "二次运行没有再发写回 op");
+    } finally { await f.close(); }
+});
+
+test("编译存活：写入四字段进入投影指纹，经真画布 op 后保留 prompt/bindings/order/taskMode 与 productionClipProjection", async () => {
+    const f = await fixture();
+    try {
+        await (f.p as any).runPrompts(EP, DRAMA, { forceRewrite: true });
+        const op = f.state.ops[0] as any;
+        for (const field of ["prompt", "referenceBindings", "referenceOrder", "taskMode"]) {
+            assert.ok(CLIP_PROJECTION_FIELDS.includes(field as any), `${field} 应在 CLIP_PROJECTION_FIELDS`);
+            assert.ok(!(H3_RUNTIME_SEGMENT_FIELDS as readonly string[]).includes(field), `${field} 不应是 H3 运行字段`);
+        }
+
+        const db = new BackendDatabase(":memory:");
+        try {
+            db.createCanvasProject({
+                id: "p",
+                nodes: [{
+                    id: "h3-node-1", type: "minimax-h3:video",
+                    metadata: { segments: [{ id: "cs-1", prompt: OLD_PROMPT, productionClipProjection: { targetId: "seg-1", fieldHashes: {} } }] },
+                }],
+                connections: [],
+            });
+            const receipt = db.applyCanvasProjectOperations("p", undefined, [{
+                type: "update_h3_segment", nodeId: "h3-node-1", segmentId: "cs-1", patch: op.patch, patchDelete: op.patchDelete,
+            }], { operationId: "prompts-write" });
+            const saved = ((receipt.project.nodes as any[])[0].metadata.segments as any[])[0];
+            assert.equal(saved.prompt, ALIGNED_PROMPT);
+            assert.deepEqual(saved.referenceBindings, op.patch.referenceBindings);
+            assert.deepEqual(saved.referenceOrder, op.patch.referenceOrder);
+            assert.equal(saved.taskMode, "ref2va");
+            assert.ok(saved.productionClipProjection, "productionClipProjection 不被写回冲掉");
+
+            const before = clipInputHash({ ...saved, prompt: OLD_PROMPT, referenceBindings: [], referenceOrder: [], taskMode: "t2v" });
+            const after = clipInputHash(saved);
+            assert.notEqual(before, after, "四字段变化会改变投影指纹 → 编译需要发 op");
+            assert.equal(clipInputHash(structuredClone(saved)), after, "内容不变时指纹稳定 → 编译不发重复 op");
+        } finally { db.close(); }
     } finally { await f.close(); }
 });

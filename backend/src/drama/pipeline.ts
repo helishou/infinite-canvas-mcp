@@ -55,6 +55,8 @@ import {
     type SegmentWriterInput,
     type SegmentWriterShot,
 } from "@basketikun/canvas-agent/drama/segment-writer";
+import { canonicalH3TaskMode } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
+import { deriveSegmentReferenceBindings, alignPromptPictures } from "./segment-reference-bindings.js";
 import { checkPromptLength, type PromptLengthCheck } from "../canvas/model-video-capability.js";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { dramaVideoResolutionToH3, type DramaVideoAspectRatio, type DramaVideoResolutionTier } from "@basketikun/canvas-agent/drama/video-resolution";
@@ -1370,6 +1372,7 @@ export class DramaPipeline {
         const canvas = (episodeRes?.canvas || null) as Record<string, any> | null;
         if (!canvas?.id) throw new Error("EPISODE_CANVAS_MISSING: 分集还没有画布");
         const production = (await this.getProduction(episodeId)).production as any;
+        const director = (production?.draft?.director || {}) as Record<string, any>;
         const source = production?.draft?.director?.source || {};
         const fps = this.fpsOf(source);
         const shots: Array<Record<string, any>> = Array.isArray(source.shots) ? source.shots : [];
@@ -1417,11 +1420,11 @@ export class DramaPipeline {
             // forceRewrite 时忽略旧 prompt，逐段重写（用于修复烂提示词）。
             const target = this.findCanvasSegment(canvasNodes, segmentId);
             if (!target) continue;
-            const noRefs = !this.hasRealReferenceBindings(target);
             if (!options.forceRewrite && target.prompt.trim()) { skipped += 1; continue; }
             const shotIds: string[] = Array.isArray(segment.shot_ids) ? segment.shot_ids.map(String) : [];
             let cursor = 0;
             const writerShots: SegmentWriterShot[] = [];
+            const writerShotIds: string[] = [];
             for (const shotId of shotIds) {
                 const shot = shotById.get(shotId);
                 if (!shot) continue;
@@ -1439,8 +1442,22 @@ export class DramaPipeline {
                         speaker: String(utterance.speaker || utterance.speakerName || ""),
                     } : {}),
                 });
+                writerShotIds.push(shotId);
             }
             if (!writerShots.length) continue;
+
+            // 段参考图绑定由拆镜结构化引用自动派生：场景→角色→道具，按 H3 9 张上限截断。
+            // noRefs 真值改为派生结果本身，不再依赖画布上可能过期的旧勾选态。
+            const derived = deriveSegmentReferenceBindings(source, director, segmentId, shotIds, shots);
+            const { bindings, referenceOrder, legend, referencesByShot } = derived;
+            const noRefs = bindings.length === 0;
+            for (const warning of derived.warnings) {
+                this.store.log(dramaId, `${segment.title || index}: ${warning}`, "warn");
+            }
+            writerShots.forEach((writerShot, shotIndex) => {
+                const references = referencesByShot[writerShotIds[shotIndex]] || [];
+                if (references.length) writerShot.references = references;
+            });
 
             const independent = Boolean(promptOpts.independent);
             const input: SegmentWriterInput = {
@@ -1458,6 +1475,8 @@ export class DramaPipeline {
                 firstFrame: index > 0 && !independent,
                 independent,
                 noReferenceBindings: noRefs,
+                referenceLegend: legend.map((entry) => `参考图${entry.ordinal}：${entry.name}（${entry.kind}）`),
+                referenceCount: bindings.length,
             };
             const prompt = buildSegmentWriterPrompt(input);
             const raw = await this.generateText([prompt.system, "", prompt.user].join("\n"), {
@@ -1482,6 +1501,13 @@ export class DramaPipeline {
                 if (cleaned !== before) {
                     this.store.log(dramaId, `${segment.title || index}: 本段无真参考图绑定，已清除提示词中的参考图编号（避免视频模型找不到图）`, "warn");
                 }
+            } else {
+                // 有绑定：把写作模板的中文「参考图N」对齐成 H3 提交协议 <Picture N>。
+                const aligned = alignPromptPictures(cleaned, bindings.length);
+                cleaned = aligned.text;
+                for (const warning of aligned.warnings) {
+                    this.store.log(dramaId, `${segment.title || index}: ${warning}`, "warn");
+                }
             }
             if (!condense.check.ok) {
                 this.store.log(dramaId, `${segment.title || index}: 提示词 ${condense.check.chars} 字，自动精简 ${condense.count} 次后仍超过模型上限 ${condense.check.maxChars} 字，请手动精简`, "warn");
@@ -1489,6 +1515,18 @@ export class DramaPipeline {
                 this.store.log(dramaId, `${segment.title || index}: 提示词超长，自动精简 ${condense.count} 次后 ${condense.check.chars}/${condense.check.maxChars} 字`, "info");
             }
 
+            const taskMode = canonicalH3TaskMode(noRefs ? "t2v" : "ref2va");
+            // 有绑定时禁止 t2v：T2V 不提交参考素材，会让刚派生的绑定全部失效。
+            if (bindings.length && taskMode === "t2v") {
+                throw new Error("PROMPTS_TASKMODE_CONFLICT: 段有参考图绑定时 taskMode 不能是 t2v");
+            }
+            const patch: Record<string, unknown> = {
+                prompt: cleaned,
+                referenceBindings: bindings,
+                referenceOrder,
+                taskMode,
+            };
+            // expectedRevision 即时重读：并行/外部编辑后仍用当前 revision 做 CAS。
             const project = await this.getCanvasProject(canvas.id);
             await this.request("POST", `/canvas/projects/${encodeURIComponent(canvas.id)}/ops`, {
                 operationId: randomUUID(),
@@ -1497,7 +1535,9 @@ export class DramaPipeline {
                     type: "update_h3_segment",
                     nodeId: target.nodeId,
                     segmentId: target.segmentId,
-                    patch: { prompt: cleaned },
+                    patch,
+                    // 清掉旧勾选态，避免 legacy refItems 与新派生的 referenceBindings 双源打架。
+                    patchDelete: ["refItems"],
                 }],
             });
             written += 1;

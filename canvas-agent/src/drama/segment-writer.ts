@@ -43,8 +43,10 @@ export type SegmentWriterInput = {
     skillName?: string;
     skillPath?: string;
     skillContent?: string;
-    /** 参考图数量，用于勾选/校验引用编号。 */
+    /** 本段参考图数量，用于勾选/校验引用编号。 */
     referenceCount?: number;
+    /** 本段参考图清单（「参考图N：名称（类型）」），由后端从 asset_plan 派生。 */
+    referenceLegend?: string[];
     /** 本段没有任何真参考图绑定：模板必须禁用“参考图N”编号写法。 */
     noReferenceBindings?: boolean;
 };
@@ -143,6 +145,9 @@ export function buildSegmentWriterPrompt(input: SegmentWriterInput): { system: s
         b += `【写作技能：${input.skillName || "视频提示词写作"}】\n遵循下面的写作方法与结构；下方【输出格式】作补充，篇幅与硬性规则始终适用。\n<skill>\n${truncate(input.skillContent.trim(), MAX_SKILL_RUNES)}\n</skill>\n\n`;
     }
     b += `【表演与运镜】\n${nonEmpty(input.style, "人物表演自然，情绪变化落在线条与呼吸上，不摆拍")}\n${nonEmpty(input.cameraMotion, "运镜有明确动机，稳而有分寸")}\n禁止：面无表情、表情僵硬、眼神呆滞、只动嘴不动脸、朗读腔或播音腔、人物像摆拍一样站着不动。\n\n`;
+    if (!noRefs && input.referenceLegend?.length) {
+        b += `【参考图清单】\n${input.referenceLegend.map((line) => `- ${line}`).join("\n")}\n只能使用上面列出的参考图编号，素材稿「参考：参考图N」里的 N 必须来自这份清单。\n\n`;
+    }
     b += "【输出格式】严格按以下结构与顺序书写，栏目名原样保留：\n";
     if (input.index > 0 && !input.independent && !input.firstFrame) {
         b += `严格从第${input.index}段视频末尾的实际站位、朝向、动作和情绪状态继续，不重新摆位\n`;

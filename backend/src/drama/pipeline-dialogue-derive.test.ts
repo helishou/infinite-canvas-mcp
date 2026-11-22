@@ -50,6 +50,8 @@ type Op = { type: string; nodeId: string; segmentId: string; patch: { prompt?: s
 interface HarnessOptions {
     source: Record<string, any>;
     canvasSegments: Array<Record<string, any>>;
+    /** 段参考图派生读 director.assets / director.shotInputs（新契约的真值源）。 */
+    director?: Record<string, any>;
     /** 按生成请求顺序返回文本；返回 { fail: true } 模拟文本模型任务失败。 */
     respond: (prompt: string, callIndex: number) => string | { fail: true };
     forceRewrite?: boolean;
@@ -83,7 +85,7 @@ async function harness(opts: HarnessOptions): Promise<Harness> {
             ...(cs.taskMode ? { taskMode: cs.taskMode } : {}),
         })) },
     }];
-    const production = { revision: 1, draft: { director: { source: opts.source } } };
+    const production = { revision: 1, draft: { director: { ...(opts.director || {}), source: opts.source } } };
 
     const server = http.createServer((req, res) => {
         const chunks: Buffer[] = [];
@@ -262,7 +264,8 @@ test("无真参考图：模板禁用编号写法，输出侧清除模型编造�
     assert.ok(sanitizeNoReferencePrompt(HALLUCINATED).includes("已设定的角色形象"));
     assert.ok(!sanitizeNoReferencePrompt(HALLUCINATED).includes("参考图"));
 
-    // t2v 即使有 bindings 也不消费参考图 → 仍走无绑定分支。
+    // 新版契约：noRefs 由 asset_plan/director.assets 派生的绑定数决定，画布上的旧勾选态
+    // （含 t2v 的旧 referenceBindings）不再是真值；本 fixture 无 asset_plan → 仍走无绑定分支。
     const h = await harness({
         source: simpleSource([{ start: { shotId: "shot-a" }, speaker: "妻", text: "我在" }]),
         canvasSegments: [{ id: "cs-a", targetId: "seg-a", prompt: "", taskMode: "t2v", referenceBindings: [{ enabled: true, storageKey: "img/x.png" }] }],
@@ -278,8 +281,9 @@ test("无真参考图：模板禁用编号写法，输出侧清除模型编造�
     } finally { await h.close(); }
 });
 
-test("有真绑定：模板与 condense 保留原写法，输出不被 sanitize", async () => {
+test("有真绑定：模板与 condense 保留原写法，写回时中文编号对齐为 <Picture N> 且不被 sanitize", async () => {
     const WITH_REF = "姓名（参考图N）＋参考图1-5：空间锁定（场景名并标注参考图编号）";
+    const ALIGNED_WITH_REF = "姓名（参考图N）＋<Picture 1>-5：空间锁定（场景名并标注参考图编号）";
     const input = {
         index: 0, count: 1, title: "第一段", totalSec: 2,
         shots: [{ startSec: 0, endSec: 2, visual: "二人相视", references: [1] }],
@@ -290,8 +294,15 @@ test("有真绑定：模板与 condense 保留原写法，输出不被 sanitize"
     assert.ok(prompt.user.includes("参考：参考图1"));
     assert.ok(buildSegmentCondensePrompt("x", 100).includes("每个“参考图N”编号写法不变"));
 
+    const source = simpleSource([{ start: { shotId: "shot-a" }, speaker: "妻", text: "我在" }]);
+    source.asset_plan = [{ id: "ASSET_REAL", kind: "scene", asset_name: "洞府", entity_id: "ENV_REAL" }];
+    source.shots = [{ ...source.shots[0], scene_id: "ENV_REAL" }];
     const h = await harness({
-        source: simpleSource([{ start: { shotId: "shot-a" }, speaker: "妻", text: "我在" }]),
+        source,
+        director: {
+            assets: { ASSET_REAL: { storageKey: "img/real.png" } },
+            shotInputs: {},
+        },
         canvasSegments: [{
             id: "cs-a", targetId: "seg-a", prompt: "", taskMode: "T2VA",
             referenceBindings: [{ enabled: true, storageKey: "img/real.png" }],
@@ -301,8 +312,10 @@ test("有真绑定：模板与 condense 保留原写法，输出不被 sanitize"
     try {
         const result = await (h.p as any).runPrompts(EP, DRAMA);
         assert.equal(result.written, 1);
-        assert.equal(h.state.ops[0].patch.prompt, WITH_REF, "有真绑定时输出原样保留");
-        assert.ok(String(h.state.ops[0].patch.prompt).includes("参考图N"));
+        assert.equal(h.state.ops[0].patch.prompt, ALIGNED_WITH_REF, "有派生绑定时中文编号对齐为 <Picture N>，其余原样");
+        assert.ok(String(h.state.ops[0].patch.prompt).includes("<Picture 1>"));
+        assert.deepEqual((h.state.ops[0].patch.referenceBindings as any[]).map((b) => b.assetId), ["ASSET_REAL"]);
+        assert.equal(h.state.ops[0].patch.taskMode, "ref2va");
         assert.equal(h.store.logs(DRAMA).filter((row) => String(row.message).includes("已清除提示词中的参考图编号")).length, 0);
     } finally { await h.close(); }
 });
