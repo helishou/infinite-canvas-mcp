@@ -1431,15 +1431,32 @@ export class DramaPipeline {
                 const durationFrames = Math.max(1, Number(shot.duration_frames || 0));
                 const startSec = cursor / fps;
                 cursor += durationFrames;
-                const utterance = utterances.find(item => String(item?.start?.shotId || item?.shot_id || "") === shotId);
+                // 一个镜头可能对应 2–3 句台词：全部收集，按 start.localFrame 排序（缺省时保持数组顺序）。
+                // 旧代码用 utterances.find 只取第一句，后续台词全丢 → 用户投诉「台词乱念」。
+                const shotUtterances = utterances
+                    .map((item, order) => ({ item, order, frame: Number(item?.start?.localFrame) }))
+                    .filter(entry => String(entry.item?.start?.shotId || entry.item?.shot_id || "") === shotId)
+                    .sort((a, b) => {
+                        const af = Number.isFinite(a.frame) ? a.frame : Number.POSITIVE_INFINITY;
+                        const bf = Number.isFinite(b.frame) ? b.frame : Number.POSITIVE_INFINITY;
+                        if (af < bf) return -1;
+                        if (af > bf) return 1;
+                        return a.order - b.order;
+                    })
+                    .map(entry => ({
+                        text: String(entry.item?.text || entry.item?.dialogue || ""),
+                        speaker: String(entry.item?.speaker || entry.item?.speakerName || ""),
+                    }));
+                const firstUtterance = shotUtterances[0];
                 writerShots.push({
                     startSec,
                     endSec: cursor / fps,
                     visual: String(shot.visual || ""),
                     ...(shot.camera?.description ? { camera: String(shot.camera.description) } : {}),
-                    ...(utterance ? {
-                        dialogue: String(utterance.text || utterance.dialogue || ""),
-                        speaker: String(utterance.speaker || utterance.speakerName || ""),
+                    ...(shotUtterances.length ? {
+                        dialogues: shotUtterances,
+                        // 单条字段保留兼容；buildSegmentDraft 优先读 dialogues，不会重复输出。
+                        ...(firstUtterance ? { dialogue: firstUtterance.text, speaker: firstUtterance.speaker } : {}),
                     } : {}),
                 });
                 writerShotIds.push(shotId);

@@ -15,10 +15,12 @@ export type SegmentWriterShot = {
     visual: string;
     /** 运镜/摄影。 */
     camera?: string;
-    /** 台词（逐字保留）。 */
+    /** 台词（逐字保留）。单条兼容字段；多句优先读 dialogues。 */
     dialogue?: string;
-    /** 说话人。 */
+    /** 说话人。单条兼容字段。 */
     speaker?: string;
+    /** 本镜全部台词（逐字保留，按镜内先后顺序）。一个镜头 2–3 句时全部写入，优先于 dialogue/speaker。 */
+    dialogues?: Array<{ text: string; speaker?: string }>;
     /** 本镜头参考图编号（1 起），用于「参考图N」。 */
     references?: number[];
 };
@@ -103,15 +105,25 @@ export function cleanWrittenPrompt(text: string): string {
  * 台词逐字来自 shots，模型不得改写。
  */
 export function buildSegmentDraft(shots: SegmentWriterShot[], noReferenceBindings = false): string {
+    // 一句台词一行：台词：speaker：“text”。多句来自 dialogues；单条 dialogue/speaker 路径保留兼容。
+    const dialogueLine = (text: string, speaker: string) =>
+        `台词：${speaker ? `${speaker}：` : ""}“${text}”`;
     return shots.map((s) => {
         const refs = noReferenceBindings ? [] : (s.references || []).filter((n) => Number.isFinite(n) && n > 0).map((n) => `参考图${n}`);
         const head = `${secText(s.startSec)}–${secText(s.endSec)}秒`;
         const parts = [s.camera && `运镜：${s.camera.trim()}`, s.visual && `画面：${s.visual.trim()}`].filter(Boolean);
         if (refs.length) parts.push(`参考：${refs.join("、")}`);
-        const dialogue = s.dialogue && s.dialogue.trim()
-            ? `${s.speaker ? `${s.speaker.trim()}：` : ""}“${s.dialogue.trim()}”`
-            : "绝对无台词";
-        return `${head}｜${parts.join("；")}\n台词：${dialogue}`;
+        const many = (Array.isArray(s.dialogues) ? s.dialogues : [])
+            .map(d => ({ text: String(d?.text || "").trim(), speaker: String(d?.speaker || "").trim() }))
+            .filter(d => d.text);
+        // 无台词才写「绝对无台词」；多句时每句独立一行，绝不做长度截断或只取第一句。
+        const lines = many.length
+            ? many.map(d => dialogueLine(d.text, d.speaker))
+            : (() => {
+                const text = String(s.dialogue || "").trim();
+                return [text ? dialogueLine(text, String(s.speaker || "").trim()) : "台词：绝对无台词"];
+            })();
+        return `${head}｜${parts.join("；")}\n${lines.join("\n")}`;
     }).join("\n");
 }
 

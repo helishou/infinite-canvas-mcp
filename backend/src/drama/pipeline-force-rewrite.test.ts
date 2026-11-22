@@ -53,7 +53,7 @@ interface Fixture {
     close: () => Promise<void>;
 }
 
-async function fixture(): Promise<Fixture> {
+async function fixture(utterances: unknown[] = [{ text: "我等你", speaker: "甲", start: { shotId: "shot-1" } }]): Promise<Fixture> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-force-rewrite-"));
     const file = path.join(dir, "runtime.sqlite");
     const raw = new DatabaseSync(file);
@@ -96,7 +96,7 @@ async function fixture(): Promise<Fixture> {
                     id: "shot-1", scene_id: "ENV_NIGHT", characters: ["CHAR_JIA"],
                     visual: SHOT_VISUAL, duration_frames: 48, camera: { description: "缓慢推镜" },
                 }],
-                utterances: [{ text: "我等你", speaker: "甲", start: { shotId: "shot-1" } }],
+                utterances,
             },
         } },
     };
@@ -212,6 +212,30 @@ test("forceRewrite=true：写回 prompt/referenceBindings/referenceOrder/taskMod
         assert.equal(patch.taskMode, "ref2va");
         assert.ok(op.patchDelete?.includes("refItems"), "清掉旧勾选态");
         assert.equal(f.state.expectedRevisions[0], 7, "expectedRevision 即时重读当前项目 revision");
+    } finally { await f.close(); }
+});
+
+test("forceRewrite：一镜多句 utterance 全部进 writer 素材稿，按 localFrame 排序", async () => {
+    // 故意打乱数组顺序，验证按 start.localFrame 排序而不是「取第一句」或原数组顺序。
+    const utterances = [
+        { text: "第三句台词", speaker: "丙", start: { shotId: "shot-1", localFrame: 40 } },
+        { text: "第一句台词", speaker: "甲", start: { shotId: "shot-1", localFrame: 0 } },
+        { text: "第二句台词", speaker: "乙", start: { shotId: "shot-1", localFrame: 20 } },
+    ];
+    const f = await fixture(utterances);
+    try {
+        const result = await (f.p as any).runPrompts(EP, DRAMA, { forceRewrite: true });
+        assert.equal(result.written, 1);
+        assert.equal(f.state.generationCalls, 1, "一次 writer LLM 调用承载全部台词");
+        const prompt = f.state.generationPrompts[0];
+        const draft = prompt.slice(prompt.indexOf("【本段素材稿】"));
+        const lines = draft.split("\n").filter(line => line.startsWith("台词："));
+        assert.deepEqual(lines, [
+            "台词：甲：“第一句台词”",
+            "台词：乙：“第二句台词”",
+            "台词：丙：“第三句台词”",
+        ], "一镜三句全部进提示词，按 localFrame 排序");
+        assert.ok(!draft.includes("绝对无台词"), "有台词时不写「绝对无台词」");
     } finally { await f.close(); }
 });
 
