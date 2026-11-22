@@ -1449,7 +1449,31 @@ export class DramaPipeline {
             // 段参考图绑定由拆镜结构化引用自动派生：场景→角色→道具，按 H3 9 张上限截断。
             // noRefs 真值改为派生结果本身，不再依赖画布上可能过期的旧勾选态。
             const derived = deriveSegmentReferenceBindings(source, director, segmentId, shotIds, shots);
-            const { bindings, referenceOrder, legend, referencesByShot } = derived;
+            let { bindings, referenceOrder, legend, referencesByShot } = derived;
+            // // 老手工绑定段保护 v2
+            // 回归保护：老手工绑定段（如蟒妻ep2）的 source.shots 没有结构化引用字段，派生必为空；
+            // 此时不能把画布上已有的真绑定清空降级成 t2v，否则 forceRewrite 会毁掉已完成剧目。
+            // 判定"老数据"：本段任一 shot 都没有 characters/structured 引用字段 且 shotInputs 无道具 → 无可派生信号，
+            // 沿用画布段已有 referenceBindings（只保留有 storageKey 的）。
+            const segShots = shots.filter(shot => (segment.shot_ids || []).map(String).includes(String(shot.id)));
+            const hasStructuredRefs = segShots.some(shot =>
+                (Array.isArray(shot.characters) && shot.characters.length > 0)
+                || (Array.isArray(director.shotInputs?.[String(shot.id)]?.assetIds) && director.shotInputs[String(shot.id)].assetIds.length > 0));
+            if (!bindings.length && !hasStructuredRefs && Array.isArray(target.referenceBindings) && target.referenceBindings.length) {
+                const kept = target.referenceBindings.filter((b: any) => b && String(b.storageKey || "").trim());
+                if (kept.length) {
+                    bindings = kept as typeof bindings;
+                    referenceOrder = kept.map((b: any) => String(b.id || "")).filter(Boolean);
+                    // 用旧绑定重建 legend，让 writer 知道有 N 张图、按编号输出 <Picture N>，
+                    // 否则 prompt 无 Picture 而 bindings 有 N 张 → prerun 判"绑定但提示词无 Picture"。
+                    legend = kept.map((b: any, i: number) => {
+                        const m = String(b.label || "").match(/Picture\s*(\d+)/i);
+                        return { ordinal: m ? Number(m[1]) : i + 1, assetId: String(b.assetId || ""), name: String(b.name || b.assetId || `参考图${i + 1}`), kind: String(b.role || "image"), role: (b.role || "other") as typeof legend[number]["role"] };
+                    });
+                    referencesByShot = {};
+                    this.store.log(dramaId, `${segment.title || index}: 源稿无结构化引用，保留画布已有 ${kept.length} 张参考图绑定（老手工绑定段保护）`, "info");
+                }
+            }
             const noRefs = bindings.length === 0;
             for (const warning of derived.warnings) {
                 this.store.log(dramaId, `${segment.title || index}: ${warning}`, "warn");
