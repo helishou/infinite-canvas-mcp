@@ -327,10 +327,12 @@ function deriveEpisode(
     const progress = stageOrder[stage];
     // 对齐影策 episodeTone：已发布成片=done；已拆镜头但没发布=待生成(awaitingMedia)；其余按游标。
     // publishedVersion 是真实发布信号，比 stage=video（仅表示有提示词）更准。
-    // 对齐影策 episodeTone(drama-shared.tsx)：error（有失败/错误）优先于 stage，
-    // 否则已发布但有失败日志的集会显示「需要处理」却计入「已完成」，筛选计数与卡片文案口径不一致。
-    // 统一到本字段后，episodeStatusText/StatusChip 与列表 counts 都读同一真值。
-    const status: StudioStatus = logStat.lastError || logStat.failed > 0
+    // 对齐影策 episodeTone：error（当前仍有未恢复失败）优先于 stage；已发布成片=done。
+    // 关键修正：只有 lastError（最新失败晚于任何后续成功/运行）才算「需要处理」。
+    // 单看 failed>0 会把「历史失败早已成功重出覆盖」的集永久误标需要处理——
+    // 例如蟒妻 ep1/ep2/ep4 的失败都是旧 gpt-image-2.6 残留，后来已用 2.1 重出并出成片，
+    // 不该再挂红条（与 deriveLogStat 的「latest failure recovered by later success」语义一致）。
+    const status: StudioStatus = logStat.lastError
         ? "需要处理"
         : prodDerive.publishedVersion > 0
             ? "已完成"

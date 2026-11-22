@@ -131,7 +131,9 @@ const PLAN_GATE_TIP_INSERT = "前面的章节还在分集规划，完成后才�
 
 /** 影策 drama-shared.tsx:117-131 的动态状态文案：只用 StudioEpisode 真实字段，缺少的计数不编造。 */
 function episodeStatusText(ep: StudioEpisode): string {
-    if (ep.error || ep.jobs.failed > 0) return "需要处理";
+    // 只有当前未恢复的失败(ep.error=lastError)才算需要处理；累计历史失败(jobs.failed)
+    // 已被后续成功覆盖时不该永久挂红条——与影策 episodeTone 的 latest-failure-recovered 语义一致。
+    if (ep.error) return "需要处理";
     if (ep.publishedVersion > 0) return `已完成 · 发布 v${ep.publishedVersion}`;
     if (ep.shotCount > 0 && ep.segmentCount === 0) return `剧本就绪 · ${ep.shotCount} 镜 · 待生成画面`;
     if (ep.segmentCount > 0) return `段视频 ${ep.segmentCount} 段 · ${ep.status === "制作中" ? "制作中" : "待生成"}`;
@@ -141,7 +143,7 @@ function episodeStatusText(ep: StudioEpisode): string {
 
 function StatusChip({ episode }: { episode: StudioEpisode }) {
     const status = episode.status;
-    const tone = episode.error || episode.jobs.failed > 0 ? "需要处理" : status;
+    const tone = episode.error ? "需要处理" : status;
     return (
         <span
             className={cn(
@@ -262,7 +264,7 @@ const STAGE_PIPS = [
  * 只用真实 stage + 产物计数派生能对齐的文案，不编造「合成成片」等本地不存在的阶段。
  */
 function headStageLabel(ep: StudioEpisode): string {
-    if (ep.error || ep.jobs.failed > 0) return "需要处理";
+    if (ep.error) return "需要处理";
     if (ep.status === "已完成" || ep.publishedVersion > 0) return "已完成";
     // 已拆镜有镜头、未发布 = 本地「待生成」= 影策等待审阅（与审批横幅同一真实口径）。
     if (ep.status === "待生成" && ep.shotCount > 0) return "等待审阅";
@@ -1570,7 +1572,8 @@ function DramaStudioInner() {
                         <div className="mt-1 flex items-center gap-2">
                             <StatusChip episode={ep} />
                             <StagePips episode={ep} />
-                            {ep.jobs.failed > 0 ? (
+                            {/* 只在当前有未恢复失败(ep.error)时显示红色失败数；历史失败已被成功覆盖不再挂红条 */}
+                            {ep.error && ep.jobs.failed > 0 ? (
                                 <span className="inline-flex items-center gap-0.5 text-[10px] text-rose-500" title={`${ep.jobs.failed} 次生成失败`}>
                                     <CircleAlert className="size-3" />{ep.jobs.failed}
                                 </span>
