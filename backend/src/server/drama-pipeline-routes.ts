@@ -67,6 +67,11 @@ const startSchema = z.object({
 }).strict();
 
 const rewritePromptsSchema = z.object({ episodeId: z.string().min(1) }).strict();
+const rewriteScriptSchema = z.object({
+    episodeId: z.string().min(1),
+    instruction: z.string().optional(),
+    model: z.string().optional(),
+}).strict();
 
 const approveSchema = z.object({ episodeId: z.string().min(1) }).strict();
 const releaseSchema = z.object({ target: z.enum(["assets", "episodes", "all"]).default("all") }).strict();
@@ -121,6 +126,18 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
         try { res.json({ ok: true, ...await pipeline.rewritePrompts(parsed.data.episodeId) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+
+    // 按章编辑原文 →「确定(保存并重新改编)」：重置本集 script/assets/prompts/video/render 作业并
+    // 重入队 script（对齐影策 rescript），script 作业内清旧分镜→按新稿重拆→promoteToCanvas 同步画布。
+    router.post("/drama/pipeline/script/rewrite", async (req, res) => {
+        const parsed = rewriteScriptSchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
+        try {
+            res.json({ ok: true, ...await pipeline.rescript(parsed.data.episodeId, {
+                instruction: parsed.data.instruction, model: parsed.data.model,
+            }) });
+        } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
     // 闸门放行（影策 /episodes/:eid/approve）

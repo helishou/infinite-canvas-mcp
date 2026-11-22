@@ -179,6 +179,25 @@ export class PipelineStore {
         this.db.prepare("UPDATE drama_pipeline_jobs SET status='canceled', finished_at=?, updated_at=? WHERE drama_id=? AND status IN ('queued','running')").run(new Date().toISOString(), new Date().toISOString(), dramaId);
     }
 
+    /**
+     * 按章改编重拆镜：把本集全部阶段作业（script/assets/prompts/video/render）原子重置为 queued，
+     * 对齐影策 CancelQueuedDramaJobs + requestDramaWork。dedupe_key 不变，重排不会堆重复作业；
+     * 清掉 task_id/attempt/error/退避起点，让重跑从干净态开始。可选 scriptPatch 透传本次改编指令
+     * （前端按章编辑后计算的 instruction/model 写进 script job payload，runScript 真消费）。
+     * 返回被重置的作业数；没有作业时返回 0（调用方再走 plan 幂等补齐）。
+     */
+    resetJobsForEpisode(dramaId: string, episodeId: string, scriptPatch?: Record<string, unknown>): number {
+        const rows = this.listJobs(dramaId).filter(job => job.episode_id === episodeId);
+        const now = new Date().toISOString();
+        const update = this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, attempt=0, task_id=NULL, started_at=NULL, finished_at=NULL, payload_json=?, updated_at=? WHERE id=?");
+        for (const job of rows) {
+            const base = this.jobPayload(job);
+            const payload = scriptPatch && job.stage === "script" ? { ...base, ...scriptPatch } : base;
+            update.run(JSON.stringify(payload), now, job.id);
+        }
+        return rows.length;
+    }
+
     listJobs(dramaId: string, statuses?: JobStatus[]): JobRow[] {
         if (statuses?.length) {
             const ph = statuses.map(() => "?").join(",");

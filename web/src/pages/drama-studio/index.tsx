@@ -66,7 +66,7 @@ import { collectPackRefs, importPackRefs } from "@/lib/director-pack-assets";
 import { productionCanvasNodes } from "@/pages/drama/production-canvas-nodes";
 import {
     startDramaPipeline, pauseDramaPipeline, resumeDramaPipeline, fetchDramaPipelineStatus,
-    retryFailedDramaPipeline, approveDramaPipelineEpisode, releaseDramaPipelineMedia, type DramaPipelineStatus,
+    retryFailedDramaPipeline, approveDramaPipelineEpisode, releaseDramaPipelineMedia, rewriteDramaEpisodeScript, type DramaPipelineStatus,
 } from "@/services/backend-api";
 import { StudioAssetsTab } from "./studio-assets-tab";
 import { StudioDetailPanel, type DetailTab } from "./studio-detail-panel";
@@ -641,6 +641,35 @@ function DramaStudioInner() {
             } catch (error) { message.error(`操作失败：${(error as Error).message}`); }
             finally { setPipelineBusy(false); }
         })();
+    };
+
+    /**
+     * 按章编辑原文 →「确定(保存并重新改编)」：走服务端 rescript 真链（清旧分镜→按新稿重拆→同步画布），
+     * 轮询本集 script 作业到终态后刷新真值；instruction（写作技能/钩子悬念/分镜规则/思考深度）原样透传。
+     */
+    const runRescript = async (episodeId: string, instruction?: string, model?: string) => {
+        if (!dramaId) throw new Error("尚未选择剧目");
+        const res = await rewriteDramaEpisodeScript(episodeId, { instruction, model });
+        if (!res?.ok) throw new Error("重新改编提交失败");
+        const deadline = Date.now() + 6 * 60 * 1000;
+        let failed = "";
+        let done = false;
+        let failedStreak = 0;
+        while (Date.now() < deadline) {
+            const status = await fetchDramaPipelineStatus(dramaId);
+            const job = (status?.jobs || []).find((j) => String(j.episodeId) === episodeId && String(j.stage) === "script");
+            if (job && String(job.status) === "succeeded") { done = true; break; }
+            // 后端失败会带退避自动 requeue，单次 failed 是重试中间态；连续多次仍 failed 才判终态。
+            if (job && String(job.status) === "failed") {
+                failedStreak += 1;
+                if (failedStreak >= 3) { failed = String(job.error || "改编拆镜作业失败"); break; }
+            } else failedStreak = 0;
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        setPipeline(await fetchDramaPipelineStatus(dramaId));
+        await refreshAll();
+        if (failed) throw new Error(failed);
+        return done;
     };
 
     /** 影策「全部生成视频·N集」确认弹窗（对齐 detail.tsx:320-328），确认后启动全自动流水线。 */
@@ -2205,8 +2234,11 @@ function DramaStudioInner() {
                                             const finalInstruction = planEffort && planEffort !== "auto"
                                                 ? (instruction ? `请以 ${planEffort} 的思考深度规划。\n${instruction}` : `请以 ${planEffort} 的思考深度规划。`).slice(0, 2000)
                                                 : instruction;
-                                            await data.adaptEpisode(current.id, finalInstruction, studioSettings.planModel || undefined);
-                                            message.success(skillRef || beats.length ? `已按${skillRef ? `写作技能「${skillRef.title}」` : ""}${skillRef && beats.length ? "与" : ""}${beats.length ? "钩子/悬念设置" : ""}重新改编本集` : "已重新改编本集，请查看剧本与分镜");
+                                            const done = await runRescript(current.id, finalInstruction, studioSettings.planModel || undefined);
+                                            const how = skillRef || beats.length
+                                                ? `已按${skillRef ? `写作技能「${skillRef.title}」` : ""}${skillRef && beats.length ? "与" : ""}${beats.length ? "钩子/悬念设置" : ""}`
+                                                : "已";
+                                            message.success(done ? `${how}重新改编本集，分镜已重拆并同步画布` : "已提交重新改编，分镜正在后台重拆，完成后请刷新查看");
                                         } catch (error) {
                                             message.error(`改编失败：${(error as Error).message}`);
                                         } finally { setBusy(null); }

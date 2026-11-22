@@ -1397,3 +1397,11 @@ export function releaseDramaPipelineMedia(dramaId: string, target: "assets" | "e
 export function retryFailedDramaPipeline(dramaId: string) {
     return request<{ ok: boolean; requeued?: number }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-failed`, {});
 }
+/** 按章编辑原文后重新改编：服务端重置本集全部作业并重入队 script（清旧镜→按新稿重拆→同步画布）。 */
+export function rewriteDramaEpisodeScript(episodeId: string, opts?: { instruction?: string; model?: string }) {
+    return request<{ ok: boolean; dramaId?: string; episodeId?: string; resetJobs?: number; status?: string }>("POST", "/drama/pipeline/script/rewrite", {
+        episodeId,
+        ...(opts?.instruction ? { instruction: opts.instruction } : {}),
+        ...(opts?.model ? { model: opts.model } : {}),
+    });
+}

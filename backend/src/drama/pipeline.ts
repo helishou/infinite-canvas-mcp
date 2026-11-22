@@ -952,7 +952,7 @@ export class DramaPipeline {
 
         const dramaId = String(job.drama_id || "");
         switch (job.kind as JobKind) {
-            case "script": return this.runScript(episodeId, dramaId);
+            case "script": return this.runScript(episodeId, dramaId, this.store.jobPayload(job));
             case "assets": return this.runAssets(episodeId, dramaId);
             case "prompts": return this.runPrompts(episodeId, dramaId, { forceRewrite: Boolean((payload as Record<string, unknown>).forceRewrite) });
             case "video": return this.runVideo(episodeId, job);
@@ -961,8 +961,10 @@ export class DramaPipeline {
         }
     }
 
-    /** script 段：script-proposal → 写 synopsis → 文本 LLM 拆镜 → production/ops → 编译链。 */
-    private async runScript(episodeId: string, dramaId: string): Promise<Record<string, unknown>> {
+    /** script 段：script-proposal → 写 synopsis/fullPlot → 文本 LLM 拆镜 → 清旧镜+整批重拆 → 编译链。
+     *  payload.instruction 是按章编辑改编时前端算好的创作指令（写作技能/钩子悬念/分镜规则/思考深度），
+     *  必须真透传到 script-proposal，保证手动改编与全自动同源。 */
+    private async runScript(episodeId: string, dramaId: string, payload?: Record<string, unknown>): Promise<Record<string, unknown>> {
         const episodeRes = await this.request("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
         const episode = episodeRes?.episode as Record<string, any> | undefined;
         if (!episode) throw new Error("EPISODE_NOT_FOUND");
@@ -978,15 +980,18 @@ export class DramaPipeline {
         const beats: string[] = [];
         if (hook) beats.push(`开篇钩子：${hook}`);
         if (cliffhanger) beats.push(`结尾悬念：${cliffhanger}`);
-        const softInstruction = beats.length ? beats.join("；").slice(0, 2000) : undefined;
+        // 按章编辑改编透传的 instruction 优先并进软指令：与前端 onRescript 计算的技能/钩子/规则同源。
+        const payloadInstruction = String(payload?.instruction || "").trim();
+        const mergedInstruction = [payloadInstruction, ...beats].filter(Boolean).join("；").slice(0, 2000) || undefined;
         const proposalUrl = `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`;
-        const baseBody = { ...(scriptOpts.planModel ? { model: scriptOpts.planModel } : {}) };
+        const effectivePlanModel = String(payload?.model || "").trim() || String(scriptOpts.planModel || "").trim();
+        const baseBody = { ...(effectivePlanModel ? { model: effectivePlanModel } : {}) };
         const enrichedBody = {
             ...baseBody,
             ...(hook ? { hook } : {}),
             ...(cliffhanger ? { cliffhanger } : {}),
             ...(planEffort && planEffort !== "auto" ? { reasoningEffort: planEffort } : {}),
-            ...(softInstruction ? { instruction: softInstruction } : {}),
+            ...(mergedInstruction ? { instruction: mergedInstruction } : {}),
         };
         let proposal: any;
         try {
@@ -996,7 +1001,7 @@ export class DramaPipeline {
             // 400 时回退到纯 instruction（钩子/悬念与思考深度全部并入软指令），不让整条流水线断在这里。
             const message = error instanceof Error ? error.message : String(error);
             if (!/\bHTTP 400\b/.test(message)) throw error;
-            const fallback = [softInstruction, planEffort && planEffort !== "auto" ? `请以 ${planEffort} 的思考深度完成分场规划` : ""]
+            const fallback = [mergedInstruction, planEffort && planEffort !== "auto" ? `请以 ${planEffort} 的思考深度完成分场规划` : ""]
                 .filter(Boolean).join("；").slice(0, 2000);
             proposal = await this.request("POST", proposalUrl, { ...baseBody, ...(fallback ? { instruction: fallback } : {}) });
         }
@@ -1042,13 +1047,11 @@ export class DramaPipeline {
             scenes = productionSceneEntries(source) as typeof scenes;
         }
         if (!scenes.length) throw new Error("DIRECTOR_NO_SCENE: 初始化后仍没有场次，无法拆镜");
-        // 已有镜头（拆过镜）的集重跑 script 时跳过拆镜——replace_director_scene_storyboard
-        // 对已有场景要求保留原 Clip ID 集合，重复提交会报 SCENE_STORYBOARD_SEGMENTS。
-        const existingShots = (Array.isArray(source.shots) ? source.shots : []).length;
-        if (existingShots > 0) {
-            await this.promoteToCanvas(episodeId);
-            return { shots: existingShots, segments: (Array.isArray(source.segments) ? source.segments : []).length, skipped: true };
-        }
+        // 按章编辑改编（rescript）重跑 script 时必须重拆镜——这是「改了原文/剧本但分镜不变」的根因。
+        // 影策 rescript 在事务内先 DELETE 本集 DramaShot+DramaSegment 再走 script 重拆；本地等价物在
+        // 下面的写稿处：清空旧 shots/segments 与写入新分镜放进同一个 productionOps 批次整批原子提交，
+        // 任一步校验失败整次回滚，不会出现「旧镜已清、新镜未写」的半写形变。
+        const hadShots = (Array.isArray(source.shots) ? source.shots : []).length > 0;
         const environments: ChapterDemandEnvironment[] = scenes.map(scene => ({ id: scene.environmentId, name: scene.title }));
         const environmentOfScene = new Map<string, string>(scenes.map(scene => [scene.environmentId, scene.id]));
 
@@ -1113,8 +1116,20 @@ export class DramaPipeline {
             clipSeconds: 10,
             pacing,
         });
-        const ops = toSceneStoryboardOps(plan, environmentOfScene);
-        production = (await this.productionOps(episodeId, production.revision, ops as Record<string, unknown>[])).production;
+        const ops = toSceneStoryboardOps(plan, environmentOfScene) as Array<Record<string, unknown>>;
+        if (hadShots) {
+            // 影策 rescript = 事务内 DELETE 本集 DramaShot+DramaSegment 再按新稿重拆。本地等价：
+            // 先用整份 director 清空 shots/segments（set_director_production），紧接着用
+            // replace_director_scene_storyboard 把新草案写回；两者在同一 productionOps 批次里
+            // 整批原子提交——任一步校验失败整次回滚，不会留下「旧镜已清、新镜未写」的半写形变。
+            // 也顺带绕开「已有场次须保留原 Clip ID 集合」(SCENE_STORYBOARD_SEGMENTS)：清空后场次
+            // 已无镜头，新 Clip 数可与旧的不同，无需硬凑数量。
+            const cleared = structuredClone(production.draft.director) as Record<string, any>;
+            cleared.source.shots = [];
+            cleared.source.segments = [];
+            ops.unshift({ type: "set_director_production", director: cleared });
+        }
+        production = (await this.productionOps(episodeId, production.revision, ops)).production;
 
         // 4) 发布 → 编译 → 应用 → 再发布 → 准备节点 → 同步 Clip（缺一步画布都不出 H3 节点）。
         await this.promoteToCanvas(episodeId);
@@ -1492,6 +1507,35 @@ export class DramaPipeline {
             written: Number(result.written || 0),
             skipped: Number(result.skipped || 0),
         };
+    }
+
+    /**
+     * 按章编辑原文 →「确定(保存并重新改编)」的服务端入口（对齐影策 rescript）：
+     * drama_routes → drama_actions CancelQueuedDramaJobs + ApplyDramaScript(stage:script) + requestDramaWork。
+     * 本地做法：反查 dramaId → 重置本集全部阶段作业为 queued（清 task/attempt/error，透传 instruction）
+     * → 清掉这些作业的退避计时 → 确保流水线 running → 幂等补齐作业 → wake 立即重跑。
+     * script 作业会走 runScript：script-proposal → 写 synopsis/fullPlot → 清旧镜+整批重拆 → promoteToCanvas。
+     * instruction/model 透传进 script job payload，runScript 真消费，不经前端假修复。
+     */
+    async rescript(episodeId: string, opts?: { instruction?: string; model?: string }): Promise<{ dramaId: string; episodeId: string; resetJobs: number; status: string }> {
+        const episodeRes = await this.request("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
+        const dramaId = String(episodeRes?.episode?.dramaId || "");
+        if (!dramaId) throw new Error("EPISODE_DRAMA_MISSING: 分集缺少所属剧目 ID，无法重新改编");
+        const scriptPatch: Record<string, unknown> = {};
+        if (String(opts?.instruction || "").trim()) scriptPatch.instruction = String(opts!.instruction).trim().slice(0, 2000);
+        if (String(opts?.model || "").trim()) scriptPatch.model = String(opts!.model).trim();
+        // 幂等：同一集重复改编只是再次把同一批 dedupe job 重置为 queued，不会堆重复作业。
+        const resetJobs = this.store.resetJobsForEpisode(dramaId, episodeId, scriptPatch);
+        // 重置后旧作业的退避计时不得继续挡住重跑。
+        for (const job of this.store.listJobs(dramaId)) {
+            if (job.episode_id === episodeId) this.retryAt.delete(job.id);
+        }
+        // 即便流水线处于 paused/completed，显式改编也要能重跑本集。
+        this.store.upsert({ dramaId, status: "running" });
+        await this.plan(dramaId); // dedupe_key 已存在的跳过，只补缺失阶段作业
+        this.store.log(dramaId, `按章改编重拆镜：已重置本集 ${resetJobs} 个阶段作业并重新入队（script→assets→prompts→video→render）`, "info", episodeId);
+        this.wake(dramaId);
+        return { dramaId, episodeId, resetJobs, status: "running" };
     }
 
     /**
