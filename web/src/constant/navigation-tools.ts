@@ -1,4 +1,4 @@
-import { Clapperboard, FileText, FolderOpen, Images, LayoutGrid, Workflow, WandSparkles } from "lucide-react";
+import { Clapperboard, FileText, FolderOpen, Images, LayoutGrid, ListChecks, Workflow, WandSparkles } from "lucide-react";
 
 /**
  * Primary workspaces. Existing tool URLs remain the canonical destinations.
@@ -12,6 +12,7 @@ export const navigationTools = [
     { slug: "resources", href: "/assets", icon: Images },
     { slug: "workflows", href: "/workflows", icon: Workflow },
     { slug: "skills", href: "/skills", icon: WandSparkles },
+    { slug: "rules", href: "/rules", icon: ListChecks },
 ] as const;
 
 export type NavigationToolSlug = (typeof navigationTools)[number]["slug"] | "workbench";

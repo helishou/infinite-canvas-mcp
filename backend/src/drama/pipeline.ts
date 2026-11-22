@@ -60,6 +60,7 @@ import { deriveSegmentReferenceBindings, alignPromptPictures } from "./segment-r
 import { checkPromptLength, type PromptLengthCheck } from "../canvas/model-video-capability.js";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
 import { dramaVideoResolutionToH3, type DramaVideoAspectRatio, type DramaVideoResolutionTier } from "@basketikun/canvas-agent/drama/video-resolution";
+import { learnedRulesCompact } from "./learned-rules.js";
 
 import { PipelineStore, type JobRow, type PipelineRow } from "./pipeline-store.js";
 import { findPipelineAssetEntityNode, generatedMediaStorageKey } from "./pipeline-asset-image.js";
@@ -984,7 +985,9 @@ export class DramaPipeline {
         if (cliffhanger) beats.push(`结尾悬念：${cliffhanger}`);
         // 按章编辑改编透传的 instruction 优先并进软指令：与前端 onRescript 计算的技能/钩子/规则同源。
         const payloadInstruction = String(payload?.instruction || "").trim();
-        const mergedInstruction = [payloadInstruction, ...beats].filter(Boolean).join("；").slice(0, 2000) || undefined;
+        // 剧本类长期规则进分场规划；分镜/提示词类规则不进这里。
+        const scriptRules = await learnedRulesCompact(["script"], 1200);
+        const mergedInstruction = [scriptRules, payloadInstruction, ...beats].filter(Boolean).join("；").slice(0, 2000) || undefined;
         const proposalUrl = `/drama/episodes/${encodeURIComponent(episodeId)}/script-proposal`;
         const effectivePlanModel = String(payload?.model || "").trim() || String(scriptOpts.planModel || "").trim();
         const baseBody = { ...(effectivePlanModel ? { model: effectivePlanModel } : {}) };
@@ -1090,6 +1093,9 @@ export class DramaPipeline {
         // 写作技能（分镜拆分）真实注入拆镜步骤：契约无 skill 字段，并入 chapterBody 的【制作设置·分镜要求】。
         const storyboardSkill = await this.resolveTextSkill(opts.textSkills?.storyboard, dramaId);
         if (storyboardSkill.skillContent) ruleLines.push(`${storyboardSkill.skillContent}。`);
+        // 分镜类与连续性类长期规则进拆镜；提示词类规则不进这里。
+        const storyboardRules = await learnedRulesCompact(["storyboard", "continuity"], 1600);
+        if (storyboardRules) ruleLines.push(`用户长期规则：${storyboardRules}。`);
         const sourceBlock = episodeSource
             ? `\n\n【小说原文·台词必须逐字从这里提取到 beat 的 dialogue/speaker，不得改写或遗漏引号内的对白】\n${episodeSource}`
             : "";
@@ -1204,8 +1210,11 @@ export class DramaPipeline {
                 chapterTitle: String(episode.title || ""),
                 synopsis,
             });
+            // 资产类长期规则进设定提取，不进分镜或提示词链路。
+            const assetRules = await learnedRulesCompact(["asset"], 1000);
+            const assetUser = assetRules ? `${assetPrompt.user}\n\n用户长期规则：${assetRules}。` : assetPrompt.user;
             const assetOpts0 = this.optionsOf(dramaId);
-            const raw = await this.generateText([assetPrompt.system, "", assetPrompt.user].join("\n"), {
+            const raw = await this.generateText([assetPrompt.system, "", assetUser].join("\n"), {
                 model: assetOpts0.assetExtractModel,
                 reasoningEffort: assetOpts0.textThinking?.extract,
             }, dramaId);
@@ -1215,6 +1224,8 @@ export class DramaPipeline {
         if (!assets.length) throw new Error("ASSETS_EMPTY: 没有可建档的设定");
 
         const canvasId = String((episodeRes?.canvas as Record<string, any> | null | undefined)?.id || "");
+        // 资产类规则同时约束参考图提示词；这段只作用于生图，不影响提示词链路。
+        const assetImageRules = await learnedRulesCompact(["asset"], 1000);
         type PendingImage = { assetId: string; kind: string; name: string; entityId: string; prompt: string };
         const pending: PendingImage[] = [];
         let created = 0;
@@ -1293,7 +1304,8 @@ export class DramaPipeline {
                 ? schemeRaw as AssetSchemeId
                 : defaultSchemeFor(kindStr as "character" | "scene" | "prop");
             const body = (rawPrompt && rawPrompt !== asset.appearance) ? `${asset.appearance}。补充要求：${rawPrompt}` : asset.appearance;
-            const prompt = buildSchemePrompt(kindStr as "character" | "scene" | "prop", String(asset.name || ""), body, scheme).trim();
+            const builtPrompt = buildSchemePrompt(kindStr as "character" | "scene" | "prop", String(asset.name || ""), body, scheme).trim();
+            const prompt = assetImageRules ? `${builtPrompt}\n用户长期规则：${assetImageRules}。` : builtPrompt;
             if (!prompt) { this.store.log(dramaId, `资产 ${id} 没有可用提示词，跳过参考图生成`, "warn"); continue; }
             this.store.log(dramaId, `资产 ${id} 参考图方案=${scheme}（横版16:9）`);
             pending.push({ assetId: id, kind: kindStr, name: String(asset.name || ""), entityId, prompt });
@@ -1403,6 +1415,9 @@ export class DramaPipeline {
         const styleParts = [perfStyle, ...ruleStyle];
         // 写作技能（提示词撰写）真值：优先前端预解析 content，否则按 name 读 SKILL.md；循环外解析一次。
         const promptSkill = await this.resolveTextSkill(promptOpts.textSkills?.prompt, dramaId);
+        // 提示词类、连续性类、视频生成类长期规则进提示词撰写；分镜/资产规则不进这里。
+        const writerRules = await learnedRulesCompact(["prompt", "continuity", "video"], 1800);
+        const writerRuleNote = writerRules ? `【用户长期规则·提示词与视频生成】${writerRules}。` : "";
 
         const shotById = new Map(shots.map(shot => [String(shot.id), shot]));
         const canvasNodes: Array<Record<string, any>> = Array.isArray(canvas.nodes) ? canvas.nodes : [];
@@ -1510,7 +1525,7 @@ export class DramaPipeline {
                 ...(index > 0 && !independent ? { previousEnding: String(segments[index - 1]?.ending || "") } : {}),
                 style: styleParts.join("，"),
                 cameraMotion,
-                ...(promptSkill.skillContent ? { skillContent: promptSkill.skillContent } : {}),
+                ...(promptSkill.skillContent || writerRuleNote ? { skillContent: [writerRuleNote, promptSkill.skillContent || ""].filter(Boolean).join("\n") } : {}),
                 ...(promptSkill.skillName ? { skillName: promptSkill.skillName } : {}),
                 ...(promptSkill.skillPath ? { skillPath: promptSkill.skillPath } : {}),
                 firstFrame: index > 0 && !independent,
@@ -1730,6 +1745,9 @@ export class DramaPipeline {
         const episodeRes = await this.request("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
         const canvas = (episodeRes?.canvas || null) as Record<string, any> | null;
         const canvasNodes: Array<Record<string, any>> = Array.isArray(canvas?.nodes) ? canvas!.nodes : [];
+        // 剪辑与合成类规则没有可自动执行的 ffmpeg 参数：记入本段流水线事件，供合成与验收时核对。
+        const renderRules = await learnedRulesCompact(["render"], 1200);
+        if (renderRules) this.store.log(String(job.drama_id || ""), `剪辑与合成长期规则：${renderRules}`, "info");
         const videos: string[] = [];
         for (const node of canvasNodes) {
             const segments = Array.isArray(node?.metadata?.segments) ? node.metadata.segments : [];

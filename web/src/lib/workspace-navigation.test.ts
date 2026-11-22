@@ -22,6 +22,7 @@ for (const [pathname, area] of [
     ["/prompts", "resources"],
     ["/workflows", "workflows"],
     ["/skills", "skills"],
+    ["/rules", "rules"],
     ["/drama-studio", "dramaStudio"],
 ] as const) {
     test(`${pathname} stays in the ${area} workspace`, () => {
@@ -34,11 +35,11 @@ test("primary navigation has no workbench tab — the logo is the home entry", (
     // workbench 仍是合法 area（见路由解析 / 上方 URL 用例），只是不作为可见导航项渲染。
     assert.deepEqual(
         navigationTools.map((item) => item.slug),
-        ["projects", "dramaStudio", "freeCanvas", "resources", "workflows", "skills"],
+        ["projects", "dramaStudio", "freeCanvas", "resources", "workflows", "skills", "rules"],
     );
     assert.deepEqual(
         navigationTools.map((item) => item.href),
-        ["/projects", "/drama-studio", "/projects?type=canvas", "/assets", "/workflows", "/skills"],
+        ["/projects", "/drama-studio", "/projects?type=canvas", "/assets", "/workflows", "/skills", "/rules"],
     );
     // slug 类型里仍保留 workbench（路由 area 用），但不可作为可见 tab：转成字符串再断言，避免无意义的字面量比较。
     assert.ok(!navigationTools.some((item) => (item.slug as string) === "workbench"), "no visible workbench tab");

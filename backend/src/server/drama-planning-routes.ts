@@ -5,6 +5,7 @@ import { dramaOutlineDetailSchema, dramaProductionPlanSchema, dramaTopicSchema, 
 import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
 import { dramaNextAction, dramaStageStates, renderDramaStageContext, type DramaStageEpisode } from "@basketikun/canvas-agent/drama/stage-contract";
 import { freshestStageActivity } from "../drama/stage-activity.js";
+import { learnedRulesCompact } from "../drama/learned-rules.js";
 import { EpisodeProductionService } from "../drama/production.js";
 import { missingChapters, proposeEpisodeGrouping, type GroupingChapter } from "../drama/episode-grouping.js";
 import type { BackendEventBus } from "../events.js";
@@ -463,7 +464,10 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
             const instructionBits = [parsed.data.instruction];
             if (parsed.data.hook?.trim()) instructionBits.push(`开场钩子倾向：${parsed.data.hook.trim()}`);
             if (parsed.data.cliffhanger?.trim()) instructionBits.push(`结尾悬念倾向：${parsed.data.cliffhanger.trim()}`);
-            const instruction = instructionBits.filter(Boolean).join("\n");
+            // 剧本类长期规则进手动「重新改编本集」；自动流水线也读同一份规则（pipeline.ts）。
+            const scriptRules = await learnedRulesCompact(["script"], 1200);
+            if (scriptRules) instructionBits.unshift(scriptRules);
+            const instruction = instructionBits.filter(Boolean).join("\n").slice(0, 2000);
             const result = await proposeEpisodeScript(stores, {
                 episodeNumber: episode.episodeNumber,
                 title: String(episode.title || ""),

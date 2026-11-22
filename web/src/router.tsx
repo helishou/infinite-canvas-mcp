@@ -26,6 +26,7 @@ const McpObservabilityPage = lazy(() => import("@/pages/mcp-observability"));
 const PelicanBikePage = lazy(() => import("@/pages/pelican-bike"));
 const LocalAnalyticsPage = lazy(() => import("@/pages/local-analytics"));
 const SkillsPage = lazy(() => import("@/pages/skills"));
+const RulesPage = lazy(() => import("@/pages/rules"));
 const DramaStudioPage = lazy(() => import("@/pages/drama-studio"));
 const StudioCreatePage = lazy(() => import("@/pages/drama-studio/studio-create"));
 
@@ -85,6 +86,7 @@ export const appRoutes = [
     { path: "/assets", element: lazyPage(AssetsPage) },
     { path: "/prompts", element: lazyPage(PromptsPage) },
     { path: "/skills", element: lazyPage(SkillsPage) },
+    { path: "/rules", element: lazyPage(RulesPage) },
     { path: "/canvas", element: lazyPage(CanvasPage) },
     { path: "/canvas/performance", element: lazyPage(CanvasPerformanceFixture) },
     { path: "/canvas/:id", element: lazyPage(CanvasProjectPage) },

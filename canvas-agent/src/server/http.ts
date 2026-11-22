@@ -18,12 +18,13 @@ import express, {
 } from "express";
 
 import { runClaudeTurn } from "../agent/claude.js";
-import { refreshDramaStageContext, withDramaStageContext } from "../agent/stage-hint.js";
+import { refreshDramaStageContext } from "../agent/stage-hint.js";
 import { HermesAgent, isHermesThread, type HermesSettings } from "../agent/hermes-agent.js";
 import {
   archiveCodexThread,
   CodexSkillLookupError,
   configureCodexSkill,
+  generateCodexRulesDraft,
   generateCodexSkillDraft,
   interruptCodexTurn,
   isRecoverableThreadError,
@@ -69,6 +70,9 @@ import { productionWriteReceipt } from "../drama/production-read.js";
 import { checkVersions } from "../version-check.js";
 import { SkillStore, SkillStoreError } from "../skills/store.js";
 import { bundledSkillWarnings } from "../skills/bundled.js";
+import { learnFromTurn, withLearnedRulesContext, type LearnTurnInput } from "../rules/auto-learn.js";
+import { parseRuleDraft, ruleDraftPrompt, ruleDraftToCandidates, RULE_DRAFT_OUTPUT_SCHEMA, type RuleLearnMessage } from "../rules/learn.js";
+import { addRuleCandidates, deleteRule, enabledRulesFor, formatRulesContext, readLearnedRules, reviewRule, selectRuleCategories, setAutoLearn, setRuleEnabled, updateRule } from "../rules/store.js";
 import {
   backendComfyUi,
   createBackendClient,
@@ -992,6 +996,87 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
       prompt: `根据以下已完成内容提炼可编辑的通用 Skill。只保存稳定、可复用的步骤、约束和输出要求，不记录一次性结果或日志。instructions 不含 frontmatter。defaultPrompt 必须引用 $name；shortDescription 为空或 25–64 字符。禁止本地路径、外部 URL、节点身份和任何敏感凭证。\n${JSON.stringify(source)}` });
     return validateAgentSkillDraft(result.output);
   }
+  /** 规则提炼的结构化输出：Hermes 与 Codex 共用同一份 prompt/schema，输出格式一致。 */
+  async function structuredRuleDraft(prompt: string, options: { model?: string; effort?: CodexReasoningEffort; hermesThread: boolean }) {
+    const cwd = ensureSiteWorkspace(config).workspacePath;
+    if (options.hermesThread && hermes) {
+      const result = await hermes.structured({ cwd, model: options.model, effort: options.effort, schema: RULE_DRAFT_OUTPUT_SCHEMA, onThread: () => {}, prompt });
+      return result.output;
+    }
+    return await generateCodexRulesDraft(emit, cwd, { prompt, model: options.model, effort: options.effort });
+  }
+
+  app.get(
+    agentRoute("/rules"),
+    route(async (_req, res) => {
+      res.json({ ok: true, data: await readLearnedRules() });
+    }),
+  );
+  app.post(
+    agentRoute("/rules/settings"),
+    codexMutation(async (req, res) => {
+      if (typeof req.body?.autoLearn !== "boolean") return void res.status(400).json({ ok: false, error: "自动提炼开关无效" });
+      const autoLearn = await setAutoLearn(req.body.autoLearn);
+      session.emitAll("rules_changed", { autoLearn });
+      res.json({ ok: true, data: { autoLearn } });
+    }),
+  );
+  app.post(
+    agentRoute("/rules/learn"),
+    codexMutation(async (req, res) => {
+      const messages = Array.isArray(req.body?.messages)
+        ? (req.body.messages as unknown[]).filter((item): item is RuleLearnMessage => Boolean(item && typeof item === "object" && ["user", "assistant"].includes(String((item as RuleLearnMessage).role)) && typeof (item as RuleLearnMessage).text === "string")).slice(-20)
+        : [];
+      if (!messages.some((message) => message.role === "user")) return void res.status(400).json({ ok: false, error: "请提供至少一条用户消息" });
+      const state = await readLearnedRules();
+      const prompt = ruleDraftPrompt({ messages, existingStatements: state.rules.map((rule) => rule.statement) });
+      const effort = reasoningEffort(req.body?.effort);
+      const raw = await structuredRuleDraft(prompt, { model: String(req.body?.model || "") || undefined, effort, hermesThread: useHermes() });
+      const draft = typeof raw === "string" ? parseRuleDraft(raw) : parseRuleDraft(JSON.stringify(raw));
+      const added = await addRuleCandidates(ruleDraftToCandidates(draft), String(req.body?.threadId || ""));
+      session.emitAll("rules_changed", { added: added.length, summary: draft.summary });
+      res.json({ ok: true, data: { summary: draft.summary, added: added.map((rule) => rule.id) } });
+    }),
+  );
+  app.post(
+    agentRoute("/rules/:id/review"),
+    codexMutation(async (req, res) => {
+      const action = String(req.body?.action || "");
+      if (action !== "accept" && action !== "ignore") return void res.status(400).json({ ok: false, error: "复核动作无效" });
+      const rule = await reviewRule(routeParam(req.params.id), action);
+      if (!rule) return void res.status(404).json({ ok: false, error: "找不到指定规则" });
+      session.emitAll("rules_changed", { id: rule.id, action });
+      res.json({ ok: true, data: rule });
+    }),
+  );
+  app.post(
+    agentRoute("/rules/:id/enabled"),
+    codexMutation(async (req, res) => {
+      if (typeof req.body?.enabled !== "boolean") return void res.status(400).json({ ok: false, error: "规则启用状态无效" });
+      const rule = await setRuleEnabled(routeParam(req.params.id), req.body.enabled);
+      if (!rule) return void res.status(404).json({ ok: false, error: "找不到指定规则" });
+      session.emitAll("rules_changed", { id: rule.id, enabled: rule.enabled });
+      res.json({ ok: true, data: rule });
+    }),
+  );
+  app.post(
+    agentRoute("/rules/:id"),
+    codexMutation(async (req, res) => {
+      const rule = await updateRule(routeParam(req.params.id), req.body || {});
+      if (!rule) return void res.status(404).json({ ok: false, error: "找不到指定规则" });
+      session.emitAll("rules_changed", { id: rule.id, updated: true });
+      res.json({ ok: true, data: rule });
+    }),
+  );
+  app.delete(
+    agentRoute("/rules/:id"),
+    codexMutation(async (req, res) => {
+      const removed = await deleteRule(routeParam(req.params.id));
+      if (!removed) return void res.status(404).json({ ok: false, error: "找不到指定规则" });
+      session.emitAll("rules_changed", { id: routeParam(req.params.id), removed: true });
+      res.json({ ok: true });
+    }),
+  );
   app.get(
     agentRoute("/codex/skills/:name"),
     route(async (req, res) => {
@@ -1315,6 +1400,21 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
             payload && typeof payload === "object" && !Array.isArray(payload)
               ? (payload as Record<string, unknown>)
               : { value: payload };
+          // 只留本轮用户原话与导演回复，用于轮末自动提炼；流式中重复的文本按最后一条覆盖。
+          if (type === "agent_event") {
+            const item = value.item as { type?: string; text?: unknown } | undefined;
+            if (item && typeof item.text === "string" && /agent_message|assistant/i.test(String(item.type || ""))) {
+              turnMessages.push({ role: "assistant", text: item.text });
+              if (turnMessages.length > 8) turnMessages.splice(1, 1);
+            }
+          }
+          if (type === "chat_message") {
+            const message = value.message as { role?: string; text?: unknown } | undefined;
+            if (message?.role === "assistant" && typeof message.text === "string") {
+              turnMessages.push({ role: "assistant", text: message.text });
+              if (turnMessages.length > 8) turnMessages.splice(1, 1);
+            }
+          }
           const eventThreadId = String(
             value.threadId || value.thread_id || threadId,
           );
@@ -1334,8 +1434,11 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
           ? (prompt: string, lifecycleEmit: AgentEmit, attachments: AgentAttachment[] = [], options: Parameters<typeof runCodexTurn>[3] = {}) => hermes.run(prompt, lifecycleEmit, attachments, options, String(session.canvasStateForClient(clientId)?.projectId || "") || undefined)
           : runCodexTurn;
         const stageContext = await refreshDramaStageContext(String(session.canvasStateForClient(clientId)?.projectId || ""));
+        const rulesState = await readLearnedRules();
+        const rulesContext = formatRulesContext(enabledRulesFor(selectRuleCategories(prompt, stageContext), rulesState.rules));
+        const turnMessages: RuleLearnMessage[] = [{ role: "user", text: prompt }];
         void runTurn(
-          withDramaStageContext(withAttachmentContext(prompt, attachmentRefs), stageContext),
+          withLearnedRulesContext(withAttachmentContext(prompt, attachmentRefs), rulesContext ? `${stageContext ? `${stageContext}\n\n` : ""}${rulesContext}` : stageContext),
           lifecycleEmit,
           attachments,
           {
@@ -1437,6 +1540,23 @@ export function createAgentApp(options: AgentHttpOptions = {}): AgentHttpRuntime
               if (clientId) session.releaseClient(clientId);
               session.setCodexState({ busy: false, threadId, turnId });
               session.finishConversationRun(threadId);
+              // 轮末自动提炼不阻塞对话；写候选失败的日志不影响已完成的制作结果。
+              setTimeout(() => {
+                void (async () => {
+                  const input: LearnTurnInput = {
+                    messages: turnMessages.slice(-8),
+                    threadId,
+                    structured: async (learnPrompt) => await structuredRuleDraft(learnPrompt, {
+                      model,
+                      effort,
+                      hermesThread: isHermesThread(threadId),
+                    }),
+                  };
+                  const result = await learnFromTurn(input);
+                  if (result.added) session.emitAll("rules_changed", { added: result.added, summary: result.summary, threadId });
+                  if (result.added) logger.info("Learned rule candidates", { threadId, added: result.added });
+                })().catch((error) => logger.warn("Automatic rule learning failed", { threadId, error: errorMessage(error) }));
+              }, 800).unref?.();
             },
           },
         );

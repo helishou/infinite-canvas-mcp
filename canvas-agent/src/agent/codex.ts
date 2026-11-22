@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 
 import type { CanvasSnapshot } from "../canvas/types.js";
+import { RULE_DRAFT_OUTPUT_SCHEMA, parseRuleDraft, type RuleDraft } from "../rules/learn.js";
 import { logger } from "../utils/logger.js";
 import { errorMessage, field, type JsonRecord } from "../utils/value.js";
 import { CodexAppClient, CodexReportedError } from "./codex-client.js";
@@ -347,6 +348,26 @@ async function generateCodexSkillDraftNow(emit: AgentEmit, cwd: string, input: C
         return parsed.data;
     } finally {
         if (threadId) await app.closeSkillDraftThread(threadId).catch((error) => logger.warn("Failed to release Skill draft thread", { threadId, error }));
+    }
+}
+
+/** 从一轮对话中提炼长期规则草稿；与生产 turn 共用串行队列，避免抢同一个 app-server。 */
+export async function generateCodexRulesDraft(emit: AgentEmit, cwd: string, input: { prompt: string; model?: string; effort?: CodexReasoningEffort }): Promise<RuleDraft> {
+    const queued = codexQueue.catch(() => undefined).then(() => generateCodexRulesDraftNow(emit, cwd, input));
+    codexQueue = queued;
+    return await queued;
+}
+
+async function generateCodexRulesDraftNow(emit: AgentEmit, cwd: string, input: { prompt: string; model?: string; effort?: CodexReasoningEffort }) {
+    const app = await getCodexApp(emit);
+    let threadId = "";
+    try {
+        const thread = await app.startSkillDraftThread(cwd);
+        threadId = String(field(thread, "id") || "");
+        const raw = await app.generateSkillDraft(threadId, input.prompt, RULE_DRAFT_OUTPUT_SCHEMA, input.model, input.effort);
+        return parseRuleDraft(raw);
+    } finally {
+        if (threadId) await app.closeSkillDraftThread(threadId).catch((error) => logger.warn("Failed to release rules draft thread", { threadId, error }));
     }
 }
 
