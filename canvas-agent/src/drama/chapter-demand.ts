@@ -21,12 +21,20 @@ export type ChapterDemandDraft = {
 };
 
 export type ChapterDemandEnvironment = { id: string; name: string };
+/** 结构化引用清单项（角色/道具/场景）；id 是注册表/资产卡的稳定 ID，name 仅给模型看。 */
+export type ChapterDemandRef = { id: string; name: string };
 
 export type ChapterDemandPromptInput = {
     chapterTitle: string;
     chapterBody: string;
     /** 本集已登记的场景环境；模型只能从这里挑 environmentId。 */
     environments: ChapterDemandEnvironment[];
+    /** 本集已登记角色（character_registry）；模型的 beat.character_ids 只能逐字复制这里的 id。 */
+    characterRefs?: ChapterDemandRef[];
+    /** 本集已登记道具（asset_cards 中 kind=prop）；模型的 beat.prop_ids 只能逐字复制这里的 id。 */
+    propRefs?: ChapterDemandRef[];
+    /** 场景引用清单；不传时场景段用 environments。 */
+    sceneRefs?: ChapterDemandRef[];
     /** 单镜时长上限，用于提示模型别给过长镜头。 */
     maxShotSeconds?: number;
     /** 目标单集秒数；给出时用影策 ShotTarget/LineTarget 作为软参考写进提示词，不强制模型照搬。 */
@@ -42,24 +50,35 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     const environments = input.environments.length
         ? input.environments.map(item => `- ${item.id}｜${item.name}`).join("\n")
         : "（本集还没有登记场景环境，请把 environmentId 留空并在 sceneName 里写场景名）";
+    const refList = (refs: ChapterDemandRef[] | undefined, empty: string) => refs?.length
+        ? refs.map(item => `- ${item.id}｜${item.name}`).join("\n")
+        : empty;
+    const characters = refList(input.characterRefs, "（本集还没有登记角色，所有 beat 的 character_ids 给空数组）");
+    const props = refList(input.propRefs, "（本集还没有登记道具，所有 beat 的 prop_ids 给空数组）");
+    const scenes = input.sceneRefs?.length
+        ? input.sceneRefs.map(item => `- ${item.id}｜${item.name}`).join("\n")
+        : environments;
     const systemLines = [
         "你是短剧分镜编剧。把给定章节改写成可拍摄的分镜草案，只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。",
         "JSON 结构：",
-        '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","camera":"运镜（可空）","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）"}]}]}',
+        '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","camera":"运镜（可空）","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）","character_ids":["角色ID数组"],"prop_ids":["道具ID数组"],"scene_id":"场景ID或空串"}]}]}',
         "硬性要求：",
         `1. 每个 beat 的 seconds 是时长提示（3–${maxShotSeconds} 秒，整数或 .5）：动作/冲突镜给 3–4 秒短镜，情绪戏/对话/关键场面给 6–${maxShotSeconds} 秒长镜，普通叙事给 4–5 秒。按剧情需要分配，不要所有镜头都用同一个秒数。`,
-        "2. environmentId 只能从下面清单里选；清单为空时才允许留空串。",
+        "2. environmentId 只能从下面场景清单里选；清单为空时才允许留空串。",
         "3. 有 dialogue 必须同时给 speaker，否则这条台词会被丢弃。",
         "4. demand 是给人看的需求正文：【场景：X】与【时间：Y】各占一行（不要写在同一行），每个镜头用【镜头 N】单独起行，镜头正文原样叙述，不要写 JSON。",
         "5. 不要新增原文没有的人物关系；不要写音乐、字幕、转场特效。",
+        "6. 每个 beat 的 character_ids / prop_ids / scene_id 用于自动绑定参考图：id 只能从下方对应清单里逐字复制，不得新编、不得改写、不得用名称代替 id；清单里没有就 character_ids/prop_ids 给空数组、scene_id 给空串；同一镜内按出场顺序去重，同一个 id 只写一次。",
     ];
     if (Number.isFinite(input.episodeSeconds) && (input.episodeSeconds ?? 0) > 0) {
         const targetSeconds = Number(input.episodeSeconds);
         systemLines.push(
-            `6. 目标单集约 ${targetSeconds} 秒：影策估算约 ${ShotTarget(targetSeconds, PacingRelaxed)} 镜、${LineTarget(targetSeconds, DialogueStandard)} 条台词/旁白。这是软参考，按剧情实际需要取舍。`,
+            `7. 目标单集约 ${targetSeconds} 秒：影策估算约 ${ShotTarget(targetSeconds, PacingRelaxed)} 镜、${LineTarget(targetSeconds, DialogueStandard)} 条台词/旁白。这是软参考，按剧情实际需要取舍。`,
         );
     }
-    systemLines.push("场景环境清单：", environments);
+    systemLines.push("角色清单：", characters);
+    systemLines.push("道具清单：", props);
+    systemLines.push("场景清单：", scenes);
     const system = systemLines.join("\n");
     const user = [
         `章节标题：${input.chapterTitle}`,
@@ -83,11 +102,38 @@ function asText(value: unknown) {
     return typeof value === "string" ? value.trim() : "";
 }
 
+export type ChapterDemandParseOptions = {
+    environments?: ChapterDemandEnvironment[];
+    /** 合法角色 ID 全集（character_registry.id）；给定时 beat.character_ids 仅保留命中项。 */
+    allowedCharacterIds?: Set<string>;
+    /** 合法道具资产 ID 全集（asset_cards.id, kind=prop）；给定时 beat.prop_ids 仅保留命中项。 */
+    allowedPropIds?: Set<string>;
+    /** 合法场景 ID 全集（environmentId）；给定时 beat.scene_id 非法则清空。 */
+    allowedSceneIds?: Set<string>;
+};
+
+/**
+ * 白名单过滤 + 保序去重：非法 id 丢弃，合法项按模型给出的顺序保留，重复项只留第一次。
+ * allowed 未给定时不过滤（向后兼容老调用方）。
+ */
+function filterRefIds(value: unknown, allowed?: Set<string>): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of Array.isArray(value) ? value : []) {
+        const id = asText(raw);
+        if (!id || seen.has(id) || (allowed && !allowed.has(id))) continue;
+        seen.add(id);
+        out.push(id);
+    }
+    return out;
+}
+
 /**
  * 解析模型回包。结构性错误抛 `CHAPTER_DEMAND_*`，与制作台的报错风格一致。
  * `environments` 给定时会校验 environmentId 是否在清单内（模型最容易在这里瞎编）。
+ * 结构化引用 id 同样走白名单：编造的 character_ids / prop_ids / scene_id 一律丢弃。
  */
-export function parseChapterDemand(text: string, options: { environments?: ChapterDemandEnvironment[] } = {}): ChapterDemandDraft {
+export function parseChapterDemand(text: string, options: ChapterDemandParseOptions = {}): ChapterDemandDraft {
     const json = extractJson(String(text ?? ""));
     if (!json) throw new Error("CHAPTER_DEMAND_JSON: 回包里没有 JSON 对象");
     let parsed: unknown;
@@ -109,6 +155,8 @@ export function parseChapterDemand(text: string, options: { environments?: Chapt
         const beats = (Array.isArray(scene.beats) ? scene.beats : []).map((beat, beatIndex) => {
             const row = beat && typeof beat === "object" ? beat as Record<string, unknown> : {};
             const seconds = Number(row.seconds);
+            const rawSceneId = asText(row.scene_id);
+            const sceneId = options.allowedSceneIds && rawSceneId && !options.allowedSceneIds.has(rawSceneId) ? "" : rawSceneId;
             return {
                 title: asText(row.title) || `镜头 ${beatIndex + 1}`,
                 visual: asText(row.visual),
@@ -116,6 +164,9 @@ export function parseChapterDemand(text: string, options: { environments?: Chapt
                 seconds: Number.isFinite(seconds) && seconds > 0 ? seconds : 2,
                 dialogue: asText(row.dialogue) || undefined,
                 speaker: asText(row.speaker) || undefined,
+                characterIds: filterRefIds(row.character_ids, options.allowedCharacterIds),
+                propIds: filterRefIds(row.prop_ids, options.allowedPropIds),
+                sceneId,
             } satisfies ChapterBeat;
         }).filter(beat => beat.visual);
         if (!beats.length) throw new Error(`CHAPTER_DEMAND_BEATS: 第 ${index + 1} 个场次没有画面描述`);
@@ -155,7 +206,8 @@ export function fallbackChapterDemand(input: {
             const slice = paragraph.slice(offset, offset + beatChars).trim();
             if (!slice) continue;
             const hint = emotionalRe.test(slice) ? 7 : actionRe.test(slice) ? 4 : secondsPerBeat;
-            beats.push({ title: `节拍 ${beats.length + 1}`, visual: slice, seconds: hint });
+            // 兜底不猜引用：角色/道具留空，场景引用就是本场次环境 ID（不做 scene_registry.id 臆造）。
+            beats.push({ title: `节拍 ${beats.length + 1}`, visual: slice, seconds: hint, characterIds: [], propIds: [], sceneId: environmentId });
         }
     }
     if (!beats.length) throw new Error("CHAPTER_DEMAND_BEATS: 章节正文为空，无法兜底");

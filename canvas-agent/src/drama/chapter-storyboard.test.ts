@@ -217,3 +217,41 @@ test("Clip 的 mode 落在编译器枚举内，默认 T2VA，可显式覆盖为 
     assert.equal(build().segments[0].mode, "T2VA");
     assert.equal(build("Ref2VA").segments[0].mode, "Ref2VA");
 });
+
+test("op.shots[].characters 非空才写；shotInputs.assetIds 来自 beat.propIds，键集合一致且不含帧窗字段", () => {
+    const plan = planChapterStoryboard({
+        chapterId: "EP-REF",
+        scenes: [{ sceneKey: "s", environmentId: "env-庙", beats: [
+            { title: "甲", visual: "陈九拔刀。", seconds: 3, characterIds: ["CHAR-CHEN"], propIds: ["PROP-SWORD"], sceneId: "env-庙" },
+            { title: "乙", visual: "小红沉默。", seconds: 3 },
+        ] }],
+    });
+    const [op] = toSceneStoryboardOps(plan, new Map([["env-庙", "scene-ref"]]));
+    // shot 级角色引用：非空才写，空镜不带该字段；scene_id 用 environmentId，不是 scene_registry.id。
+    assert.deepEqual(op.shots[0].characters, ["CHAR-CHEN"]);
+    assert.equal(Object.hasOwn(op.shots[1], "characters"), false);
+    for (const shot of op.shots) {
+        assert.equal(shot.scene_id, "env-庙", "scene_id 必须是 environmentId，否则 scene-storyboard.ts:56 拒绝");
+        assert.equal(Object.hasOwn(shot, "assetIds"), false, "assetIds 只能出现在 shotInputs，不得塞进 shot");
+        assert.equal(Object.hasOwn(shot, "start_frame"), false);
+        assert.equal(Object.hasOwn(shot, "end_frame"), false);
+        assert.ok(Number.isInteger(shot.duration_frames) && Number(shot.duration_frames) > 0);
+    }
+    // shotInputs 精确覆盖 + 道具资产 ID
+    const ids = op.shots.map(shot => String(shot.id));
+    assert.deepEqual(Object.keys(op.shotInputs).sort(), [...ids].sort());
+    assert.deepEqual((op.shotInputs[ids[0]] as Record<string, unknown>).assetIds, ["PROP-SWORD"]);
+    assert.deepEqual((op.shotInputs[ids[1]] as Record<string, unknown>).assetIds, []);
+});
+
+test("结构化引用改造不破坏 dialogues 回归：台词照旧进 op.shots.dialogues", () => {
+    const plan = planChapterStoryboard({
+        chapterId: "EP-REF-DLG",
+        scenes: [{ sceneKey: "s", environmentId: "env-庙", beats: [
+            { title: "开口", visual: "陈九开口。", seconds: 3, speaker: "陈九", dialogue: "这雨怕是要下一夜。", characterIds: ["CHAR-CHEN"], propIds: [] },
+        ] }],
+    });
+    const [op] = toSceneStoryboardOps(plan, new Map([["env-庙", "scene-ref"]]));
+    assert.deepEqual(op.shots[0].dialogues, [{ speaker: "陈九", text: "这雨怕是要下一夜。" }]);
+    assert.deepEqual(op.shots[0].characters, ["CHAR-CHEN"]);
+});

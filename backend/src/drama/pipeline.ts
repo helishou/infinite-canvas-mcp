@@ -1054,6 +1054,18 @@ export class DramaPipeline {
         const hadShots = (Array.isArray(source.shots) ? source.shots : []).length > 0;
         const environments: ChapterDemandEnvironment[] = scenes.map(scene => ({ id: scene.environmentId, name: scene.title }));
         const environmentOfScene = new Map<string, string>(scenes.map(scene => [scene.environmentId, scene.id]));
+        // 影策 CastIDsJSON 规则：结构化引用清单真值全部来自已登记注册表/资产卡。
+        // 注册表为空的老剧目 → 清单为空 → 拆镜引用全空（预期回退），绝不编造 id。
+        const characterRefs = rowsOf(source.character_registry)
+            .map(row => ({ id: textOf(row.id), name: textOf(row.name ?? row.characterName) }))
+            .filter(item => item.id && item.name);
+        const propRefs = rowsOf(source.asset_cards)
+            .filter(row => textOf(row.asset_kind ?? row.kind) === "prop")
+            .map(row => ({ id: textOf(row.id), name: textOf(row.name ?? row.asset_name ?? row.prompt) || textOf(row.id) }))
+            .filter(item => item.id);
+        const allowedCharacterIds = new Set(characterRefs.map(item => item.id));
+        const allowedPropIds = new Set(propRefs.map(item => item.id));
+        const allowedSceneIds = new Set(environments.map(item => item.id));
 
         const opts = this.optionsOf(dramaId);
         const rules = opts.storyboardRules || {};
@@ -1084,6 +1096,8 @@ export class DramaPipeline {
             chapterTitle: String(episode.title || ""),
             chapterBody,
             environments,
+            characterRefs,
+            propRefs,
         });
         const storyboardText = await this.generateText([demandPrompt.system, "", demandPrompt.user].join("\n"), {
             model: opts.storyboardModel,
@@ -1091,7 +1105,7 @@ export class DramaPipeline {
         }, dramaId);
         let draft: { demand: string; scenes: ChapterScenePlan[] };
         try {
-            draft = parseChapterDemand(storyboardText, { environments });
+            draft = parseChapterDemand(storyboardText, { environments, allowedCharacterIds, allowedPropIds, allowedSceneIds });
         } catch {
             draft = fallbackChapterDemand({
                 chapterTitle: String(episode.title || ""),

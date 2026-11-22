@@ -39,9 +39,9 @@ const NEW_DEMAND = JSON.stringify({
     scenes: [{
         sceneKey: "s1", environmentId: ENV, sceneName: "山神庙",
         beats: [
-            { title: "新镜甲", visual: "新稿镜头甲：刀客推门而入。", seconds: 6 },
-            { title: "新镜乙", visual: "新稿镜头乙：少年抬起头。", seconds: 6 },
-            { title: "新镜丙", visual: "新稿镜头丙：雨停月出。", seconds: 6 },
+            { title: "新镜甲", visual: "新稿镜头甲：刀客推门而入。", seconds: 6, character_ids: ["CHAR-DAOKE"], prop_ids: ["PROP-DAO"], scene_id: ENV },
+            { title: "新镜乙", visual: "新稿镜头乙：少年抬起头。", seconds: 6, character_ids: ["CHAR-SHAONIAN", "CHAR-DAOKE", "CHAR-DAOKE", "CHAR-FAKE"], prop_ids: ["PROP-DAO", "PROP-FAKE"], scene_id: "ENV-FAKE" },
+            { title: "新镜丙", visual: "新稿镜头丙：雨停月出。", seconds: 6, character_ids: ["CHAR-FAKE"], prop_ids: [], scene_id: ENV },
         ],
     }],
 });
@@ -84,6 +84,13 @@ async function fixture(): Promise<Fixture> {
                     source: {
                         fps_num: 24, fps_den: 1,
                         scene_registry: [{ id: ENV, name: "山神庙" }],
+                        character_registry: [
+                            { id: "CHAR-DAOKE", name: "刀客" },
+                            { id: "CHAR-SHAONIAN", name: "少年" },
+                        ],
+                        asset_cards: [
+                            { id: "PROP-DAO", asset_kind: "prop", prompt: "长刀" },
+                        ],
                         shots: [{ id: OLD_SHOT, scene_id: ENV, source_scene_id: ENV, timeline_id: "main", story_order: 0, title: "旧镜", visual: "旧稿镜头：雪夜街道。", duration_frames: 240, camera: { framing: "WS", movement: "static", editorial_reason: "旧" } }],
                         segments: [{ id: OLD_SEG, shot_ids: [OLD_SHOT], mode: "auto" }],
                     },
@@ -259,6 +266,36 @@ test("rescript 幂等重置本集全部作业，script payload 保留 instructio
         const second = await (f.p as any).rescript(EP, { instruction: "写作技能要点" });
         assert.equal(second.resetJobs, 5);
         assert.equal(f.store.listJobs(DRAMA).filter((j) => j.episode_id === EP).length, 5, "幂等：第二次仍是 5 条");
+    } finally { await f.close(); }
+});
+
+test("结构化引用随拆镜落库：ops 带 characters/shotInputs.assetIds，编造 id 被白名单过滤", async () => {
+    const f = await fixture();
+    try {
+        await (f.p as any).runScript(EP, DRAMA, {});
+        // 提示词注入了注册表/道具清单
+        const storyboardPrompt = f.state.generationPrompts.join("\n");
+        assert.ok(storyboardPrompt.includes("CHAR-DAOKE｜刀客"), "提示词含角色清单");
+        assert.ok(storyboardPrompt.includes("PROP-DAO｜长刀"), "提示词含道具清单");
+        // 写稿批次的 replace op 带结构化引用
+        const batch = f.state.opsBatches[0];
+        const replace = batch.find((op) => op.type === "replace_director_scene_storyboard")!;
+        const shots = replace.shots as Array<Record<string, any>>;
+        assert.equal(shots.length, 3);
+        assert.deepEqual(shots[0].characters, ["CHAR-DAOKE"]);
+        assert.deepEqual(shots[1].characters, ["CHAR-SHAONIAN", "CHAR-DAOKE"], "非法 id 丢弃、重复去重、保序");
+        assert.equal(shots[2].characters, undefined, "只有编造 id 的镜头不带空 characters 字段");
+        for (const shot of shots) {
+            assert.equal(shot.scene_id, ENV, "scene_id 必须是 environmentId");
+            assert.equal(Object.hasOwn(shot, "assetIds"), false);
+        }
+        const inputs = replace.shotInputs as Record<string, { assetIds: string[]; keyframePolicy: string }>;
+        const ids = shots.map((shot) => String(shot.id));
+        assert.deepEqual(Object.keys(inputs).sort(), [...ids].sort());
+        assert.deepEqual(inputs[ids[0]].assetIds, ["PROP-DAO"]);
+        assert.deepEqual(inputs[ids[1]].assetIds, ["PROP-DAO"], "编造的 PROP-FAKE 被过滤，合法的 PROP-DAO 保留");
+        assert.deepEqual(inputs[ids[2]].assetIds, []);
+        for (const id of ids) assert.equal(inputs[id].keyframePolicy, "none");
     } finally { await f.close(); }
 });
 

@@ -41,6 +41,12 @@ export type ChapterBeat = {
     dialogue?: string;
     /** 台词说话人称呼（契约里 speakerName 路径，不需要先登记 Subject）。 */
     speaker?: string;
+    /** 本镜出场角色（character_registry.id，已在 parse 阶段白名单过滤）；进 Shot.characters。 */
+    characterIds?: string[];
+    /** 本镜道具（asset_cards.id, kind=prop，已在 parse 阶段白名单过滤）；进 shotInputs.assetIds。 */
+    propIds?: string[];
+    /** 本镜场景引用（environmentId）；只作结构化记录，Shot.scene_id 仍用场次 environmentId。 */
+    sceneId?: string;
 };
 
 export type ChapterScenePlan = {
@@ -120,6 +126,10 @@ export type PlannedShot = {
     duration_frames: number;
     duration_seconds: number;
     dialogue?: { speaker: string; text: string };
+    /** 本镜出场角色 ID（白名单过滤后），写进 op.shots[].characters。 */
+    characters?: string[];
+    /** 本镜道具资产 ID（asset_cards.id, kind=prop，白名单过滤后），写进 shotInputs.assetIds。 */
+    propAssetIds?: string[];
 };
 
 /** H3 的执行模式枚举；`h3` 不是合法值，必须落到这五个之一。 */
@@ -282,6 +292,9 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
                 camera: buildShotCamera({ camera: beat.camera, visual: beat.visual }),
                 duration_frames: durationFrames,
                 duration_seconds: Number((durationFrames / fps).toFixed(3)),
+                // 结构化引用透传：ID 已在 parseChapterDemand 按注册表/资产卡白名单过滤并保序去重。
+                characters: [...new Set(beat.characterIds ?? [])],
+                propAssetIds: [...new Set(beat.propIds ?? [])],
             };
             const speaker = String(beat.speaker || "").trim();
             const text = String(beat.dialogue || "").trim();
@@ -494,12 +507,15 @@ export function toSceneStoryboardOps(plan: StoryboardPlan, environmentOfScene: M
                 // 台词必须跟着镜头落库，否则对白逐字核查拿不到任何镜头台词。
                 // 契约白名单字段是复数 dialogues，结构 Array<{speaker,text}>（与 demand-beats 一致）。
                 ...(shot.dialogue ? { dialogues: [{ speaker: shot.dialogue.speaker, text: shot.dialogue.text }] } : {}),
+                // shot.characters 是 shot 级白名单字段（production-contract.ts）；非空才写。
+                ...(shot.characters?.length ? { characters: shot.characters } : {}),
             })),
             segments: plan.segments
                 .filter(segment => segment.shot_ids.some(id => shotIds.has(id)))
                 .map(segment => ({ id: segment.id, shot_ids: segment.shot_ids, mode: segment.mode })),
             // 后端要求 shotInputs 精确覆盖本场每个镜头（键集合 === 镜头 ID 集合），空对象会被拒。
-            shotInputs: Object.fromEntries(shots.map(shot => [shot.id, { keyframePolicy: "none", assetIds: [] }])),
+            // assetIds 只放在 shotInputs（合法位置），绝不塞进 shot；无道具留空数组。
+            shotInputs: Object.fromEntries(shots.map(shot => [shot.id, { keyframePolicy: "none", assetIds: shot.propAssetIds ?? [] }])),
         });
     }
     return ops;
