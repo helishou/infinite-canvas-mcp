@@ -131,6 +131,8 @@ export type StudioClipMedia = {
     /** 画布 H3 段的创作真值：提示词与参考图绑定。制作台段卡优先显示画布内容，artifact 只作 fallback。 */
     prompt?: string;
     referenceBindings?: ReadonlyArray<Record<string, unknown>>;
+    /** 画布段的真实生成模式（t2v/i2v/fl2v/ref2va）。段卡模式标签以此为准，勿用过时 source.segment.mode。 */
+    taskMode?: string;
 };
 
 /** 段 targetId → 画布 H3 节点 errorDetails：失败段无成片、进不了 clipMedia，靠这张表也能显示失败原因。 */
@@ -525,6 +527,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                         errorDetails: nodeError && nodeError !== "[object Object]" ? nodeError : undefined,
                         prompt: canvasPrompt,
                         referenceBindings: canvasRefs,
+                        taskMode: String(s.taskMode || ""),
                     });
                 }
             }

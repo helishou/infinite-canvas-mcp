@@ -1656,7 +1656,8 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
         const title = [scene, shotTitle].filter(Boolean).join(" / ") || str(seg.summary || seg.title || `第 ${idx + 1} 段`);
         return {
             id: segId, index: idx, title,
-            prompt, mode: str(seg.mode || ""), shots: shotsList, sec, thumbnails, hasVideo,
+            // 模式标签以画布段真实 taskMode 为准：拆镜/绑定会更新画布段，source.segment.mode 可能过时（T2VA）。
+            prompt, mode: str(clip?.taskMode || seg.mode || ""), shots: shotsList, sec, thumbnails, hasVideo,
             firstShot: first, state,
             // 段卡片视频封面（影策 SegmentVideo 对齐）：无匹配 clipMedia 时 videoUrl 为空，走占位。
             videoUrl, videoInputOutdated, videoStatus, videoDuration,
