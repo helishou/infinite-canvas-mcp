@@ -127,6 +127,15 @@ function buildVideoPrerunReport(
         }
     }
 
+    // 本集资产页是否有可用参考图：任一资产有 storageKey 且媒体就绪。
+    // 传给纯函数，用于识别「图已就绪却没绑进段」的断链（T2VA+空绑定必须拦，真 T2V 放行）。
+    const hasAvailableAssets = Object.values(assets).some((asset: any) => {
+        const key = text(asset?.storageKey).trim();
+        if (!key) return false;
+        const state = mediaState(key, text(asset?.status), resolveMedia) as { fileExists?: boolean } | undefined;
+        return Boolean(state?.fileExists);
+    });
+
     const report = planVideoPrerun({
         episodeId,
         segments,
@@ -134,6 +143,7 @@ function buildVideoPrerunReport(
         model: options.model || undefined,
         // 本地没有计价/准入试算实现；显式标注跳过，绝不伪造报价或创建任务。
         pricingSkipped: true,
+        hasAvailableAssets,
     });
     if (skipped > 0) report.notes.push(`${skipped} 段已有成功结果，按 skipCompleted 口径跳过体检`);
     return report;

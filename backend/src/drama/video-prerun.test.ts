@@ -126,3 +126,41 @@ test("多段汇总：failed/warnings/total 按段计数，error 优先于 warnin
     assert.deepEqual(report.items.map(item => item.status), ["ok", "warning", "error"]);
     assert.match(report.summary, /1 失败 \/ 1 警告（共 3 条）/);
 });
+
+
+// ==== 参考图就绪却没绑进段（断链）必须拦截，真 T2V 不受影响 ====
+test("断链拦截：本集有可用参考图但段 0 绑定 = error（T2VA+空绑定不再放行）", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        hasAvailableAssets: true,
+        segments: [segment({ references: [], prompt: "角色进门，无任何 Picture 标签" })],
+    });
+    assert.equal(report.ok, false);
+    assert.equal(report.failed, 1);
+    assert.equal(report.items[0].status, "error");
+    assert.ok(report.items[0].issues!.some(issue => issue.includes("没有绑定任何参考图") && issue.includes("不会进入视频")));
+});
+
+test("真·纯 T2V：本集无参考图资产，段 0 绑定仍只警告放行", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        hasAvailableAssets: false,
+        segments: [segment({ references: [], prompt: "角色进门，无任何 Picture 标签" })],
+    });
+    assert.equal(report.ok, true);
+    assert.equal(report.failed, 0);
+    assert.equal(report.warnings, 1);
+    assert.equal(report.items[0].status, "warning");
+    assert.ok(report.items[0].issues!.some(issue => issue.includes("按文生视频提交")));
+});
+
+test("已正确绑定参考图的段不因 hasAvailableAssets 误判", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        hasAvailableAssets: true,
+        segments: [segment()], // segment() 默认带 1 张 <Picture 1> 参考
+    });
+    assert.equal(report.ok, true);
+    assert.equal(report.failed, 0);
+    assert.equal(report.items[0].status, "ok");
+});

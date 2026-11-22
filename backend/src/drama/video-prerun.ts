@@ -86,6 +86,13 @@ export type PrerunInput = {
     pricingSkipped?: boolean;
     /** 仅测试/兼容用：覆盖提示词字符上限，默认 16000。 */
     maxPromptChars?: number;
+    /**
+     * 本集资产页是否已有可用参考图（director.assets 存在 storageKey 且媒体就绪）。
+     * 用于识别「参考图已就绪却没绑进段」的断链：此时 video 段 0 绑定不能再只警告放行，
+     * 必须判 error，否则 T2VA + 空绑定会一路走到生成，参考图永远不进视频。
+     * 真·纯 T2V 剧目（资产页本就没有图）不受影响，仍按警告处理。
+     */
+    hasAvailableAssets?: boolean;
 };
 
 const truncateRunes = (text: string, limit: number) => {
@@ -159,8 +166,16 @@ export function planVideoPrerun(input: PrerunInput): PrerunReport {
         if (!prompt.trim()) fail("提示词为空");
         if (Array.from(prompt).length > limit) fail(`提示词超过 ${limit} 字符`);
 
-        // 4. 无参考图警告（影策 video/image 两种 mode）。
-        if (mode === "video" && imageReferences.length === 0) warn("没有参考图，将按文生视频提交，人物和场景一致性靠提示词");
+        // 4. 无参考图判定（影策 video/image 两种 mode）。
+        if (mode === "video" && imageReferences.length === 0) {
+            if (input.hasAvailableAssets) {
+                // 资产页已有可用参考图，段却 0 绑定 = 「参考图就绪但没绑进段」断链。
+                // 这是最该拦截的组合：放行会让参考图永远不进视频（对齐用户"参考图压根没进视频"投诉）。
+                fail("本集已有可用参考图，但本段没有绑定任何参考图；参考图不会进入视频，请先在画布为本段绑定参考资产后重新体检");
+            } else {
+                warn("没有参考图，将按文生视频提交，人物和场景一致性靠提示词");
+            }
+        }
         if (mode === "image" && references.length === 0) warn("没有资产参考，跨镜头一致性可能不稳定");
 
         // 5. 时长/参数合理性：只警告，不伪造限制。

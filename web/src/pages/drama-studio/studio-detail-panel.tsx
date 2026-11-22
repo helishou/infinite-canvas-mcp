@@ -1779,7 +1779,9 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
         if (!ep.canvasId) return void message.warning("本集画布尚未就绪，请先打开本集画布后再体检");
         setPrerunning(true);
         try {
-            const report = await prerunEpisode(ep.id, { model: batchVideoModel || undefined });
+            // 体检必须全量：skipCompleted 会跳过已有结果段，而断链段(T2VA+空绑定)的"成功结果"
+            // 恰恰是最该体检的坏产物；只读体检不创建任务/不扣费，全量检查才是正确语义。
+            const report = await prerunEpisode(ep.id, { model: batchVideoModel || undefined, includeAll: true });
             setPrerunReport(report);
             const banner = prerunBanner(report.failed, report.warnings, report.total);
             if (banner.tone === "error") message.warning(banner.text);
@@ -1793,7 +1795,25 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
         if (!toGenerate.length || batchGenerating) return;
         if (!ep.canvasId) return void message.warning("本集画布尚未就绪，请先在画布中打开本集");
         if (batchVideoModel && !onSetSegmentVideoModel) return void message.warning("批量设模型入口尚未就绪");
+        // 真闸门：提交前实时只读体检，failed>0 一律拦住（如「资产已有参考图但段 0 绑定」断链）。
+        // 用后端 prerun 唯一真值，不在前端重复实现判定；体检不创建任务/不扣费。
         setBatchGenerating(true);
+        let gatePassed = false;
+        try {
+            const gate = await prerunEpisode(ep.id, { includeAll: true });
+            if (gate.failed > 0) {
+                const firstIssue = gate.items.find(item => item.status === "error")?.issues?.[0];
+                message.error(`体检未通过（${gate.failed} 个失败项），已阻止生成。${firstIssue ? `原因：${firstIssue}` : "请先修正后再生成"}`);
+                setPrerunReport(gate);
+                return;
+            }
+            gatePassed = true;
+        } catch (error) {
+            message.error(`体检失败，已阻止生成：${(error as Error).message}`);
+            return;
+        } finally {
+            if (!gatePassed) setBatchGenerating(false);
+        }
         let ok = 0;
         const errors: string[] = [];
         try {
