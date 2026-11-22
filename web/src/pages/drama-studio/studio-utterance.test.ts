@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
     dialogueShotLinesOf,
     speakerRegistryOf,
+    speakerNameOf,
     utterancesOfShot,
     type StudioSource,
 } from "./studio-utterance.js";
@@ -80,4 +81,14 @@ test("对白核查镜头侧聚合不再依赖 dialogues：新剧目 4 行 + 老�
     assert.deepEqual(lines, ["哪来的？", "剑来！", "剑来！", "山雨欲来。", "造孽啊。", "散了吧。"]);
     const newDrama = { ...source, shots: source.shots.slice(0, 3).map((shot: Record<string, any>) => ({ ...shot, dialogues: undefined })) };
     assert.deepEqual(dialogueShotLinesOf(newDrama), ["哪来的？", "剑来！", "剑来！", "山雨欲来。"]);
+});
+
+
+test("回填老剧目 speakerSubjectId 是 character_registry.id 时显示角色名而非 entity id", () => {
+    const src: StudioSource = {
+        subject_registry: [], // 回填的老剧目没有 subject_registry
+        character_registry: [{ id: "entity-character-16pxnor", name: "崇良" }],
+    };
+    const reg = speakerRegistryOf(src);
+    assert.equal(speakerNameOf(reg, { speakerSubjectId: "entity-character-16pxnor" }), "崇良");
 });

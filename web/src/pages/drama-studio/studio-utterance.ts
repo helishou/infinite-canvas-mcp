@@ -36,6 +36,9 @@ export function speakerRegistryOf(source: StudioSource): SpeakerRegistry {
 export function speakerNameOf(reg: SpeakerRegistry, u: StudioRow): string {
     const ref = reg.subjectById.get(studioStr(u.speakerSubjectId))?.entityRef as StudioRow | undefined;
     return reg.charNameById.get(studioStr(ref?.id))
+        // 回填的老剧目把 speakerSubjectId 直接写成 character_registry.id（entity id），
+        // subject_registry 为空时上面匹配不到——直接按 character_registry 显示角色名，别暴露 entity id。
+        || reg.charNameById.get(studioStr(u.speakerSubjectId))
         || studioStr(u.speakerName)
         || studioStr(u.speakerSubjectId)
         || "未命名";
