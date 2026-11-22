@@ -8,7 +8,7 @@ import {
     PanelRightClose, PanelRightOpen,
 } from "lucide-react";
 import type { EpisodeProduction, SegmentVideoReprocessPreview, DramaSourceFormat } from "@/services/backend-api";
-import { BackendApiError, backendMediaUrl, editEpisodeProduction, fetchEpisodeProduction, fetchDramaPlanningSource, patchDramaPlanningSource, fetchBackendProject, startCanvasGeneration, applyBackendCanvasOperations, getSegmentVideoReprocessStatus, reprocessSegmentVideo, getEpisodeChapters, getChapter, patchChapter, upsertProjectReferenceAssets } from "@/services/backend-api";
+import { BackendApiError, backendMediaUrl, editEpisodeProduction, fetchEpisodeProduction, fetchDramaPlanningSource, patchDramaPlanningSource, fetchBackendProject, startCanvasGeneration, applyBackendCanvasOperations, getSegmentVideoReprocessStatus, reprocessSegmentVideo, getEpisodeChapters, getChapter, patchChapter, upsertProjectReferenceAssets, prerunEpisode, type VideoPrerunReport } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
@@ -17,6 +17,7 @@ import type { StudioClipMedia, StudioSegmentState, StudioSegmentVersion } from "
 import type { StudioEpisode } from "./use-studio-data";
 import { deriveFinalStale, SOURCE_LABEL } from "./use-studio-data";
 import { loadStudioSettings } from "./studio-settings-tab";
+import { PRERUN_TONE_CLASS, PRERUN_TONE_LABEL, prerunBanner, prerunTone } from "./studio-prerun";
 import { projectVoiceReferenceNotes, VOICE_NOTE_LABEL, VOICE_NOTE_STYLE, type VoiceReferenceNoteView } from "./voice-reference-note-view";
 import { dialogueShotLinesOf, speakerRegistryOf, utterancesOfShot, type ShotUtteranceLine } from "./studio-utterance";
 import { cn } from "@/lib/utils";
@@ -1691,6 +1692,9 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     const [batchWriting, setBatchWriting] = useState(false);
     const [approving, setApproving] = useState(false);
     const [promptResult, setPromptResult] = useState<{ text: string; warnings: string[] } | null>(null);
+    // 生成前只读体检：结果只在本组件展示，不回写制作稿/画布，也不触发任何生成任务。
+    const [prerunReport, setPrerunReport] = useState<VideoPrerunReport | null>(null);
+    const [prerunning, setPrerunning] = useState(false);
     // 影策「段编辑弹窗」：点「打开剧情段」进这里，不再只跳画布
     const [editIdx, setEditIdx] = useState<number | null>(null);
     const [editPrompt, setEditPrompt] = useState("");
@@ -1768,6 +1772,22 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     const BUSY_VIDEO_STATUSES = new Set(["queued", "running", "awaiting_confirmation", "pending", "generating"]);
     const toGenerate = cards.filter((c) => selected.has(c.id) && Boolean(c.prompt) && !BUSY_VIDEO_STATUSES.has(String(c.videoStatus || "").toLowerCase()));
     const batchSkipped = selected.size - toGenerate.length;
+    const prerunBannerView = prerunReport ? prerunBanner(prerunReport.failed, prerunReport.warnings, prerunReport.total) : null;
+    /** 影策「体检」：批量生成前只读检查每段参考图/提示词/时长，绝不创建任务、不写库、不扣费。 */
+    const handlePrerun = async () => {
+        if (prerunning) return;
+        if (!ep.canvasId) return void message.warning("本集画布尚未就绪，请先打开本集画布后再体检");
+        setPrerunning(true);
+        try {
+            const report = await prerunEpisode(ep.id, { model: batchVideoModel || undefined });
+            setPrerunReport(report);
+            const banner = prerunBanner(report.failed, report.warnings, report.total);
+            if (banner.tone === "error") message.warning(banner.text);
+            else message.success(banner.text);
+        } catch (error) {
+            message.error(`体检失败：${(error as Error).message}`);
+        } finally { setPrerunning(false); }
+    };
     /** 影策「生成视频 · N 段」：对每段真设模型 + 真提交 h3-run（skipCompleted 幂等，已完成段由后端跳过）。 */
     const handleBatchGenerate = async () => {
         if (!toGenerate.length || batchGenerating) return;
@@ -2397,6 +2417,12 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                     <span><span className="font-semibold">{formatSec(totalSec)}</span> 时长</span>
                     <span className="flex items-center gap-1">提示词 <span className="font-semibold text-emerald-500">{promptReady}/{segments.length}</span></span>
                     <span className="flex items-center gap-1">视频 <span className="font-semibold text-emerald-500">{videoReady}/{segments.length}</span></span>
+                    <button type="button" onClick={() => void handlePrerun()} disabled={prerunning || !ep.canvasId}
+                        title="生成前只读体检：参考图是否入库、<Picture N> 是否对应、提示词是否为空/超长；不创建任务、不写库、不扣费"
+                        className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50"
+                        data-studio-prerun>
+                        <ScanSearch className="size-3.5" /> {prerunning ? "体检中…" : "生成前体检"}
+                    </button>
                     <button type="button" aria-label="切换矩阵视图" onClick={() => setMatrix(v => !v)} className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted/60" title={matrix ? "列表视图" : "矩阵视图"}>
                         <Film className="size-4" />
                     </button>
@@ -2600,6 +2626,34 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                 <Play className="size-3" /> {batchGenerating ? "提交中…" : `生成视频 · ${toGenerate.length} 段`}
                             </button>
                         </Tooltip>
+                    </div>
+                ) : null}
+                {prerunReport && prerunBannerView ? (
+                    <div className="mt-2 rounded-lg border border-border bg-card px-3 py-2" data-studio-prerun-report>
+                        <div className="flex items-center gap-2">
+                            <span className={cn("rounded px-1.5 py-0.5 text-[10px] font-medium", PRERUN_TONE_CLASS[prerunBannerView.tone])}>{PRERUN_TONE_LABEL[prerunBannerView.tone]}</span>
+                            <span className="text-[11px] text-foreground">{prerunBannerView.text}</span>
+                            <button type="button" onClick={() => setPrerunReport(null)} className="ml-auto text-muted-foreground hover:text-foreground" data-studio-prerun-close>关闭</button>
+                        </div>
+                        <div className="mt-1.5 max-h-44 space-y-1 overflow-auto">
+                            {prerunReport.items.map(item => {
+                                const tone = prerunTone(item.status);
+                                return (
+                                    <div key={item.segmentId || item.index} className={cn("rounded border px-2 py-1", PRERUN_TONE_CLASS[tone])} data-studio-prerun-item>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-medium">第 {item.index + 1} 段</span>
+                                            <span className="truncate text-muted-foreground">{item.title}</span>
+                                            <span className="ml-auto shrink-0">{PRERUN_TONE_LABEL[tone]}</span>
+                                        </div>
+                                        {item.issues?.length ? (
+                                            <ul className="mt-0.5 list-inside list-disc opacity-90">{item.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul>
+                                        ) : null}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        {prerunReport.notes.length ? <div className="mt-1.5 text-[10px] text-muted-foreground">{prerunReport.notes.join("；")}</div> : null}
+                        <div className="mt-1 text-[10px] text-muted-foreground">{prerunReport.next}</div>
                     </div>
                 ) : null}
             </div>

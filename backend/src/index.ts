@@ -58,6 +58,7 @@ import { resolveOutlineModel } from "./drama/outline-proposal.js";
 import { videoCapabilitiesOf } from "./canvas/model-video-capability.js";
 import { registerDramaPipelineRoutes } from "./server/drama-pipeline-routes.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
+import { registerDramaPrerunRoutes } from "./server/drama-prerun-routes.js";
 import { registerDramaVideoReprocessRoutes } from "./server/drama-video-reprocess-routes.js";
 import { registerDramaPlanningRoutes, registerDramaPlanningStateRoutes, registerDramaScriptRoutes, registerDramaStageRoutes, registerDramaTopicProposalRoute, registerDramaEpisodeGroupingRoutes } from "./server/drama-planning-routes.js";
 import { registerDramaSourceChapterRoutes } from "./server/drama-source-chapter-routes.js";
@@ -356,6 +357,8 @@ async function startBackendHttpServer() {
   }));
   const episodeProductionRunner = new EpisodeProductionRunner(episodeProduction, runtime.stores, canvasGeneration);
   registerDramaProductionRoutes(app, episodeProduction, episodeProductionRunner, undefined, runtime.events, productionAgents);
+  // 视频生成前只读体检：GET/POST /drama/episodes/:episodeId/prerun（不创建任务、不写库）。
+  registerDramaPrerunRoutes(app, episodeProduction);
   // 视频已生成但结果回写失败：只重跑本地后处理，不重新提交模型、不扣费。
   registerDramaVideoReprocessRoutes(app, runtime.db, runtime.stores, runtime.events);
   registerDramaTopicProposalRoute(app, runtime.stores);

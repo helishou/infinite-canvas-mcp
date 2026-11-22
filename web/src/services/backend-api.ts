@@ -763,6 +763,37 @@ export function reprocessSegmentVideo(episodeId: string, segmentId: string) {
     );
 }
 
+/** 批量生成前只读体检（影策 preflight 移植）：逐段绿/黄/红 + issues，不创建任务、不写库、不扣费。 */
+export type VideoPrerunItem = {
+    index: number;
+    nodeId: string;
+    segmentId: string;
+    title: string;
+    status: "ok" | "warning" | "error";
+    issues?: string[];
+    spec?: string;
+    quote?: string;
+    note?: string;
+};
+export type VideoPrerunReport = {
+    ok: boolean;
+    failed: number;
+    warnings: number;
+    total: number;
+    items: VideoPrerunItem[];
+    episodeId?: string;
+    notes: string[];
+    summary: string;
+    next: string;
+};
+export function prerunEpisode(episodeId: string, options: { model?: string; includeAll?: boolean } = {}) {
+    return request<VideoPrerunReport>(
+        "POST",
+        `/drama/episodes/${encodeURIComponent(episodeId)}/prerun`,
+        options,
+    );
+}
+
 export function previewEpisodeProductionImpact(episodeId: ProductionTarget, stage: "script" | "shots" | "director") { return request<{ ok: boolean; impact: NonNullable<EpisodeProduction["impact"]> }>("GET", `${productionPath(episodeId)}/impact?stage=${stage}`); }
 export function publishEpisodeProduction(episodeId: ProductionTarget, expectedRevision: number, stage: "script" | "shots" | "director", operationId = nanoid()) { return request<{ ok: boolean; production: EpisodeProduction }>("POST", `${productionPath(episodeId)}/publish`, { operationId, expectedRevision, stage }); }
 export function fetchEpisodeProductionVersions(episodeId: ProductionTarget) { return sharedGet<{ ok: boolean; versions: Array<{ version: number; stage: "script" | "shots" | "director"; impact: NonNullable<EpisodeProduction["impact"]>; createdAt: string }> }>(`${productionPath(episodeId)}/versions`); }
