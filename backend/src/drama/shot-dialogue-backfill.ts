@@ -208,7 +208,9 @@ function speakerIdentity(name: string, characterRegistry: RegistryEntryLike[], s
     if (entityId) {
         const subject = subjectRegistry.find(s => String(s?.entityRef?.id || "") === entityId && String(s?.entityRef?.kind || "character") === "character");
         if (subject?.id) return { speakerSubjectId: String(subject.id) };
-        return { speakerSubjectId: entityId };
+        // 老剧目没有 subject_registry：绝不能把 character entity id 塞进 speakerSubjectId，
+        // 否则 production schema 校验（说话 Subject 未登记）会挡住一切写回。改用 speakerName。
+        return { speakerName: trimmed };
     }
     return { speakerName: trimmed };
 }

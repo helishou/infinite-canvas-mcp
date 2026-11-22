@@ -152,8 +152,11 @@ test("backfill 产出合法 utterances 与 shot.utterance_refs（对齐 ep3 结�
     }
     // speakerSubjectId 从 character_registry.name → subject_registry.entityRef.id 解析。
     assert.equal(result.utterances.find(u => u.text === "真相在卷中")?.speakerSubjectId, "SUB_SY");
-    // 没有稳定 Subject 时退回实体 id。
-    assert.equal(result.utterances.find(u => u.text === "寒波寺那晚，是我把他骗去的。")?.speakerSubjectId, "CHAR_ZHAO");
+    // 赵孟坚无稳定 Subject（subject_registry 只登记了沈砚）：不能再把 entity id 塞进
+    // speakerSubjectId，否则 production schema 校验会挡住写回；应退回 speakerName。
+    const zhaoUtterance = result.utterances.find(u => u.text === "寒波寺那晚，是我把他骗去的。");
+    assert.equal(zhaoUtterance?.speakerSubjectId, undefined);
+    assert.equal(zhaoUtterance?.speakerName, "赵孟坚");
 });
 
 test("重复 backfill 幂等：utterances 不重复、不替换、不丢弃", () => {
@@ -282,7 +285,7 @@ test("runPrompts 能读到 backfill 产出的逐字台词并写进提示词", as
         assert.match(prompt, /台词：“真相在卷中”/, "逐字台词进入素材稿");
         assert.match(prompt, /台词：“周郎害我，谨防寒波。”/, "长台词进入素材稿");
         assert.match(prompt, /台词：“周郎……寒波……”/, "叙述化台词也进入素材稿");
-        assert.match(prompt, /台词：“寒波寺那晚，是我把他骗去的。”/, "后段台词进入素材稿");
+        assert.match(prompt, /台词：(?:赵孟坚：)?“寒波寺那晚，是我把他骗去的。”/, "后段台词进入素材稿（可带说话人名）");
         assert.doesNotMatch(prompt, /绝对无台词.*寒波寺那晚/, "不再是零台词素材稿");
         assert.equal(f.state.ops.length, 1, "写回画布段");
     } finally { await f.close(); }
