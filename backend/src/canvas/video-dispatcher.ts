@@ -592,17 +592,45 @@ function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
     if (values.seconds === undefined && values.duration !== undefined) values.seconds = values.duration;
     return values;
 }
-function messageOf(error: unknown) {
-    if (error instanceof Error) return error.message;
-    // 引擎回执里的 error 可能是 {code, message} 对象：直接 String() 会写成 [object Object]。
+/**
+ * 失败原因转可诊断文本（与 h3-runner 的 describeFailure 同一口径）。
+ * 引擎回执里的 error 可能是 {code, message} 或 {error:{...}} 对象：
+ * 直接 String() 会写成 "[object Object]"，任务历史里只剩这串，无法定位。
+ */
+function describeFailure(error: unknown, depth = 0): string {
+    if (error instanceof Error) return error.message || error.name || "未知错误";
+    if (typeof error === "string") return error.trim() || "未知错误";
     if (error && typeof error === "object") {
-        const item = error as { message?: unknown; code?: unknown; error?: unknown };
-        if (typeof item.message === "string" && item.message.trim()) return item.message;
-        if (typeof item.error === "string" && item.error.trim()) return item.error;
+        if (depth >= 3) {
+            try {
+                const shallow = JSON.stringify(error);
+                return shallow && shallow !== "{}" ? shallow : "未知错误";
+            } catch { return "未知错误"; }
+        }
+        const item = error as { message?: unknown; error?: unknown; code?: unknown; detail?: unknown; reason?: unknown };
+        for (const key of ["message", "error", "detail", "reason"] as const) {
+            const value = item[key];
+            if (typeof value === "string" && value.trim()) return value;
+            if (value && typeof value === "object") {
+                const nested = describeFailure(value, depth + 1);
+                if (nested !== "未知错误" && nested !== "[object Object]") return nested;
+            }
+        }
         if (typeof item.code === "string" && item.code.trim()) return item.code;
-        try { return JSON.stringify(error); } catch { return "未知错误"; }
+        try {
+            const json = JSON.stringify(error, (key, value) => (value && typeof value === "object" && Object.keys(value).includes("self") ? undefined : value));
+            if (json && json !== "{}") return json;
+        } catch { /* 循环引用等：落到兜底 */ }
+    }
+    if (error === null || error === undefined) return "未知错误";
+    if (typeof error === "object") {
+        const name = (error as { constructor?: { name?: string } }).constructor?.name;
+        return name && name !== "Object" ? `未知错误（${name}）` : "未知错误";
     }
     return String(error);
+}
+function messageOf(error: unknown) {
+    return describeFailure(error);
 }
 async function waitForTask(tasks: TaskStore, id: string) { for (;;) { const task = tasks.get(id); if (!task) throw new Error(`生成任务不存在：${id}`); if (task.status === "succeeded") return task; if (["failed", "cancelled"].includes(task.status)) throw new Error(task.error || `生成任务${task.status}`); await new Promise((resolve) => setTimeout(resolve, 500)); } }
 function firstMedia(task: RuntimeTask) { const media = task.result?.media; const values = Array.isArray(media) ? media : media && typeof media === "object" ? [media] : []; const output = values.find((item: any) => String(item?.mimeType || "").startsWith("video/")) || values[0]; if (!output || typeof output !== "object") throw new Error("视频任务完成但没有返回媒体"); return output as Record<string, unknown>; }

@@ -47,6 +47,8 @@ export type PrerunSegment = {
     /** 秒。0/undefined/非有限值视为未设置（warning）。 */
     duration?: number;
     model?: string;
+    /** 段保存的画幅（如 16:9 / 9:16）。 */
+    aspectRatio?: string;
     references: PrerunReference[];
 };
 
@@ -93,6 +95,11 @@ export type PrerunInput = {
      * 真·纯 T2V 剧目（资产页本就没有图）不受影响，仍按警告处理。
      */
     hasAvailableAssets?: boolean;
+    /**
+     * 剧目级交付画幅（settings.videoAspectRatio，如 16:9 / 9:16）。
+     * 影策把它当单一来源，段画幅只能是它的派生值；这里用于检出两者漂移。
+     */
+    aspectRatio?: string;
 };
 
 const truncateRunes = (text: string, limit: number) => {
@@ -149,7 +156,20 @@ export function planVideoPrerun(input: PrerunInput): PrerunReport {
             else fieldCounts.audios++;
         }
 
-        // 2. <Picture N> 标签与参考图绑定一致性（影策扫 @图片N/@视频N/@音频N 的本地形式）。
+        // 2. 画幅一致性（对齐影策：交付画幅是剧目级单一来源，段不得各存一份漂移）。
+        //    剧目已设画幅而段值不同 = error，必须在跑视频前修正。
+        //    剧目未设画幅的情况不逐段刷警告（老剧目全没设，会把有效信息淹掉），只在报告 notes 提示一次。
+        const segmentAspect = String(segment.aspectRatio ?? "").trim();
+        const dramaAspect = String(input.aspectRatio ?? "").trim();
+        if (dramaAspect) {
+            if (segmentAspect && segmentAspect !== dramaAspect) {
+                fail(`段画幅 ${segmentAspect} 与剧目交付画幅 ${dramaAspect} 不一致，出片比例会与剧目设定不符`);
+            } else if (!segmentAspect) {
+                warn(`段没有保存画幅，将按剧目交付画幅 ${dramaAspect} 执行`);
+            }
+        }
+
+        // 3. <Picture N> 标签与参考图绑定一致性（影策扫 @图片N/@视频N/@音频N 的本地形式）。
         const prompt = String(segment.prompt ?? "");
         const used = pictureOrdinals(prompt);
         for (const ordinal of used) {
@@ -204,6 +224,7 @@ export function planVideoPrerun(input: PrerunInput): PrerunReport {
 
     const notes: string[] = [];
     if (input.model || input.pricingSkipped) notes.push("本地无计价/准入试算，已跳过（不创建任务、不预留积分、不扣费）");
+    if (!String(input.aspectRatio ?? "").trim()) notes.push("剧目未设置交付画幅（settings.videoAspectRatio），各段沿用各自保存值，可能出现比例不一致");
     const summary = `体检：${failed} 失败 / ${warned} 警告（共 ${items.length} 条）`;
     const next = failed === 0
         ? "可以生成：先用少量段试跑；条目多或模型新时建议先只选一段生成"

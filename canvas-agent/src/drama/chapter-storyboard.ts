@@ -47,6 +47,29 @@ export type ChapterBeat = {
     propIds?: string[];
     /** 本镜场景引用（environmentId）；只作结构化记录，Shot.scene_id 仍用场次 environmentId。 */
     sceneId?: string;
+    /**
+     * 景别（特写/近景/中景/全景/远景）。影策 shotSize 的本地形式：
+     * 由模型明确给出，不再靠正则从运镜词里猜——猜出来的值经常兜底成 MS，
+     * 整集景别单调。
+     */
+    shotSize?: string;
+    /**
+     * 本镜起幅画面描述（影策 imagePrompt）：人物站位与朝向、动作、表情、构图、光线、环境。
+     * 与 videoPrompt 分开，是因为 H3 首帧构图和镜内运动是两件事。
+     */
+    imagePrompt?: string;
+    /**
+     * 本镜镜内动作与运镜的时序描述（影策 videoPrompt）：按时间顺序写清起止。
+     */
+    videoPrompt?: string;
+    /**
+     * 本镜的动作（影策 action）：画面里具体发生了什么，区别于静态构图。
+     */
+    action?: string;
+    /**
+     * 本镜对应的原文小句（影策 sourceQuote）：回指原稿，便于核对与追责。
+     */
+    sourceQuote?: string;
 };
 
 export type ChapterScenePlan = {
@@ -130,6 +153,14 @@ export type PlannedShot = {
     characters?: string[];
     /** 本镜道具资产 ID（asset_cards.id, kind=prop，白名单过滤后），写进 shotInputs.assetIds。 */
     propAssetIds?: string[];
+    /** 本镜动作（影策 action），与静态构图分开；提示词按「动作 + 构图 + 运动」组织。 */
+    action?: string;
+    /** 本镜起幅画面（影策 imagePrompt）：站位、朝向、表情、构图、光线、环境。 */
+    imagePrompt?: string;
+    /** 本镜镜内动作与运镜的时序描述（影策 videoPrompt）。 */
+    videoPrompt?: string;
+    /** 本镜对应原文小句（影策 sourceQuote），供核对。 */
+    sourceQuote?: string;
 };
 
 /** H3 的执行模式枚举；`h3` 不是合法值，必须落到这五个之一。 */
@@ -184,6 +215,7 @@ function stableId(prefix: string, ...parts: Array<string | number>) {
 /**
  * 从运镜/画面文字里认景别。认不出来就按中景（MS）——它是能同时容纳动作与表情的
  * 安全档位；猜错景别不会阻断编译，但缺 `framing` 会。
+ * 正常路径应该由模型明确给出 shotSize（见 ChapterBeat.shotSize），这里只是兜底。
  */
 export function inferFraming(text: string): ShotFraming {
     const value = String(text || "");
@@ -197,22 +229,44 @@ export function inferFraming(text: string): ShotFraming {
     return "MS";
 }
 
+/** 影策 shotSize 中文档位 → 编译器认的七档景别。 */
+export function framingOfShotSize(shotSize?: string): ShotFraming | undefined {
+    const value = String(shotSize || "").trim();
+    if (!value) return undefined;
+    if (/大远|极远/.test(value)) return "EWS";
+    if (/全景|远景|空镜/.test(value)) return "WS";
+    if (/全身/.test(value)) return "FS";
+    if (/中景/.test(value)) return "MS";
+    if (/近景/.test(value)) return "MCU";
+    if (/大特写|极端特写/.test(value)) return "ECU";
+    if (/特写/.test(value)) return "CU";
+    return inferFraming(value);
+}
+
 /** 焦距跟着景别走：特写用长焦压缩，全景用广角交代空间。 */
 const LENS_BY_FRAMING: Record<ShotFraming, number> = { EWS: 24, WS: 28, FS: 35, MS: 50, MCU: 85, CU: 85, ECU: 100 };
 
 /**
- * 组装 Shot.camera：`framing` 与 `editorial_reason` 是编译器的必填项，
- * `description` 缺省时退回运镜文本或画面描述首句，保证提示词里有可读的机位说明。
+ * 组装 Shot.camera。`framing` 与 `editorial_reason` 是编译器必填项。
+ *
+ * 旧实现把运镜词同时塞进 description 和 editorial_reason，产出「中景跟拍」这种
+ * 复制粘贴的假理由——面板上看着齐全，实际没有任何创作信息。
+ * 现在的取值顺序：
+ * - framing：模型给的 shotSize > 运镜/画面文字里认出来的景别 > 中景兜底；
+ * - description：运镜词；没有就按画面描述首句，再没有才用固定机位；
+ * - editorial_reason：模型给的创作依据（beat.action / sourceQuote）> 画面描述首句。
+ *   宁可写画面要点，也不再把运镜词复制一遍。
  */
-export function buildShotCamera(input: { camera?: string; visual?: string; framing?: ShotFraming }): ShotCamera {
+export function buildShotCamera(input: { camera?: string; visual?: string; framing?: ShotFraming; shotSize?: string; rationale?: string }): ShotCamera {
     const movement = String(input.camera || "").trim();
-    const framing = input.framing || inferFraming(movement || String(input.visual || ""));
-    const description = movement || "固定机位，按画面描述构图";
-    const reason = movement || String(input.visual || "").trim().slice(0, 60) || "推进当前节拍的情绪落点";
+    const visual = String(input.visual || "").trim();
+    const framing = input.framing || framingOfShotSize(input.shotSize) || inferFraming(movement || visual);
+    const description = movement || visual.split(/[。；;]/)[0]?.trim() || "固定机位，按画面描述构图";
+    const rationale = String(input.rationale || "").trim() || visual.slice(0, 60) || "推进当前节拍的情绪落点";
     return {
         description,
         framing,
-        editorial_reason: reason,
+        editorial_reason: rationale,
         lens_mm: LENS_BY_FRAMING[framing],
         sensor_basis: "full-frame equivalent",
         shutter_angle: 180,
@@ -289,17 +343,34 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
                 story_order: order + beatIndex,
                 title: beat.title || `镜头 ${beatIndex + 1}`,
                 visual: beat.visual.trim(),
-                camera: buildShotCamera({ camera: beat.camera, visual: beat.visual }),
+                camera: buildShotCamera({
+                    camera: beat.camera,
+                    visual: beat.visual,
+                    shotSize: beat.shotSize,
+                    // 创作依据优先用动作/原文（真实信息），没有才退回画面描述首句。
+                    rationale: String(beat.action || "").trim() || String(beat.sourceQuote || "").trim(),
+                }),
                 duration_frames: durationFrames,
                 duration_seconds: Number((durationFrames / fps).toFixed(3)),
                 // 结构化引用透传：ID 已在 parseChapterDemand 按注册表/资产卡白名单过滤并保序去重。
                 characters: [...new Set(beat.characterIds ?? [])],
                 propAssetIds: [...new Set(beat.propIds ?? [])],
+                ...(String(beat.action || "").trim() ? { action: String(beat.action).trim() } : {}),
+                ...(String(beat.imagePrompt || "").trim() ? { imagePrompt: String(beat.imagePrompt).trim() } : {}),
+                ...(String(beat.videoPrompt || "").trim() ? { videoPrompt: String(beat.videoPrompt).trim() } : {}),
+                ...(String(beat.sourceQuote || "").trim() ? { sourceQuote: String(beat.sourceQuote).trim() } : {}),
             };
             const speaker = String(beat.speaker || "").trim();
             const text = String(beat.dialogue || "").trim();
             if (speaker && text) shot.dialogue = { speaker, text };
             else if (text && !speaker) diagnostics.push(`镜头「${beat.title}」有台词但没说话人，未写入对白`);
+            // 分镜可拍性诊断：字段缺失不阻断（老数据仍能编译），但必须在 diagnostics 里看得见，
+            // 否则又会回到「面板齐全、实际没内容」的假象。
+            const visualRun = Array.from(String(beat.visual || "")).length;
+            if (visualRun < 40) diagnostics.push(`镜头「${beat.title}」画面描述只有 ${visualRun} 字，写不出可拍的站位/动作/表情，建议补足 60 字以上`);
+            if (!String(beat.imagePrompt || "").trim()) diagnostics.push(`镜头「${beat.title}」缺少起幅画面（imagePrompt），首帧构图只能由 visual 猜测`);
+            if (!String(beat.videoPrompt || "").trim()) diagnostics.push(`镜头「${beat.title}」缺少镜内运动描述（videoPrompt），模型只能自行安排动作时序`);
+            if (!String(beat.shotSize || "").trim()) diagnostics.push(`镜头「${beat.title}」未给景别（shotSize），按文字推断，容易出现整集景别单调`);
             sceneShots.push(shot);
             shotScenes.push(sceneLabel);
         });
@@ -509,6 +580,12 @@ export function toSceneStoryboardOps(plan: StoryboardPlan, environmentOfScene: M
                 ...(shot.dialogue ? { dialogues: [{ speaker: shot.dialogue.speaker, text: shot.dialogue.text }] } : {}),
                 // shot.characters 是 shot 级白名单字段（production-contract.ts）；非空才写。
                 ...(shot.characters?.length ? { characters: shot.characters } : {}),
+                // 分镜可拍性字段（影策 shot 级标注）：只在模型真的给了内容时才写，
+                // 不塞空串占位——空字段会让面板显示「有值」却读不出东西。
+                ...(shot.action ? { action: shot.action } : {}),
+                ...(shot.imagePrompt ? { imagePrompt: shot.imagePrompt } : {}),
+                ...(shot.videoPrompt ? { videoPrompt: shot.videoPrompt } : {}),
+                ...(shot.sourceQuote ? { sourceQuote: shot.sourceQuote } : {}),
             })),
             segments: plan.segments
                 .filter(segment => segment.shot_ids.some(id => shotIds.has(id)))

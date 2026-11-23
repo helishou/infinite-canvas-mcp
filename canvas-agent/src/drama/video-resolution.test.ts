@@ -3,12 +3,14 @@ import test from "node:test";
 import {
     DRAMA_VIDEO_ASPECT_RATIOS,
     DRAMA_VIDEO_RESOLUTION_TIERS,
+    dramaVideoPixels,
     dramaVideoResolutionShortSide,
     dramaVideoResolutionToH3,
     formatDramaVideoResolution,
     isDramaVideoAspectRatio,
     isDramaVideoResolutionTier,
 } from "./video-resolution.js";
+import { estimateH3Dimensions } from "../plugins/minimax-h3/runtime-params.js";
 
 test("档位与画幅常量对齐影策：480p/720p/1080p + 16:9/9:16", () => {
     assert.deepEqual([...DRAMA_VIDEO_RESOLUTION_TIERS], ["480p", "720p", "1080p"]);
@@ -57,4 +59,30 @@ test("换算结果就是 H3 一采真实尺寸：estimateH3Dimensions 的 grid 3
             assert.equal(String(Math.min(w, h)), effective.resolution);
         }
     }
+});
+
+test("dramaVideoPixels：画幅+像素量换算宽高，与 estimateH3Dimensions 完全一致", () => {
+    // 引擎「H3 展开流」只认 width/height，这层换算必须与库逐档对齐，否则面板与出片尺寸不符。
+    for (const aspect of DRAMA_VIDEO_ASPECT_RATIOS) {
+        for (const megapixels of [0.3, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0]) {
+            const mine = dramaVideoPixels(aspect, megapixels);
+            const lib = estimateH3Dimensions({ aspectRatio: aspect, megapixels });
+            assert.deepEqual(mine, lib ? { width: lib.width, height: lib.height } : null, `${aspect} ${megapixels}`);
+        }
+    }
+});
+
+test("dramaVideoPixels：16:9 出横版、9:16 出竖版，0.4MP 基准为 864x480", () => {
+    const landscape = dramaVideoPixels("16:9", 0.4);
+    assert.ok(landscape && landscape.width > landscape.height);
+    assert.deepEqual(landscape, { width: 864, height: 480 });
+    const portrait = dramaVideoPixels("9:16", 0.4);
+    assert.ok(portrait && portrait.height > portrait.width);
+    assert.deepEqual(portrait, { width: 480, height: 864 });
+});
+
+test("dramaVideoPixels：像素量缺省/非法按 0.4MP，画幅非法返回 null", () => {
+    assert.deepEqual(dramaVideoPixels("16:9", undefined), { width: 864, height: 480 });
+    assert.deepEqual(dramaVideoPixels("16:9", 0), { width: 864, height: 480 });
+    assert.equal(dramaVideoPixels("", 0.4), null);
 });

@@ -1634,7 +1634,7 @@ export class CanvasH3Runner {
 
     private fail(id: string, error: unknown) {
         if (this.stores.tasks.get(id)?.status === "cancelled") return;
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeFailure(error);
         const failureLayer = classifyH3Failure(message);
         const current = this.stores.tasks.get(id);
         const task = this.update(id, { status: "failed", error: message, result: { ...recordOf(current?.result), failureLayer } });
@@ -1781,6 +1781,47 @@ function normalizeInput(input: H3RunInput): H3RunInput {
 }
 
 function recordOf(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
+
+/**
+ * 失败原因转可诊断文本。
+ * 引擎/工作流的 error 常是 {code, message, ...} 或 {error: {...}} 对象；直接 String() 会写成
+ * "[object Object]"，任务历史里只剩这一串，无法定位（真实发生过：整段生成失败只留一行 [object Object]）。
+ * 顺序：Error.message > message > error 字段 > code > JSON 序列化 > 兜底文案。
+ */
+export function describeFailure(error: unknown, depth = 0): string {
+    if (error instanceof Error) return error.message || error.name || "未知错误";
+    if (typeof error === "string") return error.trim() || "未知错误";
+    if (error && typeof error === "object") {
+        // 嵌套过深直接收口：自引用/环形结构不能让失败路径自己栈溢出。
+        if (depth >= 3) {
+            try {
+                const shallow = JSON.stringify(error);
+                return shallow && shallow !== "{}" ? shallow : "未知错误";
+            } catch { return "未知错误"; }
+        }
+        const item = error as { message?: unknown; error?: unknown; code?: unknown; detail?: unknown; reason?: unknown };
+        for (const key of ["message", "error", "detail", "reason"] as const) {
+            const value = item[key];
+            if (typeof value === "string" && value.trim()) return value;
+            if (value && typeof value === "object") {
+                const nested = describeFailure(value, depth + 1);
+                if (nested !== "未知错误" && nested !== "[object Object]") return nested;
+            }
+        }
+        if (typeof item.code === "string" && item.code.trim()) return item.code;
+        try {
+            const json = JSON.stringify(error, (key, value) => (value && typeof value === "object" && Object.keys(value).includes("self") ? undefined : value));
+            if (json && json !== "{}") return json;
+        } catch { /* 循环引用等：落到兜底 */ }
+    }
+    if (error === null || error === undefined) return "未知错误";
+    if (typeof error === "object") {
+        // 走到这里说明前面所有取值都落空：给可读类型名，绝不返回 "[object Object]"。
+        const name = (error as { constructor?: { name?: string } }).constructor?.name;
+        return name && name !== "Object" ? `未知错误（${name}）` : "未知错误";
+    }
+    return String(error);
+}
 
 function videoModelReference(reference: Record<string, unknown>) {
     const stringValue = (key: string) => typeof reference[key] === "string" && reference[key] ? String(reference[key]) : undefined;

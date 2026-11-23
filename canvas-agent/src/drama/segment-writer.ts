@@ -15,6 +15,14 @@ export type SegmentWriterShot = {
     visual: string;
     /** 运镜/摄影。 */
     camera?: string;
+    /** 本镜动作（影策 action）：画面里发生的具体动作，与静态构图分开。 */
+    action?: string;
+    /** 本镜起幅画面（影策 imagePrompt）：站位、朝向、表情、构图、光线、环境。 */
+    imagePrompt?: string;
+    /** 本镜镜内动作与运镜的时序（影策 videoPrompt），写清起止。 */
+    videoPrompt?: string;
+    /** 本镜对应原文小句（影策 sourceQuote），作为剧情依据交给写作模型。 */
+    sourceQuote?: string;
     /** 台词（逐字保留）。单条兼容字段；多句优先读 dialogues。 */
     dialogue?: string;
     /** 说话人。单条兼容字段。 */
@@ -111,7 +119,17 @@ export function buildSegmentDraft(shots: SegmentWriterShot[], noReferenceBinding
     return shots.map((s) => {
         const refs = noReferenceBindings ? [] : (s.references || []).filter((n) => Number.isFinite(n) && n > 0).map((n) => `参考图${n}`);
         const head = `${secText(s.startSec)}–${secText(s.endSec)}秒`;
-        const parts = [s.camera && `运镜：${s.camera.trim()}`, s.visual && `画面：${s.visual.trim()}`].filter(Boolean);
+        // 素材稿要把分镜的真实信息全交出去：只给「画面」一句时，写作模型只能复述这一句，
+        // 起幅构图、镜内运动、原文依据全部丢失（ep1 的 32 字镜头就是这么来的）。
+        // 字段顺序按写作模型的使用顺序：起幅 → 动作 → 镜内运动 → 原文依据。
+        const parts = [
+            s.camera && `运镜：${s.camera.trim()}`,
+            s.visual && `画面：${s.visual.trim()}`,
+            s.action && `动作：${s.action.trim()}`,
+            s.imagePrompt && `起幅：${s.imagePrompt.trim()}`,
+            s.videoPrompt && `镜内运动：${s.videoPrompt.trim()}`,
+            s.sourceQuote && `原文依据：${s.sourceQuote.trim()}`,
+        ].filter(Boolean) as string[];
         if (refs.length) parts.push(`参考：${refs.join("、")}`);
         const many = (Array.isArray(s.dialogues) ? s.dialogues : [])
             .map(d => ({ text: String(d?.text || "").trim(), speaker: String(d?.speaker || "").trim() }))

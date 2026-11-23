@@ -80,3 +80,20 @@ export function dramaVideoResolutionToH3(tier: unknown, aspectRatio: unknown): {
         shortSide,
     };
 }
+
+/**
+ * 画幅 + 像素量 → 真实宽高。
+ *
+ * 引擎「H3 展开流」暴露的是 width/height 直连像素字段，不认 aspectRatio/megapixels
+ * （dry_run 实测 params_ignored=['aspectRatio','megapixels']）；画幅只有换算成宽高才进得去。
+ * 换算必须复用 estimateH3Dimensions 这个唯一真值，不得自行推导：
+ * 手写公式与库在 0.3/0.6/0.8/1.0/1.5/2.0 各档都会差 16px，面板显示就会与出片不符。
+ * megapixels 缺省按 0.4MP（与 H3 节点默认一致）。
+ */
+export function dramaVideoPixels(aspectRatio: unknown, megapixels: unknown): { width: number; height: number } | null {
+    const ratio = canonicalH3AspectRatio(aspectRatio);
+    if (!ratio) return null;
+    const mp = Number(megapixels);
+    const dims = estimateH3Dimensions({ aspectRatio: ratio, megapixels: Number.isFinite(mp) && mp > 0 ? mp : 0.4 });
+    return dims ? { width: dims.width, height: dims.height } : null;
+}

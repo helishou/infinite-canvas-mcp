@@ -60,6 +60,18 @@ function directorAssetsOf(db: { db: { prepare: (sql: string) => { get: (...args:
     }
 }
 
+/** 读取制作稿 draft.settings.videoAspectRatio（仅 SELECT，绝不写库）：剧目级交付画幅单一来源。 */
+function directorAspectOf(db: { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } }, episodeId: string): string {
+    try {
+        const row = db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get(episodeId) as { draft_json?: string } | undefined;
+        const draft = row?.draft_json ? JSON.parse(row.draft_json) as Record<string, any> : {};
+        // 真值在 draft.settings（顶层），不在 director.settings：set_settings 写的就是顶层。
+        return text(record(draft.settings).videoAspectRatio);
+    } catch {
+        return "";
+    }
+}
+
 /**
  * 真值装配：从 episode 绑定的画布遍历 H3 视频段，注入参考图媒体状态后交给纯函数体检。
  * options.includeAll=true 时连已有结果的段一起检查（调试用，默认只体检待生成段）。
@@ -122,6 +134,7 @@ function buildVideoPrerunReport(
                 prompt: text(raw.prompt || raw.promptText),
                 duration: Number(raw.duration || 0),
                 model: text(raw.modelName || raw.model) || undefined,
+                aspectRatio: text(raw.aspectRatio) || undefined,
                 references,
             });
         }
@@ -144,6 +157,7 @@ function buildVideoPrerunReport(
         // 本地没有计价/准入试算实现；显式标注跳过，绝不伪造报价或创建任务。
         pricingSkipped: true,
         hasAvailableAssets,
+        aspectRatio: directorAspectOf(db as any, episodeId) || undefined,
     });
     if (skipped > 0) report.notes.push(`${skipped} 段已有成功结果，按 skipCompleted 口径跳过体检`);
     return report;

@@ -39,6 +39,22 @@ export type ChapterDemandPromptInput = {
     maxShotSeconds?: number;
     /** 目标单集秒数；给出时用影策 ShotTarget/LineTarget 作为软参考写进提示词，不强制模型照搬。 */
     episodeSeconds?: number;
+    /**
+     * 视觉风格（影策 StylePrompt，如「写实电影感」）。注入提示词后，
+     * 模型的构图与光线描述会朝这个方向收敛，不再各镜各写一套调性。
+     */
+    stylePrompt?: string;
+    /**
+     * 全剧统一的画面规则（影策 VisualRules）：色彩、光线、镜头语言、禁忌等。
+     * 影策把它和风格一起注入拆分镜头 prompt，是跨集一致性的来源。
+     */
+    visualRules?: string;
+    /** 本集开场钩子（影策 hook）：第一个镜头就要建立它。 */
+    hook?: string;
+    /** 本集结尾悬念（影策 cliffhanger）：最后一个镜头停在它上面。 */
+    cliffhanger?: string;
+    /** 本集场次与时间信息（影策 time/setting 提示），帮助模型分场。 */
+    sceneHints?: string;
 };
 
 const DEFAULT_MAX_SHOT_SECONDS = 8; // 影策 relaxed 舒缓档上限，情绪戏可给到8秒
@@ -61,7 +77,7 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     const systemLines = [
         "你是短剧分镜编剧。把给定章节改写成可拍摄的分镜草案，只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。",
         "JSON 结构：",
-        '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","camera":"运镜（可空）","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）","character_ids":["角色ID数组"],"prop_ids":["道具ID数组"],"scene_id":"场景ID或空串"}]}]}',
+        '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","action":"画面里发生的具体动作","shotSize":"特写/近景/中景/全景/远景","camera":"运镜（固定/推/拉/摇/跟/环绕，可空）","imagePrompt":"本镜起幅画面","videoPrompt":"本镜镜内动作与运镜的时序","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）","sourceQuote":"对应的原文小句","character_ids":["角色ID数组"],"prop_ids":["道具ID数组"],"scene_id":"场景ID或空串"}]}]}',
         "硬性要求：",
         `1. 每个 beat 的 seconds 是时长提示（3–${maxShotSeconds} 秒，整数或 .5）：动作/冲突镜给 3–4 秒短镜，情绪戏/对话/关键场面给 6–${maxShotSeconds} 秒长镜，普通叙事给 4–5 秒。按剧情需要分配，不要所有镜头都用同一个秒数。`,
         "2. environmentId 只能从下面场景清单里选；清单为空时才允许留空串。",
@@ -69,6 +85,10 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
         "4. demand 是给人看的需求正文：【场景：X】与【时间：Y】各占一行（不要写在同一行），每个镜头用【镜头 N】单独起行，镜头正文原样叙述，不要写 JSON。",
         "5. 不要新增原文没有的人物关系；不要写音乐、字幕、转场特效。",
         "6. 每个 beat 的 character_ids / prop_ids / scene_id 用于自动绑定参考图：id 只能从下方对应清单里逐字复制，不得新编、不得改写、不得用名称代替 id；清单里没有就 character_ids/prop_ids 给空数组、scene_id 给空串；同一镜内按出场顺序去重，同一个 id 只写一次。",
+        // 下面三条是分镜可拍性的硬要求：缺了它们，镜头只会剩一句结果陈述。
+        "7. visual 写「这一镜看得见什么」，不是剧情概括。要能直接指导拍摄：谁站在哪、朝哪个方向、正在做什么动作、脸上是什么表情、画面前景中景背景各有什么。至少 60 字。禁止写「神情坚定」「气氛紧张」这类不可拍的判断，改写能看见的具体表现（手指收紧、喉结动了一下、视线避开）。",
+        "8. imagePrompt 与 videoPrompt 必须分开写，不能复制 visual。imagePrompt 是本镜第一帧的静止构图（人物站位与朝向、动作起始姿态、表情、构图、光线方向、环境陈设），40 字以上；videoPrompt 是本镜时长内按时间顺序发生的动作与镜头运动，写清起止（如「0-2 秒……，2-5 秒……」），40 字以上。",
+        "9. shotSize 必须按叙事需要明确给出特写/近景/中景/全景/远景之一，不得整集都用一个。交代空间用全景/远景，对话与情绪用近景/特写，动作交代用中景。sourceQuote 填本镜对应的原文一小句（逐字摘录，没有原文依据就留空）。",
     ];
     if (Number.isFinite(input.episodeSeconds) && (input.episodeSeconds ?? 0) > 0) {
         const targetSeconds = Number(input.episodeSeconds);
@@ -79,6 +99,20 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     systemLines.push("角色清单：", characters);
     systemLines.push("道具清单：", props);
     systemLines.push("场景清单：", scenes);
+    // 影策拆分镜头 prompt 的票面信息：风格与画面规则决定整集调性，钩子与悬念决定首尾镜头。
+    const style = String(input.stylePrompt || "").trim();
+    const visualRules = String(input.visualRules || "").trim();
+    const hook = String(input.hook || "").trim();
+    const cliffhanger = String(input.cliffhanger || "").trim();
+    const sceneHints = String(input.sceneHints || "").trim();
+    if (style || visualRules) {
+        systemLines.push("视觉风格与画面规则（每一镜的构图、光线、色彩都要照此执行，不得各镜各写一套）：");
+        if (style) systemLines.push(`- 视觉风格：${style}`);
+        if (visualRules) systemLines.push(`- 画面规则：${visualRules}`);
+    }
+    if (hook) systemLines.push(`开场钩子（第一个镜头就要把它建立起来）：${hook}`);
+    if (cliffhanger) systemLines.push(`结尾悬念（最后一个镜头停在它上面，不要提前解决）：${cliffhanger}`);
+    if (sceneHints) systemLines.push(`场次与时间提示：${sceneHints}`);
     const system = systemLines.join("\n");
     const user = [
         `章节标题：${input.chapterTitle}`,
@@ -167,6 +201,12 @@ export function parseChapterDemand(text: string, options: ChapterDemandParseOpti
                 characterIds: filterRefIds(row.character_ids, options.allowedCharacterIds),
                 propIds: filterRefIds(row.prop_ids, options.allowedPropIds),
                 sceneId,
+                // 分镜可拍性字段：模型给了就透传，缺了由 chapter-storyboard 按旧逻辑兜底。
+                shotSize: asText(row.shotSize) || undefined,
+                action: asText(row.action) || undefined,
+                imagePrompt: asText(row.imagePrompt) || undefined,
+                videoPrompt: asText(row.videoPrompt) || undefined,
+                sourceQuote: asText(row.sourceQuote) || undefined,
             } satisfies ChapterBeat;
         }).filter(beat => beat.visual);
         if (!beats.length) throw new Error(`CHAPTER_DEMAND_BEATS: 第 ${index + 1} 个场次没有画面描述`);

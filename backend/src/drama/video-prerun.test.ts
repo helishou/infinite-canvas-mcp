@@ -164,3 +164,49 @@ test("已正确绑定参考图的段不因 hasAvailableAssets 误判", () => {
     assert.equal(report.failed, 0);
     assert.equal(report.items[0].status, "ok");
 });
+
+test("段画幅与剧目交付画幅不一致：判 error，出片前拦下", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        aspectRatio: "16:9",
+        hasAvailableAssets: true,
+        segments: [segment({ aspectRatio: "9:16" })],
+    });
+    assert.equal(report.ok, false);
+    assert.equal(report.failed, 1);
+    assert.equal(report.items[0].status, "error");
+    assert.ok(report.items[0].issues!.some(issue => issue.includes("16:9") && issue.includes("不一致")));
+});
+
+test("段画幅与剧目画幅一致：不产生画幅报错", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        aspectRatio: "16:9",
+        hasAvailableAssets: true,
+        segments: [segment({ aspectRatio: "16:9" })],
+    });
+    assert.equal(report.failed, 0);
+    assert.equal(report.items[0].status, "ok");
+});
+
+test("段缺画幅但剧目已设：warning 并说明按剧目画幅执行", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        aspectRatio: "16:9",
+        hasAvailableAssets: true,
+        segments: [segment()],
+    });
+    assert.equal(report.failed, 0);
+    assert.ok(report.items[0].issues!.some(issue => issue.includes("按剧目交付画幅 16:9")));
+});
+
+test("剧目未设画幅：报告 notes 提示一次，不逐段刷警告", () => {
+    const report = planVideoPrerun({
+        episodeId: "ep",
+        hasAvailableAssets: true,
+        segments: [segment({ aspectRatio: "16:9" })],
+    });
+    assert.equal(report.failed, 0);
+    assert.equal(report.items[0].status, "ok");
+    assert.ok(report.notes.some(note => note.includes("剧目未设置交付画幅")));
+});

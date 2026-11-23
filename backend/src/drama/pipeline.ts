@@ -57,9 +57,11 @@ import {
 } from "@basketikun/canvas-agent/drama/segment-writer";
 import { canonicalH3TaskMode } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { deriveSegmentReferenceBindings, alignPromptPictures } from "./segment-reference-bindings.js";
+import { characterRefsOf, propRefsOf } from "./shot-refs.js";
 import { checkPromptLength, type PromptLengthCheck } from "../canvas/model-video-capability.js";
 import { productionSceneEntries } from "@basketikun/canvas-agent/drama/production-contract";
-import { dramaVideoResolutionToH3, type DramaVideoAspectRatio, type DramaVideoResolutionTier } from "@basketikun/canvas-agent/drama/video-resolution";
+import { dramaVideoResolutionToH3, dramaVideoPixels, type DramaVideoAspectRatio, type DramaVideoResolutionTier } from "@basketikun/canvas-agent/drama/video-resolution";
+import { canonicalH3AspectRatio } from "@basketikun/canvas-agent/plugins/minimax-h3/runtime-params";
 import { learnedRulesCompact } from "./learned-rules.js";
 
 import { PipelineStore, type JobRow, type PipelineRow } from "./pipeline-store.js";
@@ -1061,13 +1063,10 @@ export class DramaPipeline {
         const environmentOfScene = new Map<string, string>(scenes.map(scene => [scene.environmentId, scene.id]));
         // 影策 CastIDsJSON 规则：结构化引用清单真值全部来自已登记注册表/资产卡。
         // 注册表为空的老剧目 → 清单为空 → 拆镜引用全空（预期回退），绝不编造 id。
-        const characterRefs = rowsOf(source.character_registry)
-            .map(row => ({ id: textOf(row.id), name: textOf(row.name ?? row.characterName) }))
-            .filter(item => item.id && item.name);
-        const propRefs = rowsOf(source.asset_cards)
-            .filter(row => textOf(row.asset_kind ?? row.kind) === "prop")
-            .map(row => ({ id: textOf(row.id), name: textOf(row.name ?? row.asset_name ?? row.prompt) || textOf(row.id) }))
-            .filter(item => item.id);
+        // 道具名真值在 asset_plan.asset_name（asset_cards 常只有 prompt 长描述）；
+        // 取名逻辑见 shot-refs.ts，实测直接拿 prompt 当名字会让 prop_ids 全空、参考图绑不上。
+        const characterRefs = characterRefsOf(source);
+        const propRefs = propRefsOf(source);
         const allowedCharacterIds = new Set(characterRefs.map(item => item.id));
         const allowedPropIds = new Set(propRefs.map(item => item.id));
         const allowedSceneIds = new Set(environments.map(item => item.id));
@@ -1106,6 +1105,16 @@ export class DramaPipeline {
             environments,
             characterRefs,
             propRefs,
+            // 影策拆分镜头 prompt 的票面信息：风格/画面规则决定整集调性，钩子/悬念决定首尾镜头。
+            // 这些值早就在导演源稿里，之前没传给拆镜，模型只能各镜各写一套。
+            ...(String(source.style_prompt || source.stylePrompt || "").trim()
+                ? { stylePrompt: String(source.style_prompt || source.stylePrompt).trim() } : {}),
+            ...(String(source.visual_rules || source.visualRules || "").trim()
+                ? { visualRules: String(source.visual_rules || source.visualRules).trim() } : {}),
+            ...(String(source.hook || "").trim() ? { hook: String(source.hook).trim() } : {}),
+            ...(String(source.cliffhanger || "").trim() ? { cliffhanger: String(source.cliffhanger).trim() } : {}),
+            ...(scenes.length
+                ? { sceneHints: scenes.map(scene => scene.title).filter(Boolean).join(" / ") } : {}),
         });
         const storyboardText = await this.generateText([demandPrompt.system, "", demandPrompt.user].join("\n"), {
             model: opts.storyboardModel,
@@ -1149,6 +1158,10 @@ export class DramaPipeline {
             const cleared = structuredClone(production.draft.director) as Record<string, any>;
             cleared.source.shots = [];
             cleared.source.segments = [];
+            // 对白事件引用 Shot ID：重拆镜时 Shot ID 全变，旧 utterances 必然指向已不存在的 Shot，
+            // 校验器会以「对白事件必须由 Shot 引用 / 对白起止 Shot 不存在」拒绝整批 ops。
+            // 必须在同一批次里一起清空，让新稿的对白按新 Shot 重新生成。
+            cleared.source.utterances = [];
             ops.unshift({ type: "set_director_production", director: cleared });
         }
         production = (await this.productionOps(episodeId, production.revision, ops)).production;
@@ -1468,6 +1481,12 @@ export class DramaPipeline {
                     endSec: cursor / fps,
                     visual: String(shot.visual || ""),
                     ...(shot.camera?.description ? { camera: String(shot.camera.description) } : {}),
+                    // 分镜可拍性字段：不传下去的话，写作模型只能看到「画面」一句，
+                    // 起幅构图/镜内运动/原文依据全丢——这正是分镜字段白生成的原因。
+                    ...(String(shot.action || "").trim() ? { action: String(shot.action).trim() } : {}),
+                    ...(String(shot.imagePrompt || "").trim() ? { imagePrompt: String(shot.imagePrompt).trim() } : {}),
+                    ...(String(shot.videoPrompt || "").trim() ? { videoPrompt: String(shot.videoPrompt).trim() } : {}),
+                    ...(String(shot.sourceQuote || "").trim() ? { sourceQuote: String(shot.sourceQuote).trim() } : {}),
                     ...(shotUtterances.length ? {
                         dialogues: shotUtterances,
                         // 单条字段保留兼容；buildSegmentDraft 优先读 dialogues，不会重复输出。
@@ -1653,10 +1672,20 @@ export class DramaPipeline {
      * 用 update_h3_segment 写进每个 H3 节点的段保存值——这是唯一能真正影响出片的路径。
      * 只经请求 params 传 H3_PARAM_KEYS 会被 h3-runner 的 H3_UI_PARAMETER_MISMATCH 守卫挡下
      * （防止 MCP/外部调用静默改面板与出片）；写保存值后前端面板显示与实际出片一致，不是假开关。
+     *
+     * 画幅是剧目级单一来源（对齐影策 production.Settings.AspectRatio）：即使没有分辨率档位，
+     * 也必须把剧目画幅写进每一段。段级 aspectRatio 只是派生值，不允许各存一份漂移。
+     * tier 为空时只改 aspectRatio，megapixels 保留段原值（不写键即不改），避免顺手改动像素量。
      */
     private async applyVideoResolution(canvasId: string, h3Nodes: Array<Record<string, any>>, tier: unknown, aspectRatio: unknown): Promise<{ segments: number; size: string; resolution: string; megapixels: number; aspectRatio: string } | null> {
-        const effective = dramaVideoResolutionToH3(tier, aspectRatio);
-        if (!effective) return null;
+        const tierText = String(tier ?? "").trim();
+        const aspectText = String(aspectRatio ?? "").trim();
+        if (!tierText && !aspectText) return null;
+        const effective = tierText ? dramaVideoResolutionToH3(tierText, aspectText) : null;
+        if (tierText && !effective) return null;
+        // 没有档位时只有画幅：aspectRatio 用规范化的横竖版，尺寸由各段 megapixels 决定。
+        const targetAspect = effective?.aspectRatio || canonicalH3AspectRatio(aspectText);
+        if (!targetAspect) return null;
         const project = await this.getCanvasProject(canvasId);
         const operations: Array<Record<string, unknown>> = [];
         for (const node of h3Nodes) {
@@ -1664,12 +1693,14 @@ export class DramaPipeline {
             for (const segment of segments) {
                 const id = String(segment?.id || "");
                 if (!id) continue;
-                operations.push({
-                    type: "update_h3_segment",
-                    nodeId: String(node.id),
-                    segmentId: id,
-                    patch: { aspectRatio: effective.aspectRatio, megapixels: effective.megapixels },
-                });
+                const patch: Record<string, unknown> = { aspectRatio: targetAspect };
+                if (effective) patch.megapixels = effective.megapixels;
+                // 画幅/像素量属于人工指定值：显式登记后不会被插件全局默认值覆盖。
+                const manual = new Set<string>(Array.isArray(segment.h3ParameterOverrides) ? segment.h3ParameterOverrides.map(String) : []);
+                manual.add("aspectRatio");
+                if (effective) manual.add("megapixels");
+                patch.h3ParameterOverrides = [...manual];
+                operations.push({ type: "update_h3_segment", nodeId: String(node.id), segmentId: id, patch });
             }
         }
         if (operations.length) {
@@ -1679,7 +1710,13 @@ export class DramaPipeline {
                 operations,
             });
         }
-        return { segments: operations.length, size: effective.size, resolution: effective.resolution, megapixels: effective.megapixels, aspectRatio: effective.aspectRatio };
+        return {
+            segments: operations.length,
+            size: effective?.size || "",
+            resolution: effective?.resolution || "",
+            megapixels: effective?.megapixels || 0,
+            aspectRatio: targetAspect,
+        };
     }
 
     /** video 段：H3 runFromCurrent → 轮询 task 至终态。 */
@@ -1704,19 +1741,33 @@ export class DramaPipeline {
         if (videoOpts.referenceLimit && videoOpts.referenceLimit > 0) {
             videoParams.referenceLimit = videoOpts.referenceLimit;
         }
-        // 剧目级 videoResolution 真下发：先写 H3 段保存值（aspectRatio/megapixels，真正决定出片尺寸），
-        // 再把派生 size/resolution 随请求带给自选模型工作流（size/resolution 非 H3_PARAM_KEYS，不触发 UI 守卫）。
+        // 剧目级画幅是单一来源（对齐影策 production.Settings.AspectRatio）：无论有没有分辨率档位，
+        // 都先把剧目画幅写进每个 H3 段的保存值，段级 aspectRatio 只能是它的派生值。
+        // 档位存在时再联动 megapixels，得到真实出片尺寸。
+        // 取值优先级：本次运行透传 > 制作稿 settings.videoAspectRatio（持久真值）。
         const resolutionTier = String(videoOpts.videoResolution || "").trim();
+        const dramaAspect = String(videoOpts.videoAspectRatio || "").trim()
+            || String(((await this.getProduction(episodeId)).production as any)?.draft?.settings?.videoAspectRatio || "").trim();
         let resolutionApplied: { segments: number; size: string; resolution: string; megapixels: number; aspectRatio: string } | null = null;
-        if (resolutionTier) {
-            resolutionApplied = await this.applyVideoResolution(String(canvas.id), h3Nodes, resolutionTier, videoOpts.videoAspectRatio || "16:9");
+        if (resolutionTier || dramaAspect) {
+            resolutionApplied = await this.applyVideoResolution(String(canvas.id), h3Nodes, resolutionTier, dramaAspect);
             if (resolutionApplied) {
-                videoParams.size = resolutionApplied.size;
-                videoParams.resolution = resolutionApplied.resolution;
-                this.store.log(String(job.drama_id || ""), `剧目级分辨率下发 ${resolutionTier}/${videoOpts.videoAspectRatio || "16:9"} → H3 megapixels=${resolutionApplied.megapixels} size=${resolutionApplied.size}，写入 ${resolutionApplied.segments} 段（真实出片参数）`);
+                if (resolutionApplied.size) videoParams.size = resolutionApplied.size;
+                if (resolutionApplied.resolution) videoParams.resolution = resolutionApplied.resolution;
+                // 引擎「H3 展开流」暴露的是 width/height 直连像素字段，不认 aspectRatio/megapixels
+                // （dry_run 实测 params_ignored=['aspectRatio','megapixels']）。画幅只有换算成宽高才真正生效。
+                const dims = dramaVideoPixels(resolutionApplied.aspectRatio, resolutionApplied.megapixels);
+                if (dims) {
+                    videoParams.width = dims.width;
+                    videoParams.height = dims.height;
+                }
+                this.store.log(String(job.drama_id || ""),
+                    `剧目级画幅下发 ${resolutionApplied.aspectRatio}${resolutionTier ? `/${resolutionTier} megapixels=${resolutionApplied.megapixels}` : "（未设档位，像素量沿用各段）"}${dims ? ` → width=${dims.width} height=${dims.height}` : ""}，写入 ${resolutionApplied.segments} 段（真实出片参数）`);
             } else {
-                this.store.log(String(job.drama_id || ""), `剧目级分辨率档位 ${resolutionTier} 无法解析，已回退模型默认`, "warn");
+                this.store.log(String(job.drama_id || ""), `剧目级画幅/档位 ${dramaAspect || "-"}/${resolutionTier || "-"} 无法解析，已回退模型默认`, "warn");
             }
+        } else {
+            this.store.log(String(job.drama_id || ""), "剧目未设置交付画幅（settings.videoAspectRatio），各段沿用各自保存值，可能出现比例不一致", "warn");
         }
         const results: Array<Record<string, unknown>> = [];
         for (const node of h3Nodes) {

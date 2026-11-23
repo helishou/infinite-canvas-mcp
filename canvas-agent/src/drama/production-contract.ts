@@ -47,7 +47,7 @@ export const directorPatchFields = {
     // action / imagePrompt / transition 是 ShotEditor 的镜头标注字段：由 patch_director_source(op entity=shot)
     // 写进 director.source.shots[]，参与 sourceHash 与投影，但不进入出片提示词编译（编译器只读 visual/camera 结构轨）。
     // transition 的首镜 disabled 是前端 UI 约束，后端只存字段、不做取值校验。
-    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features", "action", "imagePrompt", "transition"],
+    shot: ["title", "visual", "camera", "scene_id", "source_scene_id", "start_frame", "end_frame", "duration_frames", "dialogues", "audio", "required_assets", "description", "shot_type", "timeline_id", "story_order", "continuity_facts", "characters", "performance", "combat", "state_description", "reference_requirements", "prompt_contract_version", "identity_context", "offscreen_character_ids", "subject_usages", "utterance_refs", "features", "action", "imagePrompt", "videoPrompt", "sourceQuote", "transition"],
     segment: ["shot_ids", "start_frame", "end_frame", "generation_clip_duration", "mode", "mode_lock", "mode_selection_reason", "audio", "sound", "overall_soundscape", "non_diegetic_music", "references", "subjects", "execution_gate", "styleTemplateId", "motion_profile", "summary", "audio_bindings", "animation_term_ids", "animation_term_evidence", "locked", "preLockNoiseSeedMode"],
 } as const;
 

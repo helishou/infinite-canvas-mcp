@@ -96,3 +96,42 @@ test("buildSegmentWriterPrompt：writer 提示词的【本段素材稿】含全�
         "台词：甲：“第三句台词”",
     ], "多句台词全部进入 writer 提示词，一句都不能丢");
 });
+
+// ==== 分镜可拍性字段必须进素材稿，否则等于白生成 ====
+test("素材稿带出 action / imagePrompt / videoPrompt / sourceQuote", () => {
+    const draft = buildSegmentDraft([{
+        startSec: 0, endSec: 5,
+        visual: "崇良拨开人群走到告示墙前",
+        camera: "推",
+        action: "揭下告示转身",
+        imagePrompt: "崇良正面偏左站位，右手捏住黄纸下缘，正午顶光",
+        videoPrompt: "0-2 秒拨开人群，2-5 秒揭榜",
+        sourceQuote: "崇良一把揭下悬赏告示",
+    }]);
+    assert.ok(draft.includes("动作：揭下告示转身"), "动作必须进素材稿");
+    assert.ok(draft.includes("起幅：崇良正面偏左站位"), "起幅画面必须进素材稿");
+    assert.ok(draft.includes("镜内运动：0-2 秒拨开人群"), "镜内运动必须进素材稿");
+    assert.ok(draft.includes("原文依据：崇良一把揭下悬赏告示"), "原文依据必须进素材稿");
+});
+
+test("缺少可拍字段时不输出空标签，只留画面与运镜", () => {
+    const draft = buildSegmentDraft([{ startSec: 0, endSec: 4, visual: "崇良揭榜", camera: "固定" }]);
+    assert.ok(draft.includes("运镜：固定"));
+    assert.ok(draft.includes("画面：崇良揭榜"));
+    assert.ok(!draft.includes("动作："));
+    assert.ok(!draft.includes("起幅："));
+    assert.ok(!draft.includes("镜内运动："));
+    assert.ok(!draft.includes("原文依据："));
+});
+
+test("可拍字段与台词共存：台词逐字保留，不被新字段挤掉", () => {
+    const draft = buildSegmentDraft([{
+        startSec: 0, endSec: 6,
+        visual: "崇良站在告示墙前",
+        imagePrompt: "正午顶光，人群虚化",
+        dialogues: [{ text: "我揭了这榜", speaker: "崇良" }, { text: "你当真要去？", speaker: "路人" }],
+    }]);
+    assert.ok(draft.includes("起幅：正午顶光"));
+    assert.ok(draft.includes("台词：崇良：“我揭了这榜”"));
+    assert.ok(draft.includes("台词：路人：“你当真要去？”"));
+});
