@@ -1590,11 +1590,10 @@ export class DramaPipeline {
                 this.store.log(dramaId, `${segment.title || index}: 提示词超长，自动精简 ${condense.count} 次后 ${condense.check.chars}/${condense.check.maxChars} 字`, "info");
             }
 
-            const taskMode = canonicalH3TaskMode(noRefs ? "t2v" : "ref2va");
-            // 有绑定时禁止 t2v：T2V 不提交参考素材，会让刚派生的绑定全部失效。
-            if (bindings.length && taskMode === "t2v") {
-                throw new Error("PROMPTS_TASKMODE_CONFLICT: 段有参考图绑定时 taskMode 不能是 t2v");
-            }
+            // taskMode 固定 ref2va：这是剧目的出片模式，与单段是否恰好派生到参考图无关。
+            // 旧逻辑 noRefs 时降级 t2v，会让「场景图还没绑上」的段悄悄走纯文生视频，
+            // 参考图彻底不进片。参考图缺失应当暴露出来补绑，而不是用 t2v 掩盖。
+            const taskMode = canonicalH3TaskMode("ref2va");
             const patch: Record<string, unknown> = {
                 prompt: cleaned,
                 referenceBindings: bindings,

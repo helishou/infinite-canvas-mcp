@@ -163,6 +163,25 @@ export function deriveSegmentReferenceBindings(
         grouped.push({ shotId: rawShotId, byCategory });
     }
 
+    // 场景图保底：整章只建一个剧本场次时，所有 shot.scene_id 都是章节标题，
+    // resolve() 解析不到任何具体场景资产 → 全段没有场景图，ref2va 拿不到环境参考。
+    // 此时回退到 asset_plan 中第一个有归档图的场景资产，保证每段至少有一张场景图。
+    // 精准的环境级匹配属于后续优化；"绝不让场景图缺席"是这里必须守住的底线。
+    const anyScene = grouped.some((group) => group.byCategory.scene.length > 0);
+    if (!anyScene) {
+        const sceneAssets = rows(source?.asset_plan).filter((row) =>
+            textOf(row.kind || row.asset_kind).toLowerCase() === "scene"
+            && textOf(recordOf(assets[textOf(row.id || row.asset_id)]).storageKey));
+        const fallbackScene = sceneAssets.map((row) => {
+            const assetId = textOf(row.id || row.asset_id);
+            return { assetId, name: textOf(row.asset_name || row.name) || assetId, kind: "scene" } as AssetDesc;
+        })[0];
+        if (fallbackScene) {
+            for (const group of grouped) group.byCategory.scene.push(fallbackScene);
+            warnings.push(`段 ${segmentId}: shot.scene_id 未解析到具体场景，已回退到默认场景图 ${fallbackScene.name}`);
+        }
+    }
+
     const ordered: AssetDesc[] = [];
     const seen = new Set<string>();
     const descriptor = new Map<string, AssetDesc>();
