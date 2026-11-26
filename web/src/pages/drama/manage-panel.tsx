@@ -469,7 +469,7 @@ export function DramaManagePanel({ dramaId, onEpisodesChanged, onProduceEpisode,
             modal, message, t,
             drama: folder,
             onDelete: (options) => deleteDramaProject(folder.id, options),
-            onDeleted: () => { setDraft(null); navigate("/production"); },
+            onDeleted: () => { setDraft(null); navigate("/drama-studio"); },
         });
     };
     const handleCoverChange = async (event: ChangeEvent<HTMLInputElement>) => {

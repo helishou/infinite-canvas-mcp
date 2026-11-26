@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyFailureKind, deriveInboxFailureItems, type InboxEpisode, type InboxLog } from "./studio-inbox-failures";
+import { classifyFailureKind, deriveInboxFailureItems, type InboxActiveRefMap, type InboxEpisode, type InboxLog } from "./studio-inbox-failures";
 
 const episode = (over: Partial<InboxEpisode> = {}): InboxEpisode => ({
     id: "ep1", no: 1, title: "第一集", canvasId: "canvas1", error: null,
@@ -80,4 +80,52 @@ test("真实库样本形态（取自 ~/.infinite-canvas/runtime.sqlite）落入�
     const seg = items.find((i) => i.kind === "segment_failed")!;
     assert.equal(seg.segmentId, "shot-01");
     assert.match(seg.title, /第 3 集/);
+});
+
+
+test("孤儿失败节点：已被新资产体系取代、不再被引用的参考图失败被过滤", () => {
+    const logs: InboxLog[] = [
+        // 旧 image-canvas 节点失败，但该节点不在当前链路引用集合里
+        log({ id: "old-img", platform: "canvas-image", nodeId: "image-canvas-OLD", error: "gpt-image-2.6-1k 不支持 0 张参考图", finishedAt: "2026-11-20T10:00:00Z" }),
+        // 当前在用的资产节点失败，应保留
+        log({ id: "cur-img", platform: "canvas-image", nodeId: "production-entity-NEW", error: "引擎不可用 fetch failed", finishedAt: "2026-11-23T10:00:00Z" }),
+    ];
+    const active: InboxActiveRefMap = new Map([
+        ["ep1", { nodes: new Set(["production-entity-NEW"]), segments: new Set(["clip-1"]) }],
+    ]);
+    const items = deriveInboxFailureItems([episode()], logs, active);
+    const casts = items.filter((i) => i.kind === "cast_failed");
+    assert.equal(casts.length, 1, "只保留仍被引用的参考图失败");
+    assert.equal(casts[0].nodeId, "production-entity-NEW");
+});
+
+test("孤儿段失败：不在当前段集合里的 segment_failed 被过滤", () => {
+    const logs: InboxLog[] = [
+        log({ id: "old-seg", platform: "comfyui", nodeId: "video-old", segmentId: "shot-OLD", error: "旧段失败", finishedAt: "2026-11-20T10:00:00Z" }),
+        log({ id: "cur-seg", platform: "comfyui", nodeId: "video-new", segmentId: "clip-1", error: "当前段失败", finishedAt: "2026-11-23T10:00:00Z" }),
+    ];
+    const active: InboxActiveRefMap = new Map([
+        ["ep1", { nodes: new Set(), segments: new Set(["clip-1"]) }],
+    ]);
+    const items = deriveInboxFailureItems([episode()], logs, active);
+    const segs = items.filter((i) => i.kind === "segment_failed");
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0].segmentId, "clip-1");
+});
+
+test("未提供引用集合时不改变原有行为（向后兼容）", () => {
+    const logs: InboxLog[] = [
+        log({ id: "img", platform: "canvas-image", nodeId: "any-node", error: "失败", finishedAt: "2026-11-20T10:00:00Z" }),
+    ];
+    const items = deriveInboxFailureItems([episode()], logs);
+    assert.equal(items.filter((i) => i.kind === "cast_failed").length, 1);
+});
+
+test("某集无 production 数据（Map 无该 key）时不过滤，避免误杀未加载集的真实失败", () => {
+    const logs: InboxLog[] = [
+        log({ id: "img", platform: "canvas-image", nodeId: "node-x", error: "失败", finishedAt: "2026-11-20T10:00:00Z" }),
+    ];
+    const active: InboxActiveRefMap = new Map([["ep2", { nodes: new Set(), segments: new Set() }]]);
+    const items = deriveInboxFailureItems([episode()], logs, active);
+    assert.equal(items.filter((i) => i.kind === "cast_failed").length, 1, "ep1 不在 Map 中，不过滤");
 });

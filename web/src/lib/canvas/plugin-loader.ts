@@ -1,5 +1,7 @@
 import { registerNodeDefinitions, unregisterPluginNodes } from "@/lib/canvas/node-registry";
+import { APP_VERSION } from "@/constant/env";
 import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
+import { isHostCompatible, verifyIntegrity } from "@/lib/canvas/plugin-verify";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
 import { fetchBackendInstalledPlugins, saveBackendInstalledPlugins, saveBackendPluginMcpDeclarations } from "@/services/backend-api";
 import type { AgentPluginMcpDeclaration } from "@/services/api/canvas-agent";
@@ -70,20 +72,34 @@ function withCacheBust(url: string) {
 
 // Install or replace a plugin from a URL and enable it immediately.
 // bustCache bypasses HTTP/CDN caches during upgrades while persisting a clean URL without the timestamp query.
-export async function installPluginFromUrl(url: string, opts?: { official?: boolean; bustCache?: boolean }) {
+// 校验顺序:下载 → 完整性(integrity) → evaluate → 版本兼容(minAppVersion) → 原子替换。
+// 任一步失败都在替换旧版本之前抛出,已装插件保持不变。
+export async function installPluginFromUrl(url: string, opts?: { official?: boolean; bustCache?: boolean; integrity?: string }) {
     const source = await fetchPluginSource(opts?.bustCache ? withCacheBust(url) : url);
+    const integrity = await verifyIntegrity(source, opts?.integrity);
+    if (!integrity.ok) {
+        throw new Error(integrity.reason === "bad-format"
+            ? i18n.t("canvas.pluginErrors.badIntegrity")
+            : i18n.t("canvas.pluginErrors.integrityMismatch"));
+    }
     const plugin = await evaluatePluginSource(source);
+    if (!isHostCompatible(plugin.minAppVersion)) {
+        throw new Error(i18n.t("canvas.pluginErrors.incompatible", { min: plugin.minAppVersion, host: APP_VERSION }));
+    }
+    // 到这里所有校验都通过,才开始替换已装版本。
     deactivatePlugin(plugin.id); // Replace the previous version.
-    usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url, source, enabled: true, official: opts?.official });
+    usePluginStore.getState().upsert({ id: plugin.id, name: plugin.name || plugin.id, version: plugin.version || "0.0.0", description: plugin.description, url, source, enabled: true, official: opts?.official, integrity: opts?.integrity });
     await persistInstalledPlugins();
     activatePlugin(plugin);
     void syncPluginMcpToBackend();
     return plugin;
 }
 
-export async function updatePlugin(record: InstalledPlugin) {
+export async function updatePlugin(record: InstalledPlugin, integrity?: string) {
     // Upgrades must fetch the latest output and therefore always bypass caches.
-    return installPluginFromUrl(record.url, { official: record.official, bustCache: true });
+    // integrity 必须是"新版本"的校验值,由调用方按最新官方清单提供。
+    // 不能复用记录里的旧值 —— bundle 更新后哈希必然变化。第三方 URL 无清单时不传,跳过校验。
+    return installPluginFromUrl(record.url, { official: record.official, bustCache: true, integrity });
 }
 
 export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean) {

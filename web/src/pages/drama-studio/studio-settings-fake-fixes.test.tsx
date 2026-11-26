@@ -22,14 +22,14 @@ function render(override: Partial<StudioProductionSettings> = {}) {
     })));
 }
 
-test("参考图默认方案：可选真实 AssetSchemeId，select 不只读，并真写回资产卡", () => {
+test("参考图默认方案：可选真实 AssetSchemeId，方案卡片可写，并真写回资产卡", () => {
     const html = render();
-    const select = html.match(/<select[^>]*data-studio-reference-layout[^>]*>/)?.[0] || "";
-    assert.ok(select, "必须渲染设定版式选择器");
-    assert.doesNotMatch(select, /\sdisabled(?:=|\s|>)/, "设定版式不再是只读 disabled");
-    assert.match(html, /按资产类型自动匹配（auto）/);
-    assert.match(html, /value="portrait"/, "角色定妆照是真实方案 id");
-    assert.match(html, /value="turnaround"/, "三视图设定板是真实方案 id");
+    const group = html.match(/<div[^>]*data-studio-reference-layout[^>]*>/)?.[0] || "";
+    assert.ok(group, "必须渲染设定版式选择区（影策资产方案卡片）");
+    assert.doesNotMatch(group, /\sdisabled(?:=|\s|>)/, "设定版式不再是只读 disabled");
+    assert.match(html, /自定义 \/ 自动/);
+    assert.match(html, /data-studio-reference-layout-option="portrait"/, "角色定妆照是真实方案 id");
+    assert.match(html, /data-studio-reference-layout-option="turnaround"/, "三视图设定板是真实方案 id");
     assert.match(html, /data-studio-reference-layout-apply/);
     assert.match(html, /应用到本剧全部设定/);
     assert.match(html, /view_layout/, "说明真实写回的字段");

@@ -2461,10 +2461,11 @@ export class BackendDatabase {
         return row ? generationLogFromRow(row) : null;
     }
 
-    listGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number } = {}): GenerationLog[] {
+    listGenerationLogs(options: { projectId?: string; projectIds?: string[]; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number } = {}): GenerationLog[] {
         const clauses: string[] = [];
         const values: Array<string | number> = [];
         if (options.projectId) { clauses.push("project_id = ?"); values.push(options.projectId); }
+        if (options.projectIds?.length) { clauses.push(`project_id IN (${options.projectIds.map(() => "?").join(",")})`); values.push(...options.projectIds); }
         if (options.nodeId) { clauses.push("node_id = ?"); values.push(options.nodeId); }
         if (options.segmentId) { clauses.push("segment_id = ?"); values.push(options.segmentId); }
         if (options.runtimeTaskId) { clauses.push("runtime_task_id = ?"); values.push(options.runtimeTaskId); }
@@ -3033,13 +3034,16 @@ export class BackendDatabase {
         return this.getTask(id)!;
     }
 
-    updateTask(id: string, patch: { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string }): RuntimeTask {
+    updateTask(id: string, patch: { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string; params?: Record<string, unknown> }): RuntimeTask {
         const current = this.getTask(id);
         if (!current) throw new Error(`Task not found: ${id}`);
+        const nextParams = patch.params || patch.executor
+            ? { ...current.params, ...(patch.params || {}), ...(patch.executor ? { executor: patch.executor } : {}) }
+            : current.params;
         const next = {
             ...current,
             ...patch,
-            ...(patch.executor ? { params: { ...current.params, executor: patch.executor } } : {}),
+            params: nextParams,
             updatedAt: new Date().toISOString(),
         };
         this.db.prepare(

@@ -43,9 +43,11 @@ import {
     parseAssetExtract,
 } from "@basketikun/canvas-agent/drama/asset-extract";
 import {
-    buildSchemePrompt,
+    ASSET_SCHEMES,
     defaultSchemeFor,
+    renderAssetPromptWithTemplate,
     schemeAppliesTo,
+    type AssetPromptTemplates,
     type AssetSchemeId,
 } from "@basketikun/canvas-agent/drama/asset-spec";
 import {
@@ -491,6 +493,8 @@ export type DramaPipelineOptions = {
     poolLimit?: number;
     /** 全局并发上限（默认 16）。 */
     globalLimit?: number;
+    /** 运行期设置持久化（runtime_settings）：重载后能恢复上次下发的制作设置。 */
+    settings?: { get: (key: string) => unknown; set: (key: string, value: unknown) => void };
 };
 
 /** 写作技能引用（对齐前端 SkillRef；content/instruction 允许前端预解析后直传，免后端再查技能库）。 */
@@ -551,6 +555,8 @@ export type DramaPipelineRuntimeOptions = {
     };
     /** 各池并发上限（覆盖构造期默认；池名 text/video/render）。 */
     concurrency?: { text?: number; video?: number; render?: number };
+    /** 参考图提示词模板（角色/场景/道具/默认）；空表示沿用内置方案模板。 */
+    assetPromptTemplates?: AssetPromptTemplates;
 };
 
 export type DramaPipelineStartOpts = {
@@ -572,6 +578,8 @@ export class DramaPipeline {
     private readonly resolveTextModel?: () => string;
     private readonly resolveImageModel?: () => string;
     private readonly resolveVideoPromptMaxChars?: (modelValue: string) => number | undefined;
+    /** 运行期设置持久化（runtime_settings）；没有则只在内存里保留。 */
+    private readonly settingsStore?: { get: (key: string) => unknown; set: (key: string, value: unknown) => void };
 
     private timer: ReturnType<typeof setInterval> | null = null;
     private wakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -604,6 +612,7 @@ export class DramaPipeline {
         this.resolveTextModel = options.resolveTextModel;
         this.resolveImageModel = options.resolveImageModel;
         this.resolveVideoPromptMaxChars = options.resolveVideoPromptMaxChars;
+        this.settingsStore = options.settings;
         // 进程启动时把 DB 里已持久化的闸门放行记录恢复到内存镜像（单一进程，重启即重建）。
         this.hydrateGatesFromStore();
     }
@@ -647,7 +656,18 @@ export class DramaPipeline {
 
     /** 读取某剧目制作设置；不存在时返回空对象（各消费点自行回退默认）。 */
     optionsOf(dramaId: string): DramaPipelineRuntimeOptions {
-        return this.runOptions.get(dramaId) || {};
+        const memory = this.runOptions.get(dramaId);
+        if (memory) return memory;
+        // 重启后从 runtime_settings 恢复上次下发的制作设置（没有就返回空对象，各消费点自带默认）。
+        try {
+            const raw = this.settingsStore?.get(`drama.pipeline.options.${dramaId}`);
+            if (raw && typeof raw === "object") {
+                const restored = raw as DramaPipelineRuntimeOptions;
+                this.runOptions.set(dramaId, restored);
+                return restored;
+            }
+        } catch { /* 读取失败按无设置处理，不阻断调度 */ }
+        return {};
     }
 
     /** 本剧目预算上限（0/不设/非法=不限）。 */
@@ -694,6 +714,25 @@ export class DramaPipeline {
      * 优先用前端预解析的 content/instruction；只有 name 时经 /api/skill-market/detail 读 SKILL.md。
      * 技能加载失败只记日志不阻断流水线（技能是增强，不是生成前置条件）。
      */
+    /**
+     * 槽位技能解析：槽位为空时回退默认技能（plan→acheng/story、extract→acheng/assets、
+     * storyboard 额外叠加 continuity、prompt→acheng/model）。structured 用 silent 会话时
+     * Hermes 不会自动加载技能，必须在这里把技能正文拼进提示词。
+     */
+    private async resolveSlotSkill(ref: DramaPipelineTextSkill | null | undefined, slot: "plan" | "extract" | "storyboard" | "prompt", dramaId: string): Promise<{ skillName?: string; skillPath?: string; skillContent?: string }> {
+        const fallback: Record<typeof slot, string> = { plan: "acheng/story", extract: "acheng/assets", storyboard: "acheng/shots", prompt: "acheng/model" };
+        const picked = ref?.name ? ref : { name: fallback[slot] };
+        const resolved = await this.resolveTextSkill(picked, dramaId);
+        if (slot !== "storyboard") return resolved;
+        const continuity = await this.resolveTextSkill({ name: "acheng/continuity" }, dramaId).catch(() => ({ skillContent: "" }));
+        return {
+            ...resolved,
+            ...(continuity.skillContent
+                ? { skillContent: [resolved.skillContent, continuity.skillContent].filter(Boolean).join("\n\n") }
+                : {}),
+        };
+    }
+
     private async resolveTextSkill(ref: DramaPipelineTextSkill | null | undefined, dramaId: string): Promise<{ skillName?: string; skillPath?: string; skillContent?: string }> {
         if (!ref) return {};
         const skillName = String(ref.title || ref.name || "").trim() || undefined;
@@ -744,7 +783,11 @@ export class DramaPipeline {
 
     async start(dramaId: string, opts: DramaPipelineStartOpts): Promise<Record<string, unknown>> {
         await this.ensureTopic(dramaId);
-        if (opts?.options) this.runOptions.set(dramaId, opts.options);
+        if (opts?.options) {
+            this.runOptions.set(dramaId, opts.options);
+            // 落 runtime_settings：开发重载/重启后 optionsOf 能把制作设置恢复回来。
+            try { this.settingsStore?.set(`drama.pipeline.options.${dramaId}`, opts.options); } catch { /* 持久化失败不影响本次运行 */ }
+        }
         // 预算是本次运行期的累计计数：重新 start 即新一轮，归零后按下发的 budgetMicrocredits 重新计。
         this.budgetState.set(dramaId, { spent: 0, exceeded: false });
         if (this.budgetLimitOf(dramaId) > 0) this.store.log(dramaId, `预算上限已下发：${this.budgetLimitOf(dramaId)} 微积分（0/不设=不限）`);
@@ -1089,9 +1132,11 @@ export class DramaPipeline {
             ruleLines.push("场景衔接：智能(auto)，按场景切换自行选择硬切或过渡。");
         }
         if (rules.pacing && rules.pacing !== "标准") ruleLines.push(`整体节奏：${rules.pacing}。`);
-        // 写作技能（分镜拆分）真实注入拆镜步骤：契约无 skill 字段，并入 chapterBody 的【制作设置·分镜要求】。
-        const storyboardSkill = await this.resolveTextSkill(opts.textSkills?.storyboard, dramaId);
-        if (storyboardSkill.skillContent) ruleLines.push(`${storyboardSkill.skillContent}。`);
+        // 写作技能（分镜拆分）：用 resolveSlotSkill 而非 resolveTextSkill——
+        // 槽位空时必须回退默认 acheng/shots+continuity。制作台 structured 用 silent 会话会跳过
+        // Hermes 的 skills.auto_load，若这里也不拼 skill 正文，拆镜就没有方法约束、回包易非 JSON 走兜底。
+        const storyboardSkill = await this.resolveSlotSkill(opts.textSkills?.storyboard, "storyboard", dramaId);
+        if (storyboardSkill.skillContent) ruleLines.push(`【本轮基于 ${storyboardSkill.skillName || "默认"} 技能，按其方法与标准拆解】${storyboardSkill.skillContent}。`);
         // 分镜类与连续性类长期规则进拆镜；提示词类规则不进这里。
         const storyboardRules = await learnedRulesCompact(["storyboard", "continuity"], 1600);
         if (storyboardRules) ruleLines.push(`用户长期规则：${storyboardRules}。`);
@@ -1317,10 +1362,20 @@ export class DramaPipeline {
                 ? schemeRaw as AssetSchemeId
                 : defaultSchemeFor(kindStr as "character" | "scene" | "prop");
             const body = (rawPrompt && rawPrompt !== asset.appearance) ? `${asset.appearance}。补充要求：${rawPrompt}` : asset.appearance;
-            const builtPrompt = buildSchemePrompt(kindStr as "character" | "scene" | "prop", String(asset.name || ""), body, scheme).trim();
-            const prompt = assetImageRules ? `${builtPrompt}\n用户长期规则：${assetImageRules}。` : builtPrompt;
+            // 剧目模板优先（影策「角色/场景/默认提示词」）；模板为空时 renderAssetPromptWithTemplate 内部回退 buildSchemePrompt。
+            const assetTemplates = this.optionsOf(dramaId).assetPromptTemplates;
+            const rendered = renderAssetPromptWithTemplate(kindStr as "character" | "scene" | "prop", String(asset.name || ""), body, scheme, assetTemplates, {
+                资产名称: String(asset.name || ""),
+                资产设定: body,
+                画面规则: assetImageRules,
+                方案名称: ASSET_SCHEMES.find((s) => s.id === scheme)?.name || scheme,
+                方案要求: ASSET_SCHEMES.find((s) => s.id === scheme)?.frameHint || "",
+            });
+            if (rendered.unknownVars.length) this.store.log(dramaId, `资产 ${id} 提示词模板含未知变量 ${rendered.unknownVars.map((v) => `{{${v}}}`).join("、")}，已原样保留`, "warn");
+            const builtPrompt = rendered.prompt.trim();
+            const prompt = rendered.usedTemplate ? builtPrompt : (assetImageRules ? `${builtPrompt}\n用户长期规则：${assetImageRules}。` : builtPrompt);
             if (!prompt) { this.store.log(dramaId, `资产 ${id} 没有可用提示词，跳过参考图生成`, "warn"); continue; }
-            this.store.log(dramaId, `资产 ${id} 参考图方案=${scheme}（横版16:9）`);
+            this.store.log(dramaId, `资产 ${id} 参考图方案=${scheme}（横版16:9）· 提示词来源=${rendered.usedTemplate ? "剧目模板" : "内置方案模板"}`);
             pending.push({ assetId: id, kind: kindStr, name: String(asset.name || ""), entityId, prompt });
         }
 
@@ -1427,16 +1482,38 @@ export class DramaPipeline {
         // 表演档位与分镜规则软约束合并成 style，二者不互相覆盖。
         const styleParts = [perfStyle, ...ruleStyle];
         // 写作技能（提示词撰写）真值：优先前端预解析 content，否则按 name 读 SKILL.md；循环外解析一次。
-        const promptSkill = await this.resolveTextSkill(promptOpts.textSkills?.prompt, dramaId);
+        // 用 resolveSlotSkill：槽位空时回退默认 acheng/model-output，保证提示词撰写有方法约束。
+        const promptSkill = await this.resolveSlotSkill(promptOpts.textSkills?.prompt, "prompt", dramaId);
         // 提示词类、连续性类、视频生成类长期规则进提示词撰写；分镜/资产规则不进这里。
         const writerRules = await learnedRulesCompact(["prompt", "continuity", "video"], 1800);
         const writerRuleNote = writerRules ? `【用户长期规则·提示词与视频生成】${writerRules}。` : "";
 
         const shotById = new Map(shots.map(shot => [String(shot.id), shot]));
         const canvasNodes: Array<Record<string, any>> = Array.isArray(canvas.nodes) ? canvas.nodes : [];
-        // 真源无对白（蟒妻 script_scenes 全 kind:action）→ 仅本次运行期内存派生；绝不写回 draft.director.source.utterances。
+        // 台词真值优先取拆镜逐字对白 shot.dialogues（原文字面，不改写）。
+        // 新制作台拆镜只写 shot.dialogues、不写 source.utterances，重拆时还会清空 utterances；
+        // 若这里直接走 LLM 按画面重编，会用编造台词覆盖原文逐字对白 → 用户投诉「台词乱念」。
+        // 只有 shots 完全没有 dialogues（老剧目/真源无对白）时才让 LLM 派生，且仅内存、不写回制作稿。
         if (!utterances.length) {
-            utterances = await this.deriveUtterancesForPrompts({ segments, shotById, source, promptOpts, dramaId });
+            const fromDialogues: Array<Record<string, any>> = [];
+            for (const shot of shots) {
+                const rows = Array.isArray(shot.dialogues) ? shot.dialogues : [];
+                for (const row of rows) {
+                    const text = String((row as Record<string, any>)?.text || "").trim();
+                    const speaker = String((row as Record<string, any>)?.speaker || "").trim();
+                    if (!text || !speaker) continue;
+                    fromDialogues.push({
+                        id: `UTT:${String(shot.id)}:${fromDialogues.length + 1}`,
+                        start: { shotId: String(shot.id) }, speakerName: speaker, speaker, text,
+                    });
+                }
+            }
+            if (fromDialogues.length) {
+                utterances = fromDialogues;
+                this.store.log(dramaId, `台词取自拆镜逐字对白 ${fromDialogues.length} 句（shot.dialogues→utterances，仅内存）`);
+            } else {
+                utterances = await this.deriveUtterancesForPrompts({ segments, shotById, source, promptOpts, dramaId });
+            }
         }
         let written = 0;
         let skipped = 0;
@@ -1645,10 +1722,16 @@ export class DramaPipeline {
      * script 作业会走 runScript：script-proposal → 写 synopsis/fullPlot → 清旧镜+整批重拆 → promoteToCanvas。
      * instruction/model 透传进 script job payload，runScript 真消费，不经前端假修复。
      */
-    async rescript(episodeId: string, opts?: { instruction?: string; model?: string }): Promise<{ dramaId: string; episodeId: string; resetJobs: number; status: string }> {
+    async rescript(episodeId: string, opts?: { instruction?: string; model?: string; options?: DramaPipelineRuntimeOptions }): Promise<{ dramaId: string; episodeId: string; resetJobs: number; status: string }> {
         const episodeRes = await this.request("GET", `/drama/episodes/${encodeURIComponent(episodeId)}`);
         const dramaId = String(episodeRes?.episode?.dramaId || "");
         if (!dramaId) throw new Error("EPISODE_DRAMA_MISSING: 分集缺少所属剧目 ID，无法重新改编");
+        // 重新改编可携带本次制作设置：只覆盖下发过的键，其它沿用当前运行期设置。
+        if (opts?.options) {
+            const merged = { ...this.optionsOf(dramaId), ...opts.options };
+            this.runOptions.set(dramaId, merged);
+            try { this.settingsStore?.set(`drama.pipeline.options.${dramaId}`, merged); } catch { /* 持久化失败不影响本次运行 */ }
+        }
         const scriptPatch: Record<string, unknown> = {};
         if (String(opts?.instruction || "").trim()) scriptPatch.instruction = String(opts!.instruction).trim().slice(0, 2000);
         if (String(opts?.model || "").trim()) scriptPatch.model = String(opts!.model).trim();

@@ -9,6 +9,7 @@ export type InstalledPlugin = {
     source: string; // Cached plugin source for offline use and pinned versions.
     enabled: boolean;
     official?: boolean; // Installed from the official registry and grouped accordingly in the manager.
+    integrity?: string; // Expected SHA-256 of the source, rechecked on update.
     installedAt: string;
     mcp?: { enabled: boolean; toolCount: number }; // Summary of any MCP capability the plugin declares.
 };

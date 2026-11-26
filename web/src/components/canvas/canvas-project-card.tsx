@@ -69,7 +69,7 @@ export function CanvasProjectCard({ project }: { project: CanvasProject }) {
             </div>
             {!editing && <div className="mt-5 flex flex-wrap gap-2" onClick={event => event.stopPropagation()}>
                 <Button size="small" icon={<LayoutGrid className="size-3.5" />} onClick={() => open()}>{t("projects.openCanvas")}</Button>
-                <Button size="small" icon={<Clapperboard className="size-3.5" />} onClick={() => open("production")}>{t("projects.openProduction")}</Button>
+                <Button size="small" icon={<Clapperboard className="size-3.5" />} onClick={() => navigate("/projects?type=drama")}>{t("projects.openProduction")}</Button>
             </div>}
             <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
                 <p className="text-[11px] text-muted-foreground">{t("canvas.project.updated", { date: new Date(project.updatedAt).toLocaleString(i18n.resolvedLanguage, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) })}</p>

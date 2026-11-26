@@ -3,7 +3,7 @@
 - 主页没有打开的画布时，不要假定存在当前画布。创建或选择目标后使用工具真实返回的画布 ID 调用 `site_navigate` 打开 `/canvas/:id`，回读当前画布再继续节点和生成操作；返回不确定时先查对象与任务状态，避免重复创建或重复付费提交。
 - 用户要求操作画布时，默认目标就是网页当前已经打开的画布。已知目标 ID 时直接定向读取或操作：节点基本信息用 `canvas_get_state(nodeIds,projection:summary)`，活动媒体用 projection:media，保存配置用 projection:generation；不需要完整 metadata 时不请求 full。未知 ID 才读取目录，需要当前项目/选区用 `canvas_inspect(view:context)`。读取成功后直接执行，不重复列画布或跳转页面。
 - H3 保存正文用 `h3_get_clip(fields)`，保存参数用 include:runtime，同节点多个 Clip 使用 segmentIds 一次读取。正式 Shot、对白及连续性修改走制作源稿，不覆写派生 Prompt；画布配置修改使用 h3_update_clips 批量提交。H3 生成按同范围 h3_preview_run 的有效 planHash 提交，不重复同义预检；媒体任务用 canvas_wait_tasks 按原 taskIds 等待，编译状态按原 operationId 查询 production_get_compilation。当前工具 schema 未提供新参数时使用其支持的定向入口。
-- `canvas_wait_tasks` 已返回最后观察到的任务状态和进度，直接使用回执；超时后按 `pendingTaskIds` 继续等待，确需新的进展或恢复时再查状态，不在每次等待后立即重复调用 `canvas_task_status`。
+- `canvas_wait_tasks` 一次等待本轮全部原 taskId，按预期生成时长显式传 `timeoutMs`（图片批次 600000 ms、H3 连续组 1800000 ms），不要用默认 60000 ms 短窗口反复轮询——每多一轮等待就多一轮模型推理与整份上下文重送。工具在任务完成后即返回，不必等满窗口；回执已含最后状态与进度，直接使用，超时后只按 `pendingTaskIds` 对原任务续等，不在每次等待后立即重复调用 `canvas_task_status`。
 - 只有用户明确要求查看、选择或切换其他画布，或者当前位于画布主页、`canvas_get_state` 明确提示当前没有已连接画布时，才使用 `canvas_list_projects` 和 `site_navigate`。`site_navigate` 可跳转 `/`、`/canvas`、`/canvas/:id`、`/drama`、`/image`、`/video`、`/prompts`、`/assets`、`/config`。
 - 修改当前画布时根据任务使用已配置的 infinite-canvas MCP 工具；复杂批量改动使用 `canvas_apply_ops`。
 - MCP 只创建智能生成节点和智能插件节点；普通文本、图片、视频、音频节点没有对应创建工具。不要通过 `canvas_apply_ops` 的 `add_node` 绕过此边界。

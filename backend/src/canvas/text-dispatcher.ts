@@ -8,6 +8,7 @@ import type { ResolvedConfig } from "../config.js";
 import type { GenerationLog, RuntimeTask } from "../db.js";
 import type { Stores } from "../stores/types.js";
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
+import { channelIdOfModel, waitReasonHooks, withChannelSlot } from "./channel-slot.js";
 import { resolveCanvasExecutor } from "./executor-registry.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
 import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
@@ -185,7 +186,7 @@ export class CanvasTextDispatcher {
         const startedAt = Date.now();
         const controller = new AbortController();
         this.controllers.set(task.id, controller);
-        void this.execute(input, provider, task, controller, logId, startedAt).catch((error) => {
+        void withChannelSlot(this.stores, "text", channelIdOfModel(input.model), () => this.execute(input, provider, task, controller, logId, startedAt), waitReasonHooks(this.stores, task.id, logId)).catch((error) => {
             const failure = error instanceof Error ? error : new Error(String(error));
             const current = this.stores.tasks.get(task.id);
             if (current && current.status !== "cancelled" && current.status !== "failed") {
@@ -230,7 +231,7 @@ export class CanvasTextDispatcher {
         }
         const controller = new AbortController();
         this.controllers.set(task.id, controller);
-        void this.execute(input, provider, task, controller, log?.id || null, startedAt).catch((error) => {
+        void withChannelSlot(this.stores, "text", channelIdOfModel(input.model), () => this.execute(input, provider, task, controller, log?.id || null, startedAt), waitReasonHooks(this.stores, task.id, log?.id || null)).catch((error) => {
             const failure = error instanceof Error ? error : new Error(String(error));
             const current = this.stores.tasks.get(task.id);
             if (current && current.status !== "cancelled" && current.status !== "failed") {
@@ -536,8 +537,19 @@ export class CanvasTextDispatcher {
     }
 }
 
+/** Hermes 直连 runner：由 index.ts 用已存在的 productionHermes 注入；直连 requestOpenAiText 的链路（script/outline/topic/grouping/translation）由此支持 hermes 渠道。 */
+let hermesTextRunner: ((request: { model: string; prompt: string; systemPrompt?: string }) => Promise<string>) | undefined;
+export function setHermesTextRunner(runner: (request: { model: string; prompt: string; systemPrompt?: string }) => Promise<string>) {
+    hermesTextRunner = runner;
+}
+
 export async function requestOpenAiText(provider: TextProvider, prompt: string, imageDataUrls: string[], signal?: AbortSignal): Promise<string> {
     if (provider.kind === "codex-cli") return requestCodexText({ model: provider.model, prompt, images: imageDataUrls, systemPrompt: provider.systemPrompt, effort: provider.reasoningEffort, signal });
+    if (provider.kind === "hermes") {
+        if (!hermesTextRunner) throw new Error("Hermes 文本执行器未就绪：导演渠道未连接，请用 API 模型或稍后重试");
+        if (imageDataUrls.length) throw new Error("Hermes 文本任务暂不支持图片参考，请改用 API 模型");
+        return await hermesTextRunner({ model: provider.model, prompt, systemPrompt: provider.systemPrompt });
+    }
     const userContent: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> = imageDataUrls.length
         ? [{ type: "text", text: prompt }, ...imageDataUrls.map((url) => ({ type: "image_url" as const, image_url: { url } }))]
         : prompt;

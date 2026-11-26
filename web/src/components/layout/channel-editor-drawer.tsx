@@ -161,6 +161,19 @@ export function ChannelEditorDrawer({ open, channel, onSave, onClose, lockKind =
                     <span className="mb-1 block text-sm font-medium">API Key</span>
                     <Input.Password value={draft.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} placeholder="sk-..." />
                 </label>}
+                <label className="block">
+                    <span className="mb-1 block text-sm font-medium">渠道最大并发数</span>
+                    <InputNumber
+                        className="w-full"
+                        min={1}
+                        max={999}
+                        precision={0}
+                        value={draft.concurrencyLimit}
+                        onChange={(value) => patch({ concurrencyLimit: value ?? undefined })}
+                        placeholder="留空跟随全局"
+                    />
+                    <span className="mt-1 block text-xs text-muted-foreground">留空表示使用全局渠道并发上限；1-999。</span>
+                </label>
             </div>
 
             <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">

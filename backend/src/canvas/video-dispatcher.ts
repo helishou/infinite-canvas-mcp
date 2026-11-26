@@ -7,6 +7,7 @@ import { validateVideoTrimRange, type VideoConcatBackend } from "../engine-contr
 import type { Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowCatalog } from "../engine-contract/workflow-catalog.js";
 import { builtinWorkflowName, decodeChannelModel, findChannelModel, modelOptionName, resolveWorkflowBindingForModel, usesWorkflowExecutor, workflowResolutionMessage } from "./model-workflow.js";
+import { channelIdOfModel, waitReasonHooks, withChannelSlot } from "./channel-slot.js";
 import type { CanvasImageReference } from "./image-dispatcher.js";
 import { DirectVideoBackend } from "../engine-contract/direct-video.js";
 import { prepareCanvasGenerationTarget, prepareCanvasVideoTrimTarget } from "./generation-target.js";
@@ -149,7 +150,7 @@ export class CanvasVideoDispatcher {
         // Hybrid selection must inspect the live ComfyUI queue immediately before dispatch.
         // The task already has its authoritative canvas binding at this point; executor is
         // updated to the selected provider before any child job is submitted.
-        void this.execute(plan, task, logId, startedAt, true).catch((error) => this.fail(task, input, error, logId, startedAt));
+        void withChannelSlot(this.stores, "video", channelIdOfModel(plan.input.model), () => this.execute(plan, task, logId, startedAt, true), waitReasonHooks(this.stores, task.id, logId)).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor: plan.kind };
     }
 
@@ -215,7 +216,7 @@ export class CanvasVideoDispatcher {
             }
             const log = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
             const startedAt = log ? Date.parse(log.startedAt) : Date.now();
-            void this.execute(plan, task, log?.id || null, startedAt).catch((error) => this.fail(task, input, error, log?.id || null, startedAt));
+            void withChannelSlot(this.stores, "video", channelIdOfModel(plan.input.model), () => this.execute(plan, task, log?.id || null, startedAt), waitReasonHooks(this.stores, task.id, log?.id || null)).catch((error) => this.fail(task, input, error, log?.id || null, startedAt));
         } catch (error) { this.fail(task, input, error); }
     }
 

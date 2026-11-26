@@ -1,4 +1,23 @@
 import { decodeChannelModel, modelOptionName } from "./model-workflow.js";
+import { resolveCanvasExecutor } from "./executor-registry.js";
+
+/**
+ * 模型是否已在画布执行器注册表里声明为「直连 / 本地」执行器。
+ * gpt-image-* 直连 OpenAI 兼容的生图 API，local-style-transfer 走本地算子，
+ * 都不属于 media-engine 工作流模型。OpenAI 兼容渠道（含第三方生图 API）只是传输协议，
+ * 不能据此把它们冒充成引擎模型——否则会套上引擎的「图片输入槽」预检而误拦带参考图的请求。
+ * 判据复用 executor-registry 注册表这个单一真相源，不在这里复制 gpt-image 的匹配正则。
+ */
+function hasDedicatedNonEngineExecutor(model: string): boolean {
+    if (!model) return false;
+    try {
+        const executor = resolveCanvasExecutor({ mode: "image", model }, true);
+        return executor === "direct-image" || executor === "local-style-transfer";
+    } catch {
+        // 未注册的模型不在此列，继续按渠道判定。
+        return false;
+    }
+}
 
 /**
  * 执行引擎渠道（kind: "engine"）：把独立 media-engine 当成一个 OpenAI 兼容模型来源。
@@ -50,6 +69,9 @@ export function findEngineChannel(aiConfig: unknown, selectedModel: string): Eng
     if (!raw) return null;
     const decoded = decodeChannelModel(raw)?.channelId;
     const model = modelOptionName(raw).trim();
+    // 已声明为直连/本地执行器的模型（gpt-image-* 等）不属于引擎，无论它挂在哪个渠道下。
+    // 必须在按渠道定位之前拦截：OpenAI 兼容的第三方生图渠道本身满足下面的引擎判据。
+    if (hasDedicatedNonEngineExecutor(model)) return null;
     const channels = channelsOf(aiConfig);
     const channel = decoded
         ? channels.find((item) => String(item.id ?? "") === decoded)

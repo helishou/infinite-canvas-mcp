@@ -42,6 +42,15 @@ function aliasList(value: unknown): string[] {
     if (typeof value === "string") return value.split(/[,，、;；|]/).map(item => normalizeSpeakerName(item)).filter(Boolean);
     return [];
 }
+/** 影策 definition.aliases：draft identity JSON 里的 aliasNames / aliases 都算别名。 */
+function identityAliases(identity: unknown): string[] {
+    const raw = typeof identity === "string" ? identity.trim() : "";
+    if (!raw.startsWith("{")) return [];
+    try {
+        const o = JSON.parse(raw) as Record<string, unknown>;
+        return [...aliasList(o.aliasNames), ...aliasList(o.aliases)];
+    } catch { return []; }
+}
 
 type SpeakerIndex = Map<string, string>;
 
@@ -71,13 +80,13 @@ function buildSpeakerIndex(source: Row, groups: Record<string, unknown>): Speake
             add(subject.id, groupId);
             add(subject.name, groupId);
             add(object(subject.entityRef).id, groupId);
-            for (const alias of aliasList(subject.aliases ?? subject.alias)) add(alias, groupId);
+            for (const alias of [...aliasList(subject.aliases ?? subject.alias), ...identityAliases(subject.identity)]) add(alias, groupId);
         }
         const character = characterById.get(entityId) || characterByName.get(normalizeSpeakerName(group.characterName));
         if (character) {
             add(character.id, groupId);
             add(character.name, groupId);
-            for (const alias of aliasList(character.aliases ?? character.alias)) add(alias, groupId);
+            for (const alias of [...aliasList(character.aliases ?? character.alias), ...identityAliases(character.identity)]) add(alias, groupId);
         }
     }
     return index;

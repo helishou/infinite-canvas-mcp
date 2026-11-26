@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path, { join } from "node:path";
 
 import { logger } from "../utils/logger.js";
@@ -48,6 +48,37 @@ export function hermesCommand() {
     return executable;
 }
 
+/** 画布专用 Hermes profile：与主配置隔离。画布 MCP 由 session/new 传入，不写入 profile。 */
+export const HERMES_CANVAS_PROFILE = "infinite-canvas";
+
+let profileReady: Promise<void> | undefined;
+
+/** 首次调用时新建专用 profile（默认配置、共享凭证、不带自定义技能）；已存在则复用。 */
+export function ensureCanvasProfile(): Promise<void> {
+    if (!profileReady) {
+        profileReady = (async () => {
+            const home = process.env.HERMES_HOME || path.join(homedir(), ".hermes");
+            if (existsSync(path.join(home, "profiles", HERMES_CANVAS_PROFILE))) return;
+            await new Promise<void>((resolve, reject) => {
+                const child = spawn(hermesCommand(), ["profile", "create", HERMES_CANVAS_PROFILE, "--no-alias"], {
+                    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+                });
+                let err = "";
+                child.stderr?.setEncoding("utf8");
+                child.stderr?.on("data", (chunk: string) => { err += chunk; });
+                const timer = setTimeout(() => { child.kill(); reject(new Error("hermes profile create 超时")); }, START_TIMEOUT_MS);
+                child.on("error", (error) => { clearTimeout(timer); reject(error); });
+                child.on("close", (code) => {
+                    clearTimeout(timer);
+                    if (code === 0 || /already (exists|in use)/i.test(err)) return resolve();
+                    reject(new Error(err.trim() || `hermes profile create 退出码 ${code}`));
+                });
+            });
+        })().catch((error) => { profileReady = undefined; throw error; });
+    }
+    return profileReady;
+}
+
 /** 单条 ACP 连接：一行一个 JSON-RPC 消息，stdout 只跑协议，日志走 stderr。 */
 class AcpConnection {
     private child?: ChildProcess;
@@ -61,9 +92,10 @@ class AcpConnection {
 
     async start() {
         if (this.child) return;
+        await ensureCanvasProfile();
         const command = hermesCommand();
-        logger.info("Starting Hermes ACP", { command });
-        const child = spawn(command, ["acp"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, NO_PROXY: [process.env.NO_PROXY, "127.0.0.1,localhost,::1"].filter(Boolean).join(",") } });
+        logger.info("Starting Hermes ACP", { command, profile: HERMES_CANVAS_PROFILE });
+        const child = spawn(command, ["--profile", HERMES_CANVAS_PROFILE, "acp"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, env: { ...process.env, NO_PROXY: [process.env.NO_PROXY, "127.0.0.1,localhost,::1"].filter(Boolean).join(",") } });
         this.child = child;
         child.stdin?.setDefaultEncoding("utf8");
         child.stdout?.setEncoding("utf8");
@@ -505,14 +537,26 @@ function promptUsage(usage?: JsonRecord): JsonRecord | undefined {
     };
 }
 
+/** ACP 的失败文本藏在嵌套 content 块里：{type:"content", content:{type:"text", text:"..."}}。 */
+function contentText(entry: unknown): string {
+    if (typeof entry === "string") return entry.trim();
+    if (!entry || typeof entry !== "object") return "";
+    const row = entry as JsonRecord;
+    const direct = field(row, "text");
+    if (typeof direct === "string" && direct.trim()) return direct.trim();
+    const nested = field(row, "content");
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) return contentText(nested);
+    return "";
+}
+
 /** 工具失败时尽量给出真实原因：rawOutput / content / _meta 里任一处带 message/error 都取出来。 */
-function toolFailureReason(update: JsonRecord): string {
+export function toolFailureReason(update: JsonRecord): string {
     const candidates: unknown[] = [field(update, "rawOutput"), field(update, "rawInput"), field(update, "content"), field(update, "_meta")];
     for (const candidate of candidates) {
         if (!candidate) continue;
         if (typeof candidate === "string" && candidate.trim()) return candidate.trim().slice(0, 400);
         if (Array.isArray(candidate)) {
-            const text = candidate.map(entry => (typeof entry === "string" ? entry : String((entry as JsonRecord)?.text || ""))).join("\n").trim();
+            const text = candidate.map(contentText).filter(Boolean).join("\n").trim();
             if (text) return text.slice(0, 400);
         }
         const record = candidate as JsonRecord;

@@ -3,6 +3,7 @@ import express, { type Router } from "express";
 import { ZodError } from "zod";
 
 import { EpisodeProductionService, ProductionConflictError } from "../drama/production.js";
+import { importWorkAssets } from "../drama/import-work-assets.js";
 import { JianyingRevisionConflictError, JianyingZipWriter, writeJianyingExport, type SubtitleCalibration } from "../drama/jianying-export.js";
 import { resolveProductionTarget } from "@basketikun/canvas-agent/drama/production-contract";
 import type { EpisodeProductionRunner } from "../drama/production-runner.js";
@@ -298,6 +299,23 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
             res.json({ ok: true, promotion: service.promoteExistingSharedAsset(req.params.episodeId, input), mediaSubmitted: false });
         } catch (error) { handle(res, error); }
     });
+    // 跨作品素材导入是剧目级固定路径（非 episode 子路由），只在主 drama 注册一次，避免同路径重复挂载。
+    if (base === "/drama/episodes/:episodeId/production") router.post<Record<string, string>>("/drama/projects/:dramaId/import-work-assets", (req, res) => {
+        try {
+            const input = z.object({
+                sourceDramaId: z.string().min(1),
+                assets: z.array(z.object({
+                    sourceNodeId: z.string().min(1),
+                    kind: z.enum(["character", "scene", "prop"]),
+                    name: z.string().min(1),
+                    description: z.string().optional(),
+                    aliases: z.array(z.string()).optional(),
+                    storageKeys: z.array(z.string()),
+                })).min(1),
+            }).parse(req.body);
+            res.json(importWorkAssets(service.storageDatabase(), req.params.dramaId, input));
+        } catch (error) { handle(res, error); }
+    });
     router.post<Record<string, string>>(`${base}/arrange-scene`, async (req, res) => {
         try {
             const input = z.object({ expectedRevision: z.number().int().nonnegative(), operationId: z.string().min(1), sceneId: z.string().min(1) }).parse(req.body);
@@ -590,7 +608,8 @@ export function registerDramaProductionRoutes(router: Router, service: EpisodePr
         try {
             if (!runner) throw new Error("Clip 同步执行器不可用");
             const version = service.get(req.params.episodeId).publishedVersion;
-            const production = await runner.syncClips(req.params.episodeId, version);
+            const allowBlocked = Boolean((req.body as Record<string, unknown> | undefined)?.allowBlocked);
+            const production = await runner.syncClips(req.params.episodeId, version, undefined, undefined, allowBlocked);
             res.json({ ok: true, production });
         } catch (error) { handle(res, error); }
     });

@@ -103,7 +103,9 @@ export function bindPipelineAssetImage(db: BackendDatabase, input: PipelineAsset
         metadata.propImage = { ...image };
     }
     const applied = db.applyCanvasProjectOperations(canvasId, undefined, [{ type: "update_node", id: nodeId, metadata }], {
-        operationId: `pipeline-asset-image:${assetId}:${storageKey}`,
+        // operationId 必须带 episodeId：assetId（如 asset-character-526xuk）跨剧目复用，
+        // 只按 assetId+storageKey 会和别的剧目的历史 receipt 撞幂等，导致换图写回被误拒。
+        operationId: `pipeline-asset-image:${episodeId}:${assetId}:${storageKey}`,
         runtimeWrite: true,
         source: { kind: "system", clientId: "pipeline:asset-image", label: "全自动流水线写入资产参考图" },
     });

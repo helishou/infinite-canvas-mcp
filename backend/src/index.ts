@@ -34,7 +34,7 @@ import { registerDramaRestyleRoutes } from "./server/drama-restyle-routes.js";
 import { registerDramaAssetRegenerateRoutes } from "./server/drama-asset-regenerate-routes.js";
 import { writeBackH3Task } from "./canvas/h3-task-writeback.js";
 import { CanvasGenerationService } from "./canvas/generation-service.js";
-import { CanvasTextDispatcher } from "./canvas/text-dispatcher.js";
+import { CanvasTextDispatcher, setHermesTextRunner } from "./canvas/text-dispatcher.js";
 import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
 import { DirectVideoBackend } from "./engine-contract/direct-video.js";
 import { DirectAudioBackend } from "./engine-contract/direct-audio.js";
@@ -55,7 +55,7 @@ import { EpisodeProductionRunner } from "./drama/production-runner.js";
 import { PipelineStore } from "./drama/pipeline-store.js";
 import { DramaPipeline } from "./drama/pipeline.js";
 import { resolveOutlineModel } from "./drama/outline-proposal.js";
-import { videoCapabilitiesOf } from "./canvas/model-video-capability.js";
+import { resolveConfiguredVideoModel, videoCapabilitiesOf } from "./canvas/model-video-capability.js";
 import { registerDramaPipelineRoutes } from "./server/drama-pipeline-routes.js";
 import { registerDramaProductionRoutes } from "./server/drama-production-routes.js";
 import { registerDramaPrerunRoutes } from "./server/drama-prerun-routes.js";
@@ -308,6 +308,39 @@ async function startBackendHttpServer() {
     }
   });
   const productionHermes = new HermesAgent(runtime.stores.settings, config.url, config.token);
+  // ACP 单例客户端不能并发 prompt：多阶段作业同时调用时，第二个会拿到 "Internal error"。
+  // 用 promise 链把所有 Hermes structured 调用串行化，根治并发冲突（不是绕过）。
+  let hermesQueue: Promise<unknown> = Promise.resolve();
+  const runHermesSerial = <T>(work: () => Promise<T>): Promise<T> => {
+    const result = hermesQueue.then(work, work);
+    hermesQueue = result.then(() => undefined, () => undefined);
+    return result;
+  };
+  // 直连 requestOpenAiText 的文字链路（script/outline/topic/grouping/translation）选到 hermes 渠道时，
+  // 复用同一 Hermes 运行时执行；用 structured 包 {text} 保证拿到纯文本。
+  setHermesTextRunner(async ({ model, prompt, systemPrompt }) => {
+    const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
+    try {
+      const { output } = await runHermesSerial(() => productionHermes.structured({
+        cwd: process.cwd(),
+        prompt: fullPrompt,
+        schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
+        model,
+        effort: "auto",
+        onThread: () => undefined,
+      }));
+      const nested = output && typeof output === "object" ? output as Record<string, unknown> : {};
+      const text = typeof output === "string" ? output : String(nested.text ?? "");
+      if (!text.trim()) throw new Error("Hermes 直连文本任务返回了空内容");
+      return text;
+    } catch (error) {
+      // 取证：Hermes ACP 的 Internal error 不带原因，把会话 stderr 尾部打进后端日志，
+      // 才能区分会话失效 / 模型不可用 / 网关重启，避免反复盲改。
+      const diag = (() => { try { return fs.readFileSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "hermes-acp-stderr.log"), "utf8").slice(-1500); } catch { return ""; } })();
+      console.error(`[hermes-text-runner] 失败 model=${model} error=${error instanceof Error ? error.message : String(error)} diag=${diag}`);
+      throw error;
+    }
+  });
   // 画布文本任务打通导演 agent：模型选到 hermes 渠道时由它执行（structured 单轮，
   // 输出若是对象取 text/demand 字段，否则原样返回字符串）。
   canvasTextDispatcher.setHermesRunner(async ({ model, prompt }) => {
@@ -315,15 +348,23 @@ async function startBackendHttpServer() {
     // 既给模型一个明确的落点，也避免它回显 schema。
     // 模型偶发用散文回话（不按 JSON）：带逐次加强的纠正前缀重试（最多 3 次），
     // 比把失败直接抛给前端更有用。
+    // 引擎自主回写：本次会话已挂 infinite-canvas MCP，先据当前真值写入制作稿，再返回 JSON 文本。
+    const HERMES_WRITE_BACK = [
+      "你可通过本次会话的 infinite-canvas MCP 工具回写画布与制作稿。",
+      "执行写作任务时，先用 h3_get_node / h3_get_clip / production_get_* 读取当前真值，不要凭记忆；",
+      "产出后用相应写工具（h3_apply_video_plan、h3_prepare_clip、canvas ops 等）写回 draft.director.source，不要只在文本里描述结果；",
+      "写回仅改你负责的字段，保留他人字段与已有成片绑定；无权限或读不到时如实说明，不猜写。",
+      "完成写回或确认无法写回后，严格按下面的 JSON 要求返回。",
+    ].join("\n");
     const runStructured = async (extra?: string) => {
-      const { output } = await productionHermes.structured({
+      const { output } = await runHermesSerial(() => productionHermes.structured({
         cwd: process.cwd(),
-        prompt: extra ? `${extra}\n\n${prompt}` : prompt,
+        prompt: `${HERMES_WRITE_BACK}\n\n${extra ? `${extra}\n\n` : ""}${prompt}`,
         schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false },
         model,
         effort: "auto",
         onThread: () => undefined,
-      });
+      }));
       return output;
     };
     const toText = (output: unknown) => {
@@ -373,11 +414,17 @@ async function startBackendHttpServer() {
   const pipelineStore = new PipelineStore();
   const dramaPipeline = new DramaPipeline({
     store: pipelineStore, token: config.token, baseUrl: config.url,
+    // 剧目运行期设置持久化：重载后仍能从 runtime_settings 恢复 hermes 模型等选项。
+    settings: runtime.stores.settings,
     resolveTextModel: () => resolveOutlineModel(runtime.stores.settings.get("ai.config")),
     // 资产参考图默认模型：设置页 ai.config.imageModel（制作设置 imageModelsByKind 可逐类型覆盖）。
     resolveImageModel: () => String((runtime.stores.settings.get("ai.config") as Record<string, unknown> | undefined)?.imageModel || "").trim(),
     // C5：段提示词字数上限真值取已登记视频模型的 promptMaxChars；无登记返回 undefined=不限制。
-    resolveVideoPromptMaxChars: (modelValue: string) => videoCapabilitiesOf(runtime.stores.settings.get("ai.config"), modelValue).promptMaxChars,
+    resolveVideoPromptMaxChars: (modelValue: string) => {
+      const aiConfig = runtime.stores.settings.get("ai.config");
+      // 剧目设置留空（跟随默认）时按全局默认视频模型查，空值不再让上限形同虚设。
+      return videoCapabilitiesOf(aiConfig, resolveConfiguredVideoModel(aiConfig, modelValue)).promptMaxChars;
+    },
   });
   registerDramaPipelineRoutes(app, dramaPipeline, runtime.db);
   dramaPipeline.startLoop();

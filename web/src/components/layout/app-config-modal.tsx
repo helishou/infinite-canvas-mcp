@@ -1,4 +1,4 @@
-import { Alert, App, Button, Form, Input, Modal, Progress, Select, Switch, Tabs } from "antd";
+import { Alert, App, Button, Form, Input, InputNumber, Modal, Progress, Select, Switch, Tabs } from "antd";
 import type { TFunction } from "i18next";
 import { Cloud, Download, Pencil, Plus, RefreshCw, Trash2, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -11,6 +11,7 @@ import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
 import { ConfigLocalStorage } from "@/components/layout/config-local-storage";
 import { ConfigComfyui } from "@/components/layout/config-comfyui";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { type AgentEngine } from "@/lib/agent/agent-engine-memory";
 import { ConfigConnection } from "@/components/layout/config-connection";
 import { changeAppLocale, type AppLocale } from "@/i18n";
 import { ConfigImportFailure } from "@/services/config-import-operation";
@@ -20,7 +21,7 @@ import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent }
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaScaleOptions, parseVideoResolution } from "@/lib/media-size";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { createModelChannel, encodeChannelModel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -66,6 +67,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const [editingChannelId, setEditingChannelId] = useState("");
     /** 导演运行时渠道：设置页只切 hermes / codex，模型由对话面板决定并各自记住。 */
     const [agentEngine, setAgentEngine] = useState<"hermes" | "codex" | "">("");
+    /** 每个导演渠道记住的默认模型（settings.agentModelByEngine），在渠道下拉右侧配置。 */
+    const [agentModelByEngine, setAgentModelByEngine] = useState<Partial<Record<AgentEngine, string>>>({});
     const [testingWebdav, setTestingWebdav] = useState(false);
     const [syncingWebdav, setSyncingWebdav] = useState(false);
     const [webdavSyncStatus, setWebdavSyncStatus] = useState("");
@@ -89,7 +92,12 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     useEffect(() => {
         if (!active || activeTab !== "channels") return;
         let cancelled = false;
-        void fetchSettings().then((settings) => { if (!cancelled) setAgentEngine(settings.agentEngine || ""); }).catch(() => undefined);
+        void fetchSettings().then((settings) => {
+            if (!cancelled) {
+                setAgentEngine(settings.agentEngine || "");
+                setAgentModelByEngine(settings.agentModelByEngine || {});
+            }
+        }).catch(() => undefined);
         return () => { cancelled = true; };
     }, [active, activeTab]);
     /** 导演渠道选项：hermes 需要存在 hermes 渠道；codex 是原生 Codex CLI，恒可用。 */
@@ -107,6 +115,27 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
             message.success(t("config.channels.agentEngineSaved"));
         } catch {
             message.error(t("config.channels.agentEngineSaveFailed"));
+        }
+    };
+    /** 红框：当前导演渠道的默认模型选项。从 ai.config 对应渠道派生存 channel 编码值，
+     *  不依赖导演面板是否已连接加载 models——设置页打开就能配。codex 渠道也能用已登记的模型。 */
+    const agentChannelKind = agentEngine === "hermes" ? "hermes" : "codex-cli";
+    const agentModelOptions = agentEngine
+        ? config.channels
+            .filter((channel) => channel.kind === agentChannelKind)
+            .flatMap((channel) => channel.models.map((model) => ({ value: encodeChannelModel(channel.id, model.name), label: `${channel.name || channel.id} / ${model.name}` })))
+        : [];
+    const currentAgentModel = agentEngine ? agentModelByEngine[agentEngine] || "" : "";
+    const changeAgentDefaultModel = async (value: string) => {
+        if (!agentEngine) return;
+        const next = { ...agentModelByEngine, [agentEngine]: value };
+        setAgentModelByEngine(next);
+        try {
+            await saveSettings({ agentModelByEngine: next });
+            window.dispatchEvent(new CustomEvent("agent-settings-changed"));
+            message.success(t("config.channels.agentModelSaved"));
+        } catch {
+            message.error(t("config.channels.agentModelSaveFailed"));
         }
     };
 
@@ -232,11 +261,23 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                 <section className="mb-5 rounded-lg border border-border p-4">
                                     <h3 className="mb-1 text-sm font-medium">{t("config.channels.agentEngine")}</h3>
                                     <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("config.channels.agentEngineHint")}</p>
-                                    {agentEngineOptions.length ? (
-                                        <Select className="w-full sm:w-96" aria-label={t("config.channels.agentEngine")} value={agentEngine || undefined} options={agentEngineOptions} onChange={(value) => void changeAgentEngine(value)} placeholder={t("config.channels.agentEnginePlaceholder")} />
-                                    ) : (
-                                        <div className="text-xs text-muted-foreground">{t("config.channels.agentEngineEmpty")}</div>
-                                    )}
+                                    <div className="flex flex-wrap gap-3">
+                                        {agentEngineOptions.length ? (
+                                            <Select className="w-full sm:w-96" aria-label={t("config.channels.agentEngine")} value={agentEngine || undefined} options={agentEngineOptions} onChange={(value) => void changeAgentEngine(value)} placeholder={t("config.channels.agentEnginePlaceholder")} />
+                                        ) : (
+                                            <div className="text-xs text-muted-foreground">{t("config.channels.agentEngineEmpty")}</div>
+                                        )}
+                                        <Select
+                                            className="w-full sm:w-96"
+                                            aria-label={t("config.channels.agentDefaultModel")}
+                                            value={currentAgentModel || undefined}
+                                            options={agentModelOptions}
+                                            onChange={(value) => void changeAgentDefaultModel(value)}
+                                            placeholder={t("config.channels.agentDefaultModelPlaceholder")}
+                                            notFoundContent={t("config.channels.agentDefaultModelEmpty")}
+                                            disabled={!agentEngine}
+                                        />
+                                    </div>
                                 </section>
                                 <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                                     <div className="text-xs leading-relaxed text-muted-foreground">{t("config.channels.description")}</div>
@@ -307,6 +348,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     </Form.Item>
                                     <Form.Item label={t("config.preferences.videoResolution")} className="mb-4">
                                         <Select value={parseVideoResolution(config.vquality)} options={videoResolutionOptions} onChange={(value) => updateConfig("vquality", value)} />
+                                    </Form.Item>
+                                    <Form.Item label="全局渠道并发上限" extra="渠道未单独设并发上限时采用；留空不限。1-999。" className="mb-4">
+                                        <InputNumber min={1} max={999} precision={0} className="w-full" value={config.channelConcurrency} onChange={(value) => updateConfig("channelConcurrency", value ?? undefined)} placeholder="不限" />
                                     </Form.Item>
                                 </div>
                                 <h3 className="mb-4 text-sm font-medium text-foreground">{t("microTools.config.audio")}</h3>

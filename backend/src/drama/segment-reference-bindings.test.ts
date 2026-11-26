@@ -123,3 +123,16 @@ test("alignPromptPictures：中文参考图编号转 <Picture N>，越界编号�
     assert.ok(bad.warnings[0].includes("参考图12"));
     assert.ok(bad.warnings[1].includes("参考图99"));
 });
+
+
+test("去重：不同 asset 但同一 storageKey（场景图重复绑定）只保留一个，编号不重复", () => {
+    const { source, director } = fixture();
+    // 两个场景资产指向同一张归档图：实网 ep1 段1 的 <图1><图1> 重复，根因是按 assetId 去重漏掉这种情况。
+    director.assets[SCENE_B] = { storageKey: "image:sceneA" };
+    const derived = deriveSegmentReferenceBindings(source, director, "seg-dup", ["shot-1", "shot-2"], source.shots as any);
+    const sceneBindings = derived.bindings.filter((b) => b.role === "scene");
+    assert.equal(sceneBindings.length, 1, "同一张场景图只绑定一次");
+    const keys = derived.bindings.map((b) => b.storageKey);
+    assert.equal(new Set(keys).size, keys.length, "所有绑定的 storageKey 不重复");
+    assert.deepEqual(derived.bindings.map((b) => b.label), derived.bindings.map((_, i) => `<Picture ${i + 1}>`), "编号连续不跳号/不重复");
+});

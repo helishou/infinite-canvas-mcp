@@ -8,6 +8,7 @@ import {
   checkVideoPromptLength,
   normalizeVideoCapabilities,
   promptCodePoints,
+  resolveConfiguredVideoModel,
   videoCapabilitiesFromWorkflowPackage,
   videoCapabilitiesOf,
 } from "./model-video-capability.js";
@@ -171,6 +172,13 @@ test("promptMaxChars 真值读取：只收正整数显式登记/上报，非法�
   assert.equal(videoCapabilitiesOf(config, "已登记").promptMaxChars, 8000);
   assert.equal(videoCapabilitiesOf(config, "engine-local::未登记").promptMaxChars, undefined);
   assert.equal(videoCapabilitiesOf(config, "engine-local::无此模型").promptMaxChars, undefined);
+});
+
+test("剧目跟随默认时提示词字数上限按全局默认视频模型解析", () => {
+  const config = { ...aiConfig([{ name: "已登记", capability: "video", promptMaxChars: 8000 }]), videoModel: "engine-local::已登记" };
+  assert.equal(resolveConfiguredVideoModel(config, ""), "engine-local::已登记");
+  assert.equal(resolveConfiguredVideoModel(config, "engine-local::其它"), "engine-local::其它");
+  assert.equal(videoCapabilitiesOf(config, resolveConfiguredVideoModel(config, "")).promptMaxChars, 8000);
 });
 
 test("工作流只在显式声明 promptMaxChars 时派生；普通 prompt 字段的 max 不是字数上限", () => {

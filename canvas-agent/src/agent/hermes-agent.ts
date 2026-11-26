@@ -8,7 +8,7 @@ import matter from "gray-matter";
 
 import { AGENT_PROMPT } from "../config.js";
 import { logger } from "../utils/logger.js";
-import { hermesCommand } from "./hermes-client.js";
+import { ensureCanvasProfile, HERMES_CANVAS_PROFILE, hermesCommand } from "./hermes-client.js";
 import { errorMessage, field, type JsonRecord } from "../utils/value.js";
 import { configuredAgentChannels, type AgentChannelModel } from "./agent-channels.js";
 import { HERMES_THREAD_PREFIX, HermesAcpClient, isHermesThread } from "./hermes-client.js";
@@ -22,9 +22,10 @@ type HermesTurn = { id: string; status: "running" | "completed" | "failed" | "in
 type HermesThread = { version: 1; id: string; sessionId: string; cwd: string; model: string; preview: string; createdAt: number; updatedAt: number; archived?: boolean; silent?: boolean; turns: HermesTurn[] };
 
 const threadKey = (id: string) => `agent.hermes.thread:${id}`;
-// Hermes 的用户技能在 $HERMES_HOME/skills（默认 ~/.hermes/skills）；~/.codex/skills 是 Codex 的，别拿错。
+// 画布用专用 profile：技能列表与开关写入同一套配置，不与主配置的自定义技能混用。
+// profile 的技能目录在 $HERMES_HOME/profiles/<name>/skills；~/.codex/skills 是 Codex 的，别拿错。
 const hermesHome = process.env.HERMES_HOME || path.join(os.homedir(), ".hermes");
-const userSkills = path.join(hermesHome, "skills");
+const userSkills = path.join(hermesHome, "profiles", HERMES_CANVAS_PROFILE, "skills");
 const isRecord = (value: unknown): value is JsonRecord => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
 /**
@@ -397,16 +398,33 @@ export class HermesAgent {
         this.active = { thread, turn, emit: () => undefined, messageText: "", itemId };
         try {
             const client = await this.connection();
-            const session = await this.ensureSession(client, thread);
-            const wanted = this.acpModel(thread.model);
-            if (wanted && session.model !== thread.model) { await client.setModel(session.sessionId, wanted); session.model = thread.model; }
             const instruction = `严格只输出一个 JSON（不要代码块、不要解释），必须符合 JSON Schema：\n${JSON.stringify(request.schema)}`;
             const images = await Promise.all((request.images || []).map((file) => fileDataUrl(file)));
-            const result = await client.prompt(session.sessionId, `${request.prompt}\n\n${instruction}`, images);
-            const output = parseValidated(result.text, validate);
-            turn.display.push(this.display(thread.id, turn.id, itemId, "assistant", result.text));
-            turn.status = "completed";
-            return { threadId, output };
+            // ACP 会话在网关/backend 重载后会失效（备用会话认领了坏 sessionId），
+            // prompt 抛 Internal error / not found / launch_credentials_unavailable 时，
+            // 丢弃坏会话重建一次再试——否则重编/拆镜会一直撞同一坏会话，表现为「重编没用」。
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const session = await this.ensureSession(client, thread);
+                    const wanted = this.acpModel(thread.model);
+                    if (wanted && session.model !== thread.model) { await client.setModel(session.sessionId, wanted); session.model = thread.model; }
+                    const result = await client.prompt(session.sessionId, `${request.prompt}\n\n${instruction}`, images);
+                    const output = parseValidated(result.text, validate);
+                    turn.display.push(this.display(thread.id, turn.id, itemId, "assistant", result.text));
+                    turn.status = "completed";
+                    return { threadId, output };
+                } catch (error) {
+                    const msg = errorMessage(error);
+                    const sessionBroken = /internal error|not[_ ]?found|launch_credentials_unavailable|acp_mcp_policy_conflict|未连接/i.test(msg);
+                    if (!sessionBroken || attempt >= 1) throw error;
+                    // 丢弃坏会话：清线程缓存 + 失效备用会话，下一轮 ensureSession 自然走 newSession。
+                    logger.warn("Hermes ACP 会话失效，丢弃坏会话重建重试一次", { threadId, error: msg });
+                    this.sessions.delete(thread.id);
+                    thread.sessionId = "";
+                    this.spare = null;
+                }
+            }
+            throw new Error("HERMES_SESSION_RETRY_EXHAUSTED");
         } catch (error) {
             turn.status = "failed";
             turn.error = errorMessage(error);
@@ -459,9 +477,10 @@ export class HermesAgent {
 
     /** 跑一次 hermes CLI（配置读写），失败不抛给界面但会记日志，避免开关看起来生效其实没写进去。 */
     private async hermesCli(args: string[], timeoutMs = 30_000): Promise<string> {
+        await ensureCanvasProfile();
         const { spawn } = await import("node:child_process");
         return await new Promise<string>((resolve, reject) => {
-            const child = spawn(hermesCommand(), args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+            const child = spawn(hermesCommand(), ["--profile", HERMES_CANVAS_PROFILE, ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
             let out = "", err = "";
             const timer = setTimeout(() => { child.kill(); reject(new Error(`hermes ${args[0]} 超时`)); }, timeoutMs);
             child.stdout?.on("data", (chunk) => { out += String(chunk); });

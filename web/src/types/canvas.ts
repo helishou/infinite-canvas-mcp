@@ -197,6 +197,8 @@ export type CanvasNodeMetadata = {
     characterDescription?: string;
     characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; role?: string; width: number; height: number; bytes: number; mimeType: string; sourceNodeId?: string }>;
     characterPrimaryIndex?: number;
+    characterAliases?: string[];
+    characterRole?: string;
     // 拖入角色节点的声线（音频）：从音频节点/音频资产/音频文件拖入后记录，存入资产库映射到 CharacterAsset.voice*。
     characterVoiceName?: string;
     characterVoiceDescription?: string;

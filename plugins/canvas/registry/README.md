@@ -24,7 +24,7 @@ registry/
 https://cdn.jsdelivr.net/gh/basketikun/infinite-canvas@plugins-dist/official-plugins.json
 ```
 
-清单里每条的 `entry`(相对文件名)由前端解析成与清单同目录的绝对 URL,再走既有 URL 安装流程。jsDelivr 对分支有缓存(约数小时),需要立即生效可对该分支目录做 purge。
+清单里每条的 `entry`(相对文件名)由前端解析成与清单同目录的绝对 URL,再走既有 URL 安装流程。构建脚本同时为每条产物计算 `integrity`(`sha256-<base64>`);前端下载后先校验 SHA-256,不符则拒绝安装,防止 CDN 缓存或传输环节被篡改。jsDelivr 对分支有缓存(约数小时),需要立即生效可对该分支目录做 purge。
 
 ## 新增 / 更新官方插件
 

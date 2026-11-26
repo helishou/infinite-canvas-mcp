@@ -19,9 +19,11 @@ import crypto from "node:crypto";
 import type { Request, Response, Router } from "express";
 import { z } from "zod";
 import {
-  buildSchemePrompt,
+  ASSET_SCHEMES,
   defaultSchemeFor,
+  renderAssetPromptWithTemplate,
   schemeAppliesTo,
+  type AssetPromptTemplates,
   type AssetSchemeId,
 } from "@basketikun/canvas-agent/drama/asset-spec";
 import { withArtStyle } from "@basketikun/canvas-agent/drama/art-style";
@@ -73,6 +75,13 @@ export const regenerateReferenceSchema = z.object({
     restyleSegments: z.boolean().default(true),
     /** 指定归属分集；不传时按资产卡所在集自动反查。 */
     episodeId: z.string().min(1).optional(),
+    /** 剧目参考图提示词模板（角色/场景/道具/默认）；不传则用内置方案模板。 */
+    assetPromptTemplates: z.object({
+        default: z.string().max(8000).optional(),
+        character: z.string().max(8000).optional(),
+        scene: z.string().max(8000).optional(),
+        prop: z.string().max(8000).optional(),
+    }).strict().optional(),
 }).strict();
 
 export type RegenerateReferenceInput = z.infer<typeof regenerateReferenceSchema> & {
@@ -206,12 +215,22 @@ export function locateDramaAssetForRegeneration(db: BackendDatabase, dramaId: st
         `REGEN_ASSET_NOT_FOUND: 剧目 ${dramaId} 下找不到资产卡 ${assetId}${preferredEpisodeId ? `（分集 ${preferredEpisodeId}）` : ""}`, 404);
 }
 
-/** 组装真实出图提示词：显式 prompt 直接覆盖；否则按当前方案模板拼装资产卡设定。 */
+/** 组装真实出图提示词：显式 prompt 直接覆盖；否则按剧目模板（缺省回退内置方案模板）拼装资产卡设定。 */
 export function buildRegeneratePrompt(located: LocatedAsset, input: RegenerateReferenceInput,
-    artStyle: string, language: string): string {
+    artStyle: string, language: string, templates?: AssetPromptTemplates): string {
     const explicit = str(input.prompt);
     if (explicit) return withArtStyle(explicit, artStyle, language);
-    return buildSchemePrompt(located.kind, located.name, located.appearance, located.scheme, { artStyle, language });
+    const schemeInfo = ASSET_SCHEMES.find((s) => s.id === located.scheme);
+    const rendered = renderAssetPromptWithTemplate(located.kind, located.name, located.appearance, located.scheme,
+        templates ?? input.assetPromptTemplates, {
+            项目画风: artStyle,
+            资产名称: located.name,
+            资产设定: located.appearance,
+            方案名称: schemeInfo?.name || located.scheme,
+            方案要求: schemeInfo?.frameHint || "",
+            language,
+        });
+    return rendered.prompt;
 }
 
 const TRANSIENT = /正在开发重载|开发重载|BACKEND_OUTCOME_UNKNOWN|socket hang up|ECONNRESET|ETIMEDOUT/i;

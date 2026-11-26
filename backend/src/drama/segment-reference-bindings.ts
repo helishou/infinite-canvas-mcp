@@ -184,12 +184,20 @@ export function deriveSegmentReferenceBindings(
 
     const ordered: AssetDesc[] = [];
     const seen = new Set<string>();
+    const seenStorage = new Set<string>();
     const descriptor = new Map<string, AssetDesc>();
     for (const category of CATEGORY_ORDER) {
         for (const group of grouped) {
             for (const desc of group.byCategory[category]) {
                 if (!desc.assetId || seen.has(desc.assetId)) continue;
+                // 同一张归档图可能被两个不同 asset 引用（典型：场景图保底补的 asset-plan 项 +
+                // 投影阶段的真实场景资产，指向同一 storageKey）。按 storageKey 再去重一次，
+                // 否则 H3 会收到两个编号都指向同一张图（实网 ep1 段1 的 <图1><图1>）。
+                // 先用有 storageKey 的做键；没有 storageKey 的稍后由 withMedia 阶段剔除。
+                const storageKey = textOf(recordOf(assets[desc.assetId]).storageKey);
+                if (storageKey && seenStorage.has(storageKey)) continue;
                 seen.add(desc.assetId);
+                if (storageKey) seenStorage.add(storageKey);
                 ordered.push(desc);
                 descriptor.set(desc.assetId, desc);
             }

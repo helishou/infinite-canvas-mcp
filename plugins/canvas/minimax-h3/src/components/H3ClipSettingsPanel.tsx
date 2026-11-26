@@ -14,7 +14,6 @@ import { ClipSettings } from "./ClipSettings";
 import { H3Icon } from "./H3Icon";
 import { requestH3Run, resolveH3PaneSizes } from "./H3WorkbenchPrimitives";
 import { h3Label, useH3Locale } from "../h3-locale";
-import { refsForSegment } from "../services/h3-data";
 import { formalContinuationBoundaryUpdates } from "../services/h3-global-settings";
 import { H3_STYLE_TEMPLATES, type H3StyleTemplate } from "@basketikun/canvas-agent/plugins/minimax-h3/style-templates";
 import { resolveAvailableH3StyleTemplates } from "../services/h3-style-templates";
@@ -246,7 +245,7 @@ export function H3ClipSettingsPanel({ ctx, metadata, selected, submitting = fals
         </div>
         <p className="nfh3-hint">{h3Label(locale, "parameterPolicy")}：{h3Label(locale, resolved?.policy === "defaults" ? "inheritDefaults" : "explicitOverrides")} · {h3Label(locale, "effectiveParameters")}</p>
         {motionGroup ? <p className="nfh3-hint" role="status">{locale === "en-US" ? `Motion group: Clip ${h3ClipNumber(ctx, clips[motionGroup.head], motionGroup.head)}–${h3ClipNumber(ctx, clips[motionGroup.tail], motionGroup.tail)}. Generate current Clip from the group head to run the entire group in order.` : `接续组：Clip ${h3ClipNumber(ctx, clips[motionGroup.head], motionGroup.head)}–${h3ClipNumber(ctx, clips[motionGroup.tail], motionGroup.tail)}。从组首点击「生成当前 Clip」会依次运行全组。`}</p> : null}
-        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} audioRefs={effectiveSegment ? refsForSegment(effectiveSegment).filter((ref) => ref.type === "audio") : []} patch={patchClipSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
+        <ClipSettings key="clip-settings" ctx={ctx} metadata={metadata} segment={selected} patch={patchClipSettings} onManageStyleTemplates={() => setStylesOpen(true)} />
         <Modal title="管理视觉风格模板" open={stylesOpen} onCancel={() => { setStylesOpen(false); setStyleDraft(null); }} footer={null} width={720}>
             <div style={{ display: "grid", gap: 10, maxHeight: "55vh", overflow: "auto", marginBottom: 16 }}>
                 {styleTemplates.map(template => <div key={template.id} style={{ display: "flex", alignItems: "center", gap: 10 }}><strong style={{ flex: 1 }}>{template.label}</strong><Button size="small" onClick={() => editStyle(template)}>编辑</Button><Button size="small" danger onClick={() => void removeStyle(template.id)}>删除</Button></div>)}

@@ -4,6 +4,7 @@ import type { CanvasProject, RuntimeTask } from "../db.js";
 import type { DirectAudioBackend, DirectAudioInput } from "../engine-contract/direct-audio.js";
 import type { Stores } from "../stores/types.js";
 import { prepareCanvasGenerationTarget } from "./generation-target.js";
+import { waitReasonHooks, withChannelSlot } from "./channel-slot.js";
 import { generationSettingsSnapshot } from "../engine-contract/generation-settings.js";
 import type { CanvasOperation } from "./project-ops.js";
 
@@ -70,7 +71,7 @@ export class CanvasAudioDispatcher {
                 executor, ...(input.referenceAudio ? { referenceAudio: input.referenceAudio } : {}),
             }) },
         }).id : null;
-        void this.execute(task, input, logId, startedAt).catch((error) => this.fail(task, input, error, logId, startedAt));
+        void withChannelSlot(this.stores, "audio", input.channelId, () => this.execute(task, input, logId, startedAt), waitReasonHooks(this.stores, task.id, logId)).catch((error) => this.fail(task, input, error, logId, startedAt));
         return { taskId: task.id, executor };
     }
 
@@ -90,7 +91,7 @@ export class CanvasAudioDispatcher {
             const node = project && (project.nodes as Array<Record<string, any>>).find((item) => item.id === input.nodeId);
             if (project && node?.metadata?.runtimeTaskId !== task.id) throw new Error("音频任务已失去节点绑定，不恢复旧任务");
             const logId = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0]?.id || null;
-            void this.execute(task, input, logId, Date.parse(this.stores.logs.get(logId || "")?.startedAt || task.createdAt)).catch((error) => this.fail(task, input, error, logId, Date.parse(task.createdAt)));
+            void withChannelSlot(this.stores, "audio", input.channelId, () => this.execute(task, input, logId, Date.parse(this.stores.logs.get(logId || "")?.startedAt || task.createdAt)), waitReasonHooks(this.stores, task.id, logId)).catch((error) => this.fail(task, input, error, logId, Date.parse(task.createdAt)));
         } catch (error) { this.fail(task, input, error); }
     }
 

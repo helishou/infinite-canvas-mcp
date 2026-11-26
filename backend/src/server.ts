@@ -1242,6 +1242,19 @@ export function startServer(
       // PlanDone 后不允许手工加集（影策 PlanDone 锁）；新增集号在此被拒，
       // 既有集的编辑仍走原流程。抛错由下方 catch 统一返回 409。
       db.assertDramaEpisodeCreationAllowed(dramaId, episodeNumber);
+      // 批量建集（原剧本页逐集调本路由）会绕过 commitGrouping，导致 source_chapters
+      // 从未同步；后续 script 阶段拿不到章节原文。建集时若章节为空，先按真值同步一次。
+      if (!db.listSourceChapters(dramaId).length) {
+        const plan = (drama as unknown as { productionPlan?: Record<string, unknown> }).productionPlan;
+        const sourceScript = String(plan?.sourceScript || "");
+        if (sourceScript.trim()) {
+          const split = (plan?.sourceSplit && typeof plan.sourceSplit === "object" ? plan.sourceSplit : {}) as Record<string, unknown>;
+          db.syncSourceChapters(dramaId, sourceScript, {
+            excluded: Array.isArray(split.excluded) ? split.excluded.map(Number) : [],
+            maxChars: Number(split.maxChars) || 3000,
+          }, String(plan?.episodeMode || "") === "auto" ? "auto" : "chapter");
+        }
+      }
       const episode = db.upsertDramaEpisode({
         id: typeof body.id === "string" ? body.id : undefined,
         dramaId,
@@ -1993,6 +2006,11 @@ export function startServer(
 
   app.get("/generation-logs", (req, res) => {
     const projectId = req.query.projectId as string | undefined;
+    // dramaId：按剧目过滤。生成日志只带画布 project_id，所以先把该剧分集画布解析成 projectIds，在存储层做 IN 过滤（不先截断再内存过滤）。
+    const dramaId = typeof req.query.dramaId === "string" && req.query.dramaId ? req.query.dramaId : undefined;
+    const projectIds = dramaId
+      ? db.listDramaEpisodes(dramaId).map((episode) => episode.canvasId).filter((id): id is string => Boolean(id))
+      : undefined;
     const nodeId = req.query.nodeId as string | undefined;
     const status = [
       "queued",
@@ -2006,6 +2024,7 @@ export function startServer(
     const limit = Number(req.query.limit || 500);
     const logs = stores.logs.list({
         projectId,
+        projectIds: projectIds && projectIds.length ? projectIds : undefined,
         nodeId,
         status,
         limit,
@@ -2040,9 +2059,18 @@ export function startServer(
             return typeof media?.durationMs === "number" ? { ...output, durationMs: media.durationMs } : output;
         }) : log.outputs }
         : log;
-    const responseLogs = (req.query.summary === "true"
-      ? logs.map((log) => ({ ...log, references: [], inputCounts: {}, params: {} }))
-      : logs).map(withMediaDuration);
+    // waitReason：真实排队原因写在 params.waitReason（不新增列）；顶层补一份给队列行直接读，没有就不带字段。
+    // 必须在 summary 裁 params 之前提取，否则 summary=true 的列表调用拿不到等待原因。
+    const withWaitReason = (log: GenerationLog): GenerationLog => {
+      const reason = typeof log.params?.waitReason === "string" ? log.params.waitReason.trim() : "";
+      return reason ? { ...log, waitReason: reason } : log;
+    };
+    const responseLogs = logs
+      .map(withWaitReason)
+      .map((log) => req.query.summary === "true"
+        ? { ...log, references: [], inputCounts: {}, params: {} }
+        : log)
+      .map(withMediaDuration);
     res.json({ ok: true, logs: responseLogs });
   });
   app.post("/generation-logs", (req, res) => {

@@ -12,7 +12,7 @@ test("entering a drama selects its latest episode while explicit episode selecti
 });
 test("workbench links preserve episode and workspace without canvas or modal routing", () => {
     const url = new URL(dramaWorkbenchPath("drama/中文", "ep 2", "shots"), "https://example.test");
-    assert.equal(url.pathname, "/production");
+    assert.equal(url.pathname, "/drama-studio");
     assert.equal(url.searchParams.get("dramaId"), "drama/中文");
     assert.equal(url.searchParams.get("episodeId"), "ep 2");
     assert.equal(url.searchParams.get("workspace"), "shots");

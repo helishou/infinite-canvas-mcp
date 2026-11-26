@@ -15,22 +15,43 @@ test("workflow invocation count is not an upper limit on output images", async (
     assert.deepEqual(result.media.map((item: any) => item.imageId), ["slot", "slot"]);
 });
 
+test("中转站 gpt-image 模型落到 direct-image，不被误判成引擎（回归：带参考图报 0 图片输入槽）", () => {
+    const thirdPartyConfig = {
+        channels: [{
+            id: "gUIhQvjmKncb3eo3am204", name: "中转站", kind: "api", apiFormat: "openai",
+            baseUrl: "https://api.kunrouai.com", apiKey: "sk-x",
+            models: [{ name: "gpt-image-2.6-1k", capability: "image" }],
+        }],
+    };
+    const dispatcher = dispatcherWith({
+        settings: { get: () => thirdPartyConfig } as never,
+        directImage: { supports: (m: string) => /(^|::)gpt-image/i.test(m) } as never,
+    });
+    const plan = (dispatcher as any).plan({
+        model: "gUIhQvjmKncb3eo3am204::gpt-image-2.6-1k",
+        prompt: "一只猫",
+        references: [{ storageKey: "image:ref" }],
+        loopInputImages: [],
+    });
+    assert.equal(plan.executor, "direct-image");
+    assert.equal(plan.engine, undefined);
+});
+
 function task(id: string, input: Record<string, unknown>, status: "queued" | "running" | "succeeded" = "queued") {
     return { id, kind: "canvas-image", status, progress: status === "succeeded" ? 1 : 0, input, params: {}, result: status === "succeeded" ? { media: [] } : null, error: null, createdAt: "", updatedAt: "", executor: "direct-image", outputs: [] };
 }
 
-function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Record<string, unknown>; directImage?: Record<string, unknown>; projects?: Record<string, unknown> } = {}) {
+function dispatcherWith(overrides: { tasks?: Record<string, unknown>; media?: Record<string, unknown>; directImage?: Record<string, unknown>; projects?: Record<string, unknown>; settings?: Record<string, unknown> } = {}) {
     return new CanvasImageDispatcher(
         { url: "http://127.0.0.1:17370" } as never,
         {
             tasks: (overrides.tasks || {}) as never,
             media: (overrides.media || {}) as never,
-            settings: { get: () => undefined } as never,
+            settings: (overrides.settings || { get: () => undefined }) as never,
             logs: { create: () => { throw new Error("日志不应在此测试中创建"); } } as never,
             projects: (overrides.projects || { get: () => null }) as never,
         } as never,
-        {} as never,
-        (overrides.directImage || {}) as never,
+        (overrides.directImage || { supports: () => true }) as never,
         {} as never,
         {} as never,
     );

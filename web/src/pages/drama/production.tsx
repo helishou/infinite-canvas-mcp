@@ -2444,7 +2444,15 @@ function ProductionEditorContent({ owner, embedded = false, dialog = false, hide
   return <main ref={editorRootRef} data-production-inspector={embedded && !dialog || undefined} data-production-dialog={dialog || undefined} data-director-workspace data-production-workspace-shell={!embedded || undefined} data-shot-workspace-shell={!embedded && workspace === "shots" || undefined} className={embedded ? "min-h-full bg-background p-3 text-foreground" : "min-h-full bg-background px-4 py-5 text-foreground sm:px-6 lg:px-10 lg:py-7"}>
       {loadError && <div className="mx-auto w-full max-w-[1440px]"><Alert className="mb-5" type="warning" showIcon message={t("director.loadFailed")} description={loadError} /></div>}
       {notice && <div className="mx-auto w-full max-w-[1440px]">{notice}</div>}
-      <WorkspaceViewSwitcher mode={canvasHost?.visible ? "canvas" : "production"} onSelect={next => { if (next === "canvas") void openWorkspaceCanvas(); else canvasHost?.collapse?.(); }} />
+      <WorkspaceViewSwitcher mode={canvasHost?.visible ? "canvas" : "production"} onSelect={next => {
+        if (next === "canvas") void openWorkspaceCanvas();
+        else {
+          canvasHost?.collapse?.();
+          const query = new URLSearchParams({ dramaId: dramaId || series?.id || "" });
+          if (episodeId) query.set("episodeId", episodeId);
+          navigate(`/drama-studio?${query}`);
+        }
+      }} />
     <div className="mx-auto max-w-[1440px]">
       <ProductionWorkspaceBreadcrumb items={breadcrumbs} />
       {episode && production && workspace !== "series" && (

@@ -16,5 +16,5 @@ export function dramaWorkbenchPath(dramaId: string, episodeId?: string, workspac
     const query = new URLSearchParams({ dramaId });
     if (episodeId) query.set("episodeId", episodeId);
     if (workspace) query.set("workspace", workspace);
-    return `/production?${query}`;
+    return `/drama-studio?${query}`;
 }

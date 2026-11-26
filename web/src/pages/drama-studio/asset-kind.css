@@ -1,0 +1,26 @@
+/* 影策 asset-kind.css 的本地等价：按资产类型着色，色值全部派生自现有 shadcn token，
+   保证明暗主题跟随。用于按集核查/资产库的徽章与 chips。 */
+[data-asset-kind] {
+    --studio-asset-color: var(--muted-foreground);
+    --studio-asset-tint: color-mix(in srgb, var(--studio-asset-color) 12%, var(--card));
+}
+[data-asset-kind="character"] {
+    --studio-asset-color: var(--primary);
+}
+[data-asset-kind="scene"],
+[data-asset-kind="environment"] {
+    --studio-asset-color: #2f9e6f;
+}
+[data-asset-kind="prop"],
+[data-asset-kind="asset"] {
+    --studio-asset-color: #c07a2e;
+}
+[data-asset-kind="material"],
+[data-asset-kind="reference"] {
+    --studio-asset-color: #6b74c4;
+}
+[data-asset-kind] .studio-asset-badge,
+.studio-asset-badge[data-asset-kind] {
+    color: var(--studio-asset-color);
+    background: var(--studio-asset-tint);
+}

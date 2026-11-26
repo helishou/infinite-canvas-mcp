@@ -278,6 +278,23 @@ export function deleteBackendDramaProject(id: string, freeCanvasIds: string[] = 
     return request<{ ok: boolean; deleted?: number; deletedAssets?: number }>("DELETE", `/drama/projects/${encodeURIComponent(id)}`, { freeCanvasIds, ...(options.deleteAssets ? { deleteAssets: true } : {}) });
 }
 
+/** 跨作品素材导入：按真值节点把来源剧目共享画布的角色/场景/道具复制进本项目共享资产画布。 */
+export type WorkAssetImport = {
+    sourceNodeId: string;
+    kind: "character" | "scene" | "prop";
+    name: string;
+    description?: string;
+    aliases?: string[];
+    storageKeys: string[];
+};
+export function importWorkAssets(dramaId: string, payload: { sourceDramaId: string; assets: WorkAssetImport[] }) {
+    return request<{ ok: boolean; imported: number; skipped: number; nodes: Array<{ nodeId: string; kind: string; name: string }> }>(
+        "POST",
+        `/drama/projects/${encodeURIComponent(dramaId)}/import-work-assets`,
+        payload,
+    );
+}
+
 export type DramaEpisode = {
     id: string;
     dramaId: string;
@@ -705,8 +722,11 @@ export function fetchClipVideosCurrent(episodeId: string) {
 export function fetchClipVideosAtVersion(episodeId: string, version: number) {
     return request<{ ok: boolean; clipVideos: ClipVideoTruth[] }>("GET", `${productionPath(episodeId)}/clip-videos/${version}`);
 }
-export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft") {
+export function fetchProductionWorkbench(owner: ProductionTarget, view: "subject_workbench" | "shot_workbench" | "clip_workbench", targetId: string, snapshot: "draft" | "published" = "draft", options: { includeContext?: boolean; includeRuntime?: boolean } = {}) {
     const query = new URLSearchParams({ view, targetIds: targetId, snapshot });
+    // 默认投影会裁掉 workbench.context / workbench.runtime；只读回执需要 artifacts 与 resolvedSubjects 时才显式索取。
+    if (options.includeContext) query.set("includeContext", "true");
+    if (options.includeRuntime) query.set("includeRuntime", "true");
     return request<{ ok: boolean; production: Record<string, any> }>("GET", productionPath(owner) + "?" + query.toString());
 }
 export async function fetchProductionClipNumbers(owner: ProductionTarget) {
@@ -1004,7 +1024,7 @@ export function deleteBackendAssetFolder(id: string) {
 
 export type InstalledPluginRecord = {
     id: string; name: string; version: string; description?: string; url: string; source: string;
-    enabled: boolean; local?: boolean; official?: boolean; installedAt: string; mcp?: { enabled: boolean; toolCount: number };
+    enabled: boolean; local?: boolean; official?: boolean; integrity?: string; installedAt: string; mcp?: { enabled: boolean; toolCount: number };
 };
 
 export function fetchBackendInstalledPlugins() {
@@ -1229,10 +1249,14 @@ export type BackendGenerationLog = {
     startedAt: string; finishedAt?: string; durationMs: number;
     outputs: Array<Record<string, unknown>>; error?: string;
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
+    /** 真实排队原因（后端从 params.waitReason 提到顶层）；没有在排队时后端不带该字段。 */
+    waitReason?: string;
 };
 
-export function fetchBackendGenerationLogs(options: { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean; mediaDuration?: boolean } = {}) {
+export function fetchBackendGenerationLogs(options: { projectId?: string; dramaId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: string; from?: string; to?: string; limit?: number; offset?: number; summary?: boolean; mediaDuration?: boolean } = {}) {
     const params = new URLSearchParams();
+    // dramaId：按剧目过滤（后端解析分集画布后按 project_id IN (...) 匹配），避免跨剧目混入生成记录。
+    if (options.dramaId) params.set("dramaId", options.dramaId);
     if (options.projectId) params.set("projectId", options.projectId);
     if (options.nodeId) params.set("nodeId", options.nodeId);
     if (options.segmentId) params.set("segmentId", options.segmentId);
@@ -1389,6 +1413,8 @@ export type DramaPipelineStatus = {
     /** 制作设置「样片模式」：第 1 集视频阶段也需人工 approve。 */
     sampleMode?: boolean;
     logs?: Array<Record<string, unknown>>;
+    /** 运行期预算真值（后端 status.budget）：本机生成不计费时 spent=0/limit=0 表示不限。 */
+    budget?: { limitMicrocredits: number; spentMicrocredits: number; exceeded: boolean };
 };
 
 export type DramaPipelineStartOptions = {
@@ -1403,6 +1429,15 @@ export type DramaPipelineStartOptions = {
         dialogueDensity?: string; transitionMode?: string; transitionMs?: number; pacing?: string;
     };
     concurrency?: { text?: number; video?: number; render?: number };
+    /** 参考图提示词模板（角色/场景/道具/默认）：空则后端用内置方案模板拼装。 */
+    assetPromptTemplates?: { default?: string; character?: string; scene?: string; prop?: string };
+    /** 写作技能引用（plan/extract/storyboard/prompt）：后端按 name 读 SKILL.md 方法要点注入对应生成步骤。 */
+    textSkills?: {
+        plan?: { name: string; title?: string; path?: string; content?: string; instruction?: string } | null;
+        extract?: { name: string; title?: string; path?: string; content?: string; instruction?: string } | null;
+        storyboard?: { name: string; title?: string; path?: string; content?: string; instruction?: string } | null;
+        prompt?: { name: string; title?: string; path?: string; content?: string; instruction?: string } | null;
+    };
 };
 export function startDramaPipeline(dramaId: string, opts?: { reviewMode?: string; mediaMode?: string; options?: DramaPipelineStartOptions }) {
     return request<{ ok: boolean; [k: string]: unknown }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/start`, {
@@ -1429,10 +1464,11 @@ export function retryFailedDramaPipeline(dramaId: string) {
     return request<{ ok: boolean; requeued?: number }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-failed`, {});
 }
 /** 按章编辑原文后重新改编：服务端重置本集全部作业并重入队 script（清旧镜→按新稿重拆→同步画布）。 */
-export function rewriteDramaEpisodeScript(episodeId: string, opts?: { instruction?: string; model?: string }) {
+export function rewriteDramaEpisodeScript(episodeId: string, opts?: { instruction?: string; model?: string; options?: Record<string, unknown> }) {
     return request<{ ok: boolean; dramaId?: string; episodeId?: string; resetJobs?: number; status?: string }>("POST", "/drama/pipeline/script/rewrite", {
         episodeId,
         ...(opts?.instruction ? { instruction: opts.instruction } : {}),
         ...(opts?.model ? { model: opts.model } : {}),
+        ...(opts?.options ? { options: opts.options } : {}),
     });
 }

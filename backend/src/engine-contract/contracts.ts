@@ -29,7 +29,7 @@ export type RuntimeTaskEvent = {
     payload: Record<string, unknown>; createdAt: string;
 };
 
-export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string; model?: string };
+export type TaskPatch = { status?: RuntimeTaskStatus; progress?: number; result?: Record<string, unknown> | null; error?: string | null; executor?: string; model?: string; /** 浅合并进任务 params（用于写 waitReason 等诊断字段，不新增列）。 */ params?: Record<string, unknown> };
 
 /** 任务 store：tasks + task_events。引擎只依赖该接口，权威实现由宿主注入。 */
 export type TaskStore = {
@@ -128,10 +128,12 @@ export type GenerationLog = {
     startedAt: string; finishedAt?: string; durationMs: number;
     outputs: Array<Record<string, unknown>>; error?: string;
     params: Record<string, unknown>; createdAt: string; updatedAt: string;
+    /** 仅 GET /generation-logs 响应补充：取 params.waitReason，有值才出现（没有在排队就不带该字段）。 */
+    waitReason?: string;
 };
 
 export type GenerationLogInput = Omit<GenerationLog, "id" | "createdAt" | "updatedAt">;
-export type GenerationLogFilter = { projectId?: string; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
+export type GenerationLogFilter = { projectId?: string; projectIds?: string[]; nodeId?: string; segmentId?: string; runtimeTaskId?: string; platform?: string; model?: string; status?: GenerationLogStatus; from?: string; to?: string; limit?: number; offset?: number };
 
 // ── 工作流契约 ────────────────────────────────────────────────────────────────
 

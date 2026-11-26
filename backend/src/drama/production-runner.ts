@@ -11,7 +11,7 @@ import { canonicalProduction, productionEntities, isSubjectPromptAssembly, produ
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 import { resolveCanvasCharacterImageReferences, resolveCanvasImageReferenceNode } from "../canvas/image-references.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import type { RuntimeTask } from "../db.js";
+import type { RuntimeTask, BackendDatabase } from "../db.js";
 import type { Stores } from "../stores/types.js";
 import { directorArtifact, validateDirectorMedia } from "./director.js";
 import { EpisodeProductionService, type ProductionRecord, type ProductionRun } from "./production.js";
@@ -22,10 +22,16 @@ import { productionSceneIdsForShots, productionSceneLayout } from "./production-
 import { entityNodeOperations, entitySubjectPictureBinding } from "./entity-nodes.js";
 import { productionSceneCreationOperations } from "./production-scene-nodes.js";
 import { sharedSubjectPictureBinding } from "./shared-subject-picture.js";
+import { resolveSharedIdentity, type SharedIdentityResolution, type SharedIdentitySource } from "./shared-assets.js";
+import { productionCanvasContext } from "./production-canvas.js";
 
 const stableId = (kind: string, ...parts: string[]) => `${kind}-${crypto.createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const nodesOf = (project: Record<string, unknown>) => Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
+/** 写时按共享画布身份回填：把 db / dramaId 绑定到 entityNodeOperations 的 resolver 形状。 */
+const sharedIdentityResolverFor = (db: BackendDatabase, dramaId: string):
+    (kind: "character" | "scene" | "prop", name: string, aliases: string[], source?: SharedIdentitySource) => SharedIdentityResolution | undefined =>
+    (kind, name, aliases, source) => resolveSharedIdentity(db, dramaId, kind, name, aliases, source);
 /** Snapshot the bound node's image inputs before the task is created. */
 export function productionImageParams(node: Record<string, unknown> | undefined): Record<string, unknown> {
     const metadata = object(node?.metadata);
@@ -227,7 +233,10 @@ export class EpisodeProductionRunner {
                 const entityUnit = entityKind ? selectedUnits.find(item => item.id === `entity:${entityKind}:${entityId}`) : undefined;
                 const entityMember = entityUnit?.members.find(item => item.role === "asset");
                 if (entityUnit && entityMember) {
-                    canvasOps.push(...entityNodeOperations(project, current.draft, owner, current.draft, plan)
+                    const identityDb = this.service.storageDatabase();
+                    const identityDramaId = identityDb.getDramaEpisode(id)?.dramaId || productionCanvasContext(identityDb, canvasId || id).dramaId || "";
+                    const identityResolver = sharedIdentityResolverFor(identityDb, identityDramaId);
+                    canvasOps.push(...entityNodeOperations(project, current.draft, owner, current.draft, plan, identityResolver)
                         .filter(operation => String((operation as Record<string, any>).id || "") === entityMember.nodeId));
                     plannedNodeIds.add(entityMember.nodeId);
                     if (director.assets[assetId]?.nodeId !== entityMember.nodeId) bindings.push({ type: "bind_director_asset", assetId, nodeId: entityMember.nodeId });
@@ -406,11 +415,11 @@ export class EpisodeProductionRunner {
         for (const run of this.service.pendingRuns()) void this.run(run.episodeId, run.version);
     }
 
-    async syncClips(episodeId: string, version: number, groupIds?: string[], runSettings?: Record<string, unknown>): Promise<ProductionRecord & { syncReceipt: { updated: number; skipped: number; bound: number; reordered: number } }> {
+    async syncClips(episodeId: string, version: number, groupIds?: string[], runSettings?: Record<string, unknown>, allowBlocked = false): Promise<ProductionRecord & { syncReceipt: { updated: number; skipped: number; bound: number; reordered: number } }> {
         let production = this.service.get(episodeId);
         if (production.publishedVersion !== version && runSettings?.parallelScenes && groupIds?.length) {
             this.service.validateExecution(episodeId, version, groupIds);
-            return this.syncClips(episodeId, production.publishedVersion, groupIds, runSettings);
+            return this.syncClips(episodeId, production.publishedVersion, groupIds, runSettings, allowBlocked);
         }
         if (production.publishedVersion !== version || !production.published?.shots.length) throw new Error("只能同步当前已发布镜头表");
         let published = production.published;
@@ -418,7 +427,9 @@ export class EpisodeProductionRunner {
         let groups = published.clipGroups.filter((group) => !groupIds || groupIds.includes(group.id));
         let readiness = this.service.workflowReadiness(episodeId, "published");
         const blocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || !["ready", "complete"].includes(item.status));
-        if (blocked.length) throw new Error(blocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
+        // script 阶段 promote 时资产图尚未生成，segment 必然因「依赖资产媒体未就绪」blocked。
+        // 此时只同步 Clip 结构，资产就绪由后续 assets/video 阶段校验，不在此处拦截。
+        if (blocked.length && !allowBlocked) throw new Error(blocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
         this.service.validateExecution(episodeId, version, groups.map(group => group.id));
         const episode = this.storesEpisode(episodeId);
         if (!episode.canvasId) throw new Error("分集尚未绑定画布");
@@ -442,7 +453,7 @@ export class EpisodeProductionRunner {
             groups = published.clipGroups.filter(group => !groupIds || groupIds.includes(group.id));
             readiness = this.service.workflowReadiness(episodeId, "published");
             const nowBlocked = groups.map(group => readiness.targets.find(item => item.id === `segment:${group.id}`)).filter(item => !item || item.status !== "ready");
-            if (nowBlocked.length) throw new Error(nowBlocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
+            if (nowBlocked.length && !allowBlocked) throw new Error(nowBlocked.flatMap(item => item?.blockers || ["Segment 缺少就绪视图"] ).join("；"));
             this.service.validateExecution(episodeId, version, groups.map(group => group.id));
             project = this.stores.projects.get(episode.canvasId!);
             if (!project) throw new Error("分集画布不存在");

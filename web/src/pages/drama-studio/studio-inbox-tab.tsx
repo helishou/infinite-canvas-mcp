@@ -1,5 +1,5 @@
 import { App } from "antd";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     CircleAlert, Clock3, Eye, Play, Sparkles, TriangleAlert, Inbox, RotateCcw, Settings, Unlock,
     UserRound, Film,
@@ -58,10 +58,12 @@ function reasonCodeFor(g: Group): string {
     return g.kind.toUpperCase();
 }
 
-export function StudioInboxTab({ inbox, episodes, busy, onOpenEpisode, onReview, onOpenSettings, onStartVideo, onRetryAll, onReleaseMedia, onOpenAssets, onOpenSegment }: {
+export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenEpisode, onReview, onOpenSettings, onStartVideo, onRetryAll, onReleaseMedia, onOpenAssets, onOpenSegment }: {
     inbox: StudioInboxItem[];
     episodes: StudioEpisode[];
     busy: boolean;
+    /** 数据加载中（首屏/切剧目数据未返回时传 true）。可选：未传时靠组件自身首帧门控兜底，保持向后兼容 */
+    loading?: boolean;
     onOpenEpisode: (episodeId: string) => void;
     onReview: (episodeId: string) => void;
     onOpenSettings: () => void;
@@ -162,12 +164,63 @@ export function StudioInboxTab({ inbox, episodes, busy, onOpenEpisode, onReview,
     const reviewCount = episodes.filter((ep) => !ep.error && ep.segmentCount > 0 && ep.publishedVersion === 0).length;
     const readyEpisodeCount = episodes.filter((ep) => !ep.error && ep.shotCount > 0 && ep.segmentCount === 0 && ep.publishedVersion === 0).length;
 
-    if (!groups.length) {
+    // 首帧未定态自门控：首屏挂载或切剧目清空时 inbox/episodes 同时为 []，
+    // 这正是「还没加载」而非「全部就绪」。父级未传 loading 时也靠这里兜底。
+    // 依赖长度而非数组引用，避免父级每次渲染重建空数组导致计时器被反复重置。
+    const inboxLen = inbox.length;
+    const episodeLen = episodes.length;
+    const [firstFramePending, setFirstFramePending] = useState(() => inboxLen === 0 && episodeLen === 0);
+    useEffect(() => {
+        if (loading) { setFirstFramePending(true); return; }
+        if (inboxLen > 0 || episodeLen > 0) { setFirstFramePending(false); return; }
+        // 两者皆空：给真实数据到达留一个短窗口，超时后才认定为「确无待处理项」
+        const timer = window.setTimeout(() => setFirstFramePending(false), 400);
+        return () => window.clearTimeout(timer);
+    }, [loading, inboxLen, episodeLen]);
+
+    const isRefreshing = busy || loading;
+    // loading 中统计条不显示可能误导的「共 0 类」等数字
+    const statsPending = loading || firstFramePending;
+
+    // 骨架屏：数据未返回时（loading 为真，或首帧未定态）绝不误报「全部就绪」。
+    if ((loading || firstFramePending) && groups.length === 0) {
         return (
-            <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center" data-studio-inbox>
-                <div className="mb-4 flex size-20 items-center justify-center rounded-full border-4 border-muted"><Inbox className="size-8 text-muted-foreground/40" /></div>
-                <h3 className="text-sm font-semibold">没有待处理项</h3>
-                <p className="mt-2 max-w-sm text-xs leading-relaxed text-muted-foreground">所有生成任务与阶段判定都已就绪。</p>
+            <div className="flex min-h-0 flex-1 flex-col" data-studio-inbox data-studio-inbox-loading aria-busy="true">
+                <div className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border px-5 py-2">
+                    <h2 className="text-base font-semibold">待处理</h2>
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground" data-studio-inbox-loading-hint>
+                        <RotateCcw className="size-3.5 animate-spin" /> 正在加载待处理项…
+                    </span>
+                </div>
+                <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-7">
+                    <div className="grid items-start gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 460px), 1fr))" }}>
+                        {[0, 1].map((i) => (
+                            <div key={i} data-studio-skeleton className="animate-pulse rounded-xl border border-border bg-card p-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 size-4 shrink-0 rounded bg-muted" />
+                                    <div className="min-w-0 flex-1 space-y-2">
+                                        <div className="h-4 w-2/3 rounded bg-muted" />
+                                        <div className="h-3 w-full rounded bg-muted/70" />
+                                        <div className="h-3 w-4/5 rounded bg-muted/70" />
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (!groups.length) {
+        // 对齐影策 .drama-empty.is-tall：裸图标 + 加粗标题 + 一句说明，不用粗边框圆圈。
+        // 仅明确非加载态才展示成功空态；刷新/重试期间只给轻量提示，不伪造「已就绪」。
+        return (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 py-[18vh] text-center text-xs text-muted-foreground" data-studio-inbox aria-busy={isRefreshing || undefined}>
+                <Inbox className="size-8 opacity-50" />
+                <strong className="text-base font-semibold text-foreground">{isRefreshing ? "正在刷新待处理项" : "一切顺利"}</strong>
+                <span>{isRefreshing ? "数据重新拉取中，请稍候…" : "没有需要你处理的事项，流水线会在需要确认或出错时提醒你。"}</span>
+                {isRefreshing ? <RotateCcw className="mt-1 size-4 animate-spin opacity-60" /> : null}
             </div>
         );
     }
@@ -204,12 +257,31 @@ export function StudioInboxTab({ inbox, episodes, busy, onOpenEpisode, onReview,
     };
 
     return (
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4" data-studio-inbox>
-            {/* 统计头（对齐影策） */}
-            <div className="mb-4 flex flex-wrap items-center gap-4">
-                <h2 className="text-sm font-semibold">待处理</h2>
-                {failCount ? <span className="flex items-center gap-1 text-xs text-rose-600 dark:text-rose-400"><CircleAlert className="size-3.5" /> {failCount} 项失败</span> : null}
-                {reviewCount ? <span className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"><Clock3 className="size-3.5" /> {reviewCount} 集待审阅</span> : null}
+        <div className="flex min-h-0 flex-1 flex-col" data-studio-inbox aria-busy={isRefreshing || undefined}>
+            {/* 视图头：对齐影策 .drama-view-head——移出滚动容器吸顶，标题放大，统计为 24px 胶囊 chip（is-err / is-info 用 token 色） */}
+            <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 border-b border-border px-5 py-2">
+                <h2 className="text-base font-semibold">待处理</h2>
+                <div className="flex flex-wrap items-center gap-2" data-studio-inbox-summary>
+                    {statsPending ? (
+                        <span className="inline-flex h-6 items-center rounded-full border border-border bg-muted px-2 text-xs text-muted-foreground">统计中…</span>
+                    ) : null}
+                    {!statsPending && failCount ? (
+                        <span className="inline-flex h-6 items-center gap-1 rounded-full border border-transparent bg-destructive/10 px-2 text-xs text-destructive">
+                            <CircleAlert className="size-3.5" /> {failCount} 项失败
+                        </span>
+                    ) : null}
+                    {!statsPending && reviewCount ? (
+                        <span className="inline-flex h-6 items-center gap-1 rounded-full border border-transparent bg-accent px-2 text-xs text-primary">
+                            <Clock3 className="size-3.5" /> {reviewCount} 集待审阅
+                        </span>
+                    ) : null}
+                    {!statsPending ? <span className="inline-flex h-6 items-center rounded-full border border-border bg-muted px-2 text-xs text-muted-foreground">共 {groups.length} 类</span> : null}
+                </div>
+                {isRefreshing ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground" data-studio-inbox-busy-hint>
+                        <RotateCcw className="size-3 animate-spin" /> 刷新中…
+                    </span>
+                ) : null}
                 {onReleaseMedia ? (
                     <button type="button" disabled={busy} onClick={onReleaseMedia}
                         title="放行流水线媒体闸门（manual 媒体模式下，参考图/素材就绪后推进段视频与合成）"
@@ -218,28 +290,30 @@ export function StudioInboxTab({ inbox, episodes, busy, onOpenEpisode, onReview,
                     </button>
                 ) : null}
                 <button type="button" disabled={busy} onClick={onRetryAll}
-                    title="重新拉取全部制作数据 / 重试失败任务"
+                    title="重新拉取全部制作数据 / 重试失败任务（含未列出的失败项）"
                     className={`flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50 ${onReleaseMedia ? "" : "ml-auto"}`}>
-                    <RotateCcw className="size-3" /> 全部重试（{failCount} 项失败 · 共 {groups.length} 类）
+                    <RotateCcw className="size-3" /> 全部重试
                 </button>
             </div>
 
-            <div className="space-y-3">
+            <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-7" aria-busy={isRefreshing || undefined}>
+                {/* 对齐影策 .drama-inbox：auto-fill 两列自适应网格，铺满宽屏，gap16 */}
+                <div className="grid items-start gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 460px), 1fr))" }}>
                 {groups.map((g) => {
                     const action = actionFor(g);
                     return (
-                        <article key={g.key} data-studio-group={g.key} className={`rounded-lg border p-4 ${
-                            g.severity === "error" ? "border-rose-200 bg-rose-50/60 dark:border-rose-500/20 dark:bg-rose-500/5"
-                                : g.severity === "warning" ? "border-amber-200 bg-amber-50/60 dark:border-amber-500/20 dark:bg-amber-500/5"
-                                    : "border-border bg-card/50"
+                        <article key={g.key} data-studio-group={g.key} className={`rounded-xl border bg-card p-4 ${
+                            g.severity === "error" ? "border-destructive/30"
+                                : g.severity === "warning" ? "border-amber-400/60 dark:border-amber-500/30"
+                                    : "border-border"
                         }`}>
                             <div className="flex items-start gap-3">
                                 <span className={`mt-0.5 shrink-0 ${
                                     g.severity === "error" ? "text-rose-500" : g.severity === "warning" ? "text-amber-500" : "text-sky-500"
                                 }`}>{iconFor(g)}</span>
                                 <div className="min-w-0 flex-1">
-                                    <div className="text-xs font-semibold">{g.title}</div>
-                                    <div className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{g.detail}</div>
+                                    <div className="text-sm font-semibold leading-5">{g.title}</div>
+                                    <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{g.detail}</div>
                                     {g.reason ? <div className="mt-2 rounded-md border border-border/60 bg-background/50 p-2 text-[11px] leading-relaxed text-muted-foreground" title={g.reason}>
                                         <span className="mr-1.5 rounded bg-muted px-1 py-0.5 align-middle font-mono text-[10px] text-foreground/70" data-studio-reason-code>{reasonCodeFor(g)}</span>
                                         <span className="align-middle">{g.reason}</span>
@@ -274,6 +348,7 @@ export function StudioInboxTab({ inbox, episodes, busy, onOpenEpisode, onReview,
                         </article>
                     );
                 })}
+                </div>
             </div>
         </div>
     );

@@ -98,11 +98,18 @@ export type ModelChannel = {
     extraBody?: Record<string, unknown>;
     /** 渠道自定义请求头（如 OpenCode Go 的 x-opencode-session）；内置鉴权头优先。 */
     headers?: Record<string, string>;
+    /**
+     * 渠道最大并发数（影策 ModelChannel.ConcurrencyLimit）。1-999；留空跟随全局
+     * channelConcurrency。渠道按模型 capability 分文字/图片/视频/音频，故每类可分别设。
+     */
+    concurrencyLimit?: number;
 };
 
 export type AiConfig = {
     localComfyuiEnabled: boolean;
     channelMode: "remote" | "local";
+    /** 全局渠道并发上限（影策 ChannelConcurrency）：渠道未单独设 concurrencyLimit 时采用。0/留空不限。 */
+    channelConcurrency?: number;
     baseUrl: string;
     apiKey: string;
     apiFormat: ApiCallFormat;
@@ -366,6 +373,22 @@ export function setModelPromptMaxChars(config: AiConfig, value: string, maxChars
     return { ...config, channels };
 }
 
+/**
+ * 设置页显式登记视频模型的单次时长上限（影策 maxVideoSeconds）：只改命中的渠道模型，
+ * 正整数才写入，留空/非法删除字段回到「未知/不限制」。不写 0，也不补默认 15。
+ */
+export function setModelMaxVideoSeconds(config: AiConfig, value: string, seconds: number | undefined): AiConfig {
+    const match = findChannelModel(config, value);
+    if (!match) return config;
+    const { maxVideoSeconds: _previous, ...rest } = match.model;
+    const valid = typeof seconds === "number" && Number.isSafeInteger(seconds) && seconds > 0;
+    const nextModel: ChannelModel = valid ? { ...rest, maxVideoSeconds: seconds } : rest;
+    const channels = config.channels.map((channel) => channel.id === match.channel.id
+        ? { ...channel, models: channel.models.map((model) => model === match.model ? nextModel : model) }
+        : channel);
+    return { ...config, channels };
+}
+
 export const isAudioReferenceMode = (taskMode: unknown): boolean => String(taskMode || "").toLowerCase() === "ref2va";
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
@@ -540,19 +563,32 @@ function syncWebdavToBackend(webdav: WebdavSyncConfig) {
     webdavSyncQueue = webdavSyncQueue.then(() => saveStructuredSetting("webdav", webdav)).catch(() => undefined);
 }
 
-/** Import waits behind pending edits and only publishes acknowledged values. */
-export function importConfigConfirmed(input: AiConfig, expected = useConfigStore.getState().config): Promise<void> {
+/**
+ * 立即写入 ai.config 并在后端确认后才发布到 Store；失败直接抛给调用方。
+ * 与 debounce 同步链共用同一队列/端点，但不会像后台同步那样静默吞错。
+ */
+function commitAiConfig(input: AiConfig, expected: AiConfig, changedError: string): Promise<void> {
     flushConfigSync(true);
     const config = normalizeConfig(input);
     const before = expected;
     const operation = configSyncQueue.then(async () => {
-        if (JSON.stringify(useConfigStore.getState().config) !== JSON.stringify(before)) throw new Error("CONFIG_CHANGED_DURING_IMPORT");
+        if (JSON.stringify(useConfigStore.getState().config) !== JSON.stringify(before)) throw new Error(changedError);
         const { syncBackendAiConfig } = await import("@/services/backend-api");
         await syncBackendAiConfig(config);
         if (useConfigStore.getState().config === before) useConfigStore.setState({ config });
     });
     configSyncQueue = operation.catch(() => undefined);
     return operation;
+}
+
+/** Import waits behind pending edits and only publishes acknowledged values. */
+export function importConfigConfirmed(input: AiConfig, expected = useConfigStore.getState().config): Promise<void> {
+    return commitAiConfig(input, expected, "CONFIG_CHANGED_DURING_IMPORT");
+}
+
+/** 设置页保存单模型能力：复用 import 的写入队列，失败抛错供界面明示（不静默）。 */
+export function saveAiConfigConfirmed(input: AiConfig, expected = useConfigStore.getState().config): Promise<void> {
+    return commitAiConfig(input, expected, "CONFIG_CHANGED_DURING_SAVE");
 }
 
 export function importWebdavConfirmed(input: WebdavSyncConfig, expected = useConfigStore.getState().webdav): Promise<void> {
@@ -814,6 +850,7 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         models: normalizeChannelModels(channel?.models),
         kind: channel?.kind || "api",
         ...(headers ? { headers } : {}),
+        ...(Number.isFinite(channel?.concurrencyLimit) && Number(channel?.concurrencyLimit) > 0 ? { concurrencyLimit: Math.floor(Number(channel?.concurrencyLimit)) } : {}),
     };
 }
 

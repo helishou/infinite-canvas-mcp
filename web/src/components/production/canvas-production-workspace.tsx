@@ -107,7 +107,7 @@ export function CanvasProductionToolbar() {
         finally { setSwitching(false); }
     };
     return <div className="flex min-w-0 items-center gap-1 text-xs" data-canvas-shortcuts-ignore>
-        {!overlayHost && context.dramaId && <Link to={`/production?dramaId=${encodeURIComponent(context.dramaId)}&workspace=series`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
+        {!overlayHost && context.dramaId && <Link to={`/drama-studio?dramaId=${encodeURIComponent(context.dramaId)}`} aria-label={t("productionCanvas.backDrama")} title={t("productionCanvas.backDrama")} className="grid size-7 shrink-0 place-items-center rounded hover:bg-black/5 dark:hover:bg-white/10" style={{ color: theme.node.text }} onClick={() => useProductionFollowStore.getState().pause(t("productionCanvas.manualPause"))}><ArrowLeft className="size-4" /></Link>}
         {context.dramaId && <Dropdown trigger={["click"]} menu={{ selectedKeys: [context.role === "shared-assets" ? "shared" : context.episodeId || ""], items: [
             { key: "shared", label: t("productionCanvas.sharedCanvas"), icon: context.role === "shared-assets" ? <Check className="size-4" /> : undefined, onClick: () => void switchCanvas("shared") },
             { type: "divider" },

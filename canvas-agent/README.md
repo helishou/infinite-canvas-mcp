@@ -72,10 +72,19 @@ codex mcp remove infinite-canvas
 
 仓库内提供了 Codex app 插件：`plugins/infinite-canvas`。在 Codex app 中添加本仓库的 marketplace 后，可以安装 `Infinite Canvas` 插件；插件会注册同一个 `infinite-canvas` MCP，并带上画布操作说明。
 
-添加本地 marketplace 时建议使用仓库绝对路径，避免 Codex 从其他工作目录解析失败：
+从 GitHub 一行安装，无需手动 clone 整个仓库：
 
 ```bash
-cd /path/to/infinite-canvas
+codex plugin marketplace add helishou/infinite-canvas-mcp \
+  --sparse .agents/plugins \
+  --sparse plugins/infinite-canvas
+codex plugin add infinite-canvas@infinite-canvas-local
+```
+
+更新用 `codex plugin marketplace upgrade infinite-canvas-local`。已 clone 仓库时也可指向本地路径：
+
+```bash
+cd /path/to/infinite-canvas-mcp
 codex plugin marketplace add "$(pwd)"
 codex plugin add infinite-canvas@infinite-canvas-local
 ```

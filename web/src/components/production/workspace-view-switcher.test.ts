@@ -25,7 +25,9 @@ test("clicking the current view is a no-op, switching views is not", () => {
 test("the switcher is the single production/canvas entry point", () => {
     const production = read("../../pages/drama/production.tsx");
     assert.equal((production.match(/<WorkspaceViewSwitcher\b/g) || []).length, 1, "exactly one switcher on the production desk");
-    assert.match(production, /onSelect=\{next => \{ if \(next === "canvas"\) void openWorkspaceCanvas\(\); else canvasHost\?\.collapse\?\.\(\); \}\}/);
+    assert.match(production, /if \(next === "canvas"\) void openWorkspaceCanvas\(\)/, "切换器未接画布入口");
+    assert.match(production, /navigate\(`\/drama-studio\?\$\{query\}`\)/, "画布切回制作台未进新制作台");
+    assert.match(production, /query\.set\("episodeId", episodeId\)/, "切回制作台未带当前分集");
     assert.ok(!production.includes("icon={<ExternalLink"), "old title-bar open-canvas button must be gone");
     assert.ok(!production.includes('"director.canvasOverlay.expand"'), "old expand label must be gone");
 

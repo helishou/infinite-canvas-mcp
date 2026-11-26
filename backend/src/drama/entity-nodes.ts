@@ -85,7 +85,40 @@ export function entitySubjectPictureBinding(source: Record<string, any>, owner: 
         : binding);
     return { type: "upsert_director_subject" as const, subject: { ...subject, pictureBindings: next } };
 }
-export function entityNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous: EpisodeProductionData | undefined, layout: ProductionLayoutPlan): CanvasOperation[] {
+type SharedIdentityResolution = { productionAssetId: string; canonicalName: string; aliases: string[] };
+type SharedIdentitySource = { dramaId?: string; assetId?: string; sourceProjectId?: string; sourceNodeId?: string };
+type EntityIdentityResolver = (kind: "character" | "scene" | "prop", name: string, aliases: string[], source?: SharedIdentitySource) => SharedIdentityResolution | undefined;
+const asRecord = (value: unknown): Record<string, any> => value && typeof value === "object" ? value as Record<string, any> : {};
+const readAliases = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map(item => item.trim()) : [];
+function entityAliases(source: Record<string, any>, characterRow: Record<string, any> | undefined,
+    linkedPlan: Record<string, any> | undefined, node: Record<string, any> | undefined) {
+    const identity = source.identity;
+    const extra = typeof identity === "string" && identity.trim().startsWith("{")
+        ? (() => { try { return JSON.parse(identity) as Record<string, any>; } catch { return {}; } })()
+        : asRecord(identity);
+    return Array.from(new Set([
+        ...readAliases(node?.metadata?.characterAliases),
+        ...readAliases(extra.aliasNames), ...readAliases(extra.aliases),
+        ...readAliases(characterRow?.aliases ?? characterRow?.alias),
+        ...readAliases(linkedPlan?.aliases ?? linkedPlan?.aliasNames),
+    ]));
+}
+/** 只补身份字段：用户已编辑（sharedAssetReference.edits）的字段永不覆盖，其余缺失/不一致才回填。 */
+function identityBackfill(kind: "character" | "scene" | "prop", identity: SharedIdentityResolution,
+    node: Record<string, any> | undefined) {
+    const fields: Record<string, unknown> = { productionAssetId: identity.productionAssetId };
+    if (identity.canonicalName) fields[`${kind}CanonicalName`] = identity.canonicalName;
+    if (identity.aliases.length) fields[`${kind}Aliases`] = identity.aliases;
+    const edits = asRecord(node?.metadata?.sharedAssetReference?.edits);
+    const result: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(fields)) {
+        if (Object.hasOwn(edits, `metadata.${field}`)) continue;
+        if (JSON.stringify(node?.metadata?.[field]) !== JSON.stringify(value)) result[field] = value;
+    }
+    return result;
+}
+export function entityNodeOperations(project: Record<string, any>, data: EpisodeProductionData, owner: Owner, previous: EpisodeProductionData | undefined, layout: ProductionLayoutPlan, resolver?: EntityIdentityResolver): CanvasOperation[] {
     if (!data.director) return [];
     const planRows = Array.isArray(data.director.source.asset_plan) ? data.director.source.asset_plan as Array<Record<string, any>> : [];
     const prior = new Map(productionEntities(previous?.director?.source || {}, owner).map(entity => [`${entity.kind}:${entity.entityId}`, entity]));
@@ -113,13 +146,16 @@ export function entityNodeOperations(project: Record<string, any>, data: Episode
         const sharedAssetReference = sharedSource?.dramaId && sharedSource.assetId && sharedSource.sourceProjectId && sharedSource.sourceNodeId
             ? { dramaId: sharedSource.dramaId, assetId: sharedSource.assetId, sourceProjectId: sharedSource.sourceProjectId, sourceNodeId: sharedSource.sourceNodeId, writeThrough: true }
             : undefined;
+        const resolvedIdentity = resolver?.(entity.kind, entity.name, entityAliases(data.director!.source as Record<string, any>, characterRow, linkedPlan, node), sharedSource);
+        const backfill = resolvedIdentity ? identityBackfill(entity.kind, resolvedIdentity, node) : undefined;
         if (!node) return [{ type: "add_node", id: member.nodeId, nodeType: entity.kind, title: entity.name, position: member.position, width: member.size.width, height: member.size.height,
             metadata: { productionEntity: binding, [nameKey]: entity.name, [descriptionKey]: entity.description, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size,
-                ...(sharedAssetReference ? { sharedAssetReference } : {}), ...voiceProjection, ...(imageProjection || {}) } }];
+                ...(sharedAssetReference ? { sharedAssetReference } : {}), ...voiceProjection, ...(imageProjection || {}), ...(backfill || {}) } }];
         if (node.type !== entity.kind) throw new Error("制作实体节点类型冲突，未覆盖原节点");
         if (node.metadata?.productionEntity && JSON.stringify(node.metadata.productionEntity) !== JSON.stringify(binding)) throw new Error("制作实体节点来源冲突");
         const metadata: Record<string, any> = { productionEntity: binding, productionLayoutUnitId: unit!.id, productionLayoutBounds: member.size };
         Object.assign(metadata, voiceProjection);
+        if (backfill) Object.assign(metadata, backfill);
         if (sharedAssetReference) metadata.sharedAssetReference = sharedAssetReference;
         if (imageProjection) Object.assign(metadata, imageProjection);
         const old = prior.get(`${entity.kind}:${entity.entityId}`);

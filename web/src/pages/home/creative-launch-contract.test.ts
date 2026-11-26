@@ -343,11 +343,12 @@ test("home canvas overlay exposes the production/canvas view switcher", () => {
     const home = read("./index.tsx");
     assert.match(home, /import \{ WorkspaceViewSwitcher \}/, "首页未引入视图切换器");
     assert.match(home, /canSwitchToProduction/, "切换器没有按画布归属判定是否显示");
-    // 切换器挂在画布覆盖层可见时；切回制作台先收覆盖层，再按剧目/分集归属导航。
+    // 切换器挂在画布覆盖层可见时；切回制作台先收覆盖层，再进新制作台并按归属带上剧目/分集。
     const switchBlock = home.slice(home.indexOf("const switchToProduction = "), home.indexOf("return (\n        <main"));
     assert.match(switchBlock, /canvasHost\?\.collapse\?\.\(\)/, "切回制作台未收起画布覆盖层");
-    assert.match(switchBlock, /dramaWorkbenchPath/, "分集画布未导航到分集制作台");
-    assert.match(switchBlock, /workspace: "series"/, "共享资产画布未导航到剧目规划");
+    assert.match(switchBlock, /\/drama-studio\?/, "切回制作台未导航到新制作台");
+    assert.match(switchBlock, /query\.set\("episodeId", overlayEpisode\.episodeId\)/, "分集画布未把分集带到新制作台");
+    assert.match(switchBlock, /query\.set\("dramaId", overlayOwner\.id\)/, "共享资产画布未带剧目 id");
     assert.match(home, /<WorkspaceViewSwitcher mode="canvas" onSelect=/, "覆盖层里没有渲染 canvas 态切换器");
 });
 

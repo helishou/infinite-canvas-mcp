@@ -49,6 +49,7 @@ export const pipelineOptionsSchema = z.object({
     independent: z.boolean().optional(),
     storyboardRules: z.object({
         episodeSeconds: z.number().optional(),
+        segmentMode: z.enum(["auto", "fixed", "range"]).optional(),
         segmentRange: z.object({ min: z.number(), max: z.number() }).optional(),
         dialogueDensity: z.string().optional(),
         transitionMode: z.string().optional(),
@@ -56,6 +57,13 @@ export const pipelineOptionsSchema = z.object({
         pacing: z.string().optional(),
     }).optional(),
     concurrency: z.object({ text: z.number().optional(), video: z.number().optional(), render: z.number().optional() }).optional(),
+    // 参考图提示词模板（制作设置「角色/场景/默认提示词」）：空则用内置方案模板拼装。
+    assetPromptTemplates: z.object({
+        default: z.string().max(8000).optional(),
+        character: z.string().max(8000).optional(),
+        scene: z.string().max(8000).optional(),
+        prop: z.string().max(8000).optional(),
+    }).optional(),
     // 预算上限（影策 budgetMicrocredits，单位微积分）：0/不设=不限；累计生成花费达限自动暂停流水线。
     budgetMicrocredits: z.number().min(0).optional(),
 }).partial();
@@ -71,6 +79,7 @@ const rewriteScriptSchema = z.object({
     episodeId: z.string().min(1),
     instruction: z.string().optional(),
     model: z.string().optional(),
+    options: z.record(z.unknown()).optional(),
 }).strict();
 
 const approveSchema = z.object({ episodeId: z.string().min(1) }).strict();
@@ -135,7 +144,7 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
         try {
             res.json({ ok: true, ...await pipeline.rescript(parsed.data.episodeId, {
-                instruction: parsed.data.instruction, model: parsed.data.model,
+                instruction: parsed.data.instruction, model: parsed.data.model, options: parsed.data.options,
             }) });
         } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });

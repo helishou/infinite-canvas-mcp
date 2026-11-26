@@ -53,6 +53,14 @@ export type InboxEpisode = {
     jobs: { failed: number; succeeded: number; running: number };
 };
 
+/**
+ * 每集「当前仍在制作链路」的真值引用集合，用来过滤已被新资产体系取代的孤儿失败日志。
+ * nodes：当前 director.assets 的 nodeId/sourceNodeId + 段 referenceBindings 的 sourceNodeId。
+ * segments：当前仍在用的段 id（clip-xxx）。两者都来自该集 production 快照，不是编造。
+ */
+export type InboxActiveRefs = { nodes: Set<string>; segments: Set<string> };
+export type InboxActiveRefMap = Map<string, InboxActiveRefs>;
+
 /** 图片生成（参考图）落库的 platform 值。 */
 export const IMAGE_FAILURE_PLATFORMS = new Set(["canvas-image"]);
 /** 段视频生成落库的 platform 值。必须同时带 segment_id 才算「剧情段」。 */
@@ -78,12 +86,17 @@ function logTime(log: InboxLog): number {
  * 从 episodes + generation_logs 派生待处理失败项。
  * 每条失败按「分类 + nodeId + segmentId」定位目标，只取该目标时间上最新的一条；
  * 最新一条已成功/运行中即视为已恢复，不再当失败（与 use-studio-data 的 lastError 口径一致）。
+ *
+ * activeRefMap 可选：某集若提供了当前链路引用集合，则失败目标必须是仍被引用的节点/段才算真实失败；
+ * 已被新资产体系取代的旧 image-canvas 节点失败日志（gpt-image-2.6 等历史残留）据此过滤，避免
+ * 界面整片红色失败。Map 里没有该集时不过滤，避免 production 尚未加载时误杀真实失败。
  */
-export function deriveInboxFailureItems(episodes: InboxEpisode[], logs: InboxLog[]): StudioInboxItem[] {
+export function deriveInboxFailureItems(episodes: InboxEpisode[], logs: InboxLog[], activeRefMap?: InboxActiveRefMap): StudioInboxItem[] {
     const items: StudioInboxItem[] = [];
     for (const ep of episodes) {
         const flagged = ep.jobs.failed > 0 || Boolean(String(ep.error || "").trim());
         if (!flagged) continue;
+        const active = activeRefMap?.get(ep.id);
         const canvasId = String(ep.canvasId || "");
         const canvasLogs = canvasId ? logs.filter((log) => String(log.projectId || "") === canvasId) : [];
 
@@ -95,9 +108,17 @@ export function deriveInboxFailureItems(episodes: InboxEpisode[], logs: InboxLog
         }
 
         let produced = 0;
+        let sawFailedLog = false;
         for (const log of newestByTarget.values()) {
             if (!["failed", "error"].includes(String(log.status || "").toLowerCase())) continue;
+            sawFailedLog = true;
             const kind = classifyFailureKind(log);
+            // 只保留当前仍在制作链路里的失败目标。已被新资产体系取代的旧节点/旧段，
+            // 失败日志是历史残留，过滤掉，避免界面整片红色失败。Map 无该集时不过滤。
+            if (active) {
+                if (kind === "cast_failed" && !active.nodes.has(String(log.nodeId || ""))) continue;
+                if (kind === "segment_failed" && !active.segments.has(String(log.segmentId || ""))) continue;
+            }
             const detail = String(log.error || "").trim().slice(0, 160) || "生成失败";
             if (kind === "segment_failed") {
                 const segmentId = String(log.segmentId || "");
@@ -127,7 +148,10 @@ export function deriveInboxFailureItems(episodes: InboxEpisode[], logs: InboxLog
             produced += 1;
         }
         // 兼容历史数据：本集被标失败但拿不到逐目标失败（如仅有 Aggregate 错误）时保留原归并卡片。
-        if (produced === 0) {
+        // 例外：本集提供了当前链路引用集合，且所有失败日志目标都被判定为孤儿（不在链路里），
+        // 说明这些失败已随资产迁移失效，不再显示兜底卡片，否则界面仍会残留一条红色失败。
+        const allFilteredAsOrphan = Boolean(active) && sawFailedLog && produced === 0;
+        if (produced === 0 && !allFilteredAsOrphan) {
             items.push({
                 id: `episode:${ep.id}`, kind: "episode_error", severity: "error",
                 title: `第 ${ep.no} 集：${ep.title}`,

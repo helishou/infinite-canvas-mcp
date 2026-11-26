@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "infinite-canvas",
+  "version": "0.1.0",
+  "description": "Operate the local Infinite Canvas board through the Backend MCP server.",
+  "author": {
+    "name": "helishou",
+    "url": "https://github.com/helishou/infinite-canvas-mcp"
+  },
+  "homepage": "https://github.com/helishou/infinite-canvas-mcp",
+  "repository": "https://github.com/helishou/infinite-canvas-mcp",
+  "license": "AGPL-3.0",
+  "keywords": ["infinite-canvas", "canvas", "mcp", "agent", "creative-workflow"]
+}

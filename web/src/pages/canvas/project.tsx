@@ -458,7 +458,7 @@ export default function CanvasPage() {
                 query.set("workspace", "shots");
                 if (context.sceneId) query.set("sceneId", context.sceneId);
             }
-            setEntry({ key, destination: { pathname: "/production", search: `?${query.toString()}`, hash: location.hash } });
+            setEntry({ key, destination: { pathname: "/drama-studio", search: `?${query.toString()}`, hash: location.hash } });
         }).catch(error => {
             // status 0 是「后端不可达」（网络/跨域失败），与 404/401 这类确定性错误分开记录。
             if (active) setEntry({ key, error: error instanceof Error ? error.message : String(error), unreachable: isBackendAvailabilityError(error) });
@@ -4690,6 +4690,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
             characterVoiceDescription: string;
             characterVoiceStorageKey: string;
             characterVoiceAssetId: string;
+            characterAliases: string[];
+            characterRole: string;
         }) => {
             if (!characterEditNodeId) return;
             setNodes((prev) =>
@@ -4709,6 +4711,8 @@ export function CanvasSurface({ projectId }: { projectId: string }) {
                                   characterVoiceDescription: patch.characterVoiceDescription || undefined,
                                   characterVoiceStorageKey: patch.characterVoiceStorageKey || undefined,
                                   characterVoiceAssetId: patch.characterVoiceAssetId || undefined,
+                                  characterAliases: patch.characterAliases,
+                                  characterRole: patch.characterRole || undefined,
                               },
                           }
                         : item,

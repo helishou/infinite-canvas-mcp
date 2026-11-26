@@ -237,7 +237,8 @@ test("formal Clip Shot storyboard is source-owned while ordinary H3 reference fi
         referenceBindings: [{ id: "board", role: "storyboard", mediaType: "image", storageKey: "image:frame" }],
         storyboardShots: [{ id: "shot-2", duration: 5 }],
     } }]), /制作.*Shot|制作分镜/);
-    assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [{ id: "s1", prompt: "replacement" }] }]), /Clip 列表由制作台维护/);
+    // 归属段 s1 不可从 replace 中删除（即使为空）；孤儿可删的验证见独立用例。
+    assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [] }]), /制作绑定的 Clip/);
     assert.deepEqual(db.getCanvasProject("p"), before);
 
     db.applyCanvasProjectOperations("p", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "s1", patch: {
@@ -315,4 +316,35 @@ test("an empty unreferenced production scene H3 node can be removed, but a node 
     const before = db.getCanvasProject("task-scene");
     assert.throws(() => db.applyCanvasProjectOperations("task-scene", undefined, [{ type: "delete_node", id: "task-h3" }]), /任务或生成历史/);
     assert.deepEqual(db.getCanvasProject("task-scene"), before);
+});
+
+test("orphan segments (no productionClipProjection target) can be deleted from a production-bound H3 node, owned segments stay protected", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    db.createCanvasProject({ id: "mixed", nodes: [{ id: "h3", type: "minimax-h3:video", metadata: {
+        productionSceneId: "scene-1", productionOwnerKind: "episode", productionOwnerId: "ep",
+        segments: [
+            { id: "owned-1", productionClipProjection: { targetId: "source-1" }, prompt: "真段" },
+            { id: "owned-2", productionClipProjection: { targetId: "source-2" }, prompt: "真段二" },
+            { id: "beat-1", prompt: "节拍 1", status: "idle" },
+            { id: "beat-2", prompt: "节拍 2", status: "idle" },
+        ],
+    } }], connections: [] });
+    // 删归属段：仍被拒（无确认）
+    assert.throws(() => db.applyCanvasProjectOperations("mixed", undefined, [{ type: "delete_h3_segment", nodeId: "h3", segmentId: "owned-1" }]), /制作绑定的 Clip/);
+    // 带投影但 targetId 悬空的段：调用方显式确认后可删
+    db.applyCanvasProjectOperations("mixed", undefined, [{ type: "update_h3_segment", nodeId: "h3", segmentId: "owned-1", patch: { productionClipProjection: { targetId: "stale-source" } } }], { runtimeWrite: true });
+    db.applyCanvasProjectOperations("mixed", undefined, [{ type: "delete_h3_segment", nodeId: "h3", segmentId: "owned-1", confirmed: true }]);
+    // 删纯孤儿段：放行，真段原样保留
+    const r = db.applyCanvasProjectOperations("mixed", undefined, [
+        { type: "delete_h3_segment", nodeId: "h3", segmentId: "beat-1" },
+        { type: "delete_h3_segment", nodeId: "h3", segmentId: "beat-2" },
+    ]);
+    const segs = (db.getCanvasProject("mixed").nodes[0].metadata as any).segments;
+    assert.deepEqual(segs.map((s: any) => s.id), ["owned-2"]);
+    assert.equal(segs[0].productionClipProjection.targetId, "source-2");
+    // update_node 整体替换 segments（去掉孤儿段）也应放行，归属段顺序不变
+    db.applyCanvasProjectOperations("mixed", undefined, [{ type: "replace_h3_segments", nodeId: "h3", segments: [segs[0], { id: "new-orphan", prompt: "新建孤儿" }] }]);
+    const segs2 = (db.getCanvasProject("mixed").nodes[0].metadata as any).segments;
+    assert.deepEqual(segs2.map((s: any) => s.id), ["owned-2", "new-orphan"]);
 });

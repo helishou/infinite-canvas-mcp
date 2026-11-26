@@ -44,7 +44,7 @@ type H3RunInput = {
 
 type H3Ref = Record<string, unknown> & { url?: string; storageKey?: string; name?: string; label?: string; type?: string; mediaType?: string; role?: string; order?: number };
 type H3Segment = Record<string, unknown> & { id?: string; prompt?: string; result?: string; resultStorageKey?: string; refItems?: H3Ref[]; refs?: Record<string, H3Ref | H3Ref[]>; referenceBindings?: Record<string, unknown>[]; continuationGroupId?: string; motionContextEnabled?: boolean; storyboardCompositeEnabled?: boolean; tailFrameAnchor?: { storageKey?: string; sourceSegmentId?: string; capturedAt?: number } };
-/** 引擎里承担 H3 的模型：原生本地链路迁到它上面。 */
+/** 最后兜底：全局配置与段/节点都没有默认视频模型时才用，正常路径由全局 config.videoModel 决定。 */
 const H3_DEFAULT_SELECTED_VIDEO_MODEL = "engine-local::H3 展开流";
 
 type H3Plan = { nodeId: string; segmentId: string; segmentIndex: number; numbering?: import("@basketikun/canvas-agent/drama/production-contract").ProductionNumbering["clips"][number] | null; continuation?: { group: string; index: number } };
@@ -132,12 +132,25 @@ export class CanvasH3Runner {
         private readonly videoDispatcher?: CanvasVideoDispatcher,
     ) {}
 
+    /**
+     * H3 运行默认值：把全局默认视频模型放进 defaults 这一最低优先级层。
+     * resolveH3Runtime 的层级为 request > clip > node > nodeParams > defaults > builtIn，
+     * 段/节点/请求显式选过模型时不受影响；「跟随默认」才落到全局配置上。
+     */
+    private h3Defaults(fromPlan?: Record<string, unknown>): Record<string, unknown> {
+        const base = recordOf(fromPlan || this.stores.settings.get(H3_DEFAULTS_KEY));
+        if (String(base.selectedVideoModel || "").trim()) return base;
+        const globalModel = String(recordOf(this.stores.settings.get("ai.config")).videoModel || "").trim();
+        if (!globalModel) return base;
+        return { ...base, selectedVideoModel: globalModel, selectedVideoModelEnabled: true };
+    }
+
     /** Pure preview: no canonical ops, seed generation, task creation or media writes. */
     preview(input: H3RunInput, inspectedReferenceDigests?: Map<string, string>) {
         const normalized = normalizeInput(input);
         const { project, stale: staleStoryboard } = this.projectWithDerivedStoryboard(normalized.projectId);
         if (!project) throw new Error(`画布不存在: ${normalized.projectId}`);
-        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults();
         const requirements = this.stores.projects.getH3ProductionRequirements?.(normalized.projectId) || null;
         const diagnostics: Array<{ code: string; nodeId: string; segmentId: string; message: string }> = [];
         const plans = this.plansFor(normalized);
@@ -401,7 +414,7 @@ export class CanvasH3Runner {
         if (!frozenSegment) throw new Error("H3 运行快照缺少目标 Clip");
         let inFlight: H3Confirmation["inFlight"];
         if (request.action === "confirm") {
-            const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+            const defaults = this.h3Defaults(input.runPlan?.defaults);
             const frozenOverride = this.withPlannedSeed(input, plan, input.params || {});
             const frozenParams = extractParams(frozenSegment, frozenOverride, frozenMetadata, defaults);
             const kind = h3ConfirmationKind(frozenSegment, frozenParams);
@@ -539,7 +552,7 @@ export class CanvasH3Runner {
             plans: [],
             referenceDigests: {},
             project: { nodes: [], referenceCatalog: [] },
-            defaults: recordOf(this.stores.settings.get(H3_DEFAULTS_KEY)),
+            defaults: this.h3Defaults(),
             requirements: this.stores.projects.getH3ProductionRequirements?.(input.projectId) || null,
         };
         return structuredClone(noOpPlan);
@@ -560,7 +573,7 @@ export class CanvasH3Runner {
         const before = derivedProject.project!;
         const stalePlan = plans.find(plan => derivedProject.stale.includes(plan.segmentId));
         if (stalePlan) throw new Error(`Clip ${stalePlan.numbering?.clipNumber ?? stalePlan.segmentIndex + 1} 的分镜格图片集合已按制作稿变更，Picture 编号会重排；请先编译并应用该 Clip 再生成`);
-        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults();
         if (plans[0].continuation?.index && plans[0].continuation.index > 1 && new Set(plans.map((plan) => plan.nodeId)).size !== 1) {
             throw new Error("从组中间接入潜变量时只能选择一个 H3 节点");
         }
@@ -954,7 +967,7 @@ export class CanvasH3Runner {
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults(input.runPlan?.defaults);
         const params = extractParams(segment, override, metadata, defaults);
         // A Clip's authored taskMode is its execution contract. Node-level mode
         // is only a default and can differ when one H3 node contains mixed modes.
@@ -1010,7 +1023,7 @@ export class CanvasH3Runner {
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const source = segments[plan.segmentIndex - 1];
         if (!source) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
-        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults(input.runPlan?.defaults);
         const sourceParams = extractParams(source, override, metadata, defaults);
         if (sourceParams.motionContextEnabled !== true) throw new Error(`Clip ${plan.numbering === null ? "?" : plan.numbering?.clipNumber ?? plan.segmentIndex + 1} 缺少上一段的潜空间续写开关`);
         return { ...override, ...Object.fromEntries(H3_OUTGOING_CONTEXT_KEYS.filter((key) => sourceParams[key] !== undefined).map((key) => [key, sourceParams[key]])) };
@@ -1044,7 +1057,7 @@ export class CanvasH3Runner {
         if (selected < 0) throw new Error("找不到所选 Clip，请刷新画布后重试");
         let end = input.endSegmentId ? segments.findIndex(segment => segment.id === input.endSegmentId) : segments.length - 1;
         if (end < selected) throw new Error("连续组结束 Clip 不存在或早于起点");
-        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults(input.runPlan?.defaults);
         // Group boundaries must match the effective settings shown by the UI,
         // including inherited defaults. Never conceal conflicting saved switches.
         const isSelectedVideoClip = (index: number) => Boolean(segments[index])
@@ -1114,7 +1127,7 @@ export class CanvasH3Runner {
         const segments = Array.isArray(metadata.segments) ? metadata.segments as H3Segment[] : [];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId);
         if (!segment) return {};
-        const defaults = recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults();
         const normalized = normalizeH3Params(extractParams(segment, override, metadata, defaults), true);
         if (newRun && normalized.noiseSeedMode === "random") {
             normalized.seed = randomH3Seed();
@@ -1136,7 +1149,7 @@ export class CanvasH3Runner {
         const metadata = recordOf(node.metadata);
         const segments = metadata.segments as H3Segment[];
         const segment = segments.find((item) => String(item.id || "") === plan.segmentId)!;
-        const defaults = input.runPlan?.defaults || recordOf(this.stores.settings.get(H3_DEFAULTS_KEY));
+        const defaults = this.h3Defaults(input.runPlan?.defaults);
         let params = extractParams(segment, override, metadata, defaults);
         const confirmingSecondPass = override.confirmSecondPass === true;
         let cachedFirstPassPath = "";
@@ -1154,7 +1167,9 @@ export class CanvasH3Runner {
         // 节点 selectedVideoModel 已由 extractParams 解析（含制作设置/默认值回落）；
         // 非 reference_to_video 模式上限 0。整个执行链不再写死 3/0。
         const aiConfigForAudioLimit = this.stores.settings.get("ai.config");
-        const selectedVideoModelForLimit = String(params.selectedVideoModel || "").trim() || H3_DEFAULT_SELECTED_VIDEO_MODEL;
+        const selectedVideoModelForLimit = String(params.selectedVideoModel || "").trim()
+            || String(recordOf(aiConfigForAudioLimit).videoModel || "").trim()
+            || H3_DEFAULT_SELECTED_VIDEO_MODEL;
         const audioLimit = effectiveAudioLimit(
             (model) => resolveModelMaxAudios(aiConfigForAudioLimit, model),
             selectedVideoModelForLimit,
@@ -1879,7 +1894,7 @@ function extractParams(segment: H3Segment, override: Record<string, unknown>, me
  */
 function effectiveH3Runtime(segment: H3Segment, override: Record<string, unknown>, metadata: Record<string, unknown>, defaults: Record<string, unknown>, selectedModelOnly = false) {
     const runtime = resolveH3Runtime(segment, override, metadata, defaults);
-    // 只剩自选模型时（画布没有本地 comfy 后端）：老 Clip 没选过模型，默认落到引擎的 H3 展开流。
+    // 只剩自选模型时：段/节点/请求都没选模型时 defaults 已注入全局默认；这里只兜底全局也为空的情况。
     if (selectedModelOnly && !String(runtime.params.selectedVideoModel || "").trim()) {
         runtime.params.selectedVideoModelEnabled = true;
         runtime.params.selectedVideoModel = H3_DEFAULT_SELECTED_VIDEO_MODEL;

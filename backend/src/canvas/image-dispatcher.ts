@@ -18,6 +18,7 @@ import {
   workflowResolutionMessage,
 } from "./model-workflow.js";
 import { findChannelConfig, findComfyuiEngineTarget, findEngineChannel, type EngineChannelTarget } from "./engine-channel.js";
+import { channelIdOfModel, waitReasonHooks, withChannelSlot } from "./channel-slot.js";
 import type { GenerationLogStore, Stores, TaskStore } from "../stores/types.js";
 import type { WorkflowCatalog } from "../engine-contract/workflow-catalog.js";
 import type { BackendEventBus } from "../events.js";
@@ -259,13 +260,13 @@ export class CanvasImageDispatcher {
       (normalized.projectId && normalized.nodeId
         ? this.canvasHooks(normalized)
         : undefined);
-    void this.execute(
+    void withChannelSlot(this.stores, "image", channelIdOfModel(normalized.model), () => this.execute(
       { ...plan, input: { ...normalized, clientTaskId: taskId } },
       task,
       effectiveHooks,
       logId,
       startedAt,
-    ).catch(async (error) => {
+    ), waitReasonHooks(this.stores, task.id, logId)).catch(async (error) => {
       const failure = error instanceof Error ? error : new Error(String(error));
       const current = this.stores.tasks.get(task.id);
       if (current?.status === "cancelled") return;
@@ -427,13 +428,13 @@ export class CanvasImageDispatcher {
       plan.input.projectId && plan.input.nodeId
         ? this.canvasHooks(plan.input)
         : undefined;
-    void this.execute(
+    void withChannelSlot(this.stores, "image", channelIdOfModel(plan.input.model), () => this.execute(
       plan,
       task,
       hooks,
       log?.id || null,
       Date.parse(task.createdAt) || Date.now(),
-    ).catch(async (error) => {
+    ), waitReasonHooks(this.stores, task.id, log?.id || null)).catch(async (error) => {
       const failure = error instanceof Error ? error : new Error(String(error));
       if (this.stores.tasks.get(task.id)?.status === "cancelled") return;
       const current = this.stores.tasks.get(task.id);

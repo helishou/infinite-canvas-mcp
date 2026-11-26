@@ -330,7 +330,15 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
                 customRule,
             );
             const rawFrames = Math.round(shotMs / 1000 * fps);
-            const durationFrames = Math.max(minFrames, rawFrames);
+            // H3 单段硬上限 15 秒：影策通用 fitDialogue 上限是 60 秒，台词一长就会拟合出
+            // 16~23 秒的镜头，分段层的 maxClipFrames 只切多镜、切不开单镜自身超长，
+            // 到编译器才被 4–15 秒校验拒收。这里在转帧处钳到 15 秒并留诊断，让问题前移到拆镜阶段。
+            const h3MaxFrames = Math.round(15 * fps);
+            const cappedFrames = Math.min(h3MaxFrames, rawFrames);
+            if (cappedFrames < rawFrames) {
+                diagnostics.push(`镜头「${String(beat.title || `镜头 ${beatIndex + 1}`)}」台词拟合时长 ${(rawFrames / fps).toFixed(1)}s 超过 H3 单段上限 15s，已压到 15s；建议在草案里把该镜台词拆成两镜`);
+            }
+            const durationFrames = Math.max(minFrames, cappedFrames);
             if (Number.isFinite(hint) && hint > 0 && durationFrames !== Math.round(hint * fps)) {
                 diagnostics.push(`镜头「${beat.title}」时长按节奏档位从 ${hint}s 调整为 ${(durationFrames / fps).toFixed(1)}s`);
             }

@@ -237,12 +237,77 @@ export function buildSchemePrompt(kind: AssetSpecKind, name: string, appearance:
     return withArtStyle(withRatio, stripFrameDirectives(options.artStyle), options.language);
 }
 
-/** 去掉画风文本里与横版画幅冲突的指令（对齐影策 StripFrameDirectives）。 */
-export function stripFrameDirectives(style: unknown): string {
+/** 去掉画风文本里与横版画幅冲突的指令（对齐影策 StripFrameDirectives）。 */export function stripFrameDirectives(style: unknown): string {
     return String(style ?? "")
         .replace(/最终输出画幅[^。\n]*[。\n]/g, "")
         .replace(/画幅(必须)?(为)?\s*(9:16|竖屏|竖版|2:3|3:4)/gi, "")
         .replace(/(9:16|竖屏|竖版)/gi, "")
         .replace(/[，,]{2,}/g, "，").replace(/^，|，$/g, "")
         .trim();
+}
+
+/**
+ * 剧目级参考图提示词模板（对齐影策「角色提示词 / 场景提示词 / 默认」）。
+ * 三档按资产类型取：character/scene/prop 各自覆盖，未填则落 `default`，都为空表示沿用内置方案模板。
+ */
+export type AssetPromptTemplates = { default?: string; character?: string; scene?: string; prop?: string };
+
+/** 模板可用变量（前端插入按钮与渲染共用同一份清单）。 */
+export const ASSET_PROMPT_VARIABLES = ["项目画风", "资产名称", "资产设定", "画面规则", "方案名称", "方案要求"] as const;
+export type AssetPromptVariable = (typeof ASSET_PROMPT_VARIABLES)[number];
+
+export type AssetPromptTemplateVars = Partial<Record<AssetPromptVariable, string>> & { language?: string };
+
+/** 取某类资产实际生效的模板：本类覆盖优先，其次 default；空白视为未配置。 */
+export function assetPromptTemplateFor(kind: AssetSpecKind, templates: AssetPromptTemplates | null | undefined): string {
+    const t = templates || {};
+    const own = kind === "character" ? t.character : kind === "scene" ? t.scene : t.prop;
+    return String(own ?? "").trim() || String(t.default ?? "").trim();
+}
+
+const ASSET_RATIO_LINE = "最终输出画幅必须为 16:9，横版，宽度大于高度。";
+
+/**
+ * 用剧目模板渲染参考图提示词。
+ * - 模板为空 → 回退 `buildSchemePrompt`（默认行为不变，已有生成结果不受影响）。
+ * - 未知变量 `{{xxx}}` 原样保留并回报，绝不静默删内容。
+ * - 模板里没写 `{{画面规则}}` 时，把长期规则追加到末尾（与旧行为一致）；写了则由用户决定位置，不重复追加。
+ * - 画幅：模板里没提 16:9 时补一行，避免与实际像素不一致。
+ */
+export function renderAssetPromptWithTemplate(
+    kind: AssetSpecKind,
+    name: string,
+    appearance: string,
+    scheme: AssetSchemeId,
+    templates: AssetPromptTemplates | null | undefined,
+    vars: AssetPromptTemplateVars = {},
+): { prompt: string; usedTemplate: boolean; unknownVars: string[] } {
+    const template = assetPromptTemplateFor(kind, templates);
+    const options = { artStyle: vars["项目画风"], language: vars.language };
+    if (!template) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars: [] };
+
+    const schemeInfo = ASSET_SCHEMES.find((s) => s.id === scheme);
+    const values: Record<string, string> = {
+        项目画风: String(vars["项目画风"] ?? "").trim(),
+        资产名称: String(vars["资产名称"] ?? name ?? "").trim(),
+        资产设定: String(vars["资产设定"] ?? appearance ?? "").trim(),
+        画面规则: String(vars["画面规则"] ?? "").trim(),
+        方案名称: String(vars["方案名称"] ?? schemeInfo?.name ?? "").trim(),
+        方案要求: String(vars["方案要求"] ?? schemeInfo?.frameHint ?? "").trim(),
+    };
+    const unknownVars: string[] = [];
+    const rendered = template.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (all, key: string) => {
+        if (key in values) return values[key];
+        if (!unknownVars.includes(key)) unknownVars.push(key);
+        return all;
+    }).trim();
+    if (!rendered) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars };
+
+    const parts = [rendered];
+    if (!/\{\{\s*画面规则\s*\}\}/.test(template)) {
+        if (values["画面规则"]) parts.push(`用户长期规则：${values["画面规则"]}。`);
+    }
+    if (!/16\s*[:：]\s*9/.test(rendered)) parts.push(ASSET_RATIO_LINE);
+    const prompt = withArtStyle(parts.join("\n"), stripFrameDirectives(options.artStyle), options.language);
+    return { prompt, usedTemplate: true, unknownVars };
 }

@@ -9,7 +9,7 @@ const FIELDS: Record<string, string[]> = {
     text: ["content"], image: COMMON, video: COMMON, audio: COMMON,
     // Entity image fields are canonical. Top-level content/storageKey/dimensions are derived covers.
     prop: ["propName", "propDescription", "propImage", "itemName", "itemDescription"],
-    character: ["characterName", "characterEnglishName", "characterDescription", "characterImages", "characterPrimaryIndex", "characterVoiceUrl", "characterVoiceName", "characterVoiceDescription", "characterVoiceStorageKey", "characterVoiceAssetId"],
+    character: ["characterName", "characterEnglishName", "characterDescription", "characterImages", "characterPrimaryIndex", "characterAliases", "characterRole", "characterVoiceUrl", "characterVoiceName", "characterVoiceDescription", "characterVoiceStorageKey", "characterVoiceAssetId"],
     scene: ["sceneName", "sceneDescription", "sceneImage", "sceneColorCard", "sceneColorPalette", "sceneColorCardPrompt"],
 };
 const ENTITY_IMAGE_PROJECTION_FIELDS = ["content", "storageKey", "naturalWidth", "naturalHeight", "bytes", "mimeType"] as const;
@@ -162,7 +162,7 @@ export function stripSharedAssetContent(node: AssetNode): AssetNode {
 export function libraryAssetNode(asset: { id: string; kind: string; title: string; data: Record<string, any> }): AssetNode {
     const d = asset.data as Record<string, any>;
     const metadata: Record<string, any> = { content: d.url || d.dataUrl || d.imageUrl || d.content || "", storageKey: d.storageKey, naturalWidth: d.width, naturalHeight: d.height, bytes: d.bytes, mimeType: d.mimeType, durationMs: d.durationMs };
-    if (asset.kind === "character") Object.assign(metadata, { characterName: d.name || asset.title, characterAssetId: asset.id, characterEnglishName: d.englishName || "", characterDescription: d.description || "", characterImages: d.images || [], characterPrimaryIndex: d.primaryIndex || 0, characterVoiceUrl: d.voice || "", characterVoiceName: d.voiceName || "", characterVoiceDescription: d.voiceDescription || "", characterVoiceStorageKey: d.voiceStorageKey || "", characterVoiceAssetId: d.voiceAssetId || "" });
+    if (asset.kind === "character") Object.assign(metadata, { characterName: d.name || asset.title, characterAssetId: asset.id, characterEnglishName: d.englishName || "", characterDescription: d.description || "", characterImages: d.images || [], characterPrimaryIndex: d.primaryIndex || 0, characterAliases: Array.isArray(d.aliases) ? d.aliases : [], characterRole: d.role || "", characterVoiceUrl: d.voice || "", characterVoiceName: d.voiceName || "", characterVoiceDescription: d.voiceDescription || "", characterVoiceStorageKey: d.voiceStorageKey || "", characterVoiceAssetId: d.voiceAssetId || "" });
     if (asset.kind === "scene") Object.assign(metadata, { sceneName: d.name || asset.title, sceneDescription: d.description || "", sceneImage: d.image, sceneColorCard: d.colorCard, sceneColorPalette: d.colorPalette, sceneColorCardPrompt: d.colorCardPrompt || "" });
     if (asset.kind === "prop") Object.assign(metadata, { propName: d.name || asset.title, propDescription: d.description || "", propImage: d.image });
     if (["character", "scene", "prop"].includes(asset.kind)) {

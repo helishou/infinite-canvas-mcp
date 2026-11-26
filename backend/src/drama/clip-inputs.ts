@@ -562,6 +562,15 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
         const pictureBindingId = String(pictureBinding?.id || "") || undefined;
         const picturePurpose = Array.isArray(pictureBinding?.provides) ? pictureBinding.provides.map(String) : undefined;
         const bindingId = String(ref.bindingId || stableId("binding", group.id, ref.label));
+        // 参考图显示名：绑定过去只存 <Picture N>，前端只能显示「参考图 N」。
+        // 名称真值优先取主体（角色）名，其次取源节点标题；都取不到就不写该字段，不编名字。
+        const subjectRecord = subjectId
+            ? (Array.isArray(d.source.subject_registry) ? d.source.subject_registry as Array<Record<string, any>> : [])
+                .map(object).find(item => String(item.id || "") === String(subjectId))
+            : undefined;
+        const displayName = String(ref.name || "")
+            || String(subjectRecord?.name || "")
+            || String(nodes.find(node => String(node.id) === String(ref.nodeId || ""))?.title || "");
         const assetId = !ref.nodeId && ref.bindingId
             ? String(ref.bindingId)
             : stableId("asset", String(ref.nodeId || ref.assetId || ref.bindingId || ""), ref.storageKey);
@@ -570,6 +579,7 @@ export function buildProductionClip(project: Record<string, any>, published: Epi
             label: ref.label, role: ref.role === "environment" ? "scene" : ref.role, tags: [], enabled: true, usage: "reference",
             mediaType: ref.label.startsWith("<Video") ? "video" : ref.label.startsWith("<Audio") ? "audio" : "image",
             storageKey: ref.storageKey, ...(ref.nodeId ? { sourceNodeId: ref.nodeId } : {}), order: index,
+            ...(displayName ? { name: displayName } : {}),
             ...(ref.subjectId || subjectId ? { subjectId: ref.subjectId || subjectId } : {}),
             ...(pictureBindingId ? { pictureBindingId } : {}),
             ...(picturePurpose?.length ? { picturePurpose } : {}),

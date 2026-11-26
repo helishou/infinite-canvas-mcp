@@ -6,25 +6,35 @@
 
 ## 安装
 
-macOS / Linux：
+从 GitHub 一行安装，无需手动 clone 整个仓库：
+
+macOS / Linux / Windows（PowerShell 或 CMD 通用）：
 
 ```bash
-git clone https://github.com/helishou/infinite-canvas-mcp.git
-cd infinite-canvas-mcp
+codex plugin marketplace add helishou/infinite-canvas-mcp \
+  --sparse .agents/plugins \
+  --sparse plugins/infinite-canvas
+codex plugin add infinite-canvas@infinite-canvas-local
+```
+
+更新：
+
+```bash
+codex plugin marketplace upgrade infinite-canvas-local
+```
+
+Codex 只稀疏拉取 `.agents/plugins`（marketplace 清单）和 `plugins/infinite-canvas`（插件本体）两个目录。
+
+### 从本地仓库安装（开发调试）
+
+若已 clone 本仓库，可指向本地路径：
+
+```bash
 codex plugin marketplace add "$(pwd)"
 codex plugin add infinite-canvas@infinite-canvas-local
 ```
 
-Windows PowerShell：
-
-```powershell
-git clone https://github.com/helishou/infinite-canvas-mcp.git
-cd infinite-canvas-mcp
-codex plugin marketplace add "$PWD"
-codex plugin add infinite-canvas@infinite-canvas-local
-```
-
-Windows CMD 将 `$PWD` 替换为 `%cd%`。
+Windows PowerShell 用 `$PWD`，CMD 用 `%cd%`。
 
 ### ZCode
 

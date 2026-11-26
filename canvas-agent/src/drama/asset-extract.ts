@@ -19,6 +19,10 @@ export type ExtractedAsset = {
     appearance: string;
     /** 角色声线（可选）。 */
     voice?: string;
+    /** 影策 definition.aliases：同一人物在剧本里的其它称呼，归一后归到本卡不另建。 */
+    aliases?: string[];
+    /** 影策 BibleCharacter.role：主角/反派/配角，按剧情重要性划分。 */
+    role?: string;
 };
 
 export type AssetExtractPromptInput = {
@@ -41,12 +45,13 @@ export function buildAssetExtractPrompt(input: AssetExtractPromptInput) {
         "你是短剧美术设定提取师。从给定分场剧本里提取需要制作参考图的角色、道具、场景。",
         "只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。",
         "JSON 结构：",
-        '{"characters":[{"name":"角色名","appearance":"可直接用于生图的外貌描述：年龄、体态、五官、发型、服装、标志物","voice":"声线描述（可空）"}],"props":[{"name":"道具名","appearance":"可直接用于生图的外观描述"}],"scenes":[{"name":"场景名","appearance":"可直接用于生图的环境描述：地点、建筑、陈设、光线"}]}',
+        '{"characters":[{"name":"角色名（剧中最常用称呼）","aliases":["同一人物的其它称呼","如伪装态称呼"],"role":"主角/反派/配角（按剧情重要性判定）","appearance":"可直接用于生图的外貌描述：年龄、体态、五官、发型、服装、标志物","voice":"声线描述（可空）"}],"props":[{"name":"道具名","appearance":"可直接用于生图的外观描述"}],"scenes":[{"name":"场景名","appearance":"可直接用于生图的环境描述：地点、建筑、陈设、光线"}]}',
         "硬性要求：",
         "1. 只提取剧本里实际出现、且需要稳定视觉形象的实体；旁白、纯概念不提取。",
         "2. appearance 必须具体可视（可据此生图），不要写「见原文」「同上」「略」。",
-        "3. 每个实体只出现一次，名字用剧中最常用的称呼；不要新增剧本没有的实体。",
-        ...(existing.length ? [`4. 以下设定已建档，不要重复产出：${existing.join("、")}。`] : []),
+        "3. 同一人物可能有多个称呼（如本名/伪装名/身份称呼），必须合并为一个角色：name 用最常用称呼，其余称呼全部写进 aliases；不要把同一人拆成多个角色。",
+        "4. 每个角色必须给 role：推动主线、戏份最重的是「主角」；与主角对立、制造冲突的是「反派」；其余是「配角」。角色按重要性排序，主角排在最前。",
+        ...(existing.length ? [`5. 以下设定已建档，不要重复产出：${existing.join("、")}。`] : []),
         ...(speakerHint.length ? [`本集说话人线索：${speakerHint.join("、")}。`] : []),
         ...(sceneHint.length ? [`本集场景线索：${sceneHint.join("、")}。`] : []),
     ].join("\n");
@@ -70,6 +75,10 @@ function extractJson(text: string): unknown {
 
 const arr = (v: unknown): unknown[] => Array.isArray(v) ? v : [];
 const str = (v: unknown): string => typeof v === "string" ? v.trim() : "";
+/** 影策 normalizeCharacterName 同款归一：小写、去「角色：」前缀、去空格与 ·•・._- 分隔。 */
+export function normalizeAssetName(value?: string): string {
+    return (value || "").toLocaleLowerCase("zh-CN").replace(/^角色[：:]\s*/, "").replace(/[\s·•・._-]+/g, "").trim();
+}
 
 /**
  * 解析模型回包为设定列表；去重（同名同类型只留一个）、过滤空 appearance。
@@ -85,11 +94,22 @@ export function parseAssetExtract(text: string): ExtractedAsset[] {
             const name = str(row.name);
             const appearance = str(row.appearance) || str(row.description);
             if (!name || !appearance) continue;
-            const key = `${kind}:${name}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
+            const aliases = kind === "character"
+                ? arr(row.aliases).map(str).filter(Boolean)
+                : [];
+            // 影策 identityKeys：角色本体名 + 所有别名归一后任一命中 seen 即视为同一人，跳过重复卡。
+            const identityKeys = kind === "character"
+                ? [normalizeAssetName(name), ...aliases.map(normalizeAssetName)].filter(Boolean)
+                : [`${kind}:${name}`];
+            if (!identityKeys.length || identityKeys.some(key => seen.has(key))) continue;
+            identityKeys.forEach(key => seen.add(key));
             const voice = str(row.voice) || str(row.voice_description);
-            out.push({ kind, name, appearance, ...(voice ? { voice } : {}) });
+            // 影策 BibleCharacter.role：模型可能给「男主角」「反派角色」等变体，归一到三分类。
+            const rawRole = str(row.role);
+            const role = kind === "character"
+                ? (/主角/.test(rawRole) ? "主角" : /反派|反角|坏人|敌/.test(rawRole) ? "反派" : "配角")
+                : undefined;
+            out.push({ kind, name, appearance, ...(voice ? { voice } : {}), ...(aliases.length ? { aliases: Array.from(new Set(aliases.filter(a => normalizeAssetName(a) !== normalizeAssetName(name)))) } : {}), ...(role ? { role } : {}) });
         }
     };
     push("character", arr(json.characters));

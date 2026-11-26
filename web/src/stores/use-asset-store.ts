@@ -43,6 +43,9 @@ export type CharacterAsset = AssetBase<"character"> & {
         voiceAssetId: string;
         images: CharacterImage[];
         primaryIndex?: number;
+        /** 影策 definition.aliases：同一人物的其它称呼，归一后指同一份共享资产。 */
+        aliases?: string[];
+        role?: string;
     };
 };
 export type SceneImage = {

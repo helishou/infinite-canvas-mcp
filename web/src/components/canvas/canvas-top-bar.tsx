@@ -17,7 +17,6 @@ import { CanvasShortcutsDialog } from "./canvas-shortcuts-dialog";
 import { CanvasTaskCenterButton } from "./canvas-task-center";
 import { CanvasProductionToolbar } from "@/components/production/canvas-production-workspace";
 import { CanvasNodeFinder } from "@/components/canvas/canvas-node-finder";
-import { markProductionEntry } from "@/lib/production-navigation";
 import { earliestActiveCreatedAt, useCanvasTaskTiming, useElapsedSeconds } from "@/hooks/use-running-task-count";
 
 export function CanvasTopBar({
@@ -110,9 +109,9 @@ export function CanvasTopBar({
                         trigger={["click"]}
                         menu={{
                             items: [
-                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/production?dramaId=${encodeURIComponent(productionDramaId)}&workspace=series`}>{t("productionCanvas.backDrama")}</Link> }] : []),
+                                ...(productionDramaId ? [{ key: "drama", icon: <Images className="size-4" />, label: <Link to={`/drama-studio?dramaId=${encodeURIComponent(productionDramaId)}`}>{t("productionCanvas.backDrama")}</Link> }] : []),
                                 { key: "home", icon: <Home className="size-4" />, label: t("productionCanvas.backHome"), onClick: onHome },
-                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to={`/director/${encodeURIComponent(projectId)}`} onClick={() => markProductionEntry()}>{t("productionCanvas.enter")}</Link> }] : []),
+                                ...(!productionOwner ? [{ key: "production-view", icon: <Clapperboard className="size-4" />, label: <Link to="/projects?type=drama">{t("productionCanvas.enter")}</Link> }] : []),
                                 { key: "projects", icon: <Images className="size-4" />, label: t("canvas.projects"), onClick: onProjects },
                                 { type: "divider" },
                                 { key: "new", icon: <Plus className="size-4" />, label: t("canvas.create"), onClick: onCreateProject },

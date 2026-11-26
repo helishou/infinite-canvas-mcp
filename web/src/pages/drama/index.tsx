@@ -25,7 +25,7 @@ import { confirmDeleteDrama } from "./confirm-delete-drama";
 import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
-export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false, createOnly = false, onCreated, openInStudio = false }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean; createOnly?: boolean; onCreated?: (folderId: string) => void; openInStudio?: boolean } = {}) {
+export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false, createOnly = false, onCreated }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean; createOnly?: boolean; onCreated?: (folderId: string) => void } = {}) {
     const { t } = useTranslation();
     const hydrated = useCanvasStore((state) => state.hydrated);
     const createFolder = useCanvasStore((state) => state.createFolder);
@@ -41,15 +41,11 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
             message.info(t("projects.episodesUnavailable"));
             return;
         }
-        // openInStudio：作品列表页复用为「新制作台列表页」，进剧目直达 drama-studio。
-        if (openInStudio) {
-            const next = new URLSearchParams(query.toString());
-            next.set("dramaId", id);
-            next.delete("manage");
-            navigate(`/drama-studio?${next.toString()}`);
-            return;
-        }
-        navigate(dramaProjectDestination(id, query.toString()));
+        // 作品卡片是旧版制作台的入口，统一改为落新版制作台；规划页跳转只属于新建向导，不在这里处理。
+        const next = new URLSearchParams(query.toString());
+        next.set("dramaId", id);
+        next.delete("manage");
+        navigate(`/drama-studio?${next.toString()}`);
     };
     const shownDramaFolders = [...dramaFolders]
         .sort((a, b) => (Date.parse(b.updatedAt || b.createdAt) || 0) - (Date.parse(a.updatedAt || a.createdAt) || 0))

@@ -8,6 +8,9 @@ import {
     fetchProductionBatches,
     fetchBackendAssets,
     fetchBackendGenerationLogs,
+    fetchClipVideosCurrent,
+    fetchVersionCompareVersions,
+    type ClipVideoTruth,
     createBackendDramaEpisode,
     updateBackendDramaEpisode,
     deleteBackendDramaEpisode,
@@ -30,7 +33,7 @@ import {
     type ProductionBatch,
     type BackendGenerationLog,
 } from "@/services/backend-api";
-import { deriveInboxFailureItems, type StudioInboxItem } from "./studio-inbox-failures";
+import { deriveInboxFailureItems, SEGMENT_VIDEO_PLATFORMS, type InboxActiveRefMap, type StudioInboxItem } from "./studio-inbox-failures";
 import { deriveSegmentVersionDuration, shotsDurationSecOf } from "./studio-version-duration";
 export type { StudioInboxItem };
 import type { ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
@@ -101,6 +104,10 @@ export type StudioEpisode = {
     error: string | null;
     /** 该集任务计数 */
     jobs: { failed: number; succeeded: number; running: number };
+    /** 该集已产出真实视频的段数（画布段 resultStorageKey 以 video: 开头）；无数据源时缺省。 */
+    videoReady?: number;
+    /** 该集真实成片时长（毫秒）；无任何真值来源时为 null。 */
+    durationMs?: number | null;
 };
 
 export type StudioAsset = {
@@ -110,6 +117,10 @@ export type StudioAsset = {
     coverUrl: string;
     storageKey: string;
     note: string;
+    /** 共享资产在源画布里的实体节点 id（metadata.nodeId），段参考图绑定只有 sourceNodeId 时用它反查名称。 */
+    sourceNodeId?: string;
+    /** 资产卡 4 拼设定图真值：data.images[] + data.image + coverUrl 归一后的可显示 URL，去重保序；没有图就是空数组。 */
+    images?: string[];
 };
 
 /** 成片页真实片段产物（来自分集画布 H3 视频节点 resultStorageKey）。 */
@@ -306,11 +317,54 @@ function deriveLogStat(logs: BackendGenerationLog[]): LogStat {
     return { failed, succeeded, running, lastError };
 }
 
+/** 集级新字段的真值输入：全部来自本模块已有查询，缺源时留 undefined/null，不编造。 */
+type EpisodeTruthInput = {
+    /** 当前画布逐 clip 真值：storageKey 直接来自 metadata.segments[].resultStorageKey。 */
+    clips?: readonly { storageKey: string }[];
+    /** 已发布快照派生出的成片时长（毫秒，后端从 media_files.duration_ms 取真值）。 */
+    versionDurationMs?: number | null;
+    versionDurationSource?: string | null;
+    /** 当前制作稿 director.workflow.finalResource（durationSec 为落库真值）。 */
+    finalResource?: { storageKey?: string; durationSec?: unknown } | null;
+    /** 当前制作稿 director.source，用于 shots.duration_frames/fps 兜底。 */
+    source?: unknown;
+};
+
+/** 逐集视频就绪数：只数 resultStorageKey 带 video: 前缀的真实产物段，分母沿用 segmentCount。 */
+function deriveVideoReady(input: EpisodeTruthInput): number | undefined {
+    if (!input.clips) return undefined;
+    let count = 0;
+    for (const clip of input.clips) {
+        if (String(clip.storageKey || "").startsWith("video:")) count += 1;
+    }
+    return count;
+}
+
+/** 逐集成片时长（毫秒）：快照成片文件时长 → finalResource.durationSec → shots 帧数/fps；全缺为 null。 */
+function deriveEpisodeDurationMs(input: EpisodeTruthInput): number | null {
+    const versionMs = Number(input.versionDurationMs);
+    if (input.versionDurationSource === "media-file" && Number.isFinite(versionMs) && versionMs > 0) return versionMs;
+    const finalSec = Number(input.finalResource?.durationSec);
+    if (Number.isFinite(finalSec) && finalSec > 0) return finalSec * 1000;
+    const src = input.source;
+    if (src && typeof src === "object") {
+        const source = src as Record<string, unknown>;
+        const shots = Array.isArray(source.shots) ? source.shots : [];
+        const shotIds = shots.map((shot) => String((shot as Record<string, unknown>)?.id || "")).filter(Boolean);
+        const sec = shotsDurationSecOf(source, shotIds);
+        if (typeof sec === "number" && Number.isFinite(sec) && sec > 0) return sec * 1000;
+    }
+    // 快照只有镜头帧数兜底时也是真值（与后端 summarizeVersionSnapshot 同口径），最后才采用。
+    if (Number.isFinite(versionMs) && versionMs > 0) return versionMs;
+    return null;
+}
+
 function deriveEpisode(
     ep: DramaEpisode,
     stageEp: { episodeNumber: number; stage: string | null; done: string[] } | undefined,
     logStat: LogStat,
     prodDerive: ReturnType<typeof deriveStageFromProduction>,
+    truth: EpisodeTruthInput = {},
 ): StudioEpisode {
     const done = stageEp?.done ?? [];
     const current = stageEp?.stage ?? null;
@@ -334,9 +388,11 @@ function deriveEpisode(
     // 单看 failed>0 会把「历史失败早已成功重出覆盖」的集永久误标需要处理——
     // 例如蟒妻 ep1/ep2/ep4 的失败都是旧 gpt-image-2.6 残留，后来已用 2.1 重出并出成片，
     // 不该再挂红条（与 deriveLogStat 的「latest failure recovered by later success」语义一致）。
+    // 视频就绪段数取画布真实产物（video: 前缀），用于状态与阶段进度，避免「publish 标记在、视频没有」冒充已完成。
+    const readyCount = deriveVideoReady(truth) ?? 0;
     const status: StudioStatus = logStat.lastError
         ? "需要处理"
-        : prodDerive.publishedVersion > 0
+        : prodDerive.publishedVersion > 0 && (prodDerive.segmentCount === 0 || readyCount >= prodDerive.segmentCount)
             ? "已完成"
             : prodDerive.shotCount > 0
                 ? "待生成"
@@ -360,7 +416,41 @@ function deriveEpisode(
         publishedVersion: prodDerive.publishedVersion,
         error: logStat.lastError,
         jobs: { failed: logStat.failed, succeeded: logStat.succeeded, running: logStat.running },
+        videoReady: readyCount,
+        durationMs: deriveEpisodeDurationMs(truth),
     };
+}
+
+/** 资产图字段里可能是 storageKey（首选，带 token 的媒体地址）或已拼好的 url；旧记录也允许裸 URL 字符串。 */
+function assetImageUrlOf(image: unknown): string {
+    if (typeof image === "string") return assetImageUrlOf({ url: image });
+    const item = (image && typeof image === "object" ? image : {}) as Record<string, unknown>;
+    const storageKey = typeof item.storageKey === "string" ? item.storageKey.trim() : "";
+    if (storageKey) return backendMediaUrl(storageKey);
+    const url = typeof item.url === "string" ? item.url.trim() : "";
+    if (!url) return "";
+    // 后端记录的 coverUrl / image.url 常是 /media/:key，缺 token 会 401；能还原 key 就换成带 token 的地址。
+    const match = /\/media\/([^?#]+)/.exec(url);
+    if (!match) return url;
+    try { return backendMediaUrl(decodeURIComponent(match[1])); } catch { return url; }
+}
+
+/**
+ * 卡片 4 拼设定图真值（角色 data.images[] / 场景道具 data.image / 资产记录 coverUrl）：
+ * coverUrl 是后端主图（角色取 primaryIndex 那张），优先作首图；按数组原序追加，去重、只留非空。
+ * 绝不补齐、不重复同一张图；不足 4 张由渲染处补空占位。
+ */
+function assetImagesOf(data: Record<string, unknown>, coverUrl: string): string[] {
+    const out: string[] = [];
+    const push = (url: string) => {
+        const value = url.trim();
+        if (!value || out.includes(value)) return;
+        out.push(value);
+    };
+    push(assetImageUrlOf({ url: coverUrl }));
+    for (const image of Array.isArray(data.images) ? data.images : []) push(assetImageUrlOf(image));
+    push(assetImageUrlOf(data.image));
+    return out;
 }
 
 function toAsset(raw: unknown): StudioAsset | null {
@@ -371,13 +461,17 @@ function toAsset(raw: unknown): StudioAsset | null {
     const data = (item.data && typeof item.data === "object" ? item.data : {}) as Record<string, unknown>;
     const metadata = (item.metadata && typeof item.metadata === "object" ? item.metadata : {}) as Record<string, unknown>;
     const note = typeof item.note === "string" ? item.note : typeof metadata.note === "string" ? metadata.note : "";
+    const coverUrl = typeof item.coverUrl === "string" ? item.coverUrl : "";
     return {
         id,
         title: typeof item.title === "string" ? item.title : id,
         kind: typeof item.kind === "string" ? item.kind : "image",
-        coverUrl: typeof item.coverUrl === "string" ? item.coverUrl : "",
+        coverUrl,
         storageKey: typeof data.storageKey === "string" ? data.storageKey : "",
         note,
+        images: assetImagesOf(data, coverUrl),
+        /** 共享资产在源画布里的实体节点 id：段参考图绑定只带 sourceNodeId 时用它反查资产真名。 */
+        sourceNodeId: typeof metadata.nodeId === "string" ? metadata.nodeId : "",
     };
 }
 
@@ -556,16 +650,108 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
     /** 画布 H3 节点级失败原因，按段 targetId 关联（失败段可能无成片，不在 clipMedia 里）。 */
     const clipFailureByTarget: ClipFailureByTarget = useMemo(() => clipMediaQuery.data?.errorsByTarget || {}, [clipMediaQuery.data]);
 
+    /** 逐集画布成片真值：storageKey 由后端直接读 canvas_nodes.metadata.segments[].resultStorageKey（按 clipId 去重）。 */
+    const currentClipVideosQueries = useQueries({
+        queries: rawEpisodes.map((ep) => ({
+            queryKey: ["drama-studio-clip-videos-current", backendUrl, ep.id],
+            enabled: connected && Boolean(ep.canvasId),
+            queryFn: async (): Promise<ClipVideoTruth[]> => (await fetchClipVideosCurrent(ep.id)).clipVideos || [],
+        })),
+    });
+
+    /** 逐集已发布快照的成片时长真值：后端从 snapshot 的 finalResource.storageKey → media_files.duration_ms 派生。 */
+    const versionDurationQueries = useQueries({
+        queries: rawEpisodes.map((ep) => ({
+            queryKey: ["drama-studio-version-duration", backendUrl, ep.id],
+            enabled: connected && Boolean(ep.canvasId),
+            queryFn: async (): Promise<{ version: number; durationMs: number | null; durationSource: string | null } | null> => {
+                const versions = (await fetchVersionCompareVersions(ep.id)).versions || [];
+                if (!versions.length) return null;
+                const latest = versions.reduce((a, b) => (b.version > a.version ? b : a));
+                // 前端 VersionCompareSummary 类型尚未同步后端新增的 durationSec/durationSource，读侧容忍。
+                const summary = latest.summary as unknown as Record<string, unknown> | undefined;
+                const sec = Number(summary?.durationSec);
+                const source = typeof summary?.durationSource === "string" ? summary.durationSource : null;
+                return { version: latest.version, durationMs: Number.isFinite(sec) && sec > 0 ? sec * 1000 : null, durationSource: source };
+            },
+        })),
+    });
+
+    const clipVideosByEpisodeId = useMemo(() => {
+        const map = new Map<string, ClipVideoTruth[]>();
+        rawEpisodes.forEach((ep, i) => {
+            const data = currentClipVideosQueries[i]?.data;
+            if (data !== undefined) map.set(ep.id, data);
+        });
+        return map;
+    }, [rawEpisodes, currentClipVideosQueries]);
+
+    const versionDurationByEpisodeId = useMemo(() => {
+        const map = new Map<string, { durationMs: number | null; durationSource: string | null }>();
+        rawEpisodes.forEach((ep, i) => {
+            const data = versionDurationQueries[i]?.data;
+            if (data !== undefined) map.set(ep.id, data || { durationMs: null, durationSource: null });
+        });
+        return map;
+    }, [rawEpisodes, versionDurationQueries]);
+
+    // production 查询结果按索引对应 rawEpisodes
+    const prodByEpisodeId = useMemo(() => {
+        const map = new Map<string, EpisodeProduction | undefined>();
+        rawEpisodes.forEach((ep, i) => map.set(ep.id, productionQueries[i]?.data as EpisodeProduction | undefined));
+        return map;
+    }, [rawEpisodes, productionQueries]);
+
     // 只统计本剧分集画布的日志（generation-log.projectId === episode.canvasId），
     // 避免把全局日志算进本剧；同时过滤 [object Object] 这类无意义错误串。
     const logStatByCanvas = useMemo(() => {
         const canvasIds = new Set(rawEpisodes.map((ep) => ep.canvasId).filter(Boolean) as string[]);
+        // 每集当前资产节点集合（canvas-image 失败是否仍算数，看目标节点是否还在制作链路）。
+        const activeNodesByCanvas = new Map<string, Set<string>>();
+        const activeSegmentsByCanvas = new Map<string, Set<string>>();
+        for (const ep of rawEpisodes) {
+            if (!ep.canvasId) continue;
+            const prod = prodByEpisodeId.get(ep.id);
+            const nodes = new Set<string>();
+            const segments = new Set<string>();
+            if (prod?.draft) {
+                const draft = prod.draft as unknown as Record<string, any>;
+                const director = (draft.director || {}) as Record<string, any>;
+                const source = (director.source || {}) as Record<string, any>;
+                for (const asset of Object.values(director.assets || {})) {
+                    const a = asset as Record<string, any>;
+                    if (a?.nodeId) nodes.add(String(a.nodeId));
+                    if (a?.sourceNodeId) nodes.add(String(a.sourceNodeId));
+                }
+                for (const seg of (source.segments || []) as Array<Record<string, any>>) {
+                    if (seg?.id) segments.add(String(seg.id));
+                    for (const binding of (seg?.referenceBindings || []) as Array<Record<string, any>>) {
+                        if (binding?.sourceNodeId) nodes.add(String(binding.sourceNodeId));
+                        if (binding?.nodeId) nodes.add(String(binding.nodeId));
+                    }
+                }
+            }
+            activeNodesByCanvas.set(String(ep.canvasId), nodes);
+            activeSegmentsByCanvas.set(String(ep.canvasId), segments);
+        }
         const map = new Map<string, LogStat>();
         for (const log of logsQuery.data || []) {
             const key = String(log.projectId || "");
             if (!key || !canvasIds.has(key)) continue;
-            const stat = map.get(key) || { failed: 0, succeeded: 0, running: 0, lastError: null };
             const status = String(log.status || "").toLowerCase();
+            const platform = String(log.platform || "").toLowerCase();
+            // 已被新资产体系取代的旧 image-canvas 节点失败日志，是历史残留：
+            // 不计入 failed（与 inbox 口径一致），避免底部「待重试」红色数字虚高。
+            if (status === "failed" || status === "error") {
+                if (platform === "canvas-image") {
+                    const active = activeNodesByCanvas.get(key);
+                    if (active && !active.has(String(log.nodeId || ""))) continue;
+                } else if (SEGMENT_VIDEO_PLATFORMS.has(platform) && String(log.segmentId || "").trim()) {
+                    const segs = activeSegmentsByCanvas.get(key);
+                    if (segs && !segs.has(String(log.segmentId))) continue;
+                }
+            }
+            const stat = map.get(key) || { failed: 0, succeeded: 0, running: 0, lastError: null };
             if (status === "success" || status === "succeeded") stat.succeeded += 1;
             else if (status === "failed" || status === "error") {
                 stat.failed += 1;
@@ -575,14 +761,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
             map.set(key, stat);
         }
         return map;
-    }, [logsQuery.data, rawEpisodes]);
-
-    // production 查询结果按索引对应 rawEpisodes
-    const prodByEpisodeId = useMemo(() => {
-        const map = new Map<string, EpisodeProduction | undefined>();
-        rawEpisodes.forEach((ep, i) => map.set(ep.id, productionQueries[i]?.data as EpisodeProduction | undefined));
-        return map;
-    }, [rawEpisodes, productionQueries]);
+    }, [logsQuery.data, rawEpisodes, prodByEpisodeId]);
 
     const episodes: StudioEpisode[] = useMemo(() => {
         const stageByNo = new Map<number, { episodeNumber: number; stage: string | null; done: string[] }>();
@@ -592,9 +771,23 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
             const hasScript = Boolean(String(ep.fullPlot || "").trim()) || (synopsis.length >= 40 && !synopsis.startsWith(SOURCE_PREFIX));
             const derive = deriveStageFromProduction(prodByEpisodeId.get(ep.id), hasScript);
             const stat = (ep.canvasId && logStatByCanvas.get(ep.canvasId)) || emptyLogStat;
-            return deriveEpisode(ep, stageByNo.get(ep.episodeNumber), stat, derive);
+            // 新字段真值：当前集优先用已成形的 clipMedia，其余集用后端逐集 canvas 段结果；
+            // 时长回退链走「版本快照成片 → 当前 finalResource.durationSec → shots 帧数/fps」。
+            const production = prodByEpisodeId.get(ep.id);
+            const draft = (production?.draft || {}) as Record<string, any>;
+            const director = (draft.director || {}) as Record<string, any>;
+            const source = (director.source || draft.source || {}) as Record<string, unknown>;
+            const versionDuration = versionDurationByEpisodeId.get(ep.id);
+            const truth: EpisodeTruthInput = {
+                clips: (ep.id === episodeId && clipMediaQuery.data ? clipMedia : clipVideosByEpisodeId.get(ep.id)),
+                versionDurationMs: versionDuration?.durationMs,
+                versionDurationSource: versionDuration?.durationSource,
+                finalResource: (director.workflow as Record<string, any> | undefined)?.finalResource as { storageKey?: string; durationSec?: unknown } | undefined,
+                source,
+            };
+            return deriveEpisode(ep, stageByNo.get(ep.episodeNumber), stat, derive, truth);
         });
-    }, [rawEpisodes, stageQuery.data, prodByEpisodeId, logStatByCanvas]);
+    }, [rawEpisodes, stageQuery.data, prodByEpisodeId, logStatByCanvas, episodeId, clipMediaQuery.data, clipMedia, clipVideosByEpisodeId, versionDurationByEpisodeId]);
 
     const assets: StudioAsset[] = useMemo(() => (assetsQuery.data || []).map(toAsset).filter((item): item is StudioAsset => Boolean(item)), [assetsQuery.data]);
 
@@ -645,12 +838,43 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
         return { succeeded, failed, running };
     }, [logStatByCanvas]);
 
+    /** 每集当前仍在制作链路的引用集合（来自 production 快照，真值非编造）。
+     *  用于过滤已被新资产体系取代的旧 image-canvas 失败日志；只为已加载 production 的集建 key，
+     *  未加载的集不建 key，避免 production 尚未到达时误杀真实失败。 */
+    const inboxActiveRefs: InboxActiveRefMap = useMemo(() => {
+        const map: InboxActiveRefMap = new Map();
+        for (const ep of rawEpisodes) {
+            const prod = prodByEpisodeId.get(ep.id);
+            if (!prod?.draft) continue;
+            const draft = prod.draft as unknown as Record<string, any>;
+            const director = (draft.director || {}) as Record<string, any>;
+            const source = (director.source || {}) as Record<string, any>;
+            const nodes = new Set<string>();
+            const segments = new Set<string>();
+            for (const asset of Object.values(director.assets || {})) {
+                const a = asset as Record<string, any>;
+                if (a?.nodeId) nodes.add(String(a.nodeId));
+                if (a?.sourceNodeId) nodes.add(String(a.sourceNodeId));
+            }
+            for (const seg of (source.segments || []) as Array<Record<string, any>>) {
+                if (seg?.id) segments.add(String(seg.id));
+                for (const binding of (seg?.referenceBindings || []) as Array<Record<string, any>>) {
+                    if (binding?.sourceNodeId) nodes.add(String(binding.sourceNodeId));
+                    if (binding?.nodeId) nodes.add(String(binding.nodeId));
+                }
+            }
+            map.set(ep.id, { nodes, segments });
+        }
+        return map;
+    }, [rawEpisodes, prodByEpisodeId]);
+
     /** 影策 inbox 失败分类（cast_failed 参考图 / segment_failed 段视频 / episode_error 其余）。
      *  分类来自 generation_logs 写入时即落库的真实字段 platform + segment_id，见 studio-inbox-failures.ts。
-     *  只按每集真实错误/失败任务派生，不把规划台 stage gaps 当待处理。 */
+     *  只按每集真实错误/失败任务派生，不把规划台 stage gaps 当待处理。
+     *  传入 inboxActiveRefs 过滤已被新资产体系取代的孤儿失败日志。 */
     const inbox: StudioInboxItem[] = useMemo(
-        () => deriveInboxFailureItems(episodes, logsQuery.data || []),
-        [episodes, logsQuery.data],
+        () => deriveInboxFailureItems(episodes, logsQuery.data || [], inboxActiveRefs),
+        [episodes, logsQuery.data, inboxActiveRefs],
     );
 
     /** 影策 production 状态机（本地派生） */
@@ -1209,7 +1433,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
      * 读本集每段 H3 Clip 当前自选的视频模型，按制作稿 segment id（productionClipProjection.targetId）索引。
      * 画布段的模型真值在 metadata.segments[].selectedVideoModel，制作稿 draft 里没有这份字段，
      * 所以必须定向 fetch 画布 project 再按 targetId 对齐（与写回、日志查询共用同一映射）。
-     * 没选过模型的段不出现在结果里，界面回落显示默认「H3 展开流」。
+     * 没选过模型的段不出现在结果里，界面回落显示全局默认（config.videoModel），全局也为空才用 H3 展开流。
      */
     const listSegmentVideoModels = async (episodeId: string): Promise<Record<string, string>> => {
         const ep = rawEpisodes.find((item) => item.id === episodeId);
@@ -1249,12 +1473,38 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
         await batchesQuery.refetch();
     };
 
+    /** 首屏/详情加载门控：React Query v5 中 enabled=false（未连接/无 id）的 query 也处于 isPending，
+     *  所以只有「真正启用」的 query 才算未就绪，避免断线时永久 loading。
+     *  episodes[]/assets/inbox 等派生在数据未到时仍是空数组（保持调用方类型不变），
+     *  调用方用下面的 loading/detailLoading 做门控，不要把空数组当成「确认无数据」。 */
+    const pendingWhenEnabled = (query: { isPending: boolean }, queryEnabled: boolean): boolean =>
+        queryEnabled && query.isPending;
+    const detailReady = connected && Boolean(episodeId);
+    const anyPendingProduction = productionQueries.some(
+        (q, i) => connected && Boolean(rawEpisodes[i]?.canvasId) && q.isPending,
+    );
+
+    // 首屏并发查询全部扇入：任一尚未回包就保持 loading=true，消除「数据全空但 loading=false」窗口。
+    const dataPending =
+        pendingWhenEnabled(episodesQuery, enabled)
+        || pendingWhenEnabled(stageQuery, enabled)
+        || pendingWhenEnabled(sourceChaptersQuery, enabled)
+        || pendingWhenEnabled(assetsQuery, enabled)
+        || pendingWhenEnabled(logsQuery, enabled)
+        || pendingWhenEnabled(clipMediaQuery, detailReady);
+    // 详情查询同理；clipMedia 与逐集 production 也计入，避免详情骨架先于内容消失。
+    const detailPending =
+        pendingWhenEnabled(productionQuery, detailReady)
+        || pendingWhenEnabled(batchesQuery, detailReady)
+        || pendingWhenEnabled(clipMediaQuery, detailReady)
+        || anyPendingProduction;
+
     return {
         dramaId, episodeId, episodes, rawEpisodes, assets, stage, production, batches, counts, queue,
         jobCounts, inbox, productionState, clipMedia, clipFailureByTarget,
         sourceChapterTruth, bibleReady, firstSampleReady,
-        loading: episodesQuery.isLoading || stageQuery.isLoading,
-        detailLoading: productionQuery.isLoading || batchesQuery.isLoading,
+        loading: dataPending,
+        detailLoading: detailPending,
         error: episodesQuery.error || stageQuery.error || productionQuery.error || batchesQuery.error,
         connected,
         refreshAll, addEpisode, batchCreateEpisodes, insertEpisode, removeEpisode, adaptEpisode, extractEpisodeAssets, writeSegmentPrompt, saveSegmentPrompt, approveEpisodeVideo, saveFinalResource, renameEpisode, toggleBatch,

@@ -3,6 +3,7 @@
 // CI(publish-plugins.yml)把 dist/ 强推到 plugins-dist 分支,前端经 jsDelivr 远程拉取。
 // 本地自测:`npm install && npm run build`,再把 VITE_PLUGIN_REGISTRY_URL 指向本地 dist。
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,12 @@ async function readPluginVersion(dir) {
     const pkg = JSON.parse(await readFile(join(root, "..", dir, "package.json"), "utf8"));
     if (!pkg.version) throw new Error(`插件 ${dir} 的 package.json 缺少 version`);
     return pkg.version;
+}
+
+// 为产物计算 SHA-256 integrity,前端安装前据此校验下载内容未被篡改。
+async function readBundleIntegrity(id) {
+    const bytes = await readFile(join(outDir, `${id}.js`));
+    return `sha256-${createHash("sha256").update(bytes).digest("base64")}`;
 }
 
 await rm(outDir, { recursive: true, force: true });
@@ -62,6 +69,7 @@ const manifest = {
             description: plugin.description,
             icon: plugin.icon,
             entry: `${plugin.id}.js`,
+            integrity: await readBundleIntegrity(plugin.id),
         })),
     ),
 };

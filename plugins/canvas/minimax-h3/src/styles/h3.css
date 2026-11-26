@@ -950,3 +950,33 @@
 .minimax-quick-storyboard-footer > small { color:var(--h3-muted); }
 .minimax-quick-storyboard [role="alert"] { color:#e5484d; }
 @media (max-width:760px) { .minimax-quick-storyboard-columns { grid-template-columns:1fr; } .minimax-quick-storyboard-zone { max-height:34vh; } .minimax-quick-storyboard-preview { grid-template-columns:1fr; } }
+
+/* 标准化「视频参数」分组：与主项目视频参数面板同构（分组标题 + pill 档位 + 尺寸卡片 + 精确尺寸折叠）。 */
+.nfh3-video-params { display:grid; gap:14px; min-width:0; }
+.nfh3-video-group { display:grid; gap:8px; min-width:0; }
+.nfh3-video-group-title { color:var(--h3-muted); font-size:12px; font-weight:800; letter-spacing:.02em; }
+.nfh3-video-pills { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
+.nfh3-pill { min-width:64px; min-height:34px; padding:0 14px; border:1px solid var(--h3-border); border-radius:999px; background:transparent; color:var(--h3-text); font-size:13px; font-weight:700; cursor:pointer; transition:border-color .12s ease,background-color .12s ease; }
+.nfh3-pill:hover { border-color:var(--h3-selection,#60a5fa); }
+.nfh3-pill.is-active { border-color:var(--h3-selection,#60a5fa); background:color-mix(in srgb,var(--h3-selection,#60a5fa) 16%,transparent); box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--h3-selection,#60a5fa) 42%,transparent); }
+.nfh3-pill-input { display:inline-flex; align-items:center; height:34px; overflow:hidden; border:1px solid var(--h3-border); border-radius:999px; background:transparent; color:var(--h3-text); }
+.nfh3-pill-input:focus-within { border-color:var(--h3-selection,#60a5fa); }
+.nfh3-pill-input input { width:62px; height:100%; padding:0 4px 0 12px; border:0; outline:0; background:transparent; color:inherit; font-size:13px; font-weight:700; text-align:center; -moz-appearance:textfield; }
+.nfh3-pill-input input::-webkit-outer-spin-button,.nfh3-pill-input input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.nfh3-pill-input > span { padding-right:12px; color:var(--h3-muted); font-size:12px; font-weight:700; }
+.nfh3-video-sizes { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.nfh3-size-card { display:flex; min-height:66px; min-width:0; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:6px; border:1px solid var(--h3-border); border-radius:10px; background:transparent; color:var(--h3-text); font-size:12px; font-weight:700; cursor:pointer; transition:border-color .12s ease,background-color .12s ease; }
+.nfh3-size-card:hover { border-color:var(--h3-selection,#60a5fa); }
+.nfh3-size-card.is-active { border-color:var(--h3-selection,#60a5fa); background:color-mix(in srgb,var(--h3-selection,#60a5fa) 12%,transparent); }
+.nfh3-size-preview { display:block; border:2px solid currentColor; border-radius:2px; }
+.nfh3-video-precise { border:1px solid var(--h3-border); border-radius:9px; background:color-mix(in srgb,var(--h3-text) 3%,transparent); }
+.nfh3-video-precise > summary { display:flex; align-items:center; gap:8px; min-height:34px; padding:0 12px; color:var(--h3-text); font-size:12px; font-weight:700; cursor:pointer; list-style:none; }
+.nfh3-video-precise > summary::-webkit-details-marker { display:none; }
+.nfh3-video-precise > summary::before { content:""; width:7px; height:7px; border-right:2px solid var(--h3-muted); border-bottom:2px solid var(--h3-muted); transform:rotate(-45deg); transition:transform .12s ease; }
+.nfh3-video-precise[open] > summary::before { transform:rotate(45deg); }
+.nfh3-video-precise > summary small { margin-left:auto; color:var(--h3-muted); font-size:12px; font-weight:700; }
+.nfh3-video-dims { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); align-items:center; gap:8px; padding:0 12px 12px; }
+.nfh3-video-dims label { display:flex; align-items:center; gap:6px; min-width:0; height:34px; padding:0 10px; border-radius:8px; background:color-mix(in srgb,var(--h3-text) 5%,transparent); color:var(--h3-muted); font-size:12px; font-weight:800; }
+.nfh3-video-dims input { min-width:0; width:100%; border:0; outline:0; background:transparent; color:var(--h3-text); font-size:13px; font-weight:700; -moz-appearance:textfield; }
+.nfh3-video-dims input::-webkit-outer-spin-button,.nfh3-video-dims input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.nfh3-video-dims > span { color:var(--h3-muted); font-size:14px; }

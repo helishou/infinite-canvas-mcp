@@ -4,6 +4,7 @@ import type { DirectorProduction } from "@basketikun/canvas-agent/drama/producti
 import type { BackendDatabase } from "../db.js";
 import { productionCanvasContext } from "./production-canvas.js";
 import { reconcileSharedAssetConsumers } from "../canvas/drama-asset-library.js";
+import { normalizeAssetName } from "@basketikun/canvas-agent/drama/asset-extract";
 
 export type ApprovedSharedAsset = { id: string; dramaId: string; assetId: string; sourceProjectId: string; sourceNodeId: string; sourceVersion: number;
     storageKey: string; sha256: string; evidence: string; reviewStatus: "unreviewed" | "approved"; snapshot: Record<string, any>; createdAt: string };
@@ -44,6 +45,7 @@ export function registerSharedAssetVersion(db: BackendDatabase, projectId: strin
         version: asset.version, content: asset.storageKey, metadata: { storageKey: asset.storageKey, naturalWidth: media.width, naturalHeight: media.height, mimeType: media.mimeType,
             ...(node.metadata?.sharedPromotionOrigin ? { sharedPromotionOrigin: structuredClone(node.metadata.sharedPromotionOrigin) } : {}),
             ...(character ? { characterName: node.metadata?.characterName || node.title, characterDescription: node.metadata?.characterDescription || "", characterEnglishName: node.metadata?.characterEnglishName || "",
+                characterAliases: Array.isArray(node.metadata?.characterAliases) ? node.metadata.characterAliases : [],
                 characterImages: (Array.isArray(node.metadata?.characterImages) ? node.metadata.characterImages : []).filter((image: any) => image.storageKey === asset.storageKey), characterPrimaryIndex: 0 } : {}),
             ...(node.type === "scene" ? { sceneName: node.metadata?.sceneName || node.title, sceneDescription: node.metadata?.sceneDescription || "", sceneImage: structuredClone(node.metadata?.sceneImage || {}) } : {}),
             ...(node.type === "prop" ? { propName: node.metadata?.propName || node.title, propDescription: node.metadata?.propDescription || "", propImage: structuredClone(node.metadata?.propImage || {}) } : {}) } };
@@ -85,6 +87,97 @@ export function sharedAssetNodeMatchesSource(node: Record<string, any> | null | 
         && reference.assetId === source.assetId
         && reference.sourceProjectId === source.sourceProjectId
         && reference.sourceNodeId === source.sourceNodeId);
+}
+
+export type SharedIdentityResolution = { productionAssetId: string; canonicalName: string; aliases: string[] };
+export type SharedIdentitySource = { dramaId?: string; assetId?: string; sourceProjectId?: string; sourceNodeId?: string };
+export type SharedIdentityResolver = (kind: "character" | "scene" | "prop", name: string, aliases: string[], source?: SharedIdentitySource) => SharedIdentityResolution | undefined;
+
+const identityName = (value: string) => normalizeAssetName(value).replace(/[（(].*$/, "");
+const identityKeysOf = (value: string): string[] => {
+    const normalized = identityName(value);
+    const deFormed = normalized.replace(/(?:蟒身|蛇身)$/, "");
+    return Array.from(new Set([normalized, deFormed].filter(Boolean)));
+};
+const sharedPaid = (metadata: Record<string, any>, kind: "character" | "scene" | "prop") => String(
+    metadata.productionAssetId
+    || (kind === "character" ? metadata.characterAssetId : kind === "scene" ? (metadata.sceneAssetId || metadata.assetId) : metadata.assetId)
+    || "");
+const sharedAliases = (metadata: Record<string, any>, kind: "character" | "scene" | "prop") =>
+    Array.isArray(metadata[`${kind}Aliases`]) ? metadata[`${kind}Aliases`].map(String).filter(Boolean) : [];
+
+/**
+ * 写时回填的共享身份真值。只读同剧目共享画布上已有的节点：
+ * 1) source 指向明确的共享节点时，按该节点 metadata.productionAssetId 取（形态卡按 lookOf/别名指回主卡）；
+ * 2) 兜底用 normalizeAssetName 对 [name, canonicalName, ...aliases] 建 identityKeys 匹配共享主卡。
+ * 匹配不到返回 undefined，绝不编造身份，也不触碰 storageKey / 引用绑定 / 成片绑定。
+ */
+export function resolveSharedIdentity(db: BackendDatabase, dramaId: string, kind: "character" | "scene" | "prop",
+    name: string, aliases: string[] = [], source?: SharedIdentitySource): SharedIdentityResolution | undefined {
+    const effectiveDramaId = String(source?.dramaId || dramaId || "");
+    if (!effectiveDramaId || !["character", "scene", "prop"].includes(kind)) return undefined;
+    const projectIds = new Set<string>();
+    if (source?.sourceProjectId) projectIds.add(source.sourceProjectId);
+    for (const asset of listApprovedSharedAssets(db, effectiveDramaId)) if (asset.sourceProjectId) projectIds.add(asset.sourceProjectId);
+    if (!projectIds.size) return undefined;
+    const sharedNodes: Array<{ projectId: string; node: Record<string, any> }> = [];
+    for (const projectId of projectIds) {
+        const trustedSource = Boolean(source?.sourceProjectId === projectId && source?.dramaId === effectiveDramaId);
+        const context = productionCanvasContext(db, projectId);
+        if (!trustedSource && !(context.role === "shared-assets" && context.dramaId === effectiveDramaId)) continue;
+        for (const node of (db.getCanvasProject(projectId)?.nodes as Record<string, any>[] || [])) {
+            if (["character", "scene", "prop"].includes(String(node.type))) sharedNodes.push({ projectId, node });
+        }
+    }
+    const candidates = sharedNodes.map(({ node }) => {
+        const metadata = record(node.metadata);
+        return { metadata, paid: sharedPaid(metadata, kind), lookOf: String(metadata.characterLookOf || metadata.lookOf || ""),
+            names: [String(metadata[`${kind}Name`] || node.title || ""), String(metadata[`${kind}CanonicalName`] || ""), ...sharedAliases(metadata, kind)] };
+    }).filter(item => Boolean(item.paid));
+    if (!candidates.length) return undefined;
+    const byId = new Map(candidates.map(item => [item.paid, item]));
+    const keys = new Map<string, { paid: string; priority: number }>();
+    const register = (item: typeof candidates[number], paid: string, priority: number) => {
+        for (const value of item.names) for (const key of identityKeysOf(value)) {
+            const current = keys.get(key);
+            if (!current || priority > current.priority) keys.set(key, { paid, priority });
+        }
+    };
+    // 主卡先登记（priority=1），形态卡后登记（priority=0），保证别名始终指回主卡。
+    // 主卡之间按「有 canonicalName」优先，避免只有别名的形态卡抢注主卡名。
+    const mains = candidates.filter(item => !item.lookOf).sort((a, b) =>
+        Number(Boolean(String(b.metadata[`${kind}CanonicalName`] || ""))) - Number(Boolean(String(a.metadata[`${kind}CanonicalName`] || ""))));
+    for (const item of mains) register(item, item.paid, 1);
+    for (const item of candidates.filter(item => item.lookOf)) {
+        const looked = byId.get(item.lookOf)
+            || (() => {
+                const resolved = identityKeysOf(item.lookOf).flatMap(key => [keys.get(key)?.paid]).find(Boolean);
+                return resolved ? byId.get(resolved) : undefined;
+            })();
+        if (looked) register(item, looked.paid, 0);
+    }
+    const resolutionOf = (item: typeof candidates[number]): SharedIdentityResolution => ({
+        productionAssetId: item.paid,
+        canonicalName: String(item.metadata[`${kind}CanonicalName`] || ""),
+        aliases: sharedAliases(item.metadata, kind),
+    });
+    // 优先：显式来源节点的 ID 权威。
+    if (source?.sourceProjectId && source.sourceNodeId) {
+        const hit = sharedNodes.find(item => item.projectId === source.sourceProjectId && String(item.node.id) === source.sourceNodeId);
+        if (hit) {
+            const metadata = record(hit.node.metadata);
+            const lookOf = String(metadata.characterLookOf || metadata.lookOf || "");
+            const main = lookOf ? (byId.get(lookOf) || (() => {
+                const resolved = identityKeysOf(lookOf).flatMap(key => [keys.get(key)?.paid]).find(Boolean);
+                return resolved ? byId.get(resolved) : undefined;
+            })()) : byId.get(sharedPaid(metadata, kind));
+            if (main) return resolutionOf(main);
+        }
+    }
+    // 兜底：identityKeys 命中共享身份。
+    const hitPaid = [name, ...aliases].flatMap(identityKeysOf).flatMap(key => [keys.get(key)?.paid]).find(Boolean);
+    const main = hitPaid ? byId.get(hitPaid) : undefined;
+    return main ? resolutionOf(main) : undefined;
 }
 
 /** Validate a particular node's identity without requiring its ID to equal another projection's ID. */

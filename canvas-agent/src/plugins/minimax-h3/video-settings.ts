@@ -18,8 +18,9 @@ export function h3AspectRatioOption(value: unknown) {
     if (exact) return exact;
     const prefixed = keys.find((option) => option.startsWith(`${raw} `));
     if (prefixed) return prefixed;
-    // "9 : 16"、"09:16" 这类写法先化简再匹配
-    const match = /^\s*(\d+)\s*:\s*(\d+)\s*$/.exec(raw);
+    // "9 : 16"、"09:16"、"9:16 (Portrait)" 这类写法先化简再匹配：
+    // 比例数字是本质，括号内描述（Portrait / Portrait Widescreen 等旧新标签）不参与匹配。
+    const match = /^\s*(\d+)\s*:\s*(\d+)(?:\s|$|\()/.exec(raw);
     if (!match) return null;
     const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
     const width = Number(match[1]);

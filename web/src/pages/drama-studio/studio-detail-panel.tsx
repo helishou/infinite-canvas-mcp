@@ -1,14 +1,14 @@
 import { useMemo, useRef, useState, useEffect, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { App, Modal, Input, Tooltip, Dropdown, Popconfirm, Popover, Checkbox, type MenuProps } from "antd";
 import {
-    BookOpen, Sparkles, RefreshCw, Clapperboard, Video, Download, Film, Play, FileUp,
-    ChevronRight, AlertCircle, LoaderCircle, Eye, Scissors, Link2, Wand2, Pencil, Quote, Save, ScanSearch,
+    BookOpen, Sparkles, RefreshCw, Clapperboard, Download, Film, Play, FileUp,
+    AlertCircle, LoaderCircle, Eye, Scissors, Link2, Wand2, Pencil, Quote, Save, ScanSearch,
     ArrowUpToLine, ArrowDownToLine, ArrowUp, ArrowDown, RotateCcw, Wrench,
     Trash2, AlertTriangle, CheckCircle2, MessageCircle, Keyboard, Volume2, VolumeX,
-    PanelRightClose, PanelRightOpen,
+    PanelRightClose, PanelRightOpen, FolderOpen, Upload,
 } from "lucide-react";
 import type { EpisodeProduction, SegmentVideoReprocessPreview, DramaSourceFormat } from "@/services/backend-api";
-import { BackendApiError, backendMediaUrl, editEpisodeProduction, fetchEpisodeProduction, fetchDramaPlanningSource, patchDramaPlanningSource, fetchBackendProject, startCanvasGeneration, applyBackendCanvasOperations, getSegmentVideoReprocessStatus, reprocessSegmentVideo, getEpisodeChapters, getChapter, patchChapter, upsertProjectReferenceAssets, prerunEpisode, type VideoPrerunReport } from "@/services/backend-api";
+import { BackendApiError, backendMediaUrl, editEpisodeProduction, fetchEpisodeProduction, fetchDramaPlanningSource, patchDramaPlanningSource, fetchBackendProject, fetchProductionWorkbench, startCanvasGeneration, applyBackendCanvasOperations, getSegmentVideoReprocessStatus, reprocessSegmentVideo, getEpisodeChapters, getChapter, patchChapter, upsertProjectReferenceAssets, prerunEpisode, type VideoPrerunReport } from "@/services/backend-api";
 import { uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
@@ -39,6 +39,12 @@ function shortModelName(model: string): string {
         .replace(/^(engine-local|local|hermes-local)::/i, "")
         .replace(/^(wb-|wb_|ohmybb-)/i, "")
         .replace(/^minimax-/i, "");
+}
+
+/** 版本行里的模型展示名：本地模型值是权重路径，只留文件名并裁掉超长后缀（完整值留在 title）。 */
+function prettyModelName(model: string): string {
+    const base = shortModelName(model).split(/[\\/]/).pop()!.replace(/\.(safetensors|ckpt|pt|gguf)$/i, "");
+    return base.length > 26 ? `${base.slice(0, 24)}…` : base;
 }
 
 /** 按章编辑原文的文件导入：与建集弹窗（index.tsx importEpisodeFile）完全同一口径。 */
@@ -130,13 +136,204 @@ function referenceKindOf(text: string): "character" | "scene" | "prop" | "other"
     if (/道具|prop|ticket|phone/.test(t)) return "prop";
     return "other";
 }
+const REF_KIND_LABEL: Record<ReturnType<typeof referenceKindOf>, string> = {
+    character: "角色",
+    scene: "场景",
+    prop: "道具",
+    other: "参考",
+};
+/** 影策引用 chip 文案：`角色1 / 场景2 / 道具3`（种类取 referenceKindOf 真值，编号取 ordinal）；种类不明时用原始 label。 */
+export function refChipLabel(t: { roleKind?: string; ordinal?: number; label?: string }) {
+    const kind = t.roleKind as ReturnType<typeof referenceKindOf> | undefined;
+    if (kind && kind !== "other" && t.ordinal) return `${REF_KIND_LABEL[kind]}${t.ordinal}`;
+    return String(t.label || "");
+}
 const REF_KIND_STYLE: Record<ReturnType<typeof referenceKindOf>, string> = {
     character: "border-sky-400 bg-sky-500/10 text-sky-300",
     scene: "border-emerald-400 bg-emerald-500/10 text-emerald-300",
     prop: "border-amber-400 bg-amber-500/10 text-amber-300",
     other: "border-border bg-muted/40 text-muted-foreground",
 };
+
+/** 富提示词编辑器用的彩色 token 样式（原型同 REF_KIND_STYLE，描边+浅底+彩色文字）。 */
+const PROMPT_TOKEN_STYLE: Record<string, string> = {
+    character: "border-sky-400/60 bg-sky-500/10 text-sky-300",
+    scene: "border-emerald-400/60 bg-emerald-500/10 text-emerald-300",
+    prop: "border-amber-400/60 bg-amber-500/10 text-amber-300",
+    other: "border-border bg-muted/40 text-muted-foreground",
+};
+
+function tokenizedPromptHtml(text: string, tokens: Array<{ n: number; kind: string }>): string {
+    const escaped = String(text ?? "")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return escaped.replace(/&lt;Picture\s+(\d+)&gt;/g, (_all, raw: string) => {
+        const n = Number(raw);
+        const kind = tokens.find((t) => t.n === n)?.kind || "other";
+        return `<span contenteditable="false" data-picture-token="${n}" title="参考图 ${n}" class="mx-0.5 inline-flex items-center rounded border px-1 align-baseline ${PROMPT_TOKEN_STYLE[kind] || PROMPT_TOKEN_STYLE.other}">&lt;Picture ${n}&gt;</span>`;
+    });
+}
+
+/** contentEditable 的 innerHTML → 纯文本（保留换行，不丢 <Picture N> 原文）。 */
+function editableText(el: HTMLElement): string {
+    let out = "";
+    const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) { out += node.textContent || ""; return; }
+        if (node.nodeName === "BR") { out += "\n"; return; }
+        const isBlock = node.nodeName === "DIV" || node.nodeName === "P";
+        if (isBlock && out && !out.endsWith("\n")) out += "\n";
+        node.childNodes.forEach(walk);
+        if (isBlock && !out.endsWith("\n")) out += "\n";
+    };
+    el.childNodes.forEach(walk);
+    return out.replace(/\n+$/, "");
+}
+
+/**
+ * 影策「完整视频提示词」富编辑器：正文可直接改，参考图引用显示成按类型着色的行内 chip，
+ * 上方按 角色/环境/道具/素材 分组插入引用。存回的仍是含 <Picture N> 的原文，不引入富文本协议。
+ */
+function RichPromptEditor({ value, onChange, tokens, onEscape, placeholder, originalText }: {
+    value: string;
+    onChange: (next: string) => void;
+    tokens: Array<{ n: number; kind: string; url?: string; name?: string }>;
+    onEscape?: () => void;
+    placeholder?: string;
+    originalText?: string;
+}) {
+    const ref = useRef<HTMLDivElement | null>(null);
+    const lastValue = useRef<string | null>(null);
+    const [group, setGroup] = useState<"角色" | "环境" | "道具" | "素材">("角色");
+    const kindOfGroup = group === "角色" ? "character" : group === "环境" ? "scene" : group === "道具" ? "prop" : "other";
+    const caret = useRef<Range | null>(null);
+
+    // 外部改写（重新撰写 / 恢复模型版本）才重绘；用户打字时不重绘，避免光标跳动。
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        if (value === lastValue.current) return;
+        lastValue.current = value;
+        el.innerHTML = tokenizedPromptHtml(value, tokens);
+    }, [value, tokens]);
+
+    const commit = () => {
+        const el = ref.current;
+        if (!el) return;
+        const text = editableText(el);
+        lastValue.current = text;
+        onChange(text);
+    };
+    const rememberCaret = () => {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount && ref.current?.contains(sel.anchorNode)) caret.current = sel.getRangeAt(0).cloneRange();
+    };
+    const insertToken = (n: number) => {
+        const el = ref.current;
+        if (!el) return;
+        el.focus();
+        const sel = window.getSelection();
+        const range = caret.current && el.contains(caret.current.startContainer) ? caret.current : null;
+        if (range) { sel?.removeAllRanges(); sel?.addRange(range); }
+        else {
+            const r = document.createRange();
+            r.selectNodeContents(el);
+            r.collapse(false);
+            sel?.removeAllRanges();
+            sel?.addRange(r);
+        }
+        const span = document.createElement("span");
+        span.setAttribute("contenteditable", "false");
+        span.setAttribute("data-picture-token", String(n));
+        span.className = `mx-0.5 inline-flex items-center rounded border px-1 align-baseline ${PROMPT_TOKEN_STYLE[tokens.find((t) => t.n === n)?.kind || "other"] || PROMPT_TOKEN_STYLE.other}`;
+        span.textContent = `<Picture ${n}>`;
+        const r = sel?.getRangeAt(0);
+        if (r) {
+            r.deleteContents();
+            r.insertNode(span);
+            r.setStartAfter(span);
+            r.collapse(true);
+            sel?.removeAllRanges();
+            sel?.addRange(r);
+        }
+        commit();
+    };
+
+    const grouped = tokens.filter((t) => (t.kind || "other") === kindOfGroup);
+    return (
+        <div className="rounded-[12px] border border-border bg-background" data-studio-seg-prompt-rich>
+            <div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1.5">
+                <span className="inline-flex items-center gap-1 rounded-md border border-border bg-card px-1.5 py-0.5 text-[11px] text-muted-foreground"><Link2 className="size-3" /> @引用</span>
+                {(["角色", "环境", "道具", "素材"] as const).map((g) => (
+                    <button key={g} type="button" onClick={() => setGroup(g)}
+                        className={cn("h-6 rounded-md px-2 text-[11px] transition", group === g ? "bg-foreground/[0.08] font-semibold text-foreground" : "text-muted-foreground hover:text-foreground")}
+                        data-studio-prompt-group={g}>{g}</button>
+                ))}
+                <span className="flex-1" />
+                <span className="text-[11px] text-muted-foreground/80" data-studio-prompt-editable-hint>正文可直接修改</span>
+                <Popover trigger="click" placement="bottomRight"
+                    content={<div className="max-h-64 max-w-[420px] overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed" data-studio-prompt-original>{originalText?.trim() || "本段镜头没有原文回指"}</div>}>
+                    <button type="button" className="h-6 rounded-md px-1.5 text-[11px] text-muted-foreground transition hover:text-foreground" data-studio-prompt-view-original>查看原文</button>
+                </Popover>
+                <span className="text-[10px] text-muted-foreground">提交时附加，参考编号按模型收到的图片顺序对齐</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5">
+                {grouped.length ? grouped.map((t) => (
+                    <button key={t.n} type="button" onClick={() => insertToken(t.n)} data-studio-prompt-token={t.n}
+                        className={cn("inline-flex h-[26px] items-center gap-1.5 rounded-full border px-1.5 pr-2 text-[12px]", PROMPT_TOKEN_STYLE[t.kind] || PROMPT_TOKEN_STYLE.other)}>
+                        {t.url ? <img src={t.url} alt="" className="size-5 shrink-0 rounded-full object-cover" /> : <Eye className="size-3" />}
+                        <span className="font-semibold">{REF_KIND_LABEL[(t.kind || "other") as ReturnType<typeof referenceKindOf>] || "参考"}</span>
+                        <span className="opacity-80">参考图 {t.n} · {t.name || ""}</span>
+                    </button>
+                )) : <span className="text-[11px] text-muted-foreground">本段没有{group}类参考图</span>}
+            </div>
+            <div
+                ref={ref}
+                contentEditable
+                suppressContentEditableWarning
+                role="textbox"
+                aria-multiline="true"
+                data-studio-seg-prompt-input
+                data-placeholder={placeholder}
+                onInput={commit}
+                onKeyUp={rememberCaret}
+                onMouseUp={rememberCaret}
+                onKeyDown={(e) => {
+                    if (e.key === "Escape" && onEscape) { e.stopPropagation(); e.preventDefault(); onEscape(); }
+                }}
+                style={{ fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap" }}
+                className="thin-scrollbar max-h-[480px] min-h-[320px] overflow-y-auto px-[11px] py-2 outline-none empty:before:pointer-events-none empty:before:text-muted-foreground/70 empty:before:content-[attr(data-placeholder)]"
+            />
+        </div>
+    );
+}
 const str = (v: unknown): string => (typeof v === "string" || typeof v === "number") ? String(v) : "";
+
+/**
+ * 参考图绑定的 name 在历史数据里可能是空的（只存了 `<Picture N>`）：用资产真名表兜底。
+ * 绑定 id 可能带实例后缀（`asset-character-526xuk-f7f8ca75d0`），先整体匹配，再逐段去掉尾部片段匹配。
+ */
+function resolveAssetName(id: string, names: Readonly<Record<string, string>> | undefined): string {
+    const key = str(id);
+    if (!key || !names) return "";
+    if (names[key]) return names[key];
+    // 资产真名表的 id 与参考绑定 id 同源但前缀/后缀不同（`shared-image-asset-character-526xuk`
+    // vs `asset-character-526xuk-f7f8ca75d0`）：按「类型-编号」签名匹配。
+    const signature = (value: string) => {
+        const hit = value.match(/(character|scene|prop)-([a-z0-9]+)/i);
+        return hit ? `${hit[1].toLowerCase()}-${hit[2].toLowerCase()}` : "";
+    };
+    const wanted = signature(key);
+    if (wanted) {
+        const found = Object.keys(names).find((k) => signature(k) === wanted);
+        if (found) return names[found];
+    }
+    const parts = key.split("-");
+    for (let i = parts.length - 1; i >= 3; i -= 1) {
+        const candidate = parts.slice(0, i).join("-");
+        if (names[candidate]) return names[candidate];
+    }
+    const hit = Object.keys(names).find((k) => k && (key.startsWith(k) || k.startsWith(key)));
+    return hit ? names[hit] : "";
+}
 
 /** 等待原因的短标签：取冒号或括号前的部分，完整原因放 detail（对齐影策 videoWaitLabel，segment-parts.tsx:17-20）。 */
 export function videoWaitLabel(wait: string) {
@@ -210,7 +407,7 @@ export function segmentCardState(input: {
     // inputOutdated 是 H3 段真实字段：提示词/参考图变更后当前视频为旧版（对齐影策 stale「视频需重新生成」）。
     if (input.inputOutdated) return { tone: "stale", label: "视频需重新生成（输入已更改）", detail: "本段提示词或参考图已变更，当前视频为旧版。" };
     if (str(input.artStatus) === "stale") return { tone: "stale", label: "视频需重新生成" };
-    if (input.hasVideo || videoStatus === "ready") return { tone: "ready", label: "视频已生成" };
+    if (input.hasVideo || ["ready", "success", "succeeded"].includes(videoStatus)) return { tone: "ready", label: "视频已生成" };
     // 后端 state 未落地时的本地真值：没有提示词就是待撰写。
     if (!input.prompt && !promptStatus) return { tone: "idle", label: "待撰写提示词" };
     return { tone: "idle", label: "待生成视频" };
@@ -237,6 +434,12 @@ export const LOCAL_PROMPT_SOFT_LIMIT_CHARS = 40_000;
 /** 只认有限正数；undefined / NaN / 0 / 负数一律视为「无真值」，兼容字段未落地的中间态。 */
 export function modelPromptMaxChars(capabilities: unknown): number | null {
     const value = (capabilities as { promptMaxChars?: unknown } | null | undefined)?.promptMaxChars;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+/** 影策段卡「上限 15s」：模型声明的单次视频时长上限（/settings/ai-config 已下发的能力真值，无声明则 null）。 */
+export function modelMaxVideoSeconds(capabilities: unknown): number | null {
+    const value = (capabilities as { maxVideoSeconds?: unknown } | null | undefined)?.maxVideoSeconds;
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
 }
 
@@ -589,6 +792,8 @@ type ScreenplayShot = {
     framing: string; movement: string; sec: number; durationFrames: number; lines: ScreenplayLine[];
     /** 影策动作/起幅画面/转场：directorPatchFields.shot 已含 action/imagePrompt/transition，可写回。 */
     action?: string; imagePrompt?: string; transition?: string;
+    /** 影策 script-view「有原交出处理」：本镜对应的原文小句（shots[].sourceQuote 真值）。 */
+    sourceQuote?: string;
 };
 type ScreenplayScene = { key: string; no: number; name: string; sec: number; shots: ScreenplayShot[] };
 
@@ -630,6 +835,7 @@ function screenplayData(source: Source): { scenes: ScreenplayScene[] } {
             sec,
             durationFrames: Number(sh.duration_frames || sh.durationMs || 0),
             action: str(sh.action),
+            sourceQuote: str(sh.sourceQuote),
             imagePrompt: str(sh.imagePrompt),
             transition: str(sh.transition),
             lines,
@@ -660,6 +866,14 @@ const SHOT_FRAMINGS: Array<{ code: string; label: string }> = [
     { code: "ECU", label: "特写" },
 ];
 const FRAMING_CODES = SHOT_FRAMINGS.map(f => f.code);
+
+/** 转场下拉（照搬影策 lib/drama/storyboard TRANSITION_LABEL：cut/fadeblack/fadewhite）；空值表示不设转场，按硬切处理。 */
+const SHOT_TRANSITIONS: Array<{ code: string; label: string }> = [
+    { code: "", label: "硬切" },
+    { code: "cut", label: "硬切" },
+    { code: "fadeblack", label: "黑场过渡" },
+    { code: "fadewhite", label: "闪白" },
+];
 
 type ShotDraft = { title: string; visual: string; framing: string; movement: string; seconds: string; action: string; imagePrompt: string; transition: string };
 type ShotDialogueChange = { utteranceId?: string; text: string; speaker?: string };
@@ -736,96 +950,102 @@ function ShotEditor({ shot, fps, busy, isFirst, onPatch, onDialogueSave, onDone 
 
     return (
         <div className="space-y-2">
-            <div className="grid grid-cols-2 gap-2">
-                <label className="block" data-studio-shot-field="title">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">标题</span>
-                    <input value={draft.title} onChange={change("title")} onBlur={flush} onKeyDown={enterBlur}
-                        className="h-7 w-full rounded border border-border bg-background px-2 text-[11px] outline-none focus:border-primary" placeholder="镜头标题" />
-                </label>
-                <label className="block" data-studio-shot-field="seconds">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">时长</span>
-                    <span className="relative block">
-                        <input type="number" min={0.5} max={60} step={0.5} value={draft.seconds} onChange={change("seconds")} onBlur={flush} onKeyDown={enterBlur}
-                            className="h-7 w-full rounded border border-border bg-background px-2 pr-6 text-[11px] outline-none focus:border-primary" />
-                        <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">秒</span>
-                    </span>
-                </label>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-                <label className="block" data-studio-shot-field="framing">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">景别</span>
-                    <select value={draft.framing} onChange={change("framing")} onBlur={flush}
-                        className="h-7 w-full rounded border border-border bg-background px-1.5 text-[11px] outline-none focus:border-primary">
-                        {!FRAMING_CODES.includes(draft.framing) ? <option value={draft.framing}>{draft.framing || "自动"}</option> : null}
-                        {SHOT_FRAMINGS.map(f => <option key={f.code} value={f.code}>{f.code} · {f.label}</option>)}
-                    </select>
-                </label>
-                <label className="block" data-studio-shot-field="movement">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">运镜</span>
-                    <input list="studio-camera-options" value={draft.movement} onChange={change("movement")} onBlur={flush} onKeyDown={enterBlur}
-                        className="h-7 w-full rounded border border-border bg-background px-2 text-[11px] outline-none focus:border-primary" placeholder="如：缓慢推近" />
-                    {/* 影策 CAMERAS 词表只作建议；保留原有自由文本，不强改 shot.camera 数据。 */}
-                    <datalist id="studio-camera-options">
-                        {CAMERAS.map((value) => <option key={value} value={value} />)}
-                    </datalist>
-                </label>
-            </div>
-            <label className="block" data-studio-shot-field="visual">
-                <span className="mb-1 block text-[10px] text-muted-foreground">画面描述</span>
-                <textarea value={draft.visual} onChange={change("visual")} onBlur={flush} rows={3}
-                    className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-5 outline-none focus:border-primary" placeholder="这一镜的画面内容" />
-            </label>
-            {/* 影策 segment-dialog 的动作 / 起幅画面 / 转场：directorPatchFields.shot 已含三字段，
-                随 patch_director_source 真写回制作稿；首镜无转场，transition 输入禁用。 */}
-            <div className="grid grid-cols-2 gap-2" data-studio-shot-extra>
-                <label className="block" data-studio-shot-field="action">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">动作</span>
-                    <input value={draft.action} onChange={change("action")} onBlur={flush} onKeyDown={enterBlur}
-                        className="h-7 w-full rounded border border-border bg-background px-2 text-[11px] outline-none focus:border-primary" placeholder="这一镜的动作" />
-                </label>
-                <label className="block" data-studio-shot-field="transition">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">转场{isFirst ? "（首镜无转场）" : ""}</span>
-                    <input value={draft.transition} disabled={isFirst} onChange={change("transition")} onBlur={flush} onKeyDown={enterBlur}
-                        className="h-7 w-full rounded border border-border bg-background px-2 text-[11px] outline-none focus:border-primary disabled:opacity-50" placeholder={isFirst ? "首镜无转场" : "如：淡入 / 硬切 / 叠化"} />
-                </label>
-                <label className="col-span-2 block" data-studio-shot-field="imagePrompt">
-                    <span className="mb-1 block text-[10px] text-muted-foreground">起幅画面</span>
-                    <textarea value={draft.imagePrompt} onChange={change("imagePrompt")} onBlur={flush} rows={2}
-                        className="w-full resize-y rounded border border-border bg-background p-2 text-[11px] leading-5 outline-none focus:border-primary" placeholder="这一镜的起幅画面" />
-                </label>
-            </div>
-            <div className="border-t border-border pt-2" data-studio-shot-dialogue>
+            {/* 影策 ShotEditor 字段顺序：台词/说话人 → 时长 → 景别/运镜/转场 → 动作 → 起幅画面 → 原文。 */}
+            <div className="border-b border-border pb-2" data-studio-shot-dialogue>
                 <div className="mb-1 flex items-center gap-2">
-                    <span className="text-[10px] text-muted-foreground">台词与说话人（写回导演源稿）</span>
+                    <span className="text-[11px] font-semibold text-muted-foreground">台词</span>
                     <button type="button" onClick={() => setDialogueDraft(lines => [...lines, { speaker: "", text: "" }])}
-                        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition hover:bg-muted/60">+ 添加一句</button>
+                        style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-2 font-medium text-muted-foreground transition hover:bg-muted/60">+ 添加一句</button>
                 </div>
                 <div className="space-y-1.5">
                     {dialogueDraft.map((line, i) => (
                         <div key={i} className="grid grid-cols-[84px_1fr] gap-1.5">
-                            <input value={line.speaker} data-studio-shot-speaker={i}
+                            <input value={line.speaker} data-studio-shot-speaker={i} aria-label="说话人"
                                 onChange={e => setDialogueDraft(lines => lines.map((x, j) => j === i ? { ...x, speaker: e.target.value } : x))}
                                 onBlur={flushDialogue} onKeyDown={enterBlur}
-                                className="h-7 w-full rounded border border-border bg-background px-1.5 text-[11px] outline-none focus:border-primary"
-                                placeholder="说话人" />
-                            <textarea value={line.text} data-studio-shot-dialogue-text={i} rows={2}
+                                style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none focus:border-primary"
+                                placeholder="旁白" />
+                            <textarea value={line.text} data-studio-shot-dialogue-text={i} rows={2} aria-label="台词"
+                                title="Ctrl+Enter 保存"
                                 onChange={e => setDialogueDraft(lines => lines.map((x, j) => j === i ? { ...x, text: e.target.value } : x))}
                                 onBlur={flushDialogue}
                                 onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.blur(); }}
-                                className="resize-y rounded border border-border bg-background p-1.5 text-[11px] leading-5 outline-none focus:border-primary"
-                                placeholder="这一镜的台词（Ctrl+Enter 保存）" />
+                                style={{ fontSize: 13, lineHeight: "21px" }} className="resize-y rounded-[12px] border border-border bg-background px-3 py-[5.5px] outline-none focus:border-primary"
+                                placeholder="无台词" />
                         </div>
                     ))}
                 </div>
             </div>
+            <div className="grid grid-cols-2 gap-2">
+                <label className="block" data-studio-shot-field="title">
+                    <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">标题</span>
+                    <input value={draft.title} onChange={change("title")} onBlur={flush} onKeyDown={enterBlur}
+                        style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none focus:border-primary" placeholder="镜头标题" />
+                </label>
+                <label className="block" data-studio-shot-field="seconds">
+                    <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">时长</span>
+                    <span className="relative block">
+                        <input type="number" min={1} max={60} step={0.5} value={draft.seconds} onChange={change("seconds")} onBlur={flush} onKeyDown={enterBlur}
+                            aria-label="镜头时长"
+                            style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 pr-7 outline-none focus:border-primary" />
+                        <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground">秒</span>
+                    </span>
+                </label>
+            </div>
+            {/* 影策 segment-dialog 的 景别/运镜/转场 三联动：directorPatchFields.shot 已含三字段，
+                随 patch_director_source 真写回制作稿；首镜无转场，transition 禁用。 */}
+            <div className="grid grid-cols-3 gap-2" data-studio-shot-extra>
+                <label className="block" data-studio-shot-field="framing">
+                    <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">景别</span>
+                    <select value={draft.framing} onChange={change("framing")} onBlur={flush} aria-label="景别"
+                        style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[8px] border border-border bg-background px-[11px] outline-none focus:border-primary">
+                        {!FRAMING_CODES.includes(draft.framing) ? <option value={draft.framing}>{draft.framing || "自动"}</option> : null}
+                        {SHOT_FRAMINGS.map(f => <option key={f.code} value={f.code}>{f.label}</option>)}
+                    </select>
+                </label>
+                <label className="block" data-studio-shot-field="movement">
+                    <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">运镜</span>
+                    <select value={draft.movement} onChange={change("movement")} onBlur={flush} aria-label="运镜"
+                        style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[8px] border border-border bg-background px-[11px] outline-none focus:border-primary">
+                        <option value="">自动</option>
+                        {/* 已存在的自由文本保留为可选项，不静默丢掉 shot.camera 里的旧值。 */}
+                        {draft.movement && !CAMERAS.includes(draft.movement) ? <option value={draft.movement}>{draft.movement}</option> : null}
+                        {CAMERAS.map((value) => <option key={value} value={value}>{value}</option>)}
+                    </select>
+                </label>
+                <label className="block" data-studio-shot-field="transition" title={isFirst ? "首镜无转场" : undefined}>
+                    <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">转场</span>
+                    <select value={draft.transition} disabled={isFirst} onChange={change("transition")} onBlur={flush} aria-label="转场"
+                        style={{ fontSize: 13 }} className="h-[34px] w-full rounded-[8px] border border-border bg-background px-[11px] outline-none focus:border-primary disabled:opacity-50">
+                        <option value="">{isFirst ? "首镜无转场" : "硬切"}</option>
+                        {draft.transition && !SHOT_TRANSITIONS.some(t => t.code === draft.transition) ? <option value={draft.transition}>{draft.transition}</option> : null}
+                        {SHOT_TRANSITIONS.filter(t => t.code).map(t => <option key={t.code} value={t.code}>{t.label}</option>)}
+                    </select>
+                </label>
+            </div>
+            <label className="block" data-studio-shot-field="visual">
+                <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">画面描述</span>
+                <textarea value={draft.visual} onChange={change("visual")} onBlur={flush} rows={3}
+                    style={{ fontSize: 13, lineHeight: "21px" }} className="w-full resize-y rounded-[12px] border border-border bg-background px-3 py-[5.5px] outline-none focus:border-primary" placeholder="这一镜的画面内容" />
+            </label>
+            <label className="block" data-studio-shot-field="action">
+                <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">动作</span>
+                <textarea value={draft.action} onChange={change("action")} onBlur={flush} rows={2}
+                    style={{ fontSize: 13, lineHeight: "21px" }} className="w-full resize-y rounded-[12px] border border-border bg-background px-3 py-[5.5px] outline-none focus:border-primary" />
+            </label>
+            <label className="block" data-studio-shot-field="imagePrompt">
+                <span className="mb-1 block text-[11px] font-semibold text-muted-foreground">起幅画面</span>
+                <textarea value={draft.imagePrompt} onChange={change("imagePrompt")} onBlur={flush} rows={2}
+                    style={{ fontSize: 13, lineHeight: "21px" }} className="w-full resize-y rounded-[12px] border border-border bg-background px-3 py-[5.5px] outline-none focus:border-primary" />
+            </label>
             <div className="flex items-center gap-2 pt-0.5">
                 <button type="button" disabled={busy} onClick={() => { flush(); flushDialogue(); }}
-                    className="flex h-7 items-center gap-1 rounded bg-primary px-2.5 text-[11px] text-primary-foreground transition hover:opacity-90 disabled:opacity-50">
+                    style={{ fontSize: 12 }} className="flex h-7 items-center gap-[6px] rounded-[8px] bg-primary px-2 font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50">
                     <Save className="size-3" /> {busy ? "保存中…" : "保存"}
                 </button>
                 <button type="button" onClick={() => { flush(); flushDialogue(); onDone(); }}
-                    className="h-7 rounded border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted/60">完成</button>
-                <span className="ml-auto text-[10px] text-muted-foreground">失焦自动保存 · 改动只让本段提示词与视频过期</span>
+                    style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-2 font-medium text-muted-foreground transition hover:bg-muted/60">完成</button>
+                <span className="ml-auto text-[11px] text-muted-foreground">失焦自动保存 · 改动镜头后本段提示词与视频需要重新生成</span>
             </div>
         </div>
     );
@@ -866,12 +1086,15 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
     // 原文对照 = 本集覆盖章节正文（真值，与 pipeline.runScript 同源）；老数据无章映射时回退剧目级 sourceScript 派生。
     const [chapterSource, setChapterSource] = useState("");
     const [sourceChapters, setSourceChapters] = useState<Array<{ no: number; title: string; body: string; id?: string; sourceFormat?: string }>>([]);
+    /** 原文对照首次读取指示：初值 true，避免首帧「本集暂无原文」先把真实正文闪没。 */
+    const [sourceLoading, setSourceLoading] = useState(true);
     const [activeChapter, setActiveChapter] = useState<number | null>(null);
     useEffect(() => {
         let alive = true;
+        setSourceLoading(true);
         // 老数据兜底：剧目级 sourceScript 按章切分派生（真值仍是 chapters API，只有无章映射时才走这里）。
         const fallback = () => {
-            if (!dramaId || !ep?.no) { setChapterSource(""); setSourceChapters([]); return; }
+            if (!dramaId || !ep?.no) { setChapterSource(""); setSourceChapters([]); setSourceLoading(false); return; }
             void fetchDramaPlanningSource(dramaId).then((res) => {
                 if (!alive) return;
                 const source = String(res?.sourceScript || "");
@@ -888,7 +1111,8 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                 const mine = chapters.find((ch) => ch.no === ep.no);
                 setActiveChapter(mine?.no ?? null);
                 setChapterSource(mine?.body || "");
-            }).catch(() => { if (alive) { setChapterSource(""); setSourceChapters([]); } });
+            }).catch(() => { if (alive) { setChapterSource(""); setSourceChapters([]); } })
+                .finally(() => { if (alive) setSourceLoading(false); });
         };
         if (!ep?.id) { fallback(); return () => { alive = false; }; }
         void getEpisodeChapters(ep.id).then((res) => {
@@ -905,6 +1129,7 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
             setSourceChapters(rows);
             setActiveChapter(rows[0]?.no ?? null);
             setChapterSource(rows.map((r) => r.body).join("\n\n"));
+            setSourceLoading(false);
         }).catch(() => { if (alive) fallback(); });
         return () => { alive = false; };
     }, [dramaId, ep?.id, ep?.no, sourceUpdatedAt, chapterEditVersion]);
@@ -1133,22 +1358,22 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                 <ErrorBanner error={ep.error || ""} failed={ep.jobs.failed} />
 
                 <section className="rounded-lg border border-border bg-card/60 p-4" data-studio-script-synopsis>
-                    <div className="mb-2 flex items-center gap-2 text-xs font-semibold">
+                    <div className="mb-2 flex flex-wrap items-center gap-2 text-xs font-semibold">
                         <BookOpen className="size-3.5 text-muted-foreground" /> 本集梗概
                         <Tooltip title={formatInfo.detail}>
-                            <span className="cursor-help font-normal text-muted-foreground" data-studio-source-format>素材：{formatInfo.title}</span>
+                            <span className="cursor-help whitespace-nowrap font-normal text-muted-foreground" data-studio-source-format>素材：{formatInfo.title}</span>
                         </Tooltip>
-                        <div className="ml-auto flex items-center gap-3 text-[11px] font-normal text-muted-foreground">
-                            <button type="button" onClick={() => setProcessOpen(true)} disabled={!processJobs?.length} className="flex items-center gap-1 transition hover:text-foreground disabled:opacity-50" data-studio-process-open>
+                        <div className="ml-auto flex shrink-0 items-center gap-3 text-[11px] font-normal text-muted-foreground">
+                            <button type="button" onClick={() => setProcessOpen(true)} disabled={!processJobs?.length} className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground disabled:opacity-50" data-studio-process-open>
                                 <ScanSearch className={cn("size-3")} /> 改编过程
                             </button>
-                            <button type="button" onClick={confirmRescript} disabled={busy} className="flex items-center gap-1 transition hover:text-foreground disabled:opacity-50">
+                            <button type="button" onClick={confirmRescript} disabled={busy} className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground disabled:opacity-50">
                                 <Wand2 className="size-3" /> 重新改编
                             </button>
                             <Tooltip title={sourceOpen ? "收起原文" : "对照原文"}>
                                 <button type="button" aria-pressed={sourceOpen} aria-label={sourceOpen ? "收起原文" : "对照原文"}
                                     onClick={() => setSourceOpen((open) => !open)}
-                                    className="flex items-center gap-1 transition hover:text-foreground" data-studio-source-toggle>
+                                    className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground" data-studio-source-toggle>
                                     {sourceOpen ? <PanelRightClose className="size-3.5" /> : <PanelRightOpen className="size-3.5" />}
                                     <span>{sourceOpen ? "收起原文" : "对照原文"}</span>
                                 </button>
@@ -1194,7 +1419,7 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                         <div className="space-y-2">
                             {sp.scenes.map((scene) => (
                                 <div key={`${scene.key}-${scene.no}`} className="overflow-hidden rounded-md border border-border">
-                                    <div className="flex items-center gap-2 bg-muted/40 px-2.5 py-1.5 text-[11px]">
+                                    <div className="flex items-center gap-2 bg-foreground/[0.03] px-2.5 py-1.5 text-[11px]">
                                         <span className="font-semibold">场 {scene.no}</span>
                                         <span className="min-w-0 truncate text-muted-foreground" title={scene.name}>/ {scene.name}</span>
                                         <span className="ml-auto shrink-0 font-normal text-muted-foreground">{scene.shots.length}镜 · {Math.round(scene.sec)}秒</span>
@@ -1203,44 +1428,50 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                                         {scene.shots.map((shot) => {
                                             const isSelected = selectedShot === shot.id;
                                             return (
-                                                <div key={shot.id} className={cn(isSelected && "bg-primary/10 ring-1 ring-inset ring-primary/30")}>
+                                                <div key={shot.id} className={cn(isSelected && "bg-foreground/[0.04] ring-1 ring-inset ring-foreground/15")}>
                                                     <div
                                                         role="button"
                                                         tabIndex={0}
                                                         aria-current={isSelected}
                                                         onClick={() => setSelectedShot(shot.id)}
                                                         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedShot(shot.id); } }}
-                                                        className="flex w-full cursor-pointer gap-2 px-2.5 py-2 text-left transition hover:bg-muted/50"
+                                                        className="flex w-full cursor-pointer gap-2 px-2.5 py-2 text-left transition hover:bg-foreground/[0.03]"
                                                         data-studio-script-shot={shot.id}
                                                     >
                                                         <span className="mt-0.5 shrink-0 font-mono text-[11px] font-semibold text-muted-foreground">{shot.no}</span>
                                                         <span className="min-w-0 flex-1">
                                                             <span className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
-                                                                {shot.framing ? <span className="rounded bg-muted px-1 py-0.5 font-medium" title={shot.framing}>{framingLabel(shot.framing)}</span> : null}
-                                                                {shot.movement ? <span className="rounded bg-muted px-1 py-0.5">{shot.movement}</span> : null}
-                                                                <span className="rounded bg-muted px-1 py-0.5">{shot.sec.toFixed(1)}s</span>
+                                                                {shot.framing ? <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 font-medium" title={shot.framing}>{framingLabel(shot.framing)}</span> : null}
+                                                                {shot.movement ? <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">{shot.movement}</span> : null}
+                                                                <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5 tabular-nums">{shot.sec.toFixed(1)}s</span>
+                                                                {shot.transition ? <span className="rounded bg-foreground/[0.06] px-1.5 py-0.5">{shot.transition}</span> : null}
+                                                                {shot.sourceQuote ? <span className="inline-flex items-center gap-1 rounded bg-foreground/[0.06] px-1.5 py-0.5" title={shot.sourceQuote} data-studio-shot-source-quote><Quote className="size-3" />有原交出处理</span> : null}
                                                                 {shot.title ? <span className="min-w-0 truncate">{shot.title}</span> : null}
                                                             </span>
-                                                            {shot.visual ? <span className="mt-1 block whitespace-pre-wrap text-[11px] leading-5 text-foreground/85">{shot.visual}</span> : null}
+                                                            {/* 影策 script-view.tsx:230 优先展示 action（可拍到的动作/画面），本地无 action 时退回 visual；未选中只给两行，密度对齐影策。 */}
+                                                            {(() => {
+                                                                const body = shot.action || shot.visual;
+                                                                if (!body) return null;
+                                                                return <span title={body} className={cn("mt-1 block whitespace-pre-wrap text-[12px] leading-5 text-foreground/80", !isSelected && "line-clamp-1")}>{body}</span>;
+                                                            })()}
                                                             {shot.lines.length ? (
                                                                 <span className="mt-1 block space-y-0.5">
                                                                     {shot.lines.map((ln, li) => (
-                                                                        <span key={li} className="block text-[11px] leading-5 text-foreground/75">
-                                                                            <Quote className="mr-1 inline size-3 align-[-2px] text-muted-foreground" />
-                                                                            <span className="font-medium">{ln.speaker}：</span>{ln.text}
+                                                                        <span key={li} className="block text-[12px] leading-5 text-foreground/80">
+                                                                            <span className="font-semibold text-foreground/60">{ln.speaker}：</span>{ln.text}
                                                                         </span>
                                                                     ))}
                                                                 </span>
                                                             ) : null}
                                                             {/* 影策 script-view.tsx:234：空镜头占位提示（原有字段派生，不新增假数据） */}
-                                                            {!shot.visual && !shot.lines.length ? (
+                                                            {!shot.visual && !shot.action && !shot.lines.length ? (
                                                                 <span className="mt-1 block text-[11px] italic leading-5 text-muted-foreground/60">空镜头，点击填写动作或台词</span>
                                                             ) : null}
                                                         </span>
-                                                        {!isSelected ? <Pencil className="mt-0.5 size-3 shrink-0 text-muted-foreground/60" /> : null}
+                                                        {!isSelected ? <Pencil className="mt-0.5 size-3 shrink-0 text-muted-foreground/40" /> : null}
                                                     </div>
                                                     {isSelected ? (
-                                                        <div className="border-t border-primary/20 px-2.5 py-2" data-studio-shot-editor onClick={(e) => e.stopPropagation()}>
+                                                        <div className="border-t border-border px-2.5 pb-2 pt-4" data-studio-shot-editor onClick={(e) => e.stopPropagation()}>
                                                             <ShotEditor
                                                                 key={shot.id}
                                                                 shot={shot}
@@ -1344,13 +1575,17 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                     <span>{activeChapter != null ? `第 ${activeChapter} 章` : `第 ${ep.no} 段`}</span><span>{fullText.length.toLocaleString()} 字</span>
                     {selectedShot ? <span className="ml-auto text-rose-500">已定位镜头 {selectedShot}</span> : null}
                 </div>
-                <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2" data-studio-source-text>
+                <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2" data-studio-source-text aria-busy={sourceLoading}>
                     {fullText ? (
                         <p className="whitespace-pre-wrap text-[12px] leading-6 text-foreground/85">
                             {sourceHit >= 0 ? (
                                 <>{fullText.slice(0, sourceHit)}<mark ref={markRef} className="rounded bg-amber-500/30 px-0.5 text-inherit">{fullText.slice(sourceHit, sourceHit + sourceHitLen)}</mark>{fullText.slice(sourceHit + sourceHitLen)}</>
                             ) : fullText}
                         </p>
+                    ) : sourceLoading ? (
+                        <div className="flex h-full items-center justify-center gap-2 text-center text-xs text-muted-foreground" role="status" data-studio-source-loading>
+                            <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> 正在读取章节原文…
+                        </div>
                     ) : (
                         <div className="flex h-full items-center justify-center text-center text-xs text-muted-foreground">
                             本集暂无原文。可在分集中文「原文」字段补充。
@@ -1514,6 +1749,9 @@ function quotedSourceLines(text: string): string[] {
         const key = dialogueKey(line);
         if (!key || seen.has(key)) continue;
         if (/第.章|本节|此处|如下|台词如下|旁白说明/.test(line)) continue;
+        // 对齐影策 dialogue_check.go:72：不足 4 字且不带句读的引号多是专有名词/强调/拟声
+        // （所谓的"天才"、"哐当"），不算台词，不参与逐字核查告警。
+        if ([...key].length < 4 && !/[，。！？…!?,~～、；]/.test(line)) continue;
         seen.add(key);
         result.push(line);
     }
@@ -1530,8 +1768,8 @@ function DialogueCheckNotice({ sourceLines, shotLines, busy, onRescript }: { sou
     const missing = useMemo(() => missingDialogue(sourceLines, shotLines), [sourceLines, shotLines]);
     if (!sourceLines.length) return null;
     if (!missing.length) {
-        return <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[11px] text-emerald-600 dark:text-emerald-400" data-studio-dialogue-check="ok">
-            <CheckCircle2 className="size-3.5 shrink-0" /> 原文 {sourceLines.length} 句台词都已逐字保留在镜头对白里
+        return <div className="flex items-center gap-2 rounded-md border border-border bg-foreground/[0.02] px-3 py-2 text-[11px] text-muted-foreground" data-studio-dialogue-check="ok">
+            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" /> 原文 {sourceLines.length} 句台词都已逐字保留在镜头对白里
         </div>;
     }
     const shown = expanded ? missing : missing.slice(0, 3);
@@ -1557,6 +1795,27 @@ function formatClipSec(sec: number): string {
     return `${Math.max(0, Number(sec) || 0).toFixed(1)}s`;
 }
 
+/** 段封面静帧：首帧解码前用真实 video 事件（loadeddata/canplay）驱动 shimmer，不用定时器假装；换片源按 url 隔离状态。 */
+function SegmentCoverVideo({ url }: { url: string }) {
+    const [media, setMedia] = useState<{ url: string; decoded: boolean; failed: boolean }>({ url, decoded: false, failed: false });
+    const view = media.url === url ? media : { url, decoded: false, failed: false };
+    return (
+        <>
+            <video key={url} src={`${url}#t=0.1`} muted playsInline preload="metadata" className="pointer-events-none size-full object-cover"
+                onLoadedData={() => setMedia({ url, decoded: true, failed: false })}
+                onCanPlay={() => setMedia({ url, decoded: true, failed: false })}
+                onError={() => setMedia({ url, decoded: false, failed: true })}
+                data-studio-segment-video />
+            {!view.decoded && !view.failed ? (
+                <span className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-muted/20 via-muted/50 to-muted/20" role="status" data-studio-cover-shimmer />
+            ) : null}
+            {view.failed ? (
+                <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-muted/40 text-[9px] text-muted-foreground" data-studio-cover-error>封面加载失败</span>
+            ) : null}
+        </>
+    );
+}
+
 /** 影策「分镜/board」页数据：统计条 + 剧情段卡片 + 参考图，全部从真实制作稿派生。 */
 /** 段卡片镜头预览：台词优先（shot.utterance_refs → source.utterances，兼容老剧目 dialogues[]），否则画面描述。对齐影策 storyboard.tsx:163-194。 */
 function shotPreview(source: Source, sh: Row): { speaker: string; text: string } {
@@ -1566,7 +1825,20 @@ function shotPreview(source: Source, sh: Row): { speaker: string; text: string }
 }
 
 /** 把制作稿 draft 投影成段卡片数据（含后端 segment.state 真值接线）；导出供 gap C 契约测试直接验证。 */
-export function boardData(production: EpisodeProduction | undefined, clipMedia: readonly StudioClipMedia[] = [], clipFailureByTarget: Readonly<Record<string, string>> = {}) {
+/** 卡片徽标的紧凑文案（影策 .drama-sg-status 只有 2-4 个字）：去掉「视频」前缀与括号原因，完整文案留在 Tooltip。 */
+export function compactStateLabel(label: string) {
+    return label.replace(/（[^）]*）/g, "").replace(/^视频/, "").trim() || label;
+}
+
+/** 影策 .drama-sg-actions 的按钮文案状态机：等上一段 / 生成中 / 重新生成 / 生成。 */
+export function segmentGenerateLabel(tone: string) {
+    if (tone === "busy") return "生成中…";
+    if (tone === "blocked") return "等上一段";
+    if (tone === "ready" || tone === "stale") return "重新生成";
+    return "生成";
+}
+
+export function boardData(production: EpisodeProduction | undefined, clipMedia: readonly StudioClipMedia[] = [], clipFailureByTarget: Readonly<Record<string, string>> = {}, assetNames: Readonly<Record<string, string>> = {}) {
     const draft = (production?.draft || {}) as Record<string, unknown>;
     const director = (draft.director || {}) as Record<string, unknown>;
     const source = (director.source || {}) as Source;
@@ -1614,7 +1886,7 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
             const ordinal = referenceOrdinalOf(rawLabel) || ri + 1;
             const storageKey = str(r.storageKey);
             const assetId = str(r.assetId);
-            const nodeId = str(r.nodeId);
+            const nodeId = str(r.nodeId || r.sourceNodeId);
             // 按标号/文案把 state.references 的 sent/missingReason 对齐到同一张参考图；匹配不到就不带真值。
             const stateRef = stateRefs.find(sr => referenceOrdinalOf(sr?.label) > 0 && referenceOrdinalOf(sr?.label) === ordinal)
                 || stateRefs.find(sr => str(sr?.label) === rawLabel);
@@ -1623,7 +1895,7 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
                 storageKey,
                 url: storageKey ? backendMediaUrl(storageKey) : str(r.url),
                 role: str(r.role),
-                name: str(r.name || ""),
+                name: str(r.name || "") || resolveAssetName(assetId || nodeId, assetNames),
                 assetId,
                 nodeId,
                 source: referenceSourceLabel({ assetId, nodeId, storageKey }),
@@ -1633,7 +1905,9 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
                 missingReason: str(stateRef?.missingReason),
             };
         });
-        const hasVideo = Boolean(art && str(art.status) !== "stale" && (art.receipt || art.result));
+        // 视频真值取画布段的真实 video: 产物（clip.storageKey），不再只看编译产物 art 的 receipt/result。
+        // ep1 走「去 compile」路线没有 art，过去这里恒为 false，导致明明有 34 段成片却显示「视频 0/34」。
+        const hasVideo = Boolean(videoUrl) || Boolean(art && str(art.status) !== "stale" && (art.receipt || art.result));
         // 影策优先级真值来自 segment.state；画布 H3 段 status/errorDetails/inputOutdated 仍是本地真实字段，一并传入。
         // 画布段已成为创作真值（prompt/refs 优先取画布）：当画布段确有提示词且生成成功时，
         // artifact 的 stale 只是过时编译快照，不该再显示「提示词已过期」；仅画布无提示词时才沿用 artifact 状态派生。
@@ -1668,8 +1942,10 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
     return { shots, segments, cards, totalSec, promptReady, videoReady, fps };
 }
 
-function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, onRescript, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onApproveVideo, onSwitchToAssets, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onChanged, busy }: {
+function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onApproveVideo, onSwitchToAssets, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onChanged, busy }: {
     ep: StudioEpisode; production: EpisodeProduction | undefined; clipMedia: StudioClipMedia[]; clipFailureByTarget?: Readonly<Record<string, string>>; dramaId?: string | null;
+    /** 资产真名表：参考图绑定缺 name 时用它兜底显示「角色 参考图 2 · 崇良」。 */
+    assetNames?: Readonly<Record<string, string>>;
     onRescript: () => void; onOpenCanvas: (segmentId?: string) => void; onSwitchToScript: () => void; busy: boolean;
     onWriteSegmentPrompt?: (segmentId: string) => Promise<{ text: string; warnings: string[] }>;
     onSaveSegmentPrompt?: (segmentId: string, text: string) => Promise<void>;
@@ -1684,8 +1960,10 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     const { message, modal } = App.useApp();
     const config = useConfigStore((state) => state.config);
     const videoModelOptions = useMemo(() => selectableModelsByCapability(config, "video"), [config]);
-    const modelLabel = (value: string) => modelOptionLabel(config, value || DEFAULT_SEGMENT_VIDEO_MODEL).replace(/（[^）]*）$/, "");
-    const { cards, shots, segments, totalSec, promptReady, videoReady } = useMemo(() => boardData(production, clipMedia, clipFailureByTarget), [production, clipMedia, clipFailureByTarget]);
+    const modelLabel = (value: string) => modelOptionLabel(config, value || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL).replace(/（[^）]*）$/, "");
+    // 生成控制条只读剧目级设置真值（段级模型另取 segmentVideoModels），不伪造段级参数。
+    const studioGenSettings = useMemo(() => loadStudioSettings(dramaId ?? null), [dramaId]);
+    const { cards, shots, segments, totalSec, promptReady, videoReady, fps } = useMemo(() => boardData(production, clipMedia, clipFailureByTarget, assetNames), [production, clipMedia, clipFailureByTarget, assetNames]);
     const [active, setActive] = useState<string | null>(cards[0] ? cards[0].id : null);
     const [matrix, setMatrix] = useState(false);
     const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1708,6 +1986,10 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     // 影策 referenceUsage 的本地对齐：正文 <Picture N> 必须落在本段 thumbnails[].ordinal 内，非法则红字提示并禁止保存。
     const promptRefUsage = pictureReferenceUsage(editPrompt, editingCard ? editingCard.thumbnails.map(t => t.ordinal) : []);
     const promptRefInvalid = promptRefUsage.unknown.length > 0;
+    // 影策 SegmentPrompt 的 unmentioned：正文已写但没引用到的本段参考图（真值=thumbnails.ordinal）。
+    const promptUnmentioned = editingCard && editPrompt.trim()
+        ? editingCard.thumbnails.filter((t, i) => !promptRefUsage.used.has(Number(t.ordinal) || i + 1))
+        : [];
     // 字数只做统计显示 + 本地软提醒；本地无模型字数上限真值，不据此禁止保存（见 promptCharStats 注释）。
     const { sentChars, overSoftLimit } = promptCharStats(editPrompt);
     // 影策段视频版本：所有 Hooks 必须在下面「还没有分镜」的早退之前声明。
@@ -1716,7 +1998,29 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     const [versionsError, setVersionsError] = useState("");
     const [versionReload, setVersionReload] = useState(0);
     const [previewVersion, setPreviewVersion] = useState<StudioSegmentVersion | null>(null);
+    const [versionsExpanded, setVersionsExpanded] = useState(false);
     const [settingVersionId, setSettingVersionId] = useState<string | null>(null);
+    /**
+     * 本次生成依据回执（影策 SegmentReceipt 的后端聚合版）：按段缓存，展开折叠区时才请求。
+     * 只读 clip_workbench 的 runtime.directorArtifacts / context.resolvedSubjects，不改制作稿也不触发生成。
+     */
+    const [segmentReceipts, setSegmentReceipts] = useState<Record<string, { loading: boolean; error: string; workbench: Record<string, any> | null }>>({});
+    const loadSegmentReceipt = (segmentId: string) => {
+        const cached = segmentReceipts[segmentId];
+        if (cached && (cached.loading || cached.workbench)) return;
+        setSegmentReceipts(prev => ({ ...prev, [segmentId]: { loading: true, error: "", workbench: null } }));
+        // includeContext/includeRuntime：默认投影会裁掉 artifacts 与 resolvedSubjects，这里只读显式索取。
+        fetchProductionWorkbench(ep.id, "clip_workbench", segmentId, "draft", { includeContext: true, includeRuntime: true })
+            .then((res) => {
+                const workbench = (res.production?.workbench || res.production?.clipWorkbench) as Record<string, any> | undefined;
+                setSegmentReceipts(prev => ({ ...prev, [segmentId]: workbench
+                    ? { loading: false, error: "", workbench }
+                    : { loading: false, error: "后端未返回 clip_workbench 回执", workbench: null } }));
+            })
+            .catch((error: unknown) => {
+                setSegmentReceipts(prev => ({ ...prev, [segmentId]: { loading: false, error: (error as Error)?.message || "读取本次生成依据失败", workbench: null } }));
+            });
+    };
     // 用 ref 取回调，避免父组件每次渲染的新箭头函数触发 effect 重跑（无限请求）。
     const versionsLoaderRef = useRef(onListSegmentVersions);
     versionsLoaderRef.current = onListSegmentVersions;
@@ -1736,6 +2040,8 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     }, [editingSegmentId, versionReload]);
     // 段视频模型映射：制作稿 draft 不存这个字段，真值在画布 H3 Clip，需定向读一次。
     const [segmentVideoModels, setSegmentVideoModels] = useState<Record<string, string>>({});
+    /** 段模型映射读取态：初值 true，回包前不把默认模型当作本段真值展示。 */
+    const [modelsLoading, setModelsLoading] = useState(true);
     const [modelReload, setModelReload] = useState(0);
     const [changingModel, setChangingModel] = useState<string | null>(null);
     // 影策批量出片：批选工具栏选视频模型 + 真提交 h3-run 的进度。
@@ -1745,9 +2051,11 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     modelsLoaderRef.current = onListSegmentVideoModels;
     useEffect(() => {
         let cancelled = false;
+        setModelsLoading(true);
         Promise.resolve(modelsLoaderRef.current?.() ?? {})
             .then((map) => { if (!cancelled) setSegmentVideoModels(map); })
-            .catch(() => { if (!cancelled) setSegmentVideoModels({}); });
+            .catch(() => { if (!cancelled) setSegmentVideoModels({}); })
+            .finally(() => { if (!cancelled) setModelsLoading(false); });
         return () => { cancelled = true; };
     }, [ep.id, production, modelReload]);
     // 提示词硬上限真值：与本段实际出片模型同源（画布段 selectedVideoModel → 全局配置 → 默认模型），
@@ -1756,6 +2064,8 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     const editingSegModel = editingCard ? (segmentVideoModels[editingCard.id] || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL)
         : (config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL);
     const promptMaxChars = modelPromptMaxChars(modelVideoCapabilitiesOf(config, editingSegModel));
+    // 影策生成控制条「模型单次最长 N 秒」真值：与本段出片模型同源的能力字段，无声明则 null。
+    const editingSegMaxSeconds = modelMaxVideoSeconds(modelVideoCapabilitiesOf(config, editingSegModel));
     const overModelLimit = isPromptOverModelLimit(editPrompt, promptMaxChars);
     const handleChangeVideoModel = async (segmentId: string, model: string) => {
         if (!onSetSegmentVideoModel) return void message.warning("模型切换入口尚未就绪");
@@ -1866,10 +2176,18 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
     /** 开段/切段：提示词正文与 dirty 基线一起重置，避免把上一段的改动带到下一段。 */
     const openPromptSegment = (idx: number) => {
         const text = cards[idx]?.prompt || "";
+        const nextId = cards[idx]?.id;
+        const switching = nextId !== editingSegmentId;
         setEditIdx(idx);
         setEditPrompt(text);
         setPromptBaseline(text);
         promptCaret.current = null;
+        if (switching) {
+            // 切段同帧清掉上一段的异步读数（effect 在提交后才跑），否则首帧旧列表配新段标题闪一次。
+            setSegmentVersions([]); setVersionsError(""); setVersionsLoading(true); setPreviewVersion(null);
+            setSegmentVoices([]); setVoiceTruth(null); setVoicesError(""); setVoicesLoading(true);
+            setRefTruth(null); setRefError(""); setRefLoading(true);
+        }
     };
     /** 弹窗关闭 / 上一段 / 下一段前的 dirty 拦截：确认放弃才继续（与影策 Esc 放弃同一语义）。 */
     const guardPromptDiscard = (next: () => void) => {
@@ -2406,86 +2724,133 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
         finally { setApproving(false); }
     };
 
+    // 影策 .drama-studio-board.is-landscape：横屏项目卡片最小 400px，竖屏 320px。
+    const boardLandscape = (() => {
+        const ratio = String((production?.draft as Record<string, any> | undefined)?.settings?.videoAspectRatio || "16:9");
+        const [w, h] = ratio.split(":").map(Number);
+        return !w || !h ? true : w >= h;
+    })();
+
     return (
         <div className="flex min-h-0 flex-1 flex-col" data-studio-panel="shots">
-            {/* 顶部状态提示（对齐影策：提示词就绪 / 等待确认生成视频） */}
-            <div className="shrink-0 space-y-2 border-b border-border px-4 py-3">
-                {videoReady === 0 ? (
-                    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card/50 px-3 py-2">
-                        <div className="min-w-0 flex-1">
-                            <div className="text-xs font-medium">剧本与视频提示词已就绪，还没有生成视频</div>
-                            <div className="mt-0.5 text-[11px] text-muted-foreground">先看看剧情、镜头拆分、设定和各段视频提示词是否合适；确认后再生成本集的参考图与段视频。</div>
-                        </div>
-                        <button type="button" onClick={onSwitchToScript} className="h-7 shrink-0 rounded-md border border-border px-2.5 text-[11px] hover:bg-muted/60">看剧本与原文</button>
-                        <button type="button" onClick={() => void handleApprove()} disabled={approving || busy} className="h-7 shrink-0 rounded-md bg-primary px-2.5 text-[11px] text-primary-foreground hover:opacity-90 disabled:opacity-50" data-studio-approve-video>{approving ? "检查中…" : "放行并生成视频"}</button>
+            {/* 顶部工具条（对齐影策 .drama-board-toolbar：单行统计 + 双进度 + 顺序提示） */}
+            <div className="sticky top-0 z-10 shrink-0 border-b border-border bg-background/85 px-5 py-2.5 backdrop-blur" data-studio-progress>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                    {selected.size ? (
+                        <>
+                            {/* 影策 .drama-board-toolbar.is-selecting：选中后工具条整体换成批量动作，不再另放底浮条。 */}
+                            <span className="text-xs font-medium" data-studio-segment-batch-bar>已选 {selected.size} 段</span>
+                            <Dropdown
+                                trigger={["click"]}
+                                disabled={!videoModelOptions.length}
+                                menu={{
+                                    selectedKeys: [batchVideoModel],
+                                    items: [{ key: "", label: "沿用各段已选模型" }, ...videoModelOptions.map((value) => ({ key: value, label: modelLabel(value) }))],
+                                    onClick: ({ key }) => setBatchVideoModel(key),
+                                }}
+                            >
+                                <button type="button" className="flex h-7 min-w-0 max-w-[40vw] items-center gap-1 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:border-foreground/25 hover:text-foreground" data-studio-segment-batch-model>
+                                    <Sparkles className="size-3 shrink-0" /><span className="truncate">{batchVideoModel ? modelLabel(batchVideoModel) : "视频模型：各段已选"}</span>
+                                </button>
+                            </Dropdown>
+                            <Tooltip title={batchSkipped ? `${batchSkipped} 段提示词未就绪或正在生成，会跳过` : undefined}>
+                                <button type="button" onClick={() => void handleBatchGenerate()} disabled={batchGenerating || !toGenerate.length}
+                                    title="逐段真提交画布 H3 出片任务；已完成段由 skipCompleted 幂等跳过"
+                                    className="flex h-7 items-center gap-1 rounded-md bg-foreground px-2.5 text-[11px] font-medium text-background transition hover:opacity-85 disabled:opacity-50"
+                                    data-studio-segment-batch-generate>
+                                    <Play className="size-3" /> {batchGenerating ? "提交中…" : `生成视频 · ${toGenerate.length} 段`}
+                                </button>
+                            </Tooltip>
+                            <button type="button" onClick={() => void handleBatchWritePrompt()} disabled={batchWriting || !onWriteSegmentPrompt}
+                                className="flex h-7 items-center gap-1 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:border-foreground/25 hover:text-foreground disabled:opacity-50" data-studio-segment-batch-rewrite>
+                                <Sparkles className="size-3" /> {batchWriting ? "重写中…" : `重新撰写提示词 · ${selected.size} 段`}
+                            </button>
+                            {batchSkipped ? <span className="text-[11px] text-amber-500" data-studio-segment-batch-skipped>跳过 {batchSkipped} 段（未就绪/生成中）</span> : null}
+                            <span className="flex-1" />
+                            <button type="button" onClick={() => setSelected(new Set(cards.map(c => c.id)))} className="h-7 rounded-md px-2 text-[11px] text-muted-foreground transition hover:bg-foreground/5 hover:text-foreground" data-studio-segment-select-all>全选</button>
+                            <button type="button" onClick={() => setSelected(new Set())} className="h-7 rounded-md px-2 text-[11px] text-muted-foreground transition hover:bg-foreground/5 hover:text-foreground" data-studio-segment-clear-selection>取消选择</button>
+                        </>
+                    ) : (
+                        <>
+                    <div className="flex shrink-0 items-baseline gap-1.5 text-xs text-muted-foreground">
+                        <span className="font-semibold text-foreground">{segments.length}</span> 段
+                        <span className="text-border">·</span>
+                        <span className="font-semibold text-foreground">{shots.length}</span> 镜
+                        <span className="text-border">·</span>
+                        <span className="font-semibold text-foreground">{formatSec(totalSec)}</span> 时长
                     </div>
-                ) : null}
-                <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-card/50 px-3 py-2" data-studio-review-gate>
-                    <div className="min-w-0 flex-1">
-                        <div className="text-xs font-medium">
-                            {approval?.approvedAt ? `已放行 · ${new Date(approval.approvedAt).toLocaleString("zh-CN", { hour12: false })}` : "参考图就绪后放行生成"}
-                        </div>
-                        <div className="mt-0.5 text-[11px] text-muted-foreground">放行会核对本集资产参考图是否齐备；通过后打开画布按段生成视频（本地生成在画布内完成）。</div>
+                    <div className="flex min-w-36 flex-1 items-center gap-2 text-[11px] text-muted-foreground">
+                        <span className="shrink-0">提示词 <span className="font-medium text-foreground/75 tabular-nums">{promptReady}/{segments.length}</span></span>
+                        <span className="h-1 min-w-12 flex-1 overflow-hidden rounded-full bg-foreground/10">
+                            <span className="block h-full rounded-full bg-foreground/55" style={{ width: `${segments.length ? (promptReady / segments.length) * 100 : 0}%` }} />
+                        </span>
                     </div>
-                    <button type="button" onClick={() => void handleApprove()} disabled={approving || busy} className="h-7 shrink-0 rounded-md bg-primary px-2.5 text-[11px] text-primary-foreground hover:opacity-90 disabled:opacity-50" data-studio-approve-video>
-                        {approving ? "检查中…" : approval?.approvedAt ? "重新放行并打开画布" : "放行并生成视频"}
-                    </button>
-                </div>
-                {/* 统计条 */}
-                <div className="flex flex-wrap items-center gap-4 px-1 pt-1 text-xs">
-                    <span><span className="font-semibold">{segments.length}</span> 段</span>
-                    <span><span className="font-semibold">{shots.length}</span> 镜</span>
-                    <span><span className="font-semibold">{formatSec(totalSec)}</span> 时长</span>
-                    <span className="flex items-center gap-1">提示词 <span className="font-semibold text-emerald-500">{promptReady}/{segments.length}</span></span>
-                    <span className="flex items-center gap-1">视频 <span className="font-semibold text-emerald-500">{videoReady}/{segments.length}</span></span>
-                    <button type="button" onClick={() => void handlePrerun()} disabled={prerunning || !ep.canvasId}
-                        title="生成前只读体检：参考图是否入库、<Picture N> 是否对应、提示词是否为空/超长；不创建任务、不写库、不扣费"
-                        className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50"
-                        data-studio-prerun>
-                        <ScanSearch className="size-3.5" /> {prerunning ? "体检中…" : "生成前体检"}
-                    </button>
-                    <button type="button" aria-label="切换矩阵视图" onClick={() => setMatrix(v => !v)} className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted/60" title={matrix ? "列表视图" : "矩阵视图"}>
+                    <div className="flex min-w-36 flex-1 items-center gap-2 text-[11px] text-muted-foreground">
+                        <span className="shrink-0">视频 <span className="font-medium text-emerald-600 tabular-nums dark:text-emerald-500">{videoReady}/{segments.length}</span></span>
+                        <span className="h-1 min-w-12 flex-1 overflow-hidden rounded-full bg-foreground/10">
+                            <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${segments.length ? (videoReady / segments.length) * 100 : 0}%` }} />
+                        </span>
+                    </div>
+                    <span className="shrink-0 text-[11px] text-muted-foreground/80">段按顺序生成，第 2 段起以上一段最后一帧为首帧</span>
+                        </>
+                    )}
+                    <button type="button" aria-label="切换矩阵视图" onClick={() => setMatrix(v => !v)} className="ml-auto rounded p-1 text-muted-foreground transition hover:bg-foreground/5 hover:text-foreground" title={matrix ? "列表视图" : "矩阵视图"}>
                         <Film className="size-4" />
                     </button>
                 </div>
-                {/* 常驻快捷键提示条（影策 drama-kbd-hint）：说明真实可用的键位，输入态自动让位 */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-dashed border-border bg-muted/20 px-2.5 py-1.5 text-[10px] text-muted-foreground" data-studio-kbd-hint>
-                    <Keyboard className="size-3 shrink-0" />
-                    <span className="font-medium text-foreground/80">分镜快捷键</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">⌘/Ctrl+A</kbd> 全选</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">⌘/Ctrl+点击</kbd> 多选 · <kbd className="rounded border border-border bg-background px-1">Shift+点击</kbd> 连选</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">J/K</kbd> 或 <kbd className="rounded border border-border bg-background px-1">←→↑↓</kbd> 切换（Shift 连选）</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">X/空格</kbd> 标记</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">Enter</kbd> 编辑</span>
-                    <span><kbd className="rounded border border-border bg-background px-1">Esc</kbd> 取消选择</span>
-                </div>
             </div>
 
-            {/* 剧情段卡片列表（对齐影策 segment 卡片） */}
-            <div ref={cardsRef} className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3" aria-busy={busy}>
+            {/* 剧情段卡片列表（对齐影策 .drama-sg 卡片：320/400px 自动填充网格） */}
+            <div ref={cardsRef} style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${boardLandscape ? 400 : 320}px, 1fr))` }} className="grid min-h-0 flex-1 content-start gap-2 overflow-y-auto px-5 pb-1 pt-3" aria-busy={busy || modelsLoading}>
                 {cards.map((c) => (
                     <section key={c.id} data-segment={c.id} tabIndex={0} aria-current={active === c.id}
                         onFocus={() => setActive(c.id)}
+                        onDoubleClick={() => { setActive(c.id); openPromptSegment(c.index); }}
                         onClick={(e) => {
                             if (e.metaKey || e.ctrlKey) { toggleSel(c.id); anchorRef.current = c.id; return; }
                             if (e.shiftKey) { selectRange(anchorRef.current ?? c.id, c.id); setActive(c.id); return; }
                             anchorRef.current = c.id;
                             setActive(c.id);
+                            // 影策段卡单击只聚焦、双击才进弹窗；本地按使用习惯改成单击直接打开段编辑弹窗（卡内按钮均 stopPropagation）。
+                            openPromptSegment(c.index);
                         }}
-                        className={cn("rounded-lg border border-border bg-card/50 p-3 outline-none", active === c.id && "ring-1 ring-primary/40")} aria-label={`第 ${c.index + 1} 段 ${c.title}`}>
+                        className={cn("flex flex-col gap-2 rounded-lg border border-border bg-card p-2 outline-none transition-colors hover:border-foreground/25",
+                            active === c.id && "border-foreground/45",
+                            c.state.tone === "failed" && !selected.has(c.id) && "border-rose-500/45",
+                            selected.has(c.id) && "border-foreground/55 bg-foreground/[0.04]")} aria-label={`第 ${c.index + 1} 段 ${c.title}`}>
                         <div className="flex items-center gap-2">
-                            <input type="checkbox" checked={selected.has(c.id)} onClick={(e) => e.stopPropagation()} onChange={() => { toggleSel(c.id); anchorRef.current = c.id; }} aria-label={`选择第 ${c.index + 1} 段`} className="size-3.5 accent-primary" />
-                            <span className="flex size-6 items-center justify-center rounded bg-muted text-[11px] font-semibold">{c.index + 1}</span>
-                            <h4 className="min-w-0 flex-1 truncate text-xs font-medium" title={c.title}>{c.title}</h4>
+                            <input type="checkbox" checked={selected.has(c.id)} onClick={(e) => e.stopPropagation()} onChange={() => { toggleSel(c.id); anchorRef.current = c.id; }} aria-label={`选择第 ${c.index + 1} 段`} className="size-3.5 shrink-0 accent-foreground" />
+                            <span className="shrink-0 text-[11px] font-semibold tabular-nums text-muted-foreground" data-studio-seg-num>{c.index + 1}</span>
+                            <button type="button" onClick={(e) => { e.stopPropagation(); setActive(c.id); openPromptSegment(c.index); }} className="min-w-0 flex-1 truncate text-left text-[13px] font-medium transition hover:text-muted-foreground" title={c.title} data-studio-open-segment-title>{c.title}</button>
                             {!c.prompt ? <AlertCircle className="size-3.5 shrink-0 text-amber-500" aria-label="缺少提示词" /> : null}
-                            <button type="button" onClick={() => { setActive(c.id); openPromptSegment(c.index); }} className="flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted/60" aria-label={`打开第 ${c.index + 1} 段`} data-studio-open-segment>
-                                编辑段落 <ChevronRight className="size-3" />
-                            </button>
                         </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                            <span className="rounded bg-muted px-1.5 py-0.5 font-medium">{formatClipSec(c.sec)}</span>
+                        {/* 横向主体（对齐影策 .drama-sg-body：左封面 + 右信息） */}
+                        <div className="grid min-h-0 flex-1 content-start grid-cols-[76px_minmax(0,1fr)] gap-2 lg:grid-cols-[136px_minmax(0,1fr)]">
+                        {/* 左列封面：影策 SegmentVideo 同款静态静帧 + 播放角标，点击在画布打开该段（对齐 drama-sg-cover）。 */}
+                        <button type="button"
+                            onClick={(e) => { e.stopPropagation(); setSelected(new Set([c.id])); setActive(c.id); onOpenCanvas(c.id); }}
+                            className="relative aspect-video w-full overflow-hidden rounded-md border border-border bg-black"
+                            data-studio-segment-cover
+                            data-studio-video={c.videoUrl && (c.state.tone === "ready" || c.state.tone === "stale") ? "1" : "0"}
+                            data-studio-video-status={c.videoStatus || "none"}
+                            aria-label={`打开第 ${c.index + 1} 段`}>
+                            {c.videoUrl && (c.state.tone === "ready" || c.state.tone === "stale") ? (
+                                <>
+                                    <SegmentCoverVideo url={c.videoUrl} />
+                                    <span className="pointer-events-none absolute right-1 top-1 rounded bg-black/60 px-1 text-[11px] font-semibold leading-[15px] tabular-nums text-white">{formatClipSec(c.videoDuration)}</span>
+                                    <span className="pointer-events-none absolute bottom-1 left-1 flex size-7 items-center justify-center rounded-full bg-black/60 text-white ring-1 ring-white/40"><Play className="size-2.5" aria-hidden /></span>
+                                </>
+                            ) : (
+                                <span className="flex size-full flex-col items-center justify-center gap-1 bg-muted/30 text-muted-foreground" data-studio-segment-video-empty>
+                                    <Film className="size-5" aria-hidden />
+                                    <span className="text-[9px] font-medium">{c.state.label}</span>
+                                </span>
+                            )}
+                        </button>
+                            <div className="flex min-w-0 flex-col gap-1.5">
+                        <div className="flex items-center gap-1.5 overflow-hidden text-[11px]">
                             <Tooltip title={c.state.detail || `第 ${c.index + 1} 段状态：${c.state.label}（来自制作稿/H3 段真实字段）`} mouseEnterDelay={0.3}>
-                                <span data-studio-segment-state={c.state.tone} className={cn("inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                                <span data-studio-segment-state={c.state.tone} className={cn("inline-flex h-5 max-w-[62%] min-w-0 shrink-0 items-center gap-1 rounded-full px-2 font-semibold",
                                     c.state.tone === "ready" ? "bg-emerald-500/10 text-emerald-500"
                                     : c.state.tone === "stale" ? "bg-amber-500/10 text-amber-500"
                                     : c.state.tone === "failed" ? "bg-rose-500/10 text-rose-500"
@@ -2497,71 +2862,33 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                         : c.state.tone === "failed" ? <AlertCircle className="size-3" />
                                         : c.state.tone === "busy" ? <LoaderCircle className="size-3 animate-spin" />
                                         : c.state.tone === "blocked" ? <AlertTriangle className="size-3" />
+                                        : c.state.tone === "idle" ? <span className="size-1.5 shrink-0 rounded-full bg-current" aria-hidden />
                                         : null}
-                                    {c.state.label}
+                                    <span className="truncate">{compactStateLabel(c.state.label)}</span>
                                 </span>
                             </Tooltip>
-                            <span className="text-muted-foreground">{c.shots.length} 镜 · 上限 15s{c.mode ? ` · ${c.mode}` : ""}</span>
+                            <span className="shrink-0 whitespace-nowrap text-muted-foreground">{c.shots.length} 镜{(() => {
+                                // 影策「N 镜 · 上限 15s」：上限取本段实际出片模型能力（/settings/ai-config 真值），无声明时退回 mode。
+                                const cap = modelMaxVideoSeconds(modelVideoCapabilitiesOf(config, segmentVideoModels[c.id] || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL));
+                                return cap ? ` · 上限 ${cap}s` : c.mode ? ` · ${c.mode}` : "";
+                            })()}</span>
                         </div>
-                        {/* 段视频封面主视觉（对齐影策 storyboard.tsx:138-154 SegmentVideo）：
-                            只有本段真实 videoUrl 且段状态 ready/stale 才播放；无视频/其他状态一律占位，不造假。 */}
-                        <div className="relative mt-2 aspect-video w-full max-w-md overflow-hidden rounded-lg border border-border bg-black"
-                            data-studio-segment-cover
-                            data-studio-video={c.videoUrl && (c.state.tone === "ready" || c.state.tone === "stale") ? "1" : "0"}
-                            data-studio-video-status={c.videoStatus || "none"}>
-                            {c.videoUrl && (c.state.tone === "ready" || c.state.tone === "stale") ? (
-                                <>
-                                    <video key={c.videoUrl} src={c.videoUrl} controls playsInline preload="metadata" className="size-full object-contain" data-studio-segment-video aria-label={`第 ${c.index + 1} 段视频`} />
-                                    <span className="pointer-events-none absolute bottom-1.5 left-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">{formatClipSec(c.videoDuration)}</span>
-                                    <span className="pointer-events-none absolute bottom-1.5 right-1.5 flex size-6 items-center justify-center rounded-full bg-black/60 text-white"><Play className="size-3" aria-hidden /></span>
-                                    {c.videoInputOutdated || c.state.tone === "stale" ? (
-                                        <span className="pointer-events-none absolute right-1.5 top-1.5 rounded bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white">输入已更改</span>
-                                    ) : null}
-                                </>
-                            ) : (
-                                <div className="flex size-full flex-col items-center justify-center gap-1 bg-muted/30 text-muted-foreground" data-studio-segment-video-empty>
-                                    <Film className="size-6" aria-hidden />
-                                    <span className="text-[11px] font-medium">{c.state.label}</span>
-                                    <small className="text-[10px]">{formatClipSec(c.sec)} · 对白与音效由视频模型生成</small>
-                                </div>
-                            )}
-                        </div>
-                        {/* 镜头内容预览（对齐影策 storyboard.tsx:163-194）：单镜显示画面/台词，多镜显示前3镜 + 还有N镜 */}
-                        {c.shots.length === 1 ? (() => {
-                            const p = shotPreview(sourceOf(production), c.shots[0]);
-                            return <div className="mt-2 rounded border border-border/60 bg-background/40 px-2 py-1.5 text-[11px] leading-5">
-                                {p.speaker
-                                    ? <span className="line-clamp-2 text-foreground/80"><em className="not-italic font-medium text-primary/80">{p.speaker}：</em>{p.text}</span>
-                                    : <span className="line-clamp-2 text-foreground/80">{p.text}</span>}
-                            </div>;
-                        })() : c.shots.length > 1 ? (
-                            <ol className="mt-2 space-y-0.5" data-studio-segment-shots>
-                                {c.shots.slice(0, SHOT_PREVIEW).map((sh, si) => {
-                                    const p = shotPreview(sourceOf(production), sh);
-                                    return <li key={si} className="flex items-start gap-1.5 text-[11px] leading-5">
-                                        <b className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded bg-muted text-[9px] font-semibold">{si + 1}</b>
-                                        <span className="line-clamp-1 text-foreground/75" title={p.speaker ? `${p.speaker}：${p.text}` : p.text}>
-                                            {p.speaker ? <><em className="not-italic font-medium text-primary/80">{p.speaker}</em> {p.text}</> : p.text}
-                                        </span>
-                                    </li>;
-                                })}
-                                {c.shots.length > SHOT_PREVIEW ? <li className="pl-5 text-[10px] text-muted-foreground">还有 {c.shots.length - SHOT_PREVIEW} 镜</li> : null}
-                            </ol>
-                        ) : null}
                         {/* 参考图：首帧 + 图1..N（真实 storageKey）。已降级为次要小图条，主视觉让给段视频封面。 */}
                         {c.thumbnails.length ? (
-                            <div className="mt-2 border-t border-border/60 pt-1.5" data-studio-segment-refs>
-                                <div className="mb-1 text-[10px] text-muted-foreground">参考图 {c.thumbnails.length} 张</div>
-                                <div className="flex flex-wrap gap-1">
+                            <div className="flex flex-wrap gap-1" data-studio-segment-refs>
                                     {c.thumbnails.map((t, ti) => {
-                                        const cls = cn("relative shrink-0 overflow-hidden rounded border border-border bg-muted/40", matrix ? "h-12 w-20" : "h-9 w-16");
+                                        // 影策 .drama-chip 形态：11px 胶囊 + 16px 缩略图 + 名称，不再用大图块挤占卡片主视觉。
+                                        const cls = "relative inline-flex h-5 max-w-32 shrink-0 items-center gap-1 overflow-hidden rounded-full border border-border bg-foreground/[0.03] pl-0.5 pr-2 text-[11px] text-muted-foreground";
                                         // 只有后端 segment.state.references 真值 sent=false 才显示未附图；无 state 时为 null，原有展示不回归。
                                         const missingLabel = referenceMissingLabel(t);
                                         const body = (
                                             <>
-                                                {t.url ? <img src={t.url} alt={t.label} className="size-full object-cover" loading="lazy" /> : <div className="flex size-full items-center justify-center border border-dashed border-amber-500/50 text-[9px] text-muted-foreground">{t.label}</div>}
-                                                <span className="absolute bottom-0 left-0 right-0 truncate bg-black/60 px-1 text-[9px] text-white">{t.label}</span>
-                                                {missingLabel ? <span className="absolute left-0 right-0 top-0 truncate bg-rose-600/85 px-1 text-[9px] text-white" data-studio-segment-ref-missing>{missingLabel}</span> : null}
+                                                {t.url
+                                                    ? <img src={t.url} alt={t.label} className="size-4 shrink-0 rounded-full object-cover" loading="lazy" />
+                                                    : <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-[9px] font-medium text-amber-600">{t.label.slice(-1)}</span>}
+                                                <span className="truncate">{t.label}</span>
+                                                {missingLabel ? <span className="size-1.5 shrink-0 rounded-full bg-rose-500" title={missingLabel} data-studio-segment-ref-missing /> : null}
+                                                {matrix ? <span className="truncate text-foreground/45">{t.name}</span> : null}
                                             </>
                                         );
                                         // 有真实 storageKey 才给 tooltip 说明真实来源（assetId/nodeId 来自编译回执）；未附图真值附在提示里。
@@ -2573,82 +2900,72 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                                 {linked ? (
                                                     <button type="button" data-studio-segment-ref-open={t.assetId || t.nodeId}
                                                         onClick={(e) => { e.stopPropagation(); onSwitchToAssets?.(); }}
-                                                        className={cn(cls, "cursor-pointer transition hover:ring-1 hover:ring-primary/50")}>
+                                                        className={cn(cls, "cursor-pointer transition hover:border-foreground/25 hover:text-foreground")}>
                                                         {body}
                                                     </button>
                                                 ) : <div className={cls}>{body}</div>}
                                             </Tooltip>
                                         );
                                     })}
-                                </div>
                             </div>
                         ) : (
-                            <div className="mt-1.5 text-[10px] text-muted-foreground">本段尚未配置参考资产，可进入剧情段补充。</div>
+                            <div className="text-[10px] text-muted-foreground">本段尚未配置参考资产，可进入剧情段补充。</div>
                         )}
-                        {/* 卡片底部操作条（对齐影策 segment 卡片：段视频模型下拉 + ▶ 生成，原地打开画布不跳转） */}
-                        <div className="mt-2.5 flex items-center justify-between border-t border-border/60 pt-2">
+                        {/* 镜头内容预览（对齐影策 storyboard.tsx:163-194）：单镜显示画面/台词，多镜显示前3镜 + 还有N镜 */}
+                        {c.shots.length === 1 ? (() => {
+                            const p = shotPreview(sourceOf(production), c.shots[0]);
+                            return <div className="text-[12px] leading-5">
+                                {p.speaker
+                                    ? <span className="line-clamp-2 text-foreground/80"><em className="not-italic font-semibold text-foreground/60">{p.speaker}：</em>{p.text}</span>
+                                    : <span className="line-clamp-2 text-foreground/80">{p.text}</span>}
+                            </div>;
+                        })() : c.shots.length > 1 ? (
+                            <ol className="space-y-0.5" data-studio-segment-shots>
+                                {c.shots.slice(0, SHOT_PREVIEW).map((sh, si) => {
+                                    const p = shotPreview(sourceOf(production), sh);
+                                    return <li key={si} className="flex items-start gap-1.5 text-[12px] leading-5">
+                                        <b className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded bg-foreground/[0.06] text-[10px] font-semibold text-muted-foreground">{si + 1}</b>
+                                        <span className="line-clamp-1 text-foreground/75" title={p.speaker ? `${p.speaker}：${p.text}` : p.text}>
+                                            {p.speaker ? <><em className="not-italic font-semibold text-foreground/60">{p.speaker}</em> {p.text}</> : p.text}
+                                        </span>
+                                    </li>;
+                                })}
+                                {c.shots.length > SHOT_PREVIEW ? <li className="pl-5 text-[11px] text-muted-foreground">还有 {c.shots.length - SHOT_PREVIEW} 镜</li> : null}
+                            </ol>
+                        ) : null}
+                            </div>
+                        </div>
+                        {/* 卡片底部操作条（对齐影策 .drama-sg-foot：左模型名文本，右动作按钮） */}
+                        <div className="mt-auto flex items-center gap-1 border-t border-border/70 pt-2">
                             <Dropdown
                                 trigger={["click"]}
                                 disabled={!videoModelOptions.length || !onSetSegmentVideoModel}
                                 menu={{
-                                    selectedKeys: [segmentVideoModels[c.id] || DEFAULT_SEGMENT_VIDEO_MODEL],
+                                    selectedKeys: [segmentVideoModels[c.id] || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL],
                                     items: videoModelOptions.map((value) => ({ key: value, label: modelLabel(value) })),
                                     onClick: ({ key }) => void handleChangeVideoModel(c.id, key),
                                 } satisfies MenuProps}
                             >
-                                <button type="button" onClick={() => setActive(c.id)}
+                                <button type="button" onClick={(e) => { e.stopPropagation(); setActive(c.id); }}
                                     title="点击切换本段出片视频模型（写回画布 H3 段）"
-                                    className={cn("flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground", changingModel === c.id && "opacity-60")}
+                                    className={cn("mr-auto flex min-w-0 items-center gap-1 rounded px-1 py-1 text-[11px] text-muted-foreground transition hover:bg-foreground/5 hover:text-foreground", changingModel === c.id && "opacity-60")}
                                     data-studio-segment-video-model>
-                                    <Sparkles className="size-3" /> {changingModel === c.id ? "切换中…" : modelLabel(segmentVideoModels[c.id] || "")}
+                                    <span className="truncate">{changingModel === c.id ? "切换中…" : modelsLoading ? "读取模型…" : modelLabel(segmentVideoModels[c.id] || config.videoModel || "")}</span>
                                 </button>
                             </Dropdown>
-                            <button type="button" onClick={() => void handleWritePrompt(c.id)} disabled={writingPrompt === c.id}
+                            <button type="button" onClick={(e) => { e.stopPropagation(); void handleWritePrompt(c.id); }} disabled={writingPrompt === c.id}
                                 title="让文本模型按本段镜头/台词/参考图撰写完整视频提示词，写回画布（影策 prompts 阶段）"
-                                className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-primary transition hover:bg-primary/10 disabled:opacity-50" data-studio-segment-write-prompt>
+                                className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-foreground/5 hover:text-foreground disabled:opacity-50" data-studio-segment-write-prompt>
                                 <Sparkles className="size-3" /> {writingPrompt === c.id ? "撰写中…" : "撰写提示词"}
                             </button>
-                            <button type="button" onClick={() => { setSelected(new Set([c.id])); setActive(c.id); onOpenCanvas(c.id); }}
+                            <button type="button" onClick={(e) => { e.stopPropagation(); setSelected(new Set([c.id])); setActive(c.id); onOpenCanvas(c.id); }}
                                 title="在画布中打开本段并按段生成视频（画布已定位到该段）"
-                                className="flex items-center gap-1 rounded bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition hover:opacity-90" data-studio-segment-generate>
-                                <Play className="size-3" /> 生成
+                                className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground/85 transition hover:border-foreground/25 hover:bg-foreground/[0.04]" data-studio-segment-generate>
+                                <Play className="size-3" /> {segmentGenerateLabel(c.state.tone)}
                             </button>
                         </div>
                     </section>
                 ))}
-                {selected.size ? (
-                    <div className="sticky bottom-0 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-card/90 px-3 py-2 text-xs backdrop-blur" data-studio-segment-batch-bar>
-                        <span>已选 {selected.size} 段</span>
-                        <button type="button" onClick={() => setSelected(new Set(cards.map(c => c.id)))} className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted" data-studio-segment-select-all>全选</button>
-                        <button type="button" onClick={() => setSelected(new Set())} className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted" data-studio-segment-clear-selection>取消选择</button>
-                        <button type="button" onClick={() => void handleBatchWritePrompt()} disabled={batchWriting || !onWriteSegmentPrompt}
-                            className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50" data-studio-segment-batch-rewrite>
-                            {batchWriting ? "重写中…" : "批量重写提示词"} · {selected.size} 段
-                        </button>
-                        <Dropdown
-                            trigger={["click"]}
-                            disabled={!videoModelOptions.length}
-                            menu={{
-                                selectedKeys: [batchVideoModel],
-                                items: [{ key: "", label: "沿用各段已选模型" }, ...videoModelOptions.map((value) => ({ key: value, label: modelLabel(value) }))],
-                                onClick: ({ key }) => setBatchVideoModel(key),
-                            }}
-                        >
-                            <button type="button" className="h-7 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted" data-studio-segment-batch-model>
-                                <Sparkles className="mr-1 inline size-3" />{batchVideoModel ? modelLabel(batchVideoModel) : "批量模型：各段已选"}
-                            </button>
-                        </Dropdown>
-                        {batchSkipped ? <span className="text-[10px] text-amber-500" data-studio-segment-batch-skipped>跳过 {batchSkipped} 段（未就绪/生成中）</span> : null}
-                        <Tooltip title={batchSkipped ? `${batchSkipped} 段提示词未就绪或正在生成，会跳过` : undefined}>
-                            <button type="button" onClick={() => void handleBatchGenerate()} disabled={batchGenerating || !toGenerate.length}
-                                title="逐段真提交画布 H3 出片任务；已完成段由 skipCompleted 幂等跳过"
-                                className="ml-auto flex h-7 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
-                                data-studio-segment-batch-generate>
-                                <Play className="size-3" /> {batchGenerating ? "提交中…" : `生成视频 · ${toGenerate.length} 段`}
-                            </button>
-                        </Tooltip>
-                    </div>
-                ) : null}
                 {prerunReport && prerunBannerView ? (
                     <div className="mt-2 rounded-lg border border-border bg-card px-3 py-2" data-studio-prerun-report>
                         <div className="flex items-center gap-2">
@@ -2679,14 +2996,25 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                 ) : null}
             </div>
 
+            {/* 分镜快捷键：影策把 drama-kbd-hint 放在网格下方，是常驻提示行而不是上方横幅 */}
+            <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 px-5 pb-1.5 pt-3 text-[11px] text-muted-foreground" data-studio-kbd-hint>
+                <Keyboard className="size-3 shrink-0" />
+                <span className="font-medium text-foreground/80">分镜快捷键</span>
+                <span><kbd className="rounded border border-border bg-background px-1">⌘/Ctrl+A</kbd> 全选</span>
+                <span><kbd className="rounded border border-border bg-background px-1">⌘/Ctrl+点击</kbd> 多选 · <kbd className="rounded border border-border bg-background px-1">Shift+点击</kbd> 连选</span>
+                <span><kbd className="rounded border border-border bg-background px-1">J/K</kbd> 或 <kbd className="rounded border border-border bg-background px-1">←→↑↓</kbd> 切换（Shift 连选）</span>
+                <span><kbd className="rounded border border-border bg-background px-1">X/空格</kbd> 标记</span>
+                <span><kbd className="rounded border border-border bg-background px-1">Enter</kbd> 编辑</span>
+                <span><kbd className="rounded border border-border bg-background px-1">Esc</kbd> 取消选择</span>
+            </div>
+
             {/* 右：选中段的段提示词详情（保留原有信息，改从 artifact 取真实提示词） */}
             {activeCard ? (
-                <div className="shrink-0 border-t border-border px-4 py-2" data-studio-shot-detail>
-                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                        <Link2 className="size-3" /> 第 {activeCard.index + 1} 段提示词（@引用资产）
-                        <button type="button" onClick={onRescript} className="ml-auto flex items-center gap-1 hover:text-foreground"><Wand2 className="size-3" /> 重新编排</button>
-                    </div>
-                    <p className="mt-1 line-clamp-2 whitespace-pre-wrap text-[11px] leading-5 text-muted-foreground">{activeCard.prompt || "（暂无提示词）"}</p>
+                <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border px-4 text-[11px] text-muted-foreground" data-studio-shot-detail>
+                    <Tooltip title={activeCard.prompt || "（暂无提示词）"} mouseEnterDelay={0.3}>
+                        <span className="flex min-w-0 items-center gap-2 truncate"><Link2 className="size-3 shrink-0" /> 第 {activeCard.index + 1} 段提示词（@引用资产）</span>
+                    </Tooltip>
+                    <button type="button" onClick={onRescript} className="ml-auto flex shrink-0 items-center gap-1 hover:text-foreground"><Wand2 className="size-3" /> 重新编排</button>
                 </div>
             ) : null}
             <Modal
@@ -2707,51 +3035,169 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                 open={editIdx !== null}
                 onCancel={() => guardPromptDiscard(() => setEditIdx(null))}
                 keyboard={!promptDirty}
-                width={1120}
+                width={1360}
                 centered
                 data-studio-segment-editor
+                // 影策 .drama-sd-head / .drama-sdx-main / .drama-sdx-side 的内边距：弹窗容器留白归零，改由头部与两列各自持有。
+                styles={{
+                    container: { padding: 0 },
+                    header: { padding: "16px 16px 12px 20px", borderBottom: "1px solid var(--border)" },
+                    footer: { padding: "12px 20px 16px" },
+                }}
                 title={editIdx !== null && cards[editIdx] ? (
-                    <span className="flex flex-wrap items-center gap-2 pr-8">
-                        <span className="text-sm font-semibold">第 {editIdx + 1} 段 · {cards[editIdx].title}</span>
-                        <span className="text-[11px] text-muted-foreground">{formatClipSec(cards[editIdx].sec)} · {cards[editIdx].shots.length} 镜 · {cards[editIdx].hasVideo ? "已生成视频" : "待生成视频"}</span>
+                    <span className="flex items-start gap-3 pr-10">
+                        <span className="flex min-w-0 flex-1 flex-col gap-1">
+                            <span className="text-[11px] font-semibold text-muted-foreground">第 {ep.no} 集 · 第 {editIdx + 1} / {cards.length} 段 · 镜头 {cards[editIdx].shots.length ? `1–${cards[editIdx].shots.length}` : "—"}</span>
+                            <span className="flex flex-wrap items-center gap-2 pb-2">
+                                <span className="text-[16px] font-semibold leading-[1.3]">{cards[editIdx].title}</span>
+                                <span className="text-[11px] text-muted-foreground">总时长 {formatClipSec(cards[editIdx].sec)}</span>
+                                <span className={cn("inline-flex h-[22px] items-center rounded-full px-2 text-[11px] font-semibold", cards[editIdx].state.tone === "ready" ? "bg-emerald-500/12 text-emerald-600 dark:text-emerald-500" : cards[editIdx].state.tone === "stale" ? "bg-amber-500/12 text-amber-600 dark:text-amber-500" : cards[editIdx].state.tone === "failed" ? "bg-rose-500/12 text-rose-500" : "bg-foreground/[0.06] text-muted-foreground")}>{compactStateLabel(cards[editIdx].state.label)}</span>
+                                <span className="text-[11px] text-muted-foreground">{cards[editIdx].shots.length} 镜</span>
+                            </span>
+                        </span>
+                        {/* 影策 segment-dialog 头部动作：精修镜头下拉 + 上一段/下一段，和关闭按钮同一行。 */}
+                        <span className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                            <button type="button" onClick={() => { const card = cards[editIdx]; if (card) { setSelected(new Set([card.id])); onOpenCanvas(card.id); } }}
+                                style={{ fontSize: 12 }} className="flex h-7 items-center gap-[6px] rounded-[8px] border border-border px-2 text-muted-foreground transition hover:border-foreground/25 hover:text-foreground" data-studio-seg-refine>
+                                <Wand2 className="size-3" /> 精修镜头
+                            </button>
+                            <button type="button" aria-label="上一段" disabled={editIdx === null || editIdx <= 0}
+                                onClick={() => { const i = (editIdx ?? 0) - 1; guardPromptDiscard(() => openPromptSegment(i)); }}
+                                className="grid size-7 place-items-center rounded-[8px] border border-border text-muted-foreground transition hover:border-foreground/25 hover:text-foreground disabled:opacity-40" data-studio-seg-prev>‹</button>
+                            <button type="button" aria-label="下一段" disabled={editIdx === null || editIdx >= cards.length - 1}
+                                onClick={() => { const i = (editIdx ?? 0) + 1; guardPromptDiscard(() => openPromptSegment(i)); }}
+                                className="grid size-7 place-items-center rounded-[8px] border border-border text-muted-foreground transition hover:border-foreground/25 hover:text-foreground disabled:opacity-40" data-studio-seg-next>›</button>
+                        </span>
                     </span>
                 ) : "段编辑"}
                 footer={
                     <div className="flex items-center justify-between">
                         <div className="flex gap-1">
-                            <button type="button" disabled={editIdx === null || editIdx <= 0} onClick={() => { const i = (editIdx ?? 0) - 1; guardPromptDiscard(() => openPromptSegment(i)); }} className="h-8 rounded border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-40">‹ 上一段</button>
-                            <button type="button" disabled={editIdx === null || editIdx >= cards.length - 1} onClick={() => { const i = (editIdx ?? 0) + 1; guardPromptDiscard(() => openPromptSegment(i)); }} className="h-8 rounded border border-border px-2 text-[11px] text-muted-foreground disabled:opacity-40">下一段 ›</button>
+                            <button type="button" disabled={editIdx === null || editIdx <= 0} onClick={() => { const i = (editIdx ?? 0) - 1; guardPromptDiscard(() => openPromptSegment(i)); }} style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-2 text-muted-foreground disabled:opacity-40">‹ 上一段</button>
+                            <button type="button" disabled={editIdx === null || editIdx >= cards.length - 1} onClick={() => { const i = (editIdx ?? 0) + 1; guardPromptDiscard(() => openPromptSegment(i)); }} style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-2 text-muted-foreground disabled:opacity-40">下一段 ›</button>
                         </div>
                         <div className="flex gap-2">
-                            <button type="button" onClick={() => guardPromptDiscard(() => setEditIdx(null))} className="h-8 rounded border border-border px-3 text-[11px] text-muted-foreground">关闭</button>
-                            <button type="button" onClick={() => onOpenCanvas(cards[editIdx ?? -1]?.id)} className="h-8 rounded border border-border px-3 text-[11px] text-muted-foreground" data-studio-seg-to-canvas>在画布中精修</button>
-                            <button type="button" disabled={savingPrompt || promptRefInvalid || overModelLimit} title={promptRefInvalid ? "提示词含非法 Picture 编号，请先修正" : overModelLimit ? `超过视频模型上限 ${promptMaxChars} 个字符` : undefined} onClick={() => void handleSavePrompt()} className="h-8 rounded bg-primary px-3 text-[11px] font-medium text-primary-foreground disabled:opacity-50" data-studio-seg-save-prompt>{savingPrompt ? "保存中…" : "保存提示词"}</button>
+                            <button type="button" onClick={() => guardPromptDiscard(() => setEditIdx(null))} style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-3 text-muted-foreground">关闭</button>
+                            <button type="button" onClick={() => onOpenCanvas(cards[editIdx ?? -1]?.id)} style={{ fontSize: 12 }} className="h-7 rounded-[8px] border border-border px-3 text-muted-foreground" data-studio-seg-to-canvas>在画布中精修</button>
+                            <button type="button" disabled={savingPrompt || promptRefInvalid || overModelLimit} title={promptRefInvalid ? "提示词含非法 Picture 编号，请先修正" : overModelLimit ? `超过视频模型上限 ${promptMaxChars} 个字符` : undefined} onClick={() => void handleSavePrompt()} style={{ fontSize: 12 }} className="h-7 rounded-[8px] bg-foreground px-2 text-[12px] font-medium text-background disabled:opacity-50" data-studio-seg-save-prompt>{savingPrompt ? "保存中…" : "保存提示词"}</button>
                         </div>
                     </div>
                 }
             >
                 {editIdx !== null && cards[editIdx] ? (() => {
                     const c = cards[editIdx];
+                    // 逐镜卡片的对白取导演源稿 utterance 真值（新稿 utterance_refs / 老稿 dialogues）。
+                    const editorDraft = (production?.draft || {}) as Record<string, any>;
+                    const editorSource = (editorDraft.director?.source || {}) as Source;
+                    // 影策 ReferenceBoard「本段资产」：抽成变量以便放在左主列（与影策左栏 资产 → 提示词 同构），渲染内容与内联时逐字一致。
+                    const refsBoard = (
+                        <div data-studio-segment-assets className="rounded-lg border border-border bg-card/60 p-3">
+                            {/* 影策 ReferenceBoard 头部：左侧「本段资产 N 项 · 随请求发送 M 张」，右侧灰色说明取图规则。 */}
+                            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                <span className="flex flex-wrap items-baseline gap-1.5 text-[13px]">
+                                    <span className="font-semibold text-foreground">本段资产</span>
+                                    <span className="text-muted-foreground" data-studio-segment-assets-count>
+                                        {c.thumbnails.length} 项 · 随请求发送 {c.thumbnails.length + (editIdx && editIdx > 0 ? 1 : 0)} 张
+                                    </span>
+                                </span>
+                                <span className="text-[12px] text-muted-foreground">
+                                    按镜头自动取 · {studioGenSettings.referenceLimit ? `本段最多发送 ${studioGenSettings.referenceLimit} 张（含首帧）` : "参考图上限由所选模型决定"}
+                                </span>
+                            </div>
+                            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                                <button type="button" onClick={onSwitchToAssets} data-studio-seg-assets
+                                    className="inline-flex h-7 items-center gap-1.5 rounded-[8px] bg-muted px-2 text-[12px] font-medium text-foreground transition hover:bg-muted/70">
+                                    <Film className="size-3.5 text-muted-foreground" /> 项目资产窗口
+                                </button>
+                                <button type="button" onClick={() => { setRefManageSelected({}); setRefManageSource("episode"); setRefManageOpen(true); }} data-studio-seg-manage-refs title="从本集分集图导入"
+                                    className="inline-flex h-7 items-center gap-1.5 rounded-[8px] bg-muted px-2 text-[12px] font-medium text-foreground transition hover:bg-muted/70">
+                                    <FolderOpen className="size-3.5 text-muted-foreground" /> 从素材库导入
+                                </button>
+                                <button type="button" onClick={() => { setRefManageSelected({}); setRefManageSource("upload"); setRefManageOpen(true); }} data-studio-seg-upload-refs
+                                    className="inline-flex h-7 items-center gap-1.5 rounded-[8px] bg-muted px-2 text-[12px] font-medium text-foreground transition hover:bg-muted/70">
+                                    <Upload className="size-3.5 text-muted-foreground" /> 上传图片
+                                </button>
+                                <button type="button" onClick={onSwitchToAssets} data-studio-seg-check-refs
+                                    className="inline-flex h-7 items-center gap-1.5 px-1.5 text-[12px] text-muted-foreground transition hover:text-foreground">
+                                    按集核查
+                                </button>
+                            </div>
+                            {c.thumbnails.length ? (
+                                <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-2">
+                                    {c.thumbnails.map((t: any, ti: number) => {
+                                        const missingLabel = referenceMissingLabel(t);
+                                        // referenceKindOf 只接受字符串标签：用真值编号文本（如「角色1」）+ label 判定类型。
+                                        const kind = referenceKindOf(`${refChipLabel(t)} ${String(t.label || "")}`);
+                                        const kindStyle = REF_KIND_STYLE[kind];
+                                        // 真值里的名字若只是「<图3>」这类占位编号，就不再当名字重复显示一遍。
+                                        const rawName = String(t.name || "");
+                                        const displayName = rawName && !/^<图\d+>$/.test(rawName) ? rawName : "";
+                                        return (
+                                        <div key={String(t.storageKey || ti)} className="overflow-hidden rounded-[8px] border border-border bg-card" title={`${String(t.label || "")}${missingLabel ? `\n${missingLabel}` : ""}`}>
+                                            {t.url ? <img src={t.url} alt={String(t.label || "参考图")} className="aspect-[16/9] w-full object-cover" /> : <div className="flex aspect-[16/9] items-center justify-center text-[10px] text-muted-foreground">—</div>}
+                                            <div className="px-2 pb-1.5 pt-1">
+                                                {displayName ? <div className="truncate text-[11px] font-semibold text-foreground" data-studio-segment-ref-name>{displayName}</div> : null}
+                                                <div className="mt-1 flex items-center gap-1.5">
+                                                    <span className={`shrink-0 rounded-[4px] px-1.5 text-[11px] font-medium ${kindStyle}`} data-studio-segment-ref-kind>{REF_KIND_LABEL[kind]}</span>
+                                                    <span className="truncate text-[10px] text-muted-foreground" data-studio-segment-ref-ordinal>参考图 {ti + 1}</span>
+                                                </div>
+                                            </div>
+                                            {missingLabel ? <div className="truncate px-2 pb-1.5 text-[9px] text-rose-500" data-studio-segment-ref-missing>{missingLabel}</div> : null}
+                                        </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : <p className="text-[11px] text-muted-foreground">本段暂无参考图，可在项目资产或画布中补充。</p>}
+                            {editIdx === 0 ? (
+                                <p className="mt-3 text-[13px] text-muted-foreground" data-studio-segment-opening-note>开场段：无首帧，按提示词与参考图生成</p>
+                            ) : null}
+                        </div>
+                    );
                     return (
-                        <div className="max-h-[calc(100vh-184px)] overflow-y-auto pr-1">
-                        {/* 影策 .drama-sd 有 height:min(820px,100vh-64px) + 列内滚动；本地两栏内容较长时
-                            弹窗曾长到 1476px（视口 1020px），底部版本区与整个 footer 被挤出屏幕。
-                            这里只给正文一个视口内的滚动上限，标题/底部按钮保持固定可见。 */}
-                        <div className="grid gap-4 md:grid-cols-2">
-                            <div className="space-y-2">
+                        <div className="max-h-[calc(100vh-200px)]">
+                        {/* 影策 .drama-sdx-body：主列 1fr + 侧列 340px，两列各自滚动。 */}
+                        <div className="grid h-[min(820px,100vh-200px)] grid-cols-[minmax(0,1fr)_340px]">
+                            <div className="thin-scrollbar min-h-0 space-y-3 overflow-y-auto pb-5 pl-5 pr-5 pt-4">
+                                {/* 生成控制条：段模型取画布 selectedVideoModel→全局→默认，时长取本段镜头 duration_frames/fps 求和，
+                                    画幅/分辨率取剧目级制作设置（标注来源，不冒充段级参数）。本地出片在画布，故不放假的生成按钮。 */}
+                                <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5 text-[10px]" data-studio-seg-gen-bar>
+                                    <span className="font-semibold text-muted-foreground">生成设置</span>
+                                    {/* 影策 SegmentToolbar 的 DramaModelPicker：本段视频模型（只对本段生效）。 */}
+                                    <span className="inline-flex h-[22px] items-center rounded border border-border bg-background px-2 text-[11px] font-semibold text-muted-foreground" title={`本段视频模型（只对本段生效）：${editingSegModel}`}>
+                                        <select value={editingSegModel} aria-label="视频模型" data-studio-seg-model
+                                            disabled={!videoModelOptions.length || !onSetSegmentVideoModel || changingModel === c.id}
+                                            onChange={(e) => { const value = e.target.value; if (value && value !== editingSegModel) void handleChangeVideoModel(c.id, value); }}
+                                            style={{ fontSize: 11 }} className="max-w-[220px] bg-transparent outline-none disabled:opacity-50">
+                                            {!videoModelOptions.includes(editingSegModel) ? <option value={editingSegModel}>{modelLabel(editingSegModel)}</option> : null}
+                                            {videoModelOptions.map((value) => <option key={value} value={value}>{modelLabel(value)}</option>)}
+                                        </select>
+                                    </span>
+                                    <span className="inline-flex h-[22px] items-center rounded border border-border bg-background px-2 text-[11px] font-semibold tabular-nums text-muted-foreground" title={editingSegMaxSeconds ? `按本段镜头时长生成；模型单次最长 ${editingSegMaxSeconds} 秒` : "按本段镜头时长生成"}>{formatClipSec(c.sec)}</span>
+                                    {studioGenSettings.videoAspectRatio ? <span className="inline-flex h-[22px] items-center rounded border border-border bg-background px-2 text-[11px] font-semibold text-muted-foreground" title="画幅随作品设置，开工后不能修改（剧目级 videoAspectRatio）">{studioGenSettings.videoAspectRatio}</span> : null}
+                                    <span className="inline-flex h-[22px] items-center rounded border border-border bg-background px-2 text-[11px] font-semibold text-muted-foreground" title="本段实际出片分辨率（剧目级 videoResolution）">{studioGenSettings.videoResolution || "模型默认"}</span>
+                                </div>
+                                {refsBoard}
+                                <div className="space-y-2 rounded-lg border border-border bg-card/60 p-3">
                                 <div className="flex items-center justify-between">
                                     <span className="flex items-center gap-2">
                                         <span className="text-xs font-semibold">完整视频提示词</span>
                                         {promptDirty ? <span className="rounded border border-amber-500/50 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400" data-studio-prompt-dirty>有未保存修改</span> : null}
                                     </span>
                                     <div className="flex gap-2">
-                                        <button type="button" disabled={writingPrompt === c.id} onClick={() => void handleWritePrompt(c.id)} className="text-[11px] text-rose-500 hover:underline" data-studio-seg-rewrite>{writingPrompt === c.id ? "撰写中…" : "重新撰写"}</button>
+                                        <button type="button" disabled={writingPrompt === c.id} onClick={() => void handleWritePrompt(c.id)} className="text-[11px] text-foreground/70 hover:text-foreground" data-studio-seg-rewrite>{writingPrompt === c.id ? "撰写中…" : c.prompt ? "重新撰写提示词" : "撰写提示词"}</button>
                                         <button type="button" onClick={() => void navigator.clipboard.writeText(editPrompt).then(() => message.success("提示词已复制"))} className="text-[11px] text-muted-foreground hover:text-foreground" data-studio-seg-copy-prompt>复制提示词</button>
                                         <button type="button" disabled={!editPrompt} title="段提示词 + 按提交顺序编号的参考图（来自画布真实绑定，不含伪造字段）" onClick={() => void buildSegmentSubmissionFull(ep, c.id, editPrompt).then(text => navigator.clipboard.writeText(text)).then(() => message.success("提交全文已复制")).catch((error: unknown) => message.error(`复制提交全文失败：${(error as Error)?.message || "未知错误"}`))} className="text-[11px] text-muted-foreground hover:text-foreground" data-studio-seg-copy-submission>复制提交全文</button>
-                                        <button type="button" disabled={savingPrompt || !c.prompt} onClick={() => void handleRestorePrompt()} className="text-[11px] text-muted-foreground hover:text-foreground" data-studio-seg-restore title="用模型生成的原版提示词覆盖当前手动改写">恢复模型版</button>
+                                        <button type="button" disabled={savingPrompt || !c.prompt} onClick={() => void handleRestorePrompt()} className="text-[11px] text-muted-foreground hover:text-foreground" data-studio-seg-restore title="用模型生成的原版提示词覆盖当前手动改写">恢复模型版本</button>
+                                        {/* 影策弹窗工具栏右侧主按钮「重新生成视频」：本地出片在画布，点了定位到本段画布 H3 节点。 */}
+                                        <button type="button" disabled={!c.prompt || promptRefInvalid} onClick={() => { setSelected(new Set([c.id])); onOpenCanvas(c.id); }}
+                                            title={!c.prompt ? "提示词就绪后才能生成视频" : promptRefInvalid ? "提示词含非法 Picture 编号，请先修正" : "在画布中定位本段 H3 节点并重新生成视频"}
+                                            style={{ fontSize: 12 }} className="ml-1 flex h-7 items-center gap-[6px] rounded-[8px] bg-foreground px-2 font-medium text-background transition hover:opacity-85 disabled:opacity-50" data-studio-seg-regenerate>
+                                            <Play className="size-3" /> 重新生成视频
+                                        </button>
                                     </div>
                                 </div>
-                                <p className="text-[10px] text-muted-foreground">提示词写在画布 H3 段上，视频生成直接读这里；点「保存提示词」写回画布。点下方彩色资产可插入引用编号。</p>
+                                {!c.prompt ? <p className="text-[11px] text-muted-foreground" data-studio-seg-prompt-hint>提示词就绪后才能生成视频</p> : null}
+                                <p className="text-[11px] text-muted-foreground">提示词写在画布 H3 段上，视频生成直接读这里；点「保存提示词」写回画布。输入 @ 引用下方彩色资产，编号与本段参考图顺序一致。</p>
                                 {/* 影策 @引用资产条：角色蓝/场景绿/道具黄，点选插入 <Picture N>（对齐影策彩色引用语义，保留制作台真实保存链路）。 */}
                                 {(() => {
                                     const seg = cards[editIdx ?? -1];
@@ -2759,7 +3205,7 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                     if (!thumbs.length) return null;
                                     return (
                                         <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-border/60 bg-muted/20 px-2 py-1.5" data-studio-ref-chips>
-                                            <span className="mr-0.5 flex items-center gap-1 text-[10px] text-muted-foreground"><Link2 className="size-3" /> @引用</span>
+                                            <span className="mr-0.5 flex items-center gap-1 text-[11px] text-muted-foreground"><Link2 className="size-3" /> @引用</span>
                                             {thumbs.map((t: any, ti: number) => {
                                                 const label = String(t.label || `图${t.ordinal}`);
                                                 const chip = (
@@ -2768,7 +3214,7 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                                         type="button"
                                                         title={t.url ? undefined : `点击插入 <Picture ${t.ordinal}> · ${label}`}
                                                         onClick={() => insertRefToken(Number(t.ordinal) || ti + 1)}
-                                                        className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] transition hover:opacity-80 ${REF_KIND_STYLE[String(t.roleKind) as keyof typeof REF_KIND_STYLE] || REF_KIND_STYLE.other}`}
+                                                        className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] transition hover:opacity-80 ${REF_KIND_STYLE[String(t.roleKind) as keyof typeof REF_KIND_STYLE] || REF_KIND_STYLE.other}`}
                                                         data-studio-ref-chip={String(t.ordinal)}
                                                     >
                                                         {t.url ? <img src={t.url} alt="" className="size-3.5 rounded-sm object-cover" /> : null}
@@ -2798,28 +3244,27 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                         </div>
                                     );
                                 })()}
-                                <Input.TextArea
+                                <RichPromptEditor
                                     value={editPrompt}
-                                    onChange={(e) => { setEditPrompt(e.target.value); promptCaret.current = { start: e.target.selectionStart ?? e.target.value.length, end: e.target.selectionEnd ?? e.target.value.length }; }}
-                                    onSelect={(e) => { const el = e.target as HTMLTextAreaElement; promptCaret.current = { start: el.selectionStart, end: el.selectionEnd }; }}
-                                    onKeyDown={(e) => {
-                                        // 影策 segment-dialog.tsx:717-723：Esc 放弃本次编辑；dirty 时 Modal 已关闭自带 Esc，这里只负责回滚正文。
-                                        if (e.key === "Escape" && promptDirty) {
-                                            e.stopPropagation();
-                                            e.preventDefault();
-                                            setEditPrompt(promptBaseline);
-                                            message.info("已放弃本次提示词修改");
-                                        }
+                                    onChange={(next) => setEditPrompt(next)}
+                                    onEscape={() => {
+                                        if (!promptDirty) return;
+                                        setEditPrompt(promptBaseline);
+                                        message.info("已放弃本次提示词修改");
                                     }}
-                                    autoSize={{ minRows: 16, maxRows: 26 }} className="font-mono text-[11px]" data-studio-seg-prompt-input />
-                                <p className={cn("text-[10px]", promptDirty ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} data-studio-prompt-foot>
+                                    tokens={c.thumbnails.map((t: any, ti: number) => ({ n: ti + 1, kind: referenceKindOf(refChipLabel(t) + (t.label || "")), url: t.url, name: String(t.name || "").replace(/^<图\d+>$/, "") }))}
+                                    originalText={c.shots.map((sh) => (sh as any).sourceQuote || "").filter(Boolean).join("\n")}
+                                    placeholder="也可以直接在这里手写本段完整视频提示词；点上方分组插入 @ 引用，编号与本段参考图顺序一致；点「保存提示词」写回画布。"
+                                />
+                                <p className={cn("text-[11px]", promptDirty ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} data-studio-prompt-foot>
                                     {promptDirty ? "有未保存修改 · 点「保存提示词」写回画布，Esc 放弃本次修改" : "提示词写在画布 H3 段；不设失焦自动保存，改动需显式保存"}
                                 </p>
                                 {/* 字数真值：统计实际提交正文（含 <Picture N>），按码点计，口径与影策 Array.from / 后端 RuneCount 一致。
                                     有模型 promptMaxChars 真值时按硬上限校验并禁止保存；无真值时回落本地软提醒。 */}
-                                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[10px]" data-studio-prompt-chars>
-                                    <span className={overModelLimit ? "text-rose-500" : overSoftLimit ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>
-                                        当前 {sentChars.toLocaleString()} 字{promptMaxChars !== null ? ` / ${promptMaxChars}` : ""}
+                                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5 text-[11px]" data-studio-prompt-chars>
+                                    <span className={overModelLimit ? "text-rose-500" : overSoftLimit ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}
+                                        title="与视频模型校验口径一致：按码点计数，只统计本段提示词正文">
+                                        提示词 {sentChars.toLocaleString()} 字{promptMaxChars !== null ? ` / ${promptMaxChars}` : ""}
                                     </span>
                                     <span className="text-muted-foreground">
                                         {promptMaxChars !== null
@@ -2829,59 +3274,36 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                 </div>
                                 {promptMaxChars !== null ? (
                                     overModelLimit ? (
-                                        <p className="text-[10px] leading-relaxed text-rose-500" role="alert" data-studio-prompt-over-model-limit>
+                                        <p className="text-[11px] leading-relaxed text-rose-500" role="alert" data-studio-prompt-over-model-limit>
                                             当前正文 {sentChars.toLocaleString()} 个字符，超过视频模型上限 {promptMaxChars} 个字符，请精简后再保存。
                                         </p>
                                     ) : null
                                 ) : overSoftLimit ? (
-                                    <p className="text-[10px] leading-relaxed text-amber-600 dark:text-amber-400" role="status" data-studio-prompt-soft-limit>
+                                    <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400" role="status" data-studio-prompt-soft-limit>
                                         当前正文 {sentChars.toLocaleString()} 字，已超过本地软上限 {LOCAL_PROMPT_SOFT_LIMIT_CHARS.toLocaleString()} 字。当前段出片模型未提供 promptMaxChars 真值，这里是输入卫生提醒，不会阻止保存；过长提示词可能影响生成，建议精简。
                                     </p>
                                 ) : null}
                                 {promptRefInvalid ? (
-                                    <p className="text-[10px] leading-relaxed text-rose-500" role="alert" data-studio-prompt-invalid-ref>
-                                        正文里的 {promptRefUsage.unknown.map(n => `<Picture ${n}>`).join("、")} 不是本段参考图（本段共 {c.thumbnails.length} 张{c.thumbnails.length ? `，可用编号：${c.thumbnails.map(t => t.ordinal).join("、")}` : ""}），生成视频前请改成正确编号或点上方彩色资产重新插入。
+                                    <p className="text-[11px] leading-relaxed text-rose-500" role="alert" data-studio-prompt-invalid-ref>
+                                        正文里的 {promptRefUsage.unknown.map(n => `<Picture ${n}>`).join("、")} 不是本段的参考图（本段共 {c.thumbnails.length} 张{c.thumbnails.length ? `，可用编号：${c.thumbnails.map(t => t.ordinal).join("、")}` : ""}），生成视频前请改成正确的编号，或点上方 @引用 重新插入。
+                                    </p>
+                                ) : promptUnmentioned.length ? (
+                                    <p className="text-[11px] leading-relaxed text-muted-foreground" data-studio-prompt-unmentioned>
+                                        正文还没有引用 {promptUnmentioned.map((t: any) => `${String(t.label || `图${t.ordinal}`)}（${String(t.name || t.label || "参考图")}）`).join("、")}；参考图仍会随请求发送，在正文里写明谁是谁，视频模型才不会认错。
                                     </p>
                                 ) : null}
-                            </div>
-                            <div className="space-y-3">
-                                <div>
-                                    <div className="mb-1 text-xs font-semibold">本段镜头（{c.shots.length}）</div>
-                                    <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-border p-2">
-                                        {c.shots.map((sh: any, si: number) => (
-                                            <div key={String(sh?.id || si)} className="rounded bg-muted/40 px-2 py-1 text-[11px]">
-                                                <span className="font-medium">{si + 1}.</span> {String(sh?.visual || sh?.title || "（无画面描述）")}
-                                            </div>
-                                        ))}
-                                    </div>
                                 </div>
-                                <div>
-                                    <div className="mb-1 flex items-center justify-between text-xs font-semibold">
-                                        <span>本段参考图（{c.thumbnails.length}）</span>
-                                        <div className="flex items-center gap-2">
-                                            <button type="button" onClick={() => { setRefManageSelected({}); setRefManageSource("project"); setRefManageOpen(true); }} className="text-[11px] font-normal text-muted-foreground hover:text-foreground" data-studio-seg-manage-refs title="从本项目资产 / 本集分集图 / 上传加入参考图">参考图管理</button>
-                                            <button type="button" onClick={onSwitchToAssets} className="text-[11px] font-normal text-muted-foreground hover:text-foreground" data-studio-seg-assets>按集核查 →</button>
-                                        </div>
-                                    </div>
-                                    {c.thumbnails.length ? (
-                                        <div className="grid grid-cols-4 gap-1.5">
-                                            {c.thumbnails.map((t: any, ti: number) => {
-                                                const missingLabel = referenceMissingLabel(t);
-                                                return (
-                                                <div key={String(t.storageKey || ti)} className="overflow-hidden rounded border border-border" title={`${String(t.label || "")}${missingLabel ? `\n${missingLabel}` : ""}`}>
-                                                    {t.url ? <img src={t.url} alt={String(t.label || "参考图")} className="aspect-[3/4] w-full object-cover" /> : <div className="flex aspect-[3/4] items-center justify-center text-[10px] text-muted-foreground">—</div>}
-                                                    <div className="truncate px-1 py-0.5 text-[9px] text-muted-foreground">{String(t.label || "")}</div>
-                                                    {missingLabel ? <div className="truncate px-1 pb-0.5 text-[9px] text-rose-500" data-studio-segment-ref-missing>{missingLabel}</div> : null}
-                                                </div>
-                                                );
-                                            })}
-                                        </div>
-                                    ) : <p className="text-[11px] text-muted-foreground">本段暂无参考图，可在项目资产或画布中补充。</p>}
-                                    {/* #10 段级参考图：组内上移/下移改 order、逐项启停改 disabled、恢复自动改 mode=auto，
-                                        经 set_segment_reference_policy 真写制作稿；binding id 取画布 H3 段的稳定身份。 */}
-                                    <div className="mt-3 rounded-lg border border-border p-2" data-studio-segment-reference-policy>
-                                        <div className="mb-1.5 flex items-center justify-between gap-2">
-                                            <span className="text-xs font-semibold">参考图排序 / 启停（{refTruth?.mode === "manual" ? "手动" : "自动"}）</span>
+                            </div>
+                                    <details className="mt-3 rounded-lg border border-border p-2" data-studio-segment-reference-policy aria-busy={refLoading}>
+                                        <summary className="cursor-pointer text-xs font-semibold text-muted-foreground">参考顺序与角色音色（展开可排序 / 启停）</summary>
+                                        <div className="mt-3">
+                                        {/* 影策 ReferenceOrder：组头（类型 + N 个参考 + 上/下移）+ 音色口径行 + 大图参考卡 */}
+                                        <div className="flex items-center justify-between gap-2">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`rounded-[4px] border px-1 text-[10px] ${REF_KIND_STYLE.character}`}>角色</span>
+                                                <span className="text-[11px] text-muted-foreground">{refTruth?.bindings.filter(b => referenceKindOf(b.label) === "character").length ?? 0} 个参考</span>
+                                                <span className="text-[11px] text-muted-foreground" data-studio-ref-mode>（{refTruth?.mode === "manual" ? "手动" : "自动"}）</span>
+                                            </div>
                                             <div className="flex items-center gap-1.5">
                                                 <button type="button" aria-label="刷新参考图策略" onClick={() => setRefReload(n => n + 1)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground" data-studio-refs-refresh><RefreshCw className="size-3" /> 刷新</button>
                                                 {refTruth?.mode === "manual" ? (
@@ -2889,32 +3311,205 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                                 ) : null}
                                             </div>
                                         </div>
-                                        <p className="mb-1.5 text-[10px] leading-relaxed text-muted-foreground">顺序自上而下发送给视频模型；禁用项不随请求发送。上/下移与启停写入制作稿 referenceOverrides.order / disabled，恢复自动则改回编译派生。</p>
+                                        <p className="mt-1 text-[11px] text-muted-foreground" data-studio-voice-line>
+                                            音色 {segmentVoices.filter(v => v.enabled).length}/{voiceTruth?.audioLimit ?? 0} · {voiceTruth?.audioReferenceMode === "custom" ? "手动指定" : "按对白自动开启"}{voiceTruth?.audioLimit ? ` · 当前模型音色不可多于 ${voiceTruth.audioLimit} 个` : ""}
+                                        </p>
+                                        <p className="mb-2 mt-1 text-[10px] leading-relaxed text-muted-foreground">顺序自上而下发送给视频模型；禁用项不随请求发送。上/下移与启停写入制作稿 referenceOverrides.order / disabled，恢复自动则改回编译派生。</p>
                                         {refError ? <p className="mb-1 text-[10px] text-rose-500" role="alert">{refError}</p> : null}
                                         {refLoading ? (
                                             <p className="py-2 text-[11px] text-muted-foreground">读取参考图策略…</p>
                                         ) : refTruth?.bindings.length ? (
-                                            <div className="max-h-40 space-y-1 overflow-y-auto">
-                                                {refTruth.bindings.map((b, i) => (
-                                                    <div key={b.id} className="flex items-center gap-1.5 rounded border border-border/60 bg-muted/30 px-2 py-1" data-studio-ref-policy={b.id}>
-                                                        <span className="w-4 shrink-0 text-center font-mono text-[10px] text-muted-foreground">{i + 1}</span>
-                                                        {b.url ? <img src={b.url} alt="" className="size-6 shrink-0 rounded object-cover" /> : null}
-                                                        <div className="min-w-0 flex-1">
-                                                            <div className="truncate text-[11px]" title={b.label}>{b.label}</div>
-                                                            <div className="truncate font-mono text-[9px] text-muted-foreground" title={b.id}>{b.id}</div>
+                                            <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
+                                                {refTruth.bindings.map((b, i) => {
+                                                    const kind = referenceKindOf(b.label);
+                                                    return (
+                                                    <div key={b.id} className="relative overflow-hidden rounded-[8px] border border-border bg-card" data-studio-ref-policy={b.id}>
+                                                        <div className="relative">
+                                                            {b.url ? <img src={b.url} alt="" className="aspect-[3/4] w-full object-cover" /> : <div className="grid aspect-[3/4] w-full place-items-center text-[10px] text-muted-foreground">无图</div>}
+                                                            <span className="absolute bottom-2 left-2 rounded bg-black/70 px-1.5 py-0.5 text-[11px] font-medium text-white" data-studio-ref-badge>参考图 {i + 1}</span>
+                                                            <div className="absolute right-1.5 top-1.5 flex items-center gap-1">
+                                                                <button type="button" aria-label={`上移 ${b.label}`} disabled={i === 0 || Boolean(refBusy)} onClick={() => void handleReferenceMove(i, -1)} className="grid size-6 place-items-center rounded-full bg-black/60 text-white transition hover:bg-black/80 disabled:opacity-40" data-studio-ref-move-up={i}><ArrowUp className="size-3" /></button>
+                                                                <button type="button" aria-label={`下移 ${b.label}`} disabled={i === (refTruth?.bindings.length ?? 0) - 1 || Boolean(refBusy)} onClick={() => void handleReferenceMove(i, 1)} className="grid size-6 place-items-center rounded-full bg-black/60 text-white transition hover:bg-black/80 disabled:opacity-40" data-studio-ref-move-down={i}><ArrowDown className="size-3" /></button>
+                                                            </div>
                                                         </div>
-                                                        <div className="flex shrink-0 items-center gap-0.5">
-                                                            <button type="button" aria-label={`上移 ${b.label}`} disabled={i === 0 || Boolean(refBusy)} onClick={() => void handleReferenceMove(i, -1)} className="rounded border border-border p-0.5 text-muted-foreground transition hover:bg-muted disabled:opacity-40" data-studio-ref-move-up={i}><ArrowUp className="size-3" /></button>
-                                                            <button type="button" aria-label={`下移 ${b.label}`} disabled={i === (refTruth?.bindings.length ?? 0) - 1 || Boolean(refBusy)} onClick={() => void handleReferenceMove(i, 1)} className="rounded border border-border p-0.5 text-muted-foreground transition hover:bg-muted disabled:opacity-40" data-studio-ref-move-down={i}><ArrowDown className="size-3" /></button>
-                                                            <button type="button" aria-pressed={b.enabled} disabled={Boolean(refBusy)} onClick={() => void handleReferenceToggle(b.id, !b.enabled)} className={cn("rounded border px-1.5 py-0.5 text-[10px] transition disabled:opacity-50", b.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-500" : "border-border text-muted-foreground hover:bg-muted")} data-studio-ref-toggle={b.id}>{b.enabled ? "启用" : "禁用"}</button>
+                                                        <div className="px-2 pb-2 pt-1.5">
+                                                            <div className="truncate text-[13px] font-medium" title={b.label}>{String((b as any).name || b.label)}</div>
+                                                            <div className="mt-1 flex items-center justify-between gap-1.5">
+                                                                <span className={`rounded-[4px] border px-1 text-[10px] ${REF_KIND_STYLE[kind]}`}>{REF_KIND_LABEL[kind]}</span>
+                                                                <button type="button" aria-pressed={b.enabled} disabled={Boolean(refBusy)} onClick={() => void handleReferenceToggle(b.id, !b.enabled)} className={cn("rounded border px-1.5 py-0.5 text-[10px] transition disabled:opacity-50", b.enabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-500" : "border-border text-muted-foreground hover:bg-muted")} data-studio-ref-toggle={b.id}>{b.enabled ? "启用" : "禁用"}</button>
+                                                            </div>
                                                         </div>
                                                     </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         ) : <p className="py-2 text-[11px] text-muted-foreground">本段画布 Clip 暂无参考绑定，暂无可排序项。</p>}
+                                        </div>
+                                    </details>
+                            <div className="thin-scrollbar min-h-0 space-y-3 overflow-y-auto border-l border-border bg-muted/20 pb-5 pl-4 pr-5 pt-4">
+                                {/* 影策 SegmentVideo：右侧内嵌播放器，真值取本段 video: 产物；无产物走占位。原版本列表保留在下方。 */}
+                                <div data-studio-seg-video-preview>
+                                    <div className="mb-1 flex items-center justify-between">
+                                        <span className="text-[11px] font-bold">第 {editIdx !== null ? editIdx + 1 : 0} 段视频</span>
+                                        <span className={cn("rounded px-1.5 py-0.5 text-[10px]", c.state.tone === "ready" ? "bg-emerald-500/15 text-emerald-500" : c.state.tone === "stale" ? "bg-amber-500/15 text-amber-500" : "bg-muted text-muted-foreground")}>{c.state.label}</span>
                                     </div>
+                                    {c.videoUrl ? (
+                                        <video key={c.videoUrl} src={c.videoUrl} controls playsInline preload="metadata" className="aspect-video w-full rounded-md border border-border bg-black" data-studio-seg-player />
+                                    ) : (
+                                        <div className="flex aspect-video w-full flex-col items-center justify-center gap-1 rounded-md border border-border bg-muted/30 text-muted-foreground">
+                                            <Film className="size-6" aria-hidden />
+                                            <span className="text-[11px]">{c.state.label}</span>
+                                            <small className="text-[10px]">{formatClipSec(c.sec)} · 对白与音效由视频模型生成</small>
+                                        </div>
+                                    )}
+                                    {/* 影策 drama-sdx-facts：进入成片取本段真实产物时长；上次花费本地无消耗真值，显示 — 不造假。 */}
+                                    <dl className="mt-2 grid grid-cols-2 gap-2" data-studio-seg-facts>
+                                        <div className="rounded border border-border bg-muted/30 px-2 py-1">
+                                            <dt className="text-[11px] text-muted-foreground">进入成片</dt>
+                                            <dd className="text-[11px] font-medium">{c.hasVideo ? formatClipSec(c.videoDuration) : "—"}</dd>
+                                        </div>
+                                        <div className="rounded border border-border bg-muted/30 px-2 py-1">
+                                            <dt className="text-[11px] text-muted-foreground">上次花费</dt>
+                                            <dd className="text-[11px] font-medium" title="本地未接入消耗真值，显示 —">—</dd>
+                                        </div>
+                                    </dl>
+                                </div>
+                                
+                                    <div className="mt-3 rounded-lg border border-border p-2" data-studio-segment-versions aria-busy={versionsLoading}>
+                                        <div className="mb-1.5 flex items-center justify-between">
+                                            <span className="text-xs font-semibold">本段视频版本（{segmentVersions.length}）</span>
+                                            <button type="button" aria-label="刷新版本列表" onClick={() => setVersionReload((n) => n + 1)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground" data-studio-versions-refresh>
+                                                <RefreshCw className="size-3" /> 刷新
+                                            </button>
+                                        </div>
+                                        {reprocessPreview?.reprocessable ? (
+                                            <div className="mb-1.5 flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/5 px-2 py-1.5" data-studio-segment-reprocess>
+                                                <Wrench className="size-3 shrink-0 text-amber-500" />
+                                                <span className="min-w-0 flex-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-300">已生成视频但后处理未回写（{reprocessPreview.code || reprocessPreview.status || "可重跑"}）。重跑只用冻结参数核验并回写同一文件，不调模型、不扣费。</span>
+                                                <button type="button" disabled={reprocessBusy === editingSegmentId} onClick={() => void handleReprocess()}
+                                                    className="shrink-0 rounded bg-amber-500 px-2 py-0.5 text-[10px] font-medium text-white transition hover:opacity-90 disabled:opacity-50" data-studio-segment-reprocess-run>
+                                                    {reprocessBusy === editingSegmentId ? "处理中…" : "重新处理视频"}
+                                                </button>
+                                            </div>
+                                        ) : null}
+                                        {reprocessResult ? (
+                                            <div className="mb-1.5 flex items-center gap-2 rounded border border-border bg-muted/30 px-2 py-1 text-[10px]" data-studio-segment-reprocess-result>
+                                                <CheckCircle2 className="size-3 shrink-0 text-emerald-500" />
+                                                <span className="font-mono font-medium">{reprocessResult.code}</span>
+                                                <span className="min-w-0 truncate text-muted-foreground" title={reprocessResult.message}>{reprocessResult.message}</span>
+                                            </div>
+                                        ) : null}
+                                        {versionsError ? <p className="mb-1 text-[10px] text-rose-500" role="alert">{versionsError}</p> : null}
+                                        {versionsLoading ? (
+                                            <p className="py-2 text-[11px] text-muted-foreground">读取生成历史…</p>
+                                        ) : segmentVersions.length ? (
+                                            <div className={cn("space-y-1 overflow-y-auto", versionsExpanded ? "max-h-[420px]" : "max-h-72")} data-studio-version-list>
+                                                {(versionsExpanded ? segmentVersions : segmentVersions.slice(0, SEGMENT_VERSION_LIMIT)).map((v) => {
+                                                    // 影策 take-list.tsx:83-84、114：预览态徽标只标真正被预览的那条。
+                                                    // 本地真值=previewVersion（独立预览弹窗正展示的版本），不切换当前版本，徽标如实表示「此版本正在预览」，不伪造行内切换。
+                                                    const previewing = previewVersion?.id === v.id;
+                                                    // 影策 take-list 单行元信息：当前/失败/取消才在第二行补一句，success 不占第二行。
+                                                    const metaNote = [v.current ? "当前" : "", v.status && v.status !== "success" ? v.status : "", v.error || ""].filter(Boolean).join(" · ");
+                                                    return (
+                                                        <div
+                                                            key={v.id}
+                                                            className={cn("flex items-center gap-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5", previewing && "border-sky-500/60 bg-sky-500/5", v.current && !previewing && "border-foreground/25 bg-foreground/[0.04]")}
+                                                            data-studio-version={v.id}
+                                                            data-studio-version-previewing={previewing ? "true" : undefined}
+                                                        >
+                                                        <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold", v.current ? "bg-foreground/10 text-foreground" : "bg-muted text-muted-foreground")}>
+                                                            {v.version ? `V${v.version}` : "—"}
+                                                        </span>
+                                                        {/* 影策 take-list 来源标签：pipeline/upload/canvas/restore，className 带 is-${source} */}
+                                                        <span
+                                                            className={cn("drama-take-source shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", `is-${v.source}`,
+                                                                v.source === "canvas" ? "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                                                                    : v.source === "upload" ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
+                                                                        : v.source === "restore" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                                                                            : "bg-foreground/5 text-muted-foreground")}
+                                                            data-studio-version-source={v.source}
+                                                            title={`来源：${SOURCE_LABEL[v.source] ?? v.source}`}
+                                                        >
+                                                            {SOURCE_LABEL[v.source] ?? SOURCE_LABEL.pipeline}
+                                                        </span>
+                                                            <div className="min-w-0 flex-1">
+                                                                {/* 影策 take-list takeMeta：模型名去渠道前缀（纯字符串）；完整原始 id 留在 title。
+                                                                    视频时长是真值：成片 media_files.duration_ms 优先，缺失时回退 shots duration_frames/fps；
+                                                                    generation_logs 顶层 durationMs 是生成耗时，绝不拿来当视频时长。 */}
+                                                                <div className="truncate text-[11px]" title={`${v.model || ""}${v.taskMode ? ` · ${v.taskMode}` : ""}`}>{v.startedAt ? new Date(v.startedAt).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "未知时间"} · {prettyModelName(v.model) || "未知模型"}{v.durationSec !== null ? ` · ${v.durationSec.toFixed(1)}秒` : ""}</div>
+                                                                <div className="truncate text-[10px] text-muted-foreground" title={v.durationSource ? `时长来源：${v.durationSource === "media-file" ? "成片视频文件" : "分场镜头帧数"}` : undefined}>{metaNote}</div>
+                                                            </div>
+                                                        {/* 影策 take-list.tsx:114 预览态徽标：仅当该版本正在预览弹窗中展示时出现（真值 previewVersion）。 */}
+                                                        {previewing ? (
+                                                            <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400" data-studio-version-preview-badge>预览中</span>
+                                                        ) : null}
+                                                        {v.url ? (
+                                                            <button type="button" aria-pressed={previewing} aria-label={`预览 V${v.version ?? ""}，不切换当前版本`} onClick={() => setPreviewVersion(v)} className="flex shrink-0 items-center gap-0.5 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted" data-studio-version-preview>
+                                                                <Eye className="size-3" /> 预览
+                                                            </button>
+                                                        ) : null}
+                                                        {v.storageKey && !v.current ? (
+                                                            <Popconfirm
+                                                                title={`把 V${v.version ?? "?"} 设为本段当前视频？`}
+                                                                description="只改本段当前版本，成片会标记为需重新合成。不会重新生成，也不删除其它版本。"
+                                                                okText="设为当前"
+                                                                cancelText="取消"
+                                                                onConfirm={() => void handleSetCurrentVersion(v)}
+                                                            >
+                                                                <button type="button" disabled={settingVersionId === v.id} className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-foreground/80 transition hover:border-foreground/25 hover:bg-foreground/5 disabled:opacity-50" data-studio-version-set-current>
+                                                                    {settingVersionId === v.id ? "设置中…" : "设为当前"}
+                                                                </button>
+                                                            </Popconfirm>
+                                                        ) : null}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : (
+                                            <p className="py-2 text-[11px] text-muted-foreground">本段还没有生成历史（generation_logs 无记录）</p>
+                                        )}
+                                        {/* 影策 take-list.tsx:132：超出上限的版本用计数文案提示，不再全塞进滚动区。 */}
+                                        {segmentVersions.length > SEGMENT_VERSION_LIMIT ? (
+                                            <button type="button" onClick={() => setVersionsExpanded(v => !v)} className="mt-1 text-left text-[10px] text-muted-foreground underline-offset-2 transition hover:text-foreground hover:underline" data-studio-versions-more>{versionsExpanded ? "收起更早版本" : `另有 ${segmentVersions.length - SEGMENT_VERSION_LIMIT} 个更早版本`}</button>
+                                        ) : null}
+                                        <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Vn = 本段第 n 次成功生成（按时间升序）；「设为当前」只切换视频，保留当前提示词与参数。</p>
+                                    </div>
+<div>
+                                    <div className="mb-1 text-xs font-semibold">本段镜头（{c.shots.length}）</div>
+                                    <div className="max-h-64 space-y-1.5 overflow-y-auto rounded border border-border p-2" data-studio-seg-shot-cards>
+                                        {c.shots.map((sh: any, si: number) => {
+                                            const frames = Number(sh?.duration_frames || sh?.durationMs || 0);
+                                            const startFrame = c.shots.slice(0, si).reduce((sum: number, prev: any) => sum + Number(prev?.duration_frames || prev?.durationMs || 0), 0);
+                                            const cam = sh?.camera && typeof sh.camera === "object" ? sh.camera : {};
+                                            const lines = utterancesOfShot(editorSource, sh);
+                                            const kind = lines.length ? "对白" : str(sh?.action) ? "动作" : str(sh?.visual) ? "画面" : "";
+                                            return (
+                                                <div key={String(sh?.id || si)} className="rounded-md border border-border/60 bg-muted/20 px-2 py-1.5 text-[11px]" data-studio-seg-shot-card={si}>
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <span className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-[10px] font-medium">{si + 1}</span>
+                                                        {kind ? <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground">{kind}</span> : null}
+                                                        <span className="font-mono text-[10px] text-muted-foreground" title="起止时间与单镜时长（duration_frames / fps）">{formatClipSec(startFrame / fps)}–{formatClipSec((startFrame + frames) / fps)} · {formatClipSec(frames / fps)}</span>
+                                                        {str(sh?.title) ? <span className="min-w-0 truncate text-[10px] text-muted-foreground">{str(sh.title)}</span> : null}
+                                                    </div>
+                                                    <div className="mt-1 space-y-0.5 pl-6 text-[10px] leading-5 text-foreground/80">
+                                                        {cam.framing ? <div><span className="text-muted-foreground">景别 </span>{framingLabel(str(cam.framing))}</div> : null}
+                                                        {str(sh?.visual) ? <div><span className="text-muted-foreground">画面 </span>{str(sh.visual)}</div> : null}
+                                                        {str(sh?.action) ? <div><span className="text-muted-foreground">动作 </span>{str(sh.action)}</div> : null}
+                                                        {str(cam.movement) ? <div><span className="text-muted-foreground">运动 </span>{str(cam.movement)}</div> : null}
+                                                        {lines.length ? lines.map((ln, li) => (
+                                                            <div key={li}><span className="text-muted-foreground">对白 </span>{ln.speaker ? `${ln.speaker}：` : ""}{ln.text}</div>
+                                                        )) : null}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                                <div>
+                                    {/* #10 段级参考图：组内上移/下移改 order、逐项启停改 disabled、恢复自动改 mode=auto，
+                                        经 set_segment_reference_policy 真写制作稿；binding id 取画布 H3 段的稳定身份。 */}
                                     {/* #8 段级音色：逐角色开关直接写画布 H3 段 h3CharacterGroups[].voiceEnabled，随本段视频请求作为参考音频发送 */}
-                                    <div className="mt-3 rounded-lg border border-border p-2" data-studio-segment-voices>
+                                    <div className="mt-3 rounded-lg border border-border p-2" data-studio-segment-voices aria-busy={voicesLoading}>
                                         <div className="mb-1.5 flex items-center justify-between">
                                             <span className="text-xs font-semibold">角色音色（{segmentVoices.filter(v => v.enabled).length}/{voiceTruth?.audioLimit ?? 0} · 共 {segmentVoices.length} 组）</span>
                                             <button type="button" aria-label="刷新本段音色" onClick={() => setVoiceReload(n => n + 1)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground" data-studio-voices-refresh>
@@ -3010,131 +3605,69 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, o
                                             </div>
                                         ) : null}
 <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">
-                                            当前段模型「{voiceTruth?.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL}」参考音色上限 {voiceTruth?.audioLimit ?? 0} 个（取自模型 maxAudios 能力，非 ref2va 模式为 0）。「按对白自动」按本段台词开口顺序选中角色（最多 {voiceTruth?.audioLimit ?? 0} 个），每次编译从台词重算派生列表并写入各角色组开关；「手动指定」保留用户逐组开关，重新编译不会覆盖。超限的手工开关会被拦截，运行时若仍有超出（旧数据/派生变化）按影策写 Note 跳过而不发送。开关写入画布 H3 段，h3-runner 按模式过滤后随本段视频请求发送。
+                                            当前段模型「{voiceTruth?.videoModel || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL}」参考音色上限 {voiceTruth?.audioLimit ?? 0} 个（取自模型 maxAudios 能力，非 ref2va 模式为 0）。「按对白自动」按本段台词开口顺序选中角色（最多 {voiceTruth?.audioLimit ?? 0} 个），每次编译从台词重算派生列表并写入各角色组开关；「手动指定」保留用户逐组开关，重新编译不会覆盖。超限的手工开关会被拦截，运行时若仍有超出（旧数据/派生变化）按影策写 Note 跳过而不发送。开关写入画布 H3 段，h3-runner 按模式过滤后随本段视频请求发送。
                                         </p>
                                     </div>
-                                    {/* 影策 SegmentReceipt：生成依据回执——提示词引用了哪些参考图编号（纯前端计算，零后端） */}
-                                    <div className="mt-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground" data-studio-seg-receipt>
-                                        <span className="font-medium text-foreground">生成依据：</span>
-                                        {(() => {
-                                            const tokens = Array.from(new Set((editPrompt.match(/<Picture\s*\d+\s*>/gi) || []).map(s => s.replace(/\s+/g, " ").toLowerCase()))).sort();
-                                            const used = tokens.length ? tokens.join("、") : "未显式引用编号（由提示词正文描述）";
-                                            // 真值取制作设置 continuationMode（index.tsx 即据此下发 independent）：tail=尾帧续接，parallel=并行出片。
-                                            const independent = loadStudioSettings(dramaId ?? null).continuationMode === "parallel";
-                                            const continuity = independent ? "各段独立生成，不依赖上一段尾帧。" : "第 2 段起以上一段尾帧为锚帧。";
-                                            return `随请求发送 ${c.thumbnails.length} 张参考图；提示词引用：${used}。${continuity}`;
-                                        })()}
-                                        {/* 影策 segment-dialog.tsx:408 声音行：只有读到模型 generateAudio 真值才显示，能力未知时整行不渲染，不造假。
-                                            真值来源与本段实际出片模型同源：画布段 selectedVideoModel（segmentVideoModels）→ 全局配置 → 默认模型，再查 modelVideoCapabilitiesOf。 */}
-                                        {(() => {
-                                            const segModel = segmentVideoModels[c.id] || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL;
-                                            const audio = modelVideoCapabilitiesOf(config, segModel).generateAudio;
-                                            if (typeof audio !== "boolean") return null;
-                                            return (
-                                                <span className={cn("ml-1 block", audio ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")} data-studio-seg-receipt-audio>
-                                                    声音：{audio ? "模型同步生成对白与音效" : "所选模型不出声，本段视频没有对白与音效"}
-                                                </span>
-                                            );
-                                        })()}
-                                    </div>
-                                    {/* 影策「段视频版本记录 / 预览 / 设为当前」：数据来自 generation_logs，写回走 restore_h3_output */}
-                                    <div className="mt-3 rounded-lg border border-border p-2" data-studio-segment-versions>
-                                        <div className="mb-1.5 flex items-center justify-between">
-                                            <span className="text-xs font-semibold">本段视频版本（{segmentVersions.length}）</span>
-                                            <button type="button" aria-label="刷新版本列表" onClick={() => setVersionReload((n) => n + 1)} className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground" data-studio-versions-refresh>
-                                                <RefreshCw className="size-3" /> 刷新
-                                            </button>
+                                    {/* 影策 SegmentReceipt：本次生成依据。展开时才读后端聚合的 clip_workbench（runtime/context），只读不写。 */}
+                                    <details key={`seg-receipt-${c.id}`} className="mt-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground" data-studio-seg-receipt
+                                        onToggle={(event) => { if ((event.currentTarget as HTMLDetailsElement).open) loadSegmentReceipt(c.id); }}>
+                                        <summary className="cursor-pointer text-[11px] font-medium text-foreground">本次生成依据（只读）</summary>
+                                        <div className="mt-1.5 space-y-0.5">
+                                            {(() => {
+                                                const receipt = segmentReceipts[c.id];
+                                                // 懒加载态：只有展开后才请求，请求前/请求中不展示任何推断值。
+                                                if (!receipt || receipt.loading) return <p>正在读取本次生成依据…</p>;
+                                                if (receipt.error) return <p className="text-rose-500" role="alert">读取本次生成依据失败：{receipt.error}</p>;
+                                                const workbench = receipt.workbench || {};
+                                                const artifacts = Array.isArray(workbench.runtime?.directorArtifacts) ? workbench.runtime.directorArtifacts as Array<Record<string, any>> : [];
+                                                // 优先当前有效的编译回执；没有 current 时退回最后一条，并如实标注「非当前」。
+                                                const artifact = artifacts.find((item) => item?.current === true) || artifacts[artifacts.length - 1];
+                                                const refs = Array.isArray(artifact?.references) ? artifact.references as Array<Record<string, any>> : [];
+                                                const subjects = Array.isArray(workbench.context?.resolvedSubjects) ? workbench.context.resolvedSubjects as Array<Record<string, any>> : [];
+                                                const latestVersion = segmentVersions.reduce<StudioSegmentVersion | null>((best, item) =>
+                                                    !best || (Date.parse(item.startedAt || "") || 0) > (Date.parse(best.startedAt || "") || 0) ? item : best, null);
+                                                // 模型/时间只取本段已加载真值（画布段 selectedVideoModel / generation_logs 版本），无值不渲染。
+                                                const model = segmentVideoModels[c.id] || latestVersion?.model || "";
+                                                const generatedAt = latestVersion?.startedAt || "";
+                                                const refName = (ref: Record<string, any>) => String(ref.label || ref.role || ref.assetId || ref.storageKey || "未命名").slice(0, 60);
+                                                return (
+                                                    <>
+                                                        {artifact?.sha256
+                                                            ? <p>提示词指纹 <span className="font-mono text-foreground/80">{String(artifact.sha256).slice(0, 8)}</span></p>
+                                                            : <p>提示词指纹：本段还没有编译回执</p>}
+                                                        {artifact ? <p>回执状态 {String(artifact.status || "未知")} · {artifact.current === true ? "当前有效" : "非当前（源稿或参考图已变更）"}</p> : null}
+                                                        <p>回执参考图 {refs.length} 张{refs.length ? `（${refs.map(refName).join("、")}）` : ""}</p>
+                                                        {subjects.length ? <p>参考对象 {subjects.length} 个（{subjects.map((subject) => String(subject.entityRef?.id || subject.id || "未命名")).join("、")}）</p> : null}
+                                                        {model ? <p>当前段模型 {prettyModelName(model)}</p> : null}
+                                                        {generatedAt ? <p>最近成功生成 {new Date(generatedAt).toLocaleString("zh-CN", { hour12: false })}</p> : null}
+                                                        {!artifact && !refs.length ? <p>后端回执里没有本段的编译产物与参考图记录。</p> : null}
+                                                    </>
+                                                );
+                                            })()}
+                                            {/* 前端本段真实绑定回执：随请求发送的参考图编号与续接模式（与原 SegmentReceipt 同源计算）。 */}
+                                            <p>
+                                                随请求发送 {c.thumbnails.length} 张参考图；提示词引用：
+                                                {(() => {
+                                                    const tokens = Array.from(new Set((editPrompt.match(/<Picture\s*\d+\s*>/gi) || []).map(s => s.replace(/\s+/g, " ").toLowerCase()))).sort();
+                                                    return tokens.length ? tokens.join("、") : "未显式引用编号（由提示词正文描述）";
+                                                })()}
+                                                。{loadStudioSettings(dramaId ?? null).continuationMode === "parallel" ? "各段独立生成，不依赖上一段尾帧。" : "第 2 段起以上一段尾帧为锚帧。"}
+                                            </p>
+                                            {/* 影策 segment-dialog.tsx:408 声音行：只有读到模型 generateAudio 真值才显示，能力未知时整行不渲染，不造假。
+                                                真值来源与本段实际出片模型同源：画布段 selectedVideoModel（segmentVideoModels）→ 全局配置 → 默认模型，再查 modelVideoCapabilitiesOf。 */}
+                                            {(() => {
+                                                const segModel = segmentVideoModels[c.id] || config.videoModel || DEFAULT_SEGMENT_VIDEO_MODEL;
+                                                const audio = modelVideoCapabilitiesOf(config, segModel).generateAudio;
+                                                if (typeof audio !== "boolean") return null;
+                                                return (
+                                                    <span className={cn("ml-1 block", audio ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")} data-studio-seg-receipt-audio>
+                                                        声音：{audio ? "模型同步生成对白与音效" : "所选模型不出声，本段视频没有对白与音效"}
+                                                    </span>
+                                                );
+                                            })()}
                                         </div>
-                                        {reprocessPreview?.reprocessable ? (
-                                            <div className="mb-1.5 flex items-center gap-2 rounded border border-amber-500/40 bg-amber-500/5 px-2 py-1.5" data-studio-segment-reprocess>
-                                                <Wrench className="size-3 shrink-0 text-amber-500" />
-                                                <span className="min-w-0 flex-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-300">已生成视频但后处理未回写（{reprocessPreview.code || reprocessPreview.status || "可重跑"}）。重跑只用冻结参数核验并回写同一文件，不调模型、不扣费。</span>
-                                                <button type="button" disabled={reprocessBusy === editingSegmentId} onClick={() => void handleReprocess()}
-                                                    className="shrink-0 rounded bg-amber-500 px-2 py-0.5 text-[10px] font-medium text-white transition hover:opacity-90 disabled:opacity-50" data-studio-segment-reprocess-run>
-                                                    {reprocessBusy === editingSegmentId ? "处理中…" : "重新处理视频"}
-                                                </button>
-                                            </div>
-                                        ) : null}
-                                        {reprocessResult ? (
-                                            <div className="mb-1.5 flex items-center gap-2 rounded border border-border bg-muted/30 px-2 py-1 text-[10px]" data-studio-segment-reprocess-result>
-                                                <CheckCircle2 className="size-3 shrink-0 text-emerald-500" />
-                                                <span className="font-mono font-medium">{reprocessResult.code}</span>
-                                                <span className="min-w-0 truncate text-muted-foreground" title={reprocessResult.message}>{reprocessResult.message}</span>
-                                            </div>
-                                        ) : null}
-                                        {versionsError ? <p className="mb-1 text-[10px] text-rose-500" role="alert">{versionsError}</p> : null}
-                                        {versionsLoading ? (
-                                            <p className="py-2 text-[11px] text-muted-foreground">读取生成历史…</p>
-                                        ) : segmentVersions.length ? (
-                                            <div className="max-h-56 space-y-1 overflow-y-auto" data-studio-version-list>
-                                                {segmentVersions.slice(0, SEGMENT_VERSION_LIMIT).map((v) => {
-                                                    // 影策 take-list.tsx:83-84、114：预览态徽标只标真正被预览的那条。
-                                                    // 本地真值=previewVersion（独立预览弹窗正展示的版本），不切换当前版本，徽标如实表示「此版本正在预览」，不伪造行内切换。
-                                                    const previewing = previewVersion?.id === v.id;
-                                                    return (
-                                                        <div
-                                                            key={v.id}
-                                                            className={cn("flex items-center gap-2 rounded border border-border/60 bg-muted/30 px-2 py-1.5", previewing && "border-sky-500/60 bg-sky-500/5")}
-                                                            data-studio-version={v.id}
-                                                            data-studio-version-previewing={previewing ? "true" : undefined}
-                                                        >
-                                                        <span className={cn("shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold", v.current ? "bg-emerald-500/15 text-emerald-500" : "bg-muted text-muted-foreground")}>
-                                                            {v.version ? `V${v.version}` : "—"}
-                                                        </span>
-                                                        {/* 影策 take-list 来源标签：pipeline/upload/canvas/restore，className 带 is-${source} */}
-                                                        <span
-                                                            className={cn("drama-take-source shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", `is-${v.source}`,
-                                                                v.source === "canvas" ? "bg-sky-500/15 text-sky-600 dark:text-sky-400"
-                                                                    : v.source === "upload" ? "bg-violet-500/15 text-violet-600 dark:text-violet-400"
-                                                                        : v.source === "restore" ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
-                                                                            : "bg-foreground/5 text-muted-foreground")}
-                                                            data-studio-version-source={v.source}
-                                                            title={`来源：${SOURCE_LABEL[v.source] ?? v.source}`}
-                                                        >
-                                                            {SOURCE_LABEL[v.source] ?? SOURCE_LABEL.pipeline}
-                                                        </span>
-                                                            <div className="min-w-0 flex-1">
-                                                                {/* 影策 take-list takeMeta：模型名去渠道前缀（纯字符串）；完整原始 id 留在 title。
-                                                                    视频时长是真值：成片 media_files.duration_ms 优先，缺失时回退 shots duration_frames/fps；
-                                                                    generation_logs 顶层 durationMs 是生成耗时，绝不拿来当视频时长。 */}
-                                                                <div className="truncate text-[11px]" title={v.model}>{v.startedAt ? new Date(v.startedAt).toLocaleString("zh-CN", { hour12: false }) : "未知时间"} · {shortModelName(v.model) || "未知模型"}{v.taskMode ? ` · ${v.taskMode}` : ""}{v.durationSec !== null ? ` · ${v.durationSec.toFixed(1)}秒` : ""}</div>
-                                                                <div className="truncate text-[10px] text-muted-foreground" title={v.durationSource ? `时长来源：${v.durationSource === "media-file" ? "成片视频文件" : "分场镜头帧数"}` : undefined}>{v.status || "—"}{v.error ? ` · ${v.error}` : ""}{v.current ? " · 当前" : ""}</div>
-                                                            </div>
-                                                        {/* 影策 take-list.tsx:114 预览态徽标：仅当该版本正在预览弹窗中展示时出现（真值 previewVersion）。 */}
-                                                        {previewing ? (
-                                                            <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-600 dark:text-sky-400" data-studio-version-preview-badge>预览中</span>
-                                                        ) : null}
-                                                        {v.url ? (
-                                                            <button type="button" aria-pressed={previewing} aria-label={`预览 V${v.version ?? ""}，不切换当前版本`} onClick={() => setPreviewVersion(v)} className="flex shrink-0 items-center gap-0.5 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted" data-studio-version-preview>
-                                                                <Eye className="size-3" /> 预览
-                                                            </button>
-                                                        ) : null}
-                                                        {v.storageKey && !v.current ? (
-                                                            <Popconfirm
-                                                                title={`把 V${v.version ?? "?"} 设为本段当前视频？`}
-                                                                description="只改本段当前版本，成片会标记为需重新合成。不会重新生成，也不删除其它版本。"
-                                                                okText="设为当前"
-                                                                cancelText="取消"
-                                                                onConfirm={() => void handleSetCurrentVersion(v)}
-                                                            >
-                                                                <button type="button" disabled={settingVersionId === v.id} className="shrink-0 rounded bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50" data-studio-version-set-current>
-                                                                    {settingVersionId === v.id ? "设置中…" : "设为当前"}
-                                                                </button>
-                                                            </Popconfirm>
-                                                        ) : null}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        ) : (
-                                            <p className="py-2 text-[11px] text-muted-foreground">本段还没有生成历史（generation_logs 无记录）</p>
-                                        )}
-                                        {/* 影策 take-list.tsx:132：超出上限的版本用计数文案提示，不再全塞进滚动区。 */}
-                                        {segmentVersions.length > SEGMENT_VERSION_LIMIT ? (
-                                            <p className="mt-1 text-[10px] text-muted-foreground" data-studio-versions-more>另有 {segmentVersions.length - SEGMENT_VERSION_LIMIT} 个更早版本</p>
-                                        ) : null}
-                                        <p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Vn = 本段第 n 次成功生成（按时间升序）；「设为当前」只切换视频，保留当前提示词与参数。</p>
-                                    </div>
+                                    </details>
+                                    {/* 影策「段视频版本记录 / 预览 / 设为当前」：数据来自 generation_logs，写回走 restore_h3_output */}
                                 </div>
                             </div>
                         </div>
@@ -3247,6 +3780,18 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
     const videoRef = useRef<HTMLVideoElement>(null);
     const readyClips = clips.filter((c) => c.status === "success" || !c.status).length;
     const current = clips[activeClip];
+    // 播放器读取态：只由 video 真实事件驱动；换片源按 key 隔离，避免上一段的缓冲/错误串到新片源。
+    const playerKey = hasFinal ? `final:${finalResource!.storageKey}` : current ? `${current.id}:${current.storageKey}` : "";
+    const [playerState, setPlayerState] = useState<{ key: string; buffering: boolean; error: string }>({ key: "", buffering: false, error: "" });
+    const playerView = playerState.key === playerKey ? playerState : { key: playerKey, buffering: false, error: "" };
+    const setBuffering = (buffering: boolean) => setPlayerState({ key: playerKey, buffering, error: "" });
+    const playerEvents = {
+        onLoadStart: () => setBuffering(true),
+        onWaiting: () => setBuffering(true),
+        onPlaying: () => setBuffering(false),
+        onCanPlay: () => setBuffering(false),
+        onError: () => setPlayerState({ key: playerKey, buffering: false, error: "视频加载失败，请检查网络或稍后重试" }),
+    };
     // 本页只有「合成成品」会把 busy 置真 → 视作 rendering（影策 composing || rendering）。
     const rendering = busy;
     // 合成片的真实时间轴：按 clipMedia 顺序累加每段实测时长（与 index.tsx 的拼接顺序一致），胶片条点击跳到该段起点。
@@ -3266,7 +3811,7 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                 <div className="flex min-w-0 flex-col gap-3">
                     <div className="flex min-w-0 flex-1 items-center justify-center">
                         {/* 影策 final-view.tsx:35,53：有合成成片就放合成片（不是单片段）；画幅按设置页 videoAspectRatio 派生。 */}
-                        <div className={cn("flex w-full max-w-2xl items-center justify-center overflow-hidden rounded-xl bg-black shadow-sm", aspect.className)} style={aspect.style} data-studio-player data-studio-aspect={aspectLabel}>
+                        <div className={cn("relative flex w-full max-w-2xl items-center justify-center overflow-hidden rounded-xl bg-black shadow-sm", aspect.className)} style={aspect.style} data-studio-player data-studio-aspect={aspectLabel} aria-busy={playerView.buffering}>
                             {hasFinal ? (
                                 <video
                                     key={`final:${finalResource!.storageKey}`}
@@ -3276,7 +3821,7 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                                     playsInline
                                     preload="metadata"
                                     className="size-full object-contain"
-                                    onError={() => void 0}
+                                    {...playerEvents}
                                     data-studio-video="final"
                                 />
                             ) : current ? (
@@ -3288,7 +3833,7 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                                     playsInline
                                     preload="metadata"
                                     className="size-full object-contain"
-                                    onError={() => void 0}
+                                    {...playerEvents}
                                 />
                             ) : (
                                 <div className="text-center text-white/40">
@@ -3296,6 +3841,16 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                                     <p className="mt-2 text-xs">{STAGE_LABEL[ep.stage] || STAGE_LABEL.draft} · {rendering ? "正在合成成片…" : "全部段视频生成后，点右侧「合成成品」生成成片"}</p>
                                 </div>
                             )}
+                            {playerView.error ? (
+                                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 px-4 text-center text-xs text-rose-300" role="alert" data-studio-player-error>
+                                    <AlertCircle className="size-6" aria-hidden />
+                                    <span>{playerView.error}</span>
+                                </div>
+                            ) : playerView.buffering ? (
+                                <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/30 text-xs text-white/90" role="status" data-studio-player-buffering>
+                                    <LoaderCircle className="size-4 animate-spin" aria-hidden /> 缓冲中…
+                                </div>
+                            ) : null}
                         </div>
                     </div>
                     {/* 胶片条：影策 final-view.tsx:65-83 —— 有合成片时点击跳到该段起点（不换片源）；尾帧图有则显示，无则保留 video（不造假）。 */}
@@ -3306,7 +3861,7 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                                 const tailKey = typeof tail === "string" && tail ? tail : "";
                                 return (
                                 <button key={`${c.id}:${i}`} type="button" onClick={() => { setActiveClip(i); if (videoRef.current) videoRef.current.currentTime = hasFinal ? (starts[i] || 0) : 0; }}
-                                    className={`flex shrink-0 flex-col gap-1 rounded-md border p-1 text-left transition ${i === activeClip ? "border-primary bg-accent/40" : "border-border hover:bg-muted/50"}`}
+                                    className={`flex shrink-0 flex-col gap-1 rounded-md border p-1 text-left transition ${i === activeClip ? "border-foreground/40 bg-foreground/[0.04]" : "border-border hover:bg-muted/50"}`}
                                     title={`${c.title} · ${fmtDur(c.duration)}${c.inputOutdated ? " · 输入已更改" : ""}`}>
                                     {tailKey ? (
                                         <img src={backendMediaUrl(tailKey)} alt="" className="h-12 w-20 rounded bg-black object-cover" />
@@ -3339,9 +3894,6 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                         {clips.length ? <div className="mt-1 text-muted-foreground">已生成 {readyClips}/{clips.length} 段视频 · 点击胶片条{hasFinal ? "定位到对应段" : "切换片段"}</div> : null}
                         <div className="mt-1 text-muted-foreground">对白与音效来自视频模型</div>
                     </div>
-                    <button type="button" onClick={() => onOpenCanvas()} className="flex h-9 w-full items-center justify-center gap-2 rounded-md bg-foreground text-xs font-medium text-background transition hover:opacity-90">
-                        <Video className="size-3.5" /> 在画布中打开本集
-                    </button>
                     {/* 影策 final-view.tsx:97-106：disabled=每段 ready、loading=合成中、title 说明原因。 */}
                     <button type="button" onClick={onCompose} disabled={!composeReady || rendering}
                         title={composeReady ? (rendering ? "正在合成成片" : "按各段视频实测时长重新拼接成片") : "所有剧情段视频就绪后才能合成"}
@@ -3351,7 +3903,7 @@ function FinalPanel({ ep, production, clipMedia, onCompose, onExportJianying, on
                     </button>
                     <button type="button" disabled={!hasFinal}
                         onClick={() => { if (finalResource?.storageKey) { const a = document.createElement("a"); a.href = backendMediaUrl(finalResource.storageKey); a.download = `${ep.title || "成片"}-第${ep.no}集.mp4`; document.body.appendChild(a); a.click(); a.remove(); } }}
-                        className="flex h-9 w-full items-center justify-center gap-2 rounded-md border border-primary/40 bg-primary/5 text-xs text-primary transition hover:bg-primary/10 disabled:opacity-40" data-studio-download-final>
+                        className="flex h-9 w-full items-center justify-center gap-2 rounded-md border border-border text-xs text-foreground transition hover:bg-muted disabled:opacity-40" data-studio-download-final>
                         <Download className="size-3.5" /> 下载成片{hasFinal ? "" : "（先合成）"}
                     </button>
                     <button type="button" disabled={!current} onClick={() => { if (current) window.open(backendMediaUrl(current.storageKey), "_blank"); }} className="flex h-9 w-full items-center justify-center gap-2 rounded-md border border-border text-xs text-muted-foreground transition hover:bg-muted disabled:opacity-40">
@@ -3370,13 +3922,15 @@ export type DetailTab = "story" | "shots" | "clips";
 
 export type ProcessJobView = { id: string; stage: string; status: string; attempt: number; error?: string | null; startedAt?: string | null; finishedAt?: string | null };
 
-export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFailureByTarget, dramaId, onRescript, onCompose, onExportJianying, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onApproveVideo, onSwitchToAssets, onChanged, busy, processJobs, onDiscussShot }: {
+export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onCompose, onExportJianying, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onApproveVideo, onSwitchToAssets, onChanged, busy, processJobs, onDiscussShot }: {
     tab: DetailTab;
     episode: StudioEpisode;
     production: EpisodeProduction | undefined;
     clipMedia: StudioClipMedia[];
     clipFailureByTarget?: Readonly<Record<string, string>>;
     dramaId?: string | null;
+    /** 资产真名表（assetId / 节点 id → 名称），来自项目资产真值；参考图绑定里没带 name 时用它兜底。 */
+    assetNames?: Readonly<Record<string, string>>;
     onRescript: () => void;
     onCompose: () => void;
     onExportJianying: () => void;
@@ -3396,6 +3950,6 @@ export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFai
     onDiscussShot?: (shot: { title?: string; visual?: string; camera?: unknown; duration_seconds?: number; dialogues?: unknown }) => void;
 }) {
     if (tab === "story") return <ScriptPanel ep={episode} production={production} dramaId={dramaId} onRescript={onRescript} onChanged={onChanged} busy={busy} processJobs={processJobs} onDiscussShot={onDiscussShot} />;
-    if (tab === "shots") return <ShotsPanel ep={episode} production={production} clipMedia={clipMedia} clipFailureByTarget={clipFailureByTarget} dramaId={dramaId} onRescript={onRescript} onOpenCanvas={onOpenCanvas} onSwitchToScript={onSwitchToScript} onWriteSegmentPrompt={onWriteSegmentPrompt} onSaveSegmentPrompt={onSaveSegmentPrompt} onListSegmentVersions={onListSegmentVersions} onSetSegmentCurrentVideo={onSetSegmentCurrentVideo} onListSegmentVideoModels={onListSegmentVideoModels} onSetSegmentVideoModel={onSetSegmentVideoModel} onChanged={onChanged} onApproveVideo={onApproveVideo} onSwitchToAssets={onSwitchToAssets} busy={busy} />;
+    if (tab === "shots") return <ShotsPanel ep={episode} production={production} clipMedia={clipMedia} clipFailureByTarget={clipFailureByTarget} dramaId={dramaId} assetNames={assetNames} onRescript={onRescript} onOpenCanvas={onOpenCanvas} onSwitchToScript={onSwitchToScript} onWriteSegmentPrompt={onWriteSegmentPrompt} onSaveSegmentPrompt={onSaveSegmentPrompt} onListSegmentVersions={onListSegmentVersions} onSetSegmentCurrentVideo={onSetSegmentCurrentVideo} onListSegmentVideoModels={onListSegmentVideoModels} onSetSegmentVideoModel={onSetSegmentVideoModel} onChanged={onChanged} onApproveVideo={onApproveVideo} onSwitchToAssets={onSwitchToAssets} busy={busy} />;
     return <FinalPanel ep={episode} production={production} clipMedia={clipMedia} onCompose={onCompose} onExportJianying={onExportJianying} onOpenCanvas={onOpenCanvas} busy={busy} />;
 }

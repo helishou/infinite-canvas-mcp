@@ -498,6 +498,7 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
             }
             res.json({ ok: true, episodeId: episode.id, ...result });
         } catch (error) {
+            console.error(`[script-proposal] 生成失败 episode=${episode.id} detail=`, error instanceof Error ? error.stack || error.message : error);
             res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
         }
     });

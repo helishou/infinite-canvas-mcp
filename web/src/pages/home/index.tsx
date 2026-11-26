@@ -12,7 +12,6 @@ import type { CanvasConnection, CanvasNodeData, CanvasNodeMetadata } from "@/typ
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
 import { canvasHostLocation } from "@/lib/canvas/canvas-host-navigation";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
-import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { WorkspaceViewSwitcher } from "@/components/production/workspace-view-switcher";
 import { cn } from "@/lib/utils";
 import { CreativeLaunchPad } from "./creative-launch-pad";
@@ -116,7 +115,9 @@ function HomeWorkbench() {
     const isDrama = (p: CanvasProject) => data.canvasOwners.has(p.id);
     const dramaDestination = (p: CanvasProject) => {
         const episode = data.canvasEpisodes.get(p.id);
-        return episode ? dramaWorkbenchPath(episode.dramaId, episode.episodeId) : `/production?dramaId=${encodeURIComponent(folderFor(p)?.id || "")}&workspace=series`;
+        const query = new URLSearchParams({ dramaId: episode?.dramaId || folderFor(p)?.id || "" });
+        if (episode) query.set("episodeId", episode.episodeId);
+        return `/drama-studio?${query}`;
     };
     const sorted = [...projects].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
     const latest = sorted[0];
@@ -404,7 +405,7 @@ function HomeWorkbench() {
 
     const creationActions = (
         <section className={hasWork ? "flex flex-wrap items-center gap-2" : "mb-5 grid gap-3 sm:grid-cols-2"} aria-label={t("productionCanvas.entryTitle")}>
-            {[{ path: "/production", title: "dramaEntry", description: "dramaEntryHint", icon: Clapperboard }, { path: "/canvas", title: "canvasEntry", description: "canvasEntryHint", icon: LayoutGrid }].map(({ path, title, description, icon: Icon }) => (
+            {[{ path: "/drama-studio", title: "dramaEntry", description: "dramaEntryHint", icon: Clapperboard }, { path: "/canvas", title: "canvasEntry", description: "canvasEntryHint", icon: LayoutGrid }].map(({ path, title, description, icon: Icon }) => (
                 <Link
                     key={path}
                     to={path}
@@ -440,8 +441,15 @@ function HomeWorkbench() {
     const switchToProduction = () => {
         if (!overlayProjectId) return;
         canvasHost?.collapse?.();
-        if (overlayEpisode) navigate(dramaWorkbenchPath(overlayEpisode.dramaId, overlayEpisode.episodeId));
-        else if (overlayOwner) navigate(`/production?${new URLSearchParams({ dramaId: overlayOwner.id, workspace: "series", seriesView: "planning" })}`);
+        // 切回制作台统一进新制作台：分集画布带 episodeId 选中对应集，共享资产画布只带 dramaId。
+        const query = new URLSearchParams();
+        if (overlayEpisode) {
+            query.set("dramaId", overlayEpisode.dramaId);
+            query.set("episodeId", overlayEpisode.episodeId);
+        } else if (overlayOwner) {
+            query.set("dramaId", overlayOwner.id);
+        }
+        navigate(`/drama-studio?${query}`);
     };
     return (
         <main className="ui-controls min-h-full bg-background text-foreground" data-testid="home-workbench">

@@ -70,7 +70,7 @@ import type { BackendDatabase } from "../db.js";
 import type { BackendEventBus } from "../events.js";
 import type { CanvasCommit } from "../canvas/collaboration.js";
 import type { CanvasOperation } from "../canvas/project-ops.js";
-import { listApprovedSharedAssets, registerSharedAssetVersion, sharedAssetHistory, sharedAssetNodeMatchesSource, validateSharedAssetSourceIdentity, type ApprovedSharedAsset, type SharedAssetIdentity } from "./shared-assets.js";
+import { listApprovedSharedAssets, registerSharedAssetVersion, resolveSharedIdentity, sharedAssetHistory, sharedAssetNodeMatchesSource, validateSharedAssetSourceIdentity, type ApprovedSharedAsset, type SharedAssetIdentity, type SharedIdentityResolution, type SharedIdentitySource } from "./shared-assets.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./production-canvas.js";
 import { explicitShotCueCount, importDemandScriptBlocks } from "./script-demand-import.js";
 import { scriptNodeOperations } from "./script-nodes.js";
@@ -440,6 +440,12 @@ export type SubjectPictureResolutionContext = {
     canvasProjects?: Map<string, ReturnType<BackendDatabase["getCanvasProject"]>>;
     h3ModesByTarget?: Map<string, string>;
 };
+
+/** 写时按共享画布身份回填：把 db / dramaId 绑定到 entityNodeOperations 的 resolver 形状。 */
+function sharedIdentityResolverFor(db: BackendDatabase, dramaId: string):
+    (kind: "character" | "scene" | "prop", name: string, aliases: string[], source?: SharedIdentitySource) => SharedIdentityResolution | undefined {
+    return (kind, name, aliases, source) => resolveSharedIdentity(db, dramaId, kind, name, aliases, source);
+}
 
 export class EpisodeProductionService {
     private subjectDependencyIndexReady = false;
@@ -1288,6 +1294,8 @@ export class EpisodeProductionService {
         const frozen = layoutReceipt || this.db.getProductionPreparationLayout(operationId)?.receipt as ProductionLayoutReceipt | undefined;
         const frozenPlan = layoutPlan || this.db.getProductionPreparationLayout(operationId)?.plan;
         const canvasId = this.episodeInfo(id).canvasId;
+        const identityDramaId = this.db.getDramaEpisode(id)?.dramaId || productionCanvasContext(this.db, canvasId || id).dramaId || "";
+        const identityResolver = sharedIdentityResolverFor(this.db, identityDramaId);
         let completedResponse: ProductionRecord & { replayed?: boolean; layoutReceipt?: ProductionLayoutReceipt } | undefined;
         const finishReceipt = (record: ProductionRecord & { replayed?: boolean }) => {
             const completed = frozen && canvasId ? { ...frozen, canvasRevision: this.db.getCanvasProjectRevision(canvasId) || frozen.canvasRevision } : frozen;
@@ -1308,7 +1316,7 @@ export class EpisodeProductionService {
                 if (canvasPreparation.operations.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, canvasPreparation.expectedCanvasRevision, canvasPreparation.operations,
                     { operationId: canvasPreparation.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:layout", label: "准备制作布局" } });
                 const projectedProject = this.db.getCanvasProject(canvasPreparation.projectId)!;
-                const scriptOps = [...(projectionLayout ? entityNodeOperations(projectedProject, result.draft, { kind: this.ownerKind, id }, result.draft, projectionLayout) : []), ...scriptNodeOperations(projectedProject, result.draft, { kind: this.ownerKind, id }, result.draft), ...(projectionLayout ? imageInputOperations(projectedProject, result.draft, id, result.draft, projectionLayout) : [])];
+                const scriptOps = [...(projectionLayout ? entityNodeOperations(projectedProject, result.draft, { kind: this.ownerKind, id }, result.draft, projectionLayout, identityResolver) : []), ...scriptNodeOperations(projectedProject, result.draft, { kind: this.ownerKind, id }, result.draft), ...(projectionLayout ? imageInputOperations(projectedProject, result.draft, id, result.draft, projectionLayout) : [])];
                 if (scriptOps.length) this.db.applyCanvasProjectOperations(canvasPreparation.projectId, Number(projectedProject.revision || 0), scriptOps,
                     { operationId: `${operationId}:scripts`, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
                 const updatedProject = this.db.getCanvasProject(canvasPreparation.projectId)!;
@@ -1321,7 +1329,7 @@ export class EpisodeProductionService {
             // 乐观锁放行：write 已在 last-write-wins 下进行，不再用 revision 复核结果。
             const canvas = canvasId && this.db.getCanvasProject(canvasId);
             if (canvas) {
-                const operations = [...(projectionLayout ? entityNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft, projectionLayout) : []), ...scriptNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft), ...(projectionLayout ? imageInputOperations(canvas, result.draft, id, result.draft, projectionLayout) : [])];
+                const operations = [...(projectionLayout ? entityNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft, projectionLayout, identityResolver) : []), ...scriptNodeOperations(canvas, result.draft, { kind: this.ownerKind, id }, result.draft), ...(projectionLayout ? imageInputOperations(canvas, result.draft, id, result.draft, projectionLayout) : [])];
                 if (operations.length) this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: `${operationId}:scripts`, runtimeWrite: true, source: { kind: "system", clientId: "production:scripts", label: "准备剧本文本节点" } });
             }
         }
@@ -1361,10 +1369,18 @@ export class EpisodeProductionService {
         const sharedProject = sharedCanvasId ? this.db.getCanvasProject(sharedCanvasId) : null;
         if (sharedCanvasId && !sharedProject) throw new Error("固定共享资产画布不存在，请恢复原画布");
         const targetNodeId = `shared-import-${crypto.createHash("sha256").update([episode.dramaId, assetId, storageKey, sha256].join("\0")).digest("hex").slice(0, 24)}`;
+        // 共享画布的节点类型按资产权威分类决定，不沿用分集源节点的 image/config 形态：
+        // 接入后必须与本地「存入资产库」一致产出 character/scene/prop 实体节点。
+        // 优先级：asset_plan.kind（权威）→ assetId 的 AC-CHAR/SCENE/PROP 前缀（存量兼容）→ 源节点 type → image。
+        const planKind = String(plan.kind || plan.asset_type || "").toLowerCase();
+        const prefixKind = String(assetId).startsWith("AC-CHAR-") ? "character" : String(assetId).startsWith("AC-SCENE-") ? "scene" : String(assetId).startsWith("AC-PROP-") ? "prop" : "";
+        const entityKind = ["character", "scene", "prop"].includes(planKind) ? planKind
+            : ["character", "scene", "prop"].includes(prefixKind) ? prefixKind
+            : ["character", "scene", "prop"].includes(String(sourceNode.type)) ? String(sourceNode.type) : "";
         return {
             episodeId: id, episodeRevision: current.revision, publishedVersion: current.publishedVersion, sourceHash: director.sourceHash,
             sourceCanvasId: episode.canvasId, sourceCanvasRevision: Number(sourceProject?.revision || 0), sourceNodeId: String(sourceNode!.id), assetId,
-            assetName: String(plan.asset_name || plan.name || plan.title || sourceNode!.title || assetId), storageKey, sha256,
+            assetName: String(plan.asset_name || plan.name || plan.title || sourceNode!.title || assetId), entityKind, storageKey, sha256,
             evidence: asset.evidence || "", reviewStatus: asset.status === "approved" && Boolean(asset.evidence?.trim()) ? "approved" as const : "unreviewed" as const, sourceGenerationTaskId: String(record(asset.selectedResult).taskId || meta.runtimeTaskId || ""),
             dramaId: episode.dramaId, sharedCanvasId, sharedCanvasRevision: sharedProject ? Number(sharedProject.revision || 0) : null,
             targetNodeId, approvedId: approved?.id || null, eligible: true as const,
@@ -1404,20 +1420,31 @@ export class EpisodeProductionService {
             const sourceMeta = record(sourceNode.metadata);
             const sharedPromotionOrigin = { episodeId: id, sourceCanvasId: preview.sourceCanvasId, sourceNodeId: preview.sourceNodeId, sourceVersion: preview.publishedVersion,
                 sourceGenerationTaskId: preview.sourceGenerationTaskId, sourceStorageKey: preview.storageKey, sourceSha256: preview.sha256 };
+            const media = this.db.getMediaFile(preview.storageKey);
+            // 共享画布统一产出实体节点（character/scene/prop），不再沿用分集 image/config 形态。
+            // 顶层媒体字段保留，normalizeEntityPrimaryMedia/normalizeCharacterPrimaryMedia 会据此派生
+            // sceneImage/propImage/characterImages，与本地「存入资产库」的节点结构一致。
+            const kind = preview.entityKind;
+            const entityFields: Record<string, unknown> = kind === "character" ? {
+                characterName: sourceMeta.characterName || preview.assetName,
+                characterDescription: sourceMeta.characterDescription || "",
+                characterEnglishName: sourceMeta.characterEnglishName || "",
+                characterImages: (Array.isArray(sourceMeta.characterImages) ? sourceMeta.characterImages : []).filter((image: any) => image?.storageKey === preview.storageKey),
+                characterPrimaryIndex: 0,
+            } : kind === "scene" ? {
+                sceneName: sourceMeta.sceneName || preview.assetName,
+                sceneDescription: sourceMeta.sceneDescription || sourceMeta.description || "",
+            } : kind === "prop" ? {
+                propName: sourceMeta.propName || preview.assetName,
+                propDescription: sourceMeta.propDescription || "",
+            } : {};
             const metadata = {
-                ...(sourceNode.type === "character" ? {
-                    characterName: sourceMeta.characterName || sourceNode.title || preview.assetName,
-                    characterDescription: sourceMeta.characterDescription || "",
-                    characterEnglishName: sourceMeta.characterEnglishName || "",
-                    characterImages: (Array.isArray(sourceMeta.characterImages) ? sourceMeta.characterImages : []).filter((image: any) => image?.storageKey === preview.storageKey),
-                    characterPrimaryIndex: 0,
-                } : sourceNode.type === "scene" ? {
-                    sceneDescription: sourceMeta.sceneDescription || sourceMeta.description || "",
-                } : {}),
-                storageKey: preview.storageKey, naturalWidth: this.db.getMediaFile(preview.storageKey)?.width || 0, naturalHeight: this.db.getMediaFile(preview.storageKey)?.height || 0,
-                mimeType: this.db.getMediaFile(preview.storageKey)?.mimeType || "image/png", productionAssetId: input.assetId, sharedPromotionOrigin,
+                ...entityFields,
+                content: preview.storageKey, storageKey: preview.storageKey,
+                naturalWidth: media?.width || 0, naturalHeight: media?.height || 0, bytes: media?.bytes || 0,
+                mimeType: media?.mimeType || "image/png", productionAssetId: input.assetId, sharedPromotionOrigin,
             };
-            const operations = prior ? [] : [{ type: "add_node", id: preview.targetNodeId, nodeType: sourceNode.type === "config" ? "image" : sourceNode.type, title: preview.assetName,
+            const operations = prior ? [] : [{ type: "add_node", id: preview.targetNodeId, nodeType: kind || "image", title: preview.assetName,
                 position: productionAssetPosition(targetProject.nodes as Record<string, any>[], [input.assetId], input.assetId), width: Number(sourceNode.width || 340), height: Number(sourceNode.height || 260),
                 content: preview.storageKey, metadata } as CanvasOperation];
             const result = operations.length ? this.db.applyCanvasProjectOperations(sharedCanvasId, expectedSharedRevision, operations, { operationId: input.operationId, runtimeWrite: true, withinTransaction: true, deferredCommits: canvasCommits,
@@ -4560,7 +4587,9 @@ export class EpisodeProductionService {
                         const projection = record(record(op.patch).productionClipProjection);
                         return readyClips.has(String(projection.targetId || "")) || forcedBoundarySegments.has(String(op.segmentId || ""));
                     });
-                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout), ...removedSharedEntityNodeOperations(canvas, current.draft, next.draft, owner), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations, ...removedSubjectEntityNodeOperations(canvas, current.draft, next.draft, owner)]);
+                    const identityDramaId = this.db.getDramaEpisode(episodeId)?.dramaId || productionCanvasContext(this.db, canvasId || episodeId).dramaId || "";
+                    const identityResolver = sharedIdentityResolverFor(this.db, identityDramaId);
+                    const operations = measure("canvas_operation_plan", () => scopedShotProjection ? clipOperations : [...entityNodeOperations(canvas, next.draft, owner, current.draft, layout, identityResolver), ...removedSharedEntityNodeOperations(canvas, current.draft, next.draft, owner), ...sceneOperations, ...scriptNodeOperations(canvas, next.draft, owner, current.draft), ...imageInputOperations(canvas, next.draft, episodeId, current.draft, layout), ...clipOperations, ...removedSubjectEntityNodeOperations(canvas, current.draft, next.draft, owner)]);
                     if (operations.length) measure("canvas_operation_apply", () => this.db.applyCanvasProjectOperations(canvasId!, Number(canvas.revision || 0), operations, { operationId: projectionOperationId, runtimeWrite: true, withinTransaction: true, deferredCommits: scriptCommits, source: { kind: "system", clientId: "production:scripts", label: "同步正式制作节点输入" } }));
                 } else {
                     const operations = scriptNodeOperations(canvas, next.draft, { kind: this.ownerKind, id: episodeId }, current.draft);

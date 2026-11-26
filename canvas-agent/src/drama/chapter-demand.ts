@@ -64,7 +64,7 @@ const FALLBACK_BEAT_CHARS = 120;
 export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     const maxShotSeconds = Math.max(1, Math.floor(input.maxShotSeconds ?? DEFAULT_MAX_SHOT_SECONDS));
     const environments = input.environments.length
-        ? input.environments.map(item => `- ${item.id}｜${item.name}`).join("\n")
+        ? input.environments.map(item => `- environmentId: "${item.id}"（场景名：${item.name}）`).join("\n")
         : "（本集还没有登记场景环境，请把 environmentId 留空并在 sceneName 里写场景名）";
     const refList = (refs: ChapterDemandRef[] | undefined, empty: string) => refs?.length
         ? refs.map(item => `- ${item.id}｜${item.name}`).join("\n")
@@ -72,7 +72,7 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
     const characters = refList(input.characterRefs, "（本集还没有登记角色，所有 beat 的 character_ids 给空数组）");
     const props = refList(input.propRefs, "（本集还没有登记道具，所有 beat 的 prop_ids 给空数组）");
     const scenes = input.sceneRefs?.length
-        ? input.sceneRefs.map(item => `- ${item.id}｜${item.name}`).join("\n")
+        ? input.sceneRefs.map(item => `- scene_id: "${item.id}"（场景名：${item.name}）`).join("\n")
         : environments;
     const systemLines = [
         "你是短剧分镜编剧。把给定章节改写成可拍摄的分镜草案，只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。",
@@ -80,8 +80,8 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
         '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","action":"画面里发生的具体动作","shotSize":"特写/近景/中景/全景/远景","camera":"运镜（固定/推/拉/摇/跟/环绕，可空）","imagePrompt":"本镜起幅画面","videoPrompt":"本镜镜内动作与运镜的时序","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）","sourceQuote":"对应的原文小句","character_ids":["角色ID数组"],"prop_ids":["道具ID数组"],"scene_id":"场景ID或空串"}]}]}',
         "硬性要求：",
         `1. 每个 beat 的 seconds 是时长提示（3–${maxShotSeconds} 秒，整数或 .5）：动作/冲突镜给 3–4 秒短镜，情绪戏/对话/关键场面给 6–${maxShotSeconds} 秒长镜，普通叙事给 4–5 秒。按剧情需要分配，不要所有镜头都用同一个秒数。`,
-        "2. environmentId 只能从下面场景清单里选；清单为空时才允许留空串。",
-        "3. 有 dialogue 必须同时给 speaker，否则这条台词会被丢弃。",
+        "2. environmentId 只能填下面场景清单里 environmentId: 后面引号中的 ID 原值（只填 ID，不要带引号、场景名或「｜」）；清单为空时才允许留空串。",
+        "3. 原文里每段引号内的对白都必须逐字提取到某个 beat 的 dialogue，并同时给出 speaker；这是硬要求，不是可选项。宁可把带对白的段落拆成独立镜头，也不要把台词省略或只写进 visual 叙述。",
         "4. demand 是给人看的需求正文：【场景：X】与【时间：Y】各占一行（不要写在同一行），每个镜头用【镜头 N】单独起行，镜头正文原样叙述，不要写 JSON。",
         "5. 不要新增原文没有的人物关系；不要写音乐、字幕、转场特效。",
         "6. 每个 beat 的 character_ids / prop_ids / scene_id 用于自动绑定参考图：id 只能从下方对应清单里逐字复制，不得新编、不得改写、不得用名称代替 id；清单里没有就 character_ids/prop_ids 给空数组、scene_id 给空串；同一镜内按出场顺序去重，同一个 id 只写一次。",
@@ -123,13 +123,45 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
 }
 
 /** 从模型回包里取出 JSON：容忍 ```json 围栏与前后闲聊。 */
-function extractJson(text: string) {
-    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-    const raw = (fenced ? fenced[1] : text).trim();
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start < 0 || end <= start) return "";
-    return raw.slice(start, end + 1);
+/** 收集文本中所有「可能是一个完整 JSON 对象」的候选片段（围栏块 / 裸 {…} / 平衡括号扫描）。 */
+function extractJsonCandidates(text: string): string[] {
+    const out: string[] = [];
+    const push = (value: string) => { const v = value.trim(); if (v.startsWith("{") && v.endsWith("}") && !out.includes(v)) out.push(v); };
+    // 1) 所有 Markdown 围栏块
+    const re = /```(?:json)?\s*([\s\S]*?)```/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) push(m[1]);
+    // 2) 首个 { 到末尾 }（常见整段就是一个对象）
+    const start = text.indexOf("{"), end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) push(text.slice(start, end + 1));
+    // 3) 对每个 "{" 起点单独做平衡扫描，收集所有可能的 {…} 对象。
+    // 只扫顶层会被前置的坏 "{" 吞掉后面的好对象；逐起点扫描能覆盖好对象自己的 "{"。
+    for (let start = 0; start < text.length; start++) {
+        if (text[start] !== "{") continue;
+        let depth = 0, inStr = false, esc = false, closed = -1;
+        for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+            if (ch === '"') { inStr = true; continue; }
+            if (ch === "{") depth++;
+            else if (ch === "}") { depth--; if (depth === 0) { closed = i; break; } }
+        }
+        if (closed > start) push(text.slice(start, closed + 1));
+    }
+    return out;
+}
+
+/** 逐个候选 JSON.parse，返回第一个「对象且含 scenes 数组」的结果；都没有返回 null。 */
+function parseDemandRecord(text: string): Record<string, unknown> | null {
+    for (const candidate of extractJsonCandidates(text)) {
+        try {
+            const value = JSON.parse(candidate);
+            if (value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as Record<string, unknown>).scenes)) {
+                return value as Record<string, unknown>;
+            }
+        } catch { /* 候选不是合法 JSON，试下一个 */ }
+    }
+    return null;
 }
 
 function asText(value: unknown) {
@@ -168,15 +200,8 @@ function filterRefIds(value: unknown, allowed?: Set<string>): string[] {
  * 结构化引用 id 同样走白名单：编造的 character_ids / prop_ids / scene_id 一律丢弃。
  */
 export function parseChapterDemand(text: string, options: ChapterDemandParseOptions = {}): ChapterDemandDraft {
-    const json = extractJson(String(text ?? ""));
-    if (!json) throw new Error("CHAPTER_DEMAND_JSON: 回包里没有 JSON 对象");
-    let parsed: unknown;
-    try {
-        parsed = JSON.parse(json);
-    } catch {
-        throw new Error("CHAPTER_DEMAND_JSON: 回包 JSON 无法解析");
-    }
-    const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+    const record = parseDemandRecord(String(text ?? ""));
+    if (!record) throw new Error("CHAPTER_DEMAND_JSON: 回包里没有可解析的 scenes JSON 对象");
     const demand = asText(record.demand);
     if (!demand) throw new Error("CHAPTER_DEMAND_EMPTY: 缺少 demand 正文");
     const rawScenes = Array.isArray(record.scenes) ? record.scenes : [];
@@ -184,12 +209,15 @@ export function parseChapterDemand(text: string, options: ChapterDemandParseOpti
     const allowed = new Set((options.environments || []).map(item => item.id));
     const scenes: ChapterScenePlan[] = rawScenes.map((item, index) => {
         const scene = item && typeof item === "object" ? item as Record<string, unknown> : {};
-        const environmentId = asText(scene.environmentId);
+        let environmentId = asText(scene.environmentId);
+        // 容错：模型可能把清单整行 "ID｜场景名" 照抄到 environmentId；取「｜」前的 ID 段。
+        if (environmentId.includes("｜") && !allowed.has(environmentId)) environmentId = environmentId.split("｜")[0].trim();
         if (allowed.size && !allowed.has(environmentId)) throw new Error(`CHAPTER_DEMAND_ENVIRONMENT: 第 ${index + 1} 个场次的 environmentId 不在已登记清单内：${environmentId || "(空)"}`);
         const beats = (Array.isArray(scene.beats) ? scene.beats : []).map((beat, beatIndex) => {
             const row = beat && typeof beat === "object" ? beat as Record<string, unknown> : {};
             const seconds = Number(row.seconds);
-            const rawSceneId = asText(row.scene_id);
+            let rawSceneId = asText(row.scene_id);
+            if (rawSceneId.includes("｜") && options.allowedSceneIds && !options.allowedSceneIds.has(rawSceneId)) rawSceneId = rawSceneId.split("｜")[0].trim();
             const sceneId = options.allowedSceneIds && rawSceneId && !options.allowedSceneIds.has(rawSceneId) ? "" : rawSceneId;
             return {
                 title: asText(row.title) || `镜头 ${beatIndex + 1}`,

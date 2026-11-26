@@ -104,6 +104,13 @@ export function videoCapabilitiesOf(aiConfig: unknown, modelValue: string): Mode
   return found ? normalizeVideoCapabilities(found.model) : {};
 }
 
+/** 剧目设置留空（跟随默认）时，按全局 ai.config.videoModel 解析；显式选择不受影响。 */
+export function resolveConfiguredVideoModel(aiConfig: unknown, modelValue: string): string {
+  const explicit = String(modelValue || "").trim();
+  if (explicit) return explicit;
+  return String((aiConfig as { videoModel?: unknown } | null | undefined)?.videoModel || "").trim();
+}
+
 type WorkflowFieldLike = { id?: unknown; name?: unknown; type?: unknown; options?: unknown; max?: unknown; maximum?: unknown };
 type WorkflowNodeLike = { inputs?: unknown };
 

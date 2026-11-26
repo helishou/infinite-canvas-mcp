@@ -60,7 +60,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
     const handleInstallOfficial = async (entry: OfficialPluginEntry) => {
         setBusyId(entry.id);
         try {
-            const plugin = await installPluginFromUrl(entry.url, { official: true });
+            const plugin = await installPluginFromUrl(entry.url, { official: true, integrity: entry.integrity });
             message.success(t("canvas.plugins.installed", { name: plugin.name }));
         } catch (error) {
             message.error(t("canvas.plugins.installFailed", { error: error instanceof Error ? error.message : String(error) }));
@@ -83,7 +83,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
 
     // Installed plugin actions: enable, update, or uninstall.
     // Highlight the update action when a newer remote version is available.
-    const installedControls = (record: InstalledPlugin, upgradable = false) => (
+    const installedControls = (record: InstalledPlugin, upgradable = false, integrity?: string) => (
         <>
             <Switch size="small" checked={record.enabled} loading={busyId === record.id} onChange={(checked) => runOnPlugin(record, () => setPluginEnabled(record, checked), t(checked ? "canvas.plugins.enabled" : "canvas.plugins.disabled"))} />
             <Button
@@ -92,7 +92,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
                 icon={<RefreshCw className="size-4" />}
                 loading={busyId === record.id}
                 title={t(upgradable ? "canvas.plugins.upgradeAvailable" : "canvas.plugins.updateFromSource")}
-                onClick={() => runOnPlugin(record, async () => void (await updatePlugin(record)), t("canvas.plugins.updated"))}
+                onClick={() => runOnPlugin(record, async () => void (await updatePlugin(record, integrity)), t("canvas.plugins.updated"))}
             />
             <Popconfirm title={t("canvas.plugins.uninstallTitle")} okText={t("canvas.plugins.uninstall")} cancelText={t("canvas.editors.cancel")} onConfirm={() => uninstallPlugin(record.id)}>
                 <Button type="text" size="small" danger icon={<Trash2 className="size-4" />} title={t("canvas.plugins.uninstall")} />
@@ -175,7 +175,7 @@ export function CanvasPluginManagerModal({ open, onClose }: { open: boolean; onC
                             upgradable && record ? `${record.version} → ${entry.version}` : entry.version,
                             entry.description,
                             record ? (
-                                installedControls(record, upgradable)
+                                installedControls(record, upgradable, entry.integrity)
                             ) : (
                                 <Button type="primary" size="small" icon={<Download className="size-4" />} loading={busyId === entry.id} onClick={() => handleInstallOfficial(entry)}>
                                     {t("canvas.plugins.install")}

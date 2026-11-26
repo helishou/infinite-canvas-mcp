@@ -40,6 +40,26 @@ test("token 可缺省；isEngineModel 与 findEngineChannel 判定一致", () =>
     assert.equal(isEngineModel(CONFIG, "local::2.1"), false);
 });
 
+test("第三方生图 API 渠道的 gpt-image 不算引擎模型（回归：带参考图被误判 0 图片输入槽）", () => {
+    // 中转站这类渠道只是 OpenAI 兼容的第三方生图 API：apiFormat=openai、有 baseUrl、kind=api，
+    // 但 gpt-image-* 在 executor-registry 里声明为 direct-image，天生不属于 media-engine 工作流模型。
+    const thirdParty = {
+        channels: [
+            {
+                id: "gUIhQvjmKncb3eo3am204", name: "中转站", kind: "api", apiFormat: "openai",
+                baseUrl: "https://api.kunrouai.com", apiKey: "sk-x",
+                models: [{ name: "gpt-image-2.6-1k", capability: "image" }],
+            },
+        ],
+    };
+    // 带渠道前缀和裸模型名两种写法都不能被当成引擎
+    assert.equal(findEngineChannel(thirdParty, "gUIhQvjmKncb3eo3am204::gpt-image-2.6-1k"), null);
+    assert.equal(findEngineChannel(thirdParty, "gpt-image-2.6-1k"), null);
+    assert.equal(isEngineModel(thirdParty, "gUIhQvjmKncb3eo3am204::gpt-image-2.6-1k"), false);
+    // 真引擎渠道里的工作流模型照常识别，不能被这次收紧误伤
+    assert.equal(findEngineChannel(CONFIG, "eng::2.1")?.baseUrl, "http://127.0.0.1:8300");
+});
+
 test("findChannelConfig 带出 apiFormat 与 extraBody（渠道级自定义参数）", () => {
     const withExtra = {
         channels: [

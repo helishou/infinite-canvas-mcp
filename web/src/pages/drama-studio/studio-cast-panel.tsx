@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { App, Modal, Input, Checkbox } from "antd";
+import { App, Modal, Input, Checkbox, Switch } from "antd";
 import {
     Users, Shirt, Package, MapPin, Sparkles, Plus, Lock, LockOpen, Image as ImageIcon,
     Save, Trash2, Wand2, RefreshCw, Upload, Mic, Maximize2, Play, Volume2, History,
+    MicOff, AlertCircle, Pause, Link2,
 } from "lucide-react";
 
 import {
@@ -13,6 +14,10 @@ import {
     prepareProductionTargets,
     fetchEpisodeProduction,
     fetchBackendProject,
+    fetchBackendProjects,
+    fetchBackendCanvasFolders,
+    importWorkAssets,
+    type WorkAssetImport,
     fetchDramaCastImpact,
     fetchDramaAssetVersions,
     restyleDramaCast,
@@ -26,6 +31,7 @@ import type { ProductionOperation } from "@basketikun/canvas-agent/drama/product
 import { createManualDirectorAsset } from "@/pages/drama/manual-director-assets";
 import { withArtStyle } from "@basketikun/canvas-agent/drama/art-style";
 import { ASSET_SCHEMES, defaultSchemeFor, schemeAppliesTo, type AssetSchemeId } from "@basketikun/canvas-agent/drama/asset-spec";
+import { normalizeAssetName } from "@basketikun/canvas-agent/drama/asset-extract";
 import { artStyleOptions } from "@/pages/drama/planning-topic-logic";
 import { uploadMediaFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -63,6 +69,9 @@ type GenStatus = "ready" | "failed" | "busy" | "idle";
  */
 type CastExtra = {
     aliasNames?: string[];
+    /** 影策 definition.aliases 同名字段，后端 buildCastIndex/auto-voice 从这里读。 */
+    aliases?: string[];
+    canonicalName?: string;
     imageStyleId?: string;
     imageStyleName?: string;
     imageStylePrompt?: string;
@@ -75,7 +84,32 @@ function parseExtra(v: unknown): CastExtra {
     } catch { return {}; }
 }
 const stringifyExtra = (extra: CastExtra): string => JSON.stringify(extra);
+/** 影策 definition.aliases 归一读取：共享节点 characterAliases > draft identity.aliasNames/aliases > registry.aliases/alias > asset.data.aliases。 */
+function readAliases(identity: unknown, row: Row | undefined, dataAliases: unknown): string[] {
+    const extra = parseExtra(identity);
+    const pick = (value: unknown): string[] => Array.isArray(value) ? value.filter((x): x is string => typeof x === "string" && Boolean(x.trim())).map(x => x.trim()) : [];
+    const fromExtra = pick(extra.aliasNames).length ? pick(extra.aliasNames) : pick((extra as Record<string, unknown>).aliases);
+    const fromRow = pick(row?.aliases ?? row?.alias);
+    const candidates = fromExtra.length ? fromExtra : fromRow.length ? fromRow : pick(dataAliases);
+    return Array.from(new Set(candidates));
+}
+/**
+ * 画面指令的兜底来源：只用外观/描述这类自然语言，绝不带 name 前缀。
+ * name 是稳定标识（可能就是章节标题等内部 ID），写进 prompt 会触发 INTERNAL_ID_IN_PROMPT 校验。
+ */
+function promptFromAppearance(e: { name: string; description: string; appearance: string }): string {
+    const text = String(e.appearance || e.description || "").trim();
+    if (!text) return "";
+    // 极端情形：整段描述就是内部 ID（章节标题），退回中性自然语言。
+    if (/^第[一二三四五六七八九十\d]+章[\s　]/.test(text) || text === e.name) return "";
+    return text;
+}
 const styleSlug = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "custom";
+
+/** 图片网络加载占位：容器尺寸已固定，加载期间显示极轻扫光底色，补裸 img 的视觉占位。 */
+const imgLoadingStyle = { backgroundImage: "linear-gradient(110deg, transparent 30%, color-mix(in oklab, var(--foreground) 5%, transparent) 50%, transparent 70%)", backgroundSize: "200% 100%" } as const;
+
+/** 影策卡片上的波形是后端把「三视图 + 波形」合成进一张图里的；本地拿不到采样数据，因此不画波形，音频行只保留真实试听入口。 */
 
 /** 从真实生成状态派生：director.assets[id].status + asset_card.generation_status。 */
 function deriveGenStatus(assetId: string, assets: Record<string, unknown>, cards: unknown[]): { status: GenStatus; thumb: string } {
@@ -104,6 +138,36 @@ function parseVoice(v: unknown): { voiceAssetId: string; voiceStorageKey: string
 const rows = (v: unknown): Row[] => Array.isArray(v) ? v.filter((x): x is Row => Boolean(x) && typeof x === "object" && !Array.isArray(x)) : [];
 const str = (v: unknown): string => (typeof v === "string" || typeof v === "number") ? String(v) : "";
 
+/** 角色卡造型横排真图：从 characterImages[]/images[] 的 storageKey 派生 URL（本体由合并后第一张承担，渲染处丢弃）。 */
+function lookThumbsOf(images: unknown, toUrl: (storageKey: string) => string): string[] {
+    return rows(images).map(img => {
+        const sk = String(img.storageKey || "");
+        const url = sk ? toUrl(sk) : String(img.url || "");
+        return url || (sk ? backendMediaUrl(sk) : "");
+    }).filter(Boolean);
+}
+
+/**
+ * 资产卡 4 拼设定图：主图（thumb）→ 记录 coverUrl → 多图真值（characterImages[]/images[]）→ 参考图 storageKey，
+ * 去重保序、只留非空 URL。真值不足 4 张时由渲染处补空占位，绝不重复同一张图凑格。
+ */
+function cardImagesOf(input: { primary?: string; cover?: string; images?: unknown; referenceStorageKey?: string }): string[] {
+    const out: string[] = [];
+    const push = (url: string) => {
+        const value = url.trim();
+        if (!value || out.includes(value)) return;
+        out.push(value);
+    };
+    push(input.primary || "");
+    push(input.cover || "");
+    for (const image of rows(input.images)) {
+        const storageKey = str(image.storageKey);
+        push(storageKey ? backendMediaUrl(storageKey) : str(image.url));
+    }
+    if (input.referenceStorageKey) push(backendMediaUrl(input.referenceStorageKey));
+    return out;
+}
+
 type Entry = {
     key: string;
     id: string; name: string; kind: CastKind; role: string;
@@ -130,6 +194,14 @@ type Entry = {
     libraryAssetId: string;
     /** 真实参考图 storageKey（共享节点 metadata 或制作稿 media.storageKey/output_file）。 */
     referenceStorageKey: string;
+    /** 影策 definition.aliases 归一主名：同一人物的别名卡归到这一张卡。 */
+    canonicalName: string;
+    /** 造型归属：非空表示本条是某主角的造型形态，不单独列为角色卡（造型在「造型」tab 独立成卡）。 */
+    lookOf: string;
+    /** 角色卡造型缩略图横排：同一身份归并后去掉本体（第一张真图）的造型图 URL；无造型整行不渲染。 */
+    lookThumbs: string[];
+    /** 资产卡 4 拼设定图：真实图片 URL（主图优先），0~4 张；不足 4 张渲染处补空占位。 */
+    images: string[];
 };
 
 type CastDraft = {
@@ -168,11 +240,13 @@ const draftOf = (e: Entry): CastDraft => ({
 /** 换音色录音上限（秒）：与影策一致，到点由真实计时器自动停止并走完成上传绑定。 */
 const VOICE_RECORD_LIMIT_SEC = 30;
 
-export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyle, onOpenCanvas, onOpenSharedCanvas, onChanged, voiceProfiles, initialKind, focusAsset }: {
+export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, loading, artStyle, onOpenCanvas, onOpenSharedCanvas, onChanged, voiceProfiles, initialKind, focusAsset }: {
     /** 当前剧目 ID：saveLibraryAsset 写共享画布必须的 dramaId。 */
     dramaId: string | null;
     sharedAssetCanvasId: string | null;
     sources: CastSource[];
+    /** 顶层资产列表是否仍在读取；父级有 loading 时请显式传入，避免 sources 初值 [] 被误判为「没有设定」。 */
+    loading?: boolean;
     artStyle: string;
     onOpenCanvas: () => void;
     /** 共享条目换参考图：打开共享资产画布（owner=canvas），不是当前集画布。 */
@@ -194,6 +268,13 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
         () => (voiceProfiles || []).filter(p => p.sampleRef.trim()).map(p => ({ id: `voiceprofile:${p.id}`, title: `${p.name || p.id}（音色库）`, description: p.description.trim(), storageKey: p.sampleRef.trim(), url: "" })),
         [voiceProfiles],
     );
+    // 顶层 sources 无加载态：父级 castSources 由 Promise.all 异步填值，首帧恒为 []。
+    // 显式 loading 优先；未传时用「sources 引用是否被父级更新过」兜底，避免首帧断言"没有设定"。
+    // 父级 StudioAssetsTab 后续应把自身 loading 透传进来（本文件不能改父级）。
+    const initialSourcesRef = useRef(sources);
+    const [sourcesRefreshed, setSourcesRefreshed] = useState(false);
+    useEffect(() => { if (sources !== initialSourcesRef.current) setSourcesRefreshed(true); }, [sources]);
+    const sourcesPending = loading ?? (sources.length === 0 && !sourcesRefreshed);
     const [kind, setKind] = useState<CastKind>(initialKind || "角色");
     useEffect(() => { if (initialKind) setKind(initialKind); }, [initialKind]);
     const [lookCount, setLookCount] = useState(0);
@@ -239,34 +320,165 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     const [castImpact, setCastImpact] = useState<Awaited<ReturnType<typeof fetchDramaCastImpact>> | null>(null);
     const [castImpactLoading, setCastImpactLoading] = useState(false);
     const [castImpactTick, setCastImpactTick] = useState(0);
+    // effect 里才置 true 会让切设定的首帧沿用上一设定的旧影响；渲染期按查询键判 pending。
+    const [castImpactKey, setCastImpactKey] = useState("");
 
     // 设定详情版本记录：真值 drama_asset_versions 按 (dramaId, assetId) 只读查询。
     const [assetVersions, setAssetVersions] = useState<ApprovedSharedAsset[]>([]);
     const [assetVersionsLoading, setAssetVersionsLoading] = useState(false);
+    // 同上：版本列表按查询键判 pending，切设定首帧不显示上一设定的旧版本。
+    const [assetVersionsKey, setAssetVersionsKey] = useState("");
     const [versionPreview, setVersionPreview] = useState<ApprovedSharedAsset | null>(null);
     const [restyleSubmitting, setRestyleSubmitting] = useState(false);
 
     // 共享资产画布真值节点（character/scene/prop），跨集共用；与造型面板同一拉取模式。
     type SharedNode = { id: string; type: string; title?: string; metadata?: Record<string, any> };
-    const [sharedNodes, setSharedNodes] = useState<SharedNode[]>([]);
+    const [rawSharedNodes, setRawSharedNodes] = useState<SharedNode[]>([]);
+    // 渲染期派生门控：只暴露「已拉取完成且画布 id 与当前一致」的节点，切画布首帧绝不拿旧节点配新画布。
+    const [sharedNodesCanvasId, setSharedNodesCanvasId] = useState<string | null>(null);
+    const sharedNodes = sharedNodesCanvasId === sharedAssetCanvasId ? rawSharedNodes : [];
     const [sharedCanvasRev, setSharedCanvasRev] = useState(0);
     const [sharedLoading, setSharedLoading] = useState(false);
     const [sharedRefreshTick, setSharedRefreshTick] = useState(0);
     useEffect(() => {
         let alive = true;
-        if (!sharedAssetCanvasId) { setSharedNodes([]); return; }
+        // 切画布立即清掉上一张画布的真值与 revision，避免写回落到旧画布。
+        setRawSharedNodes([]);
+        setSharedCanvasRev(0);
         setSharedLoading(true);
+        if (!sharedAssetCanvasId) { setSharedNodesCanvasId(null); setSharedLoading(false); return; }
         void fetchBackendProject(sharedAssetCanvasId)
             .then((r) => {
                 if (!alive) return;
-                const nodes = ((r.project?.nodes || []) as SharedNode[]).filter(n => ["character", "scene", "prop"].includes(n.type));
-                setSharedNodes(nodes);
+                const nodes = ((r.project?.nodes || []) as SharedNode[]).filter(n => {
+                    if (["character", "scene", "prop"].includes(n.type)) return true;
+                    // 影策提升（promotion / adopt-shared-image）进共享画布的资产是 image 节点，
+                    // 实体分类只记在 metadata.productionAssetId 前缀（AC-CHAR-/AC-SCENE-/AC-PROP-）。
+                    // 不认这批节点，七绝山这类剧目的共享资产在新版制作台资产库里会全部消失。
+                    if (n.type !== "image") return false;
+                    return /^AC-(CHAR|SCENE|PROP)-/.test(String(n.metadata?.productionAssetId || ""));
+                });
+                setRawSharedNodes(nodes);
+                setSharedNodesCanvasId(sharedAssetCanvasId);
                 setSharedCanvasRev(Number(r.project?.revision || 0));
             })
-            .catch(() => { if (alive) { setSharedNodes([]); } })
+            .catch(() => { if (alive) { setRawSharedNodes([]); setSharedNodesCanvasId(sharedAssetCanvasId); } })
             .finally(() => { if (alive) setSharedLoading(false); });
         return () => { alive = false; };
     }, [sharedAssetCanvasId, sharedRefreshTick]);
+
+    // 关联已有作品素材：作品真值来自 canvas/folders（isDrama + sharedAssetCanvasId），
+    // 再用 canvas/projects 摘要确认共享画布仍存在；资产只读来源作品共享画布节点。
+    type ImportWork = { dramaId: string; name: string; sharedCanvasId: string };
+    type ImportAsset = WorkAssetImport & { thumb: string; kindLabel: string };
+    const [workImportOpen, setWorkImportOpen] = useState(false);
+    const [importWorks, setImportWorks] = useState<ImportWork[]>([]);
+    const [importWorkId, setImportWorkId] = useState("");
+    const [importAssets, setImportAssets] = useState<ImportAsset[]>([]);
+    const [importChecked, setImportChecked] = useState<string[]>([]);
+    const [importWorksLoading, setImportWorksLoading] = useState(false);
+    const [importAssetsLoading, setImportAssetsLoading] = useState(false);
+    const [importSubmitting, setImportSubmitting] = useState(false);
+    const [importError, setImportError] = useState("");
+
+    const openWorkImport = () => {
+        setWorkImportOpen(true);
+        setImportWorks([]);
+        setImportWorkId("");
+        setImportAssets([]);
+        setImportChecked([]);
+        setImportError("");
+        setImportWorksLoading(true);
+        void Promise.all([fetchBackendCanvasFolders(), fetchBackendProjects(true)])
+            .then(([folders, projects]) => {
+                const aliveCanvasIds = new Set((projects.projects || []).map(p => String(p.id || "")));
+                const works = (folders.folders || [])
+                    .filter(f => f && f.isDrama !== false && String(f.id || "") !== String(dramaId || ""))
+                    .map(f => ({ dramaId: String(f.id || ""), name: String(f.name || ""), sharedCanvasId: String(f.sharedAssetCanvasId || "") }))
+                    .filter(w => w.dramaId && w.sharedCanvasId && aliveCanvasIds.has(w.sharedCanvasId))
+                    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+                setImportWorks(works);
+                setImportWorkId(works[0]?.dramaId || "");
+                if (!works.length) setImportError("没有其他可关联的剧目作品");
+            })
+            .catch(() => { setImportWorks([]); setImportError("读取作品列表失败，请稍后重试"); })
+            .finally(() => setImportWorksLoading(false));
+    };
+
+    useEffect(() => {
+        let alive = true;
+        const work = importWorks.find(w => w.dramaId === importWorkId);
+        if (!workImportOpen || !work) { setImportAssets([]); return; }
+        setImportAssetsLoading(true);
+        setImportError("");
+        void fetchBackendProject(work.sharedCanvasId)
+            .then((r) => {
+                if (!alive) return;
+                const nodes = ((r.project?.nodes || []) as SharedNode[]).filter(n => ["character", "scene", "prop"].includes(n.type));
+                const assets: ImportAsset[] = nodes.map(n => {
+                    const md = n.metadata || {};
+                    const kind = n.type as "character" | "scene" | "prop";
+                    const images = Array.isArray(md.characterImages) ? md.characterImages : [];
+                    const cover = kind === "character" ? images[0] : kind === "scene" ? md.sceneImage : md.propImage;
+                    const storageKeys = kind === "character"
+                        ? images.map((img: Record<string, unknown>) => String(img?.storageKey || "")).filter(Boolean)
+                        : cover?.storageKey ? [String(cover.storageKey)] : [];
+                    const name = kind === "character" ? md.characterName || md.characterCanonicalName || n.title
+                        : kind === "scene" ? md.sceneName || n.title
+                        : md.propName || md.itemName || n.title;
+                    const description = kind === "character" ? md.characterDescription
+                        : kind === "scene" ? md.sceneDescription
+                        : md.propDescription || md.itemDescription;
+                    const aliases = kind === "character" && Array.isArray(md.characterAliases)
+                        ? md.characterAliases.map((a: unknown) => String(a)).filter(Boolean) : [];
+                    return {
+                        sourceNodeId: n.id,
+                        kind,
+                        name: String(name || n.id),
+                        kindLabel: kind === "character" ? "角色" : kind === "scene" ? "场景" : "道具",
+                        thumb: storageKeys[0] ? backendMediaUrl(storageKeys[0]) : "",
+                        storageKeys,
+                        ...(description ? { description: String(description) } : {}),
+                        ...(aliases.length ? { aliases } : {}),
+                    };
+                });
+                setImportAssets(assets);
+                setImportChecked([]);
+            })
+            .catch(() => { if (alive) { setImportAssets([]); setImportError("读取该作品共享资产失败，请稍后重试"); } })
+            .finally(() => { if (alive) setImportAssetsLoading(false); });
+        return () => { alive = false; };
+    }, [workImportOpen, importWorkId, importWorks]);
+
+    const handleImportWork = async () => {
+        const work = importWorks.find(w => w.dramaId === importWorkId);
+        if (!dramaId || !work) { message.warning("未定位到当前剧目或来源作品"); return; }
+        const chosen = importAssets.filter(a => importChecked.includes(a.sourceNodeId));
+        if (!chosen.length) { message.warning("请先勾选要导入的素材"); return; }
+        setImportSubmitting(true);
+        setImportError("");
+        try {
+            const result = await importWorkAssets(dramaId, {
+                sourceDramaId: work.dramaId,
+                assets: chosen.map(({ sourceNodeId, kind, name, description, aliases, storageKeys }) => ({
+                    sourceNodeId, kind, name,
+                    ...(description ? { description } : {}),
+                    ...(aliases?.length ? { aliases } : {}),
+                    storageKeys,
+                })),
+            });
+            if (!result.ok) { setImportError("导入失败，请稍后重试"); return; }
+            message.success(`已导入 ${result.imported} 个素材${result.skipped ? `，跳过 ${result.skipped} 个` : ""}`);
+            setWorkImportOpen(false);
+            setImportChecked([]);
+            setSharedRefreshTick(tick => tick + 1);
+            onChanged();
+        } catch (error) {
+            setImportError(error instanceof Error ? error.message : "导入失败，请稍后重试");
+        } finally {
+            setImportSubmitting(false);
+        }
+    };
 
     /**
      * 共享画布节点的正式生成目标：节点 ID 不是生产实体 ID，必须读 metadata.productionEntity 的真实绑定。
@@ -322,7 +534,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     voice: str(raw.voice_description || raw.voice), coverUrl: str(raw.coverUrl || raw.reference_image),
                     ...loc, entity: "character", entityId: str(raw.id), assetId: aid, locked: isLocked(raw),
                     genStatus: g.status, thumb: g.thumb, prompt: promptFor(aid),
-                    aliasNames: Array.isArray(extra.aliasNames) ? extra.aliasNames.filter(x => typeof x === "string") : [],
+                    aliasNames: readAliases(raw.identity, raw, (media as Row)?.aliases ?? (media as Row)?.data?.aliases),
                     imageStyleId: str(extra.imageStyleId), imageStyleName: str(extra.imageStyleName), imageStylePrompt: str(extra.imageStylePrompt),
                     imagePrompt: promptFor(aid),
                     scheme: schemeFor(aid, "character"),
@@ -331,9 +543,18 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     ...(episodeNodeId && src.canvasId ? { canvasId: src.canvasId, nodeId: episodeNodeId } : {}),
                     libraryAssetId: aid || str(raw.id),
                     referenceStorageKey: str(media.storageKey || card?.output_file),
+                    canonicalName: str(extra.canonicalName), lookOf: "",
+                    lookThumbs: lookThumbsOf((media as Row)?.images, backendMediaUrl),
+                    images: cardImagesOf({ primary: g.thumb, cover: str(raw.coverUrl || raw.reference_image), images: (media as Row)?.images, referenceStorageKey: str(media.storageKey || card?.output_file) }),
                 });
             }
             for (const raw of rows(src.source.scene_registry)) {
+                // 早期建档把「第N章 标题」场次标题误注册成 scene_registry 条目：无外观描述、name==id==章节标题。
+                // 它不是场景资产，不该出现在资产库、更不该被一键准备（会把内部 ID 写进画面指令）。
+                const rawName = str(raw.name || raw.scene_name);
+                const rawId = str(raw.id);
+                const hasLook = Boolean(str(raw.description) || str(raw.prompt_description) || str(raw.appearance));
+                if (!hasLook && rawName === rawId && /^第[一二三四五六七八九十\d]+章[\s　]/.test(rawName)) continue;
                 const aid = assetIdFor(str(raw.id), str(raw.id));
                 const g = gen(aid);
                 const media = (src.assets[aid] || {}) as Row;
@@ -353,6 +574,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     ...(episodeNodeId && src.canvasId ? { canvasId: src.canvasId, nodeId: episodeNodeId } : {}),
                     libraryAssetId: aid || str(raw.id),
                     referenceStorageKey: str(media.storageKey || card?.output_file),
+                    canonicalName: "", lookOf: "",
+                    lookThumbs: [],
+                    images: cardImagesOf({ primary: g.thumb, cover: str(raw.coverUrl || raw.reference_image), images: (media as Row)?.images, referenceStorageKey: str(media.storageKey || card?.output_file) }),
                 });
             }
             for (const raw of rows(src.source.asset_plan)) {
@@ -378,6 +602,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     ...(episodeNodeId && src.canvasId ? { canvasId: src.canvasId, nodeId: episodeNodeId } : {}),
                     libraryAssetId: aid || str(raw.id),
                     referenceStorageKey: str(media.storageKey || card?.output_file),
+                    canonicalName: "", lookOf: "",
+                    lookThumbs: [],
+                    images: cardImagesOf({ primary: g.thumb, cover: str(raw.coverUrl || raw.reference_image), images: (media as Row)?.images, referenceStorageKey: str(media.storageKey || card?.output_file) }),
                 });
             }
             void epLabel;
@@ -391,58 +618,189 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
         for (const n of sharedNodes) {
             const md = n.metadata || {};
             const thumbOf = (sk: unknown) => sk ? backendMediaUrl(String(sk)) : "";
+            const sharedAssetId = (explicit: unknown) => canonicalAssetId(n.id, explicit);
             if (n.type === "character") {
+                // 身份真值优先 productionAssetId（提升/迁移后的实体节点），其次历史 characterAssetId。
+                // 与分集条目 assetId 对齐后，下方按身份去重才能消掉同一资产的两种名称。
+                const identity = sharedAssetId(md.productionAssetId || md.characterAssetId);
                 const imgs = Array.isArray(md.characterImages) ? md.characterImages : [];
                 const primary = Number(md.characterPrimaryIndex || 0);
                 const cover = imgs[primary] || imgs[0];
                 out.push({
-                    key: `shared:character:${n.id}`, id: String(md.characterAssetId || n.id),
+                    key: `shared:character:${n.id}`, id: identity,
                     name: String(md.characterName || n.title || n.id), kind: "角色",
-                    role: String(md.characterRole || "配角"), description: String(md.characterDescription || ""),
+                    role: String(md.characterRole || md.role || "配角"), description: String(md.characterDescription || ""),
                     appearance: String(md.characterDescription || ""), voice: String(md.characterVoiceDescription || ""),
                     coverUrl: thumbOf(cover?.storageKey),
-                    episodeId: "", revision: 0, entity: "character", entityId: String(md.characterAssetId || n.id),
-                    assetId: String(md.characterAssetId || n.id), locked: false,
+                    episodeId: "", revision: 0, entity: "character", entityId: identity,
+                    assetId: identity, locked: false,
                     genStatus: cover?.storageKey ? "ready" : "idle", thumb: thumbOf(cover?.storageKey), prompt: String(md.prompt || ""),
-                    aliasNames: [], imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: String(md.prompt || ""),
+                    aliasNames: readAliases(undefined, undefined, md.characterAliases), imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: String(md.prompt || ""),
                     scheme: defaultSchemeFor("character"),
                     voiceAssetId: String(md.characterVoiceAssetId || ""), voiceStorageKey: String(md.characterVoiceStorageKey || ""), voiceUrl: String(md.characterVoiceUrl || ""),
                     scope: "shared", canvasId: sharedAssetCanvasId || undefined, nodeId: n.id, canvasRevision: sharedCanvasRev,
-                    libraryAssetId: canonicalAssetId(n.id, md.characterAssetId),
+                    libraryAssetId: identity,
                     referenceStorageKey: String(cover?.storageKey || md.storageKey || ""),
+                    canonicalName: String(md.characterCanonicalName || ""),
+                    lookOf: String(md.characterLookOf || ""),
+                    lookThumbs: lookThumbsOf(md.characterImages, backendMediaUrl),
+                    images: cardImagesOf({ primary: thumbOf(cover?.storageKey), images: md.characterImages, referenceStorageKey: String(cover?.storageKey || md.storageKey || "") }),
                 });
             } else if (n.type === "scene") {
+                const identity = sharedAssetId(md.productionAssetId || md.sceneAssetId || md.assetId);
                 out.push({
-                    key: `shared:scene:${n.id}`, id: n.id, name: String(md.sceneName || n.title || n.id),
+                    key: `shared:scene:${n.id}`, id: identity, name: String(md.sceneName || n.title || n.id),
                     kind: "场景", role: "环境", description: String(md.sceneDescription || ""), appearance: String(md.sceneDescription || ""),
                     voice: "", coverUrl: thumbOf(md.sceneImage?.storageKey),
-                    episodeId: "", revision: 0, entity: "environment", entityId: n.id, assetId: n.id, locked: false,
+                    episodeId: "", revision: 0, entity: "environment", entityId: identity, assetId: identity, locked: false,
                     genStatus: md.sceneImage?.storageKey ? "ready" : "idle", thumb: thumbOf(md.sceneImage?.storageKey), prompt: String(md.prompt || ""),
                     aliasNames: [], imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: String(md.prompt || ""),
                     scheme: defaultSchemeFor("scene"), voiceAssetId: "", voiceStorageKey: "", voiceUrl: "",
                     scope: "shared", canvasId: sharedAssetCanvasId || undefined, nodeId: n.id, canvasRevision: sharedCanvasRev,
-                    libraryAssetId: canonicalAssetId(n.id, md.sceneAssetId || md.assetId),
+                    libraryAssetId: identity,
                     referenceStorageKey: String(md.sceneImage?.storageKey || md.storageKey || ""),
+                    canonicalName: "", lookOf: "",
+                    lookThumbs: [],
+                    images: cardImagesOf({ primary: thumbOf(md.sceneImage?.storageKey), images: [md.sceneImage], referenceStorageKey: String(md.sceneImage?.storageKey || md.storageKey || "") }),
                 });
             } else if (n.type === "prop") {
+                const identity = sharedAssetId(md.productionAssetId || md.assetId);
                 out.push({
-                    key: `shared:prop:${n.id}`, id: n.id, name: String(md.propName || md.itemName || n.title || n.id),
+                    key: `shared:prop:${n.id}`, id: identity, name: String(md.propName || md.itemName || n.title || n.id),
                     kind: "道具", role: "道具", description: String(md.propDescription || md.itemDescription || ""), appearance: "",
                     voice: "", coverUrl: thumbOf(md.propImage?.storageKey),
-                    episodeId: "", revision: 0, entity: "asset", entityId: n.id, assetId: n.id, locked: false,
+                    episodeId: "", revision: 0, entity: "asset", entityId: identity, assetId: identity, locked: false,
                     genStatus: md.propImage?.storageKey ? "ready" : "idle", thumb: thumbOf(md.propImage?.storageKey), prompt: String(md.prompt || ""),
                     aliasNames: [], imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: String(md.prompt || ""),
                     scheme: defaultSchemeFor("prop"), voiceAssetId: "", voiceStorageKey: "", voiceUrl: "",
                     scope: "shared", canvasId: sharedAssetCanvasId || undefined, nodeId: n.id, canvasRevision: sharedCanvasRev,
                     libraryAssetId: canonicalAssetId(n.id, md.productionAssetId || md.assetId),
                     referenceStorageKey: String(md.propImage?.storageKey || md.storageKey || ""),
+                    canonicalName: "", lookOf: "",
+                    lookThumbs: [],
+                    images: cardImagesOf({ primary: thumbOf(md.propImage?.storageKey), images: [md.propImage], referenceStorageKey: String(md.propImage?.storageKey || md.storageKey || "") }),
+                });
+            } else if (n.type === "image") {
+                // 影策提升的共享资产是 image 节点，实体分类在 productionAssetId 前缀里。
+                // 真值只有 title / storageKey / productionAssetId，描述类字段不编造，留空。
+                const paid = String(md.productionAssetId || "");
+                const kindCast: CastKind = paid.startsWith("AC-CHAR-") ? "角色" : paid.startsWith("AC-SCENE-") ? "场景" : "道具";
+                const entity: Entity = kindCast === "角色" ? "character" : kindCast === "场景" ? "environment" : "asset";
+                const storageKey = String(md.storageKey || "");
+                out.push({
+                    key: `shared:image:${n.id}`, id: paid || n.id, name: String(n.title || paid || n.id),
+                    kind: kindCast, role: kindCast === "场景" ? "环境" : kindCast === "道具" ? "道具" : "配角",
+                    description: "", appearance: "", voice: "",
+                    coverUrl: thumbOf(storageKey),
+                    episodeId: "", revision: 0, entity, entityId: paid || n.id, assetId: paid || n.id, locked: false,
+                    genStatus: storageKey ? "ready" : "idle", thumb: thumbOf(storageKey), prompt: String(md.prompt || ""),
+                    aliasNames: [], imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: String(md.prompt || ""),
+                    scheme: kindCast === "角色" ? defaultSchemeFor("character") : kindCast === "场景" ? defaultSchemeFor("scene") : defaultSchemeFor("prop"),
+                    voiceAssetId: "", voiceStorageKey: "", voiceUrl: "",
+                    scope: "shared", canvasId: sharedAssetCanvasId || undefined, nodeId: n.id, canvasRevision: sharedCanvasRev,
+                    libraryAssetId: canonicalAssetId(n.id, md.productionAssetId || md.assetId),
+                    referenceStorageKey: storageKey,
+                    canonicalName: "", lookOf: "",
+                    lookThumbs: [],
+                    images: cardImagesOf({ primary: thumbOf(storageKey), referenceStorageKey: storageKey }),
                 });
             }
         }
-        const seen = new Set<string>();
-        // 共享资产优先：先放 shared 再放 episode，同名时保留前者。
+        // 影策「别名同一人 + 造型归主卡」归一（存量资产不改 storageKey、不删节点、不动成片绑定）：
+        // 1) shared 主卡写 characterCanonicalName + characterAliases；形态卡写 characterLookOf 或作为别名命中主卡；
+        // 2) 形态卡/别名重复卡不单列，全部造型图并入保留的主卡（shared 优先）。
+        // 共享资产优先：shared 排在前，归一时优先保留正式版本。
         const ordered = [...out].sort((a, b) => (a.scope === "shared" ? 0 : 1) - (b.scope === "shared" ? 0 : 1));
-        return ordered.filter(e => { const k = `${e.kind}:${e.name}`; if (seen.has(k)) return false; seen.add(k); return true; });
+        // 归一走影策同款 normalizeAssetName（小写、去「角色：」前缀、去空格与 ·•・._- 分隔），
+        // 再剥括号形态后缀（「崇良（铁鞭武人）」→「崇良」）。禁止裸名精确匹配，避免形态卡误绑独立身份。
+        const normalizeName = (name: string) => normalizeAssetName(name).replace(/[（(].*$/, "");
+        // 同一身份可有多个写法：完整归一 key + 去掉「蟒身/蛇身」形态后缀的 key（兼容旧 normalizeName 行为）。
+        const identityKeysOf = (name: string): string[] => {
+            const n = normalizeName(name);
+            const stripped = n.replace(/(?:蟒身|蛇身)$/, "");
+            return Array.from(new Set([n, stripped].filter(Boolean)));
+        };
+        // aliasKey → 规范化身份 key：shared 主卡取 productionAssetId，纯分集卡用自身 assetId 兜底。
+        const aliasKeyToCanonical = new Map<string, string>();
+        const keyPriority = new Map<string, number>();
+        const identityById = new Map<string, string>();
+        const registerIdentity = (identity: string, e: Entry, priority: number) => {
+            if (!identity) return;
+            for (const id of [e.assetId, e.id]) if (id) identityById.set(id, identity);
+            for (const name of [e.name, e.canonicalName, ...e.aliasNames]) {
+                for (const key of identityKeysOf(name)) {
+                    // 主卡（无 lookOf 的 shared）优先登记；形态卡不得抢占主卡别名。
+                    if (!aliasKeyToCanonical.has(key) || priority > (keyPriority.get(key) ?? -1)) {
+                        aliasKeyToCanonical.set(key, identity);
+                        keyPriority.set(key, priority);
+                    }
+                }
+            }
+        };
+        const lookupIdentity = (e: Entry): string | undefined => [e.name, e.canonicalName, ...e.aliasNames]
+            .flatMap(identityKeysOf)
+            .map(k => aliasKeyToCanonical.get(k))
+            .find(Boolean);
+        // 第一遍：登记共享节点身份键 [characterName, characterCanonicalName, ...characterAliases] → 主卡 productionAssetId。
+        // 主卡先登记（priority=1），形态卡后登记（priority=0），保证别名始终指回主卡。
+        const sharedChars = ordered.filter(e => e.scope === "shared" && e.kind === "角色");
+        for (const e of [...sharedChars.filter(e => !e.lookOf), ...sharedChars.filter(e => e.lookOf)]) {
+            const mainIdentity = e.lookOf
+                ? (identityById.get(e.lookOf) || lookupIdentity({ ...e, name: e.lookOf, canonicalName: "", aliasNames: [] }))
+                : undefined;
+            registerIdentity(mainIdentity || e.assetId || e.id, e, e.lookOf ? 0 : 1);
+        }
+        // 第二遍：分集条目按 aliasKeys 命中共享身份后，读时对齐（仅显示/去重字段，媒体真值不动）。
+        for (const e of ordered) {
+            if (e.kind !== "角色") continue;
+            const ownIdentity = e.assetId || e.id;
+            if (e.scope === "episode") {
+                const hit = lookupIdentity(e);
+                if (hit && hit !== ownIdentity) {
+                    const main = sharedChars.find(s => !s.lookOf && (s.assetId || s.id) === hit);
+                    e.canonicalName = main?.canonicalName || e.canonicalName;
+                    e.assetId = hit;
+                    e.entityId = hit;
+                    // thumb / coverUrl / referenceStorageKey / libraryAssetId 保持各自真实媒体与写回定位。
+                }
+            }
+            registerIdentity(e.assetId || e.id, e, 0);
+        }
+        const identityKeyOf = (e: Entry): string => `role:${lookupIdentity(e) || e.assetId || e.id}`;
+        // 目标 key：造型卡按 lookOf 指回主卡身份，其余按自身规范化身份。
+        const targetKeyOf = (e: Entry): string => {
+            if (e.lookOf && e.kind === "角色") {
+                const looked = identityById.get(e.lookOf)
+                    || aliasKeyToCanonical.get(normalizeName(e.lookOf))
+                    || e.lookOf;
+                return `role:${looked}`;
+            }
+            return e.kind === "角色" ? identityKeyOf(e) : `${e.kind}:${e.assetId || e.name}`;
+        };
+        // 第一遍：谁保留（每个目标 key 第一张，shared 优先）；其余卡的设定图/造型图全部收集到保留卡。
+        const seen = new Set<string>();
+        const imagesByKey = new Map<string, string[]>();
+        const lookThumbsByKey = new Map<string, string[]>();
+        const result: Entry[] = [];
+        for (const e of ordered) {
+            const key = targetKeyOf(e);
+            const isLook = Boolean(e.lookOf && e.kind === "角色");
+            if (!seen.has(key) && !isLook) { seen.add(key); result.push(e); }
+            const collectedImages = [...(imagesByKey.get(key) || []), ...e.images, ...(e.thumb ? [e.thumb] : [])];
+            imagesByKey.set(key, Array.from(new Set(collectedImages.filter(Boolean))));
+            // 造型真值与「造型」tab 同源：同一身份归并后的真实图片（shared 优先），本体由第一张承担。
+            const collectedThumbs = [...(lookThumbsByKey.get(key) || []), ...e.lookThumbs, ...(e.thumb ? [e.thumb] : [])];
+            lookThumbsByKey.set(key, Array.from(new Set(collectedThumbs.filter(Boolean))));
+        }
+        // 第二遍：合并完成后再写回主卡（主卡可能排在形态卡之前）；4 拼图只并真实图片，不足 4 张仍由占位补齐。
+        for (const e of result) {
+            const key = targetKeyOf(e);
+            const extraImages = imagesByKey.get(key);
+            if (extraImages?.length) e.images = Array.from(new Set([...e.images, ...extraImages]));
+            // 角色卡横排 = 归并真图去掉本体（第一张）；没有造型数组为空，渲染处整行不渲染。
+            e.lookThumbs = e.kind === "角色" ? (lookThumbsByKey.get(key) || []).slice(1) : [];
+        }
+        return result;
     }, [sources, sharedNodes, sharedCanvasRev, sharedAssetCanvasId]);
 
     // 按集核查「打开资产设定」：从该资产行的真值 ID/名称/分类定位资产库条目并选中。
@@ -483,6 +841,8 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     const failedCount = entries.filter(e => e.genStatus === "failed").length;
     const busyCount = entries.filter(e => e.genStatus === "busy").length;
     const lockedCount = entries.filter(e => e.locked).length;
+    /** 横幅标题只用真实状态：还有非 ready 的设定时才提示「还没有生成」。 */
+    const hasPendingRefs = entries.some(e => e.genStatus !== "ready");
     const current = visible.find(e => e.key === selectedKey) || visible[0] || null;
     const librarySavedKind = (e: Entry) => e.entity === "character" ? "character" : e.entity === "environment" ? "scene" : "prop";
     const isLibrarySaved = Boolean(current && (current.scope === "shared" || allAssets.some(a => a.id === current.libraryAssetId && a.kind === librarySavedKind(current))));
@@ -492,7 +852,30 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     // 换音色后的标脏依赖它保持用户选择。
     const selectEntry = (e: Entry) => { setSelectedKey(e.key); setDraft(draftOf(e)); setAliasInput(""); };
     const shownDraft = draft && current && draft.key === current.key ? draft : (current ? draftOf(current) : null);
+    /** 详情大图真值：设定自身参考图（造型在「造型」tab 独立成卡，不再叠加选中态）。 */
+    const detailHeroImage = current?.thumb || current?.coverUrl || "";
     const patchDraft = (patch: Partial<CastDraft>) => { if (shownDraft) setDraft({ ...shownDraft, ...patch }); };
+    /**
+     * 表单 disabled 的 busy 口径对齐影策 CastEditor：保存中或该设定参考图生成中时禁用字段编辑。
+     */
+    const formBusy = saving || (Boolean(current) && generating === current?.key);
+    /** 草稿脏标记（对齐影策 dirty）：保存按钮在无改动或名称/描述为空时禁用。 */
+    const draftBase = current ? draftOf(current) : null;
+    const dirty = Boolean(shownDraft && draftBase && (
+        shownDraft.name !== draftBase.name
+        || shownDraft.description !== draftBase.description
+        || shownDraft.voice !== draftBase.voice
+        || shownDraft.aliasNames.join("|") !== draftBase.aliasNames.join("|")
+        || shownDraft.hasOwnStyle !== draftBase.hasOwnStyle
+        || shownDraft.imageStyleName !== draftBase.imageStyleName
+        || shownDraft.imageStylePrompt !== draftBase.imageStylePrompt
+        || shownDraft.imagePrompt !== draftBase.imagePrompt
+        || shownDraft.scheme !== draftBase.scheme
+    ));
+    /** 字段标签按资产类型区分（影策 APPEARANCE_LABEL：角色外貌描述 / 道具外形描述 / 场景环境描述；造型沿用角色）。 */
+    const appearanceLabel = !current ? "描述" : current.kind === "场景" ? "环境描述" : current.kind === "道具" ? "外形描述" : "外貌描述";
+    /** 名称标签：造型卡在影策里叫「造型名称」。 */
+    const nameLabel = current?.kind === "造型" ? "造型名称" : "名称";
 
     // 设定级 restyle 的 castId 必须能被后端 h3CharacterGroups/referenceBindings 反查：
     // 共享画布角色节点没有 characterAssetId（productionEntity.entityId 是 C_XXX），
@@ -511,26 +894,30 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
 
     // 设定详情的 restyle 影响集：只读真实查询；没有 dramaId / 设定 ID 时保持 null，不造假数字。
     const currentCastId = current ? (resolvableCastIdByName.get(current.name) || current.entityId || "") : "";
+    const castImpactQueryKey = dramaId && currentCastId ? `${dramaId}|${currentCastId}|${castImpactTick}` : "";
+    const castImpactPending = Boolean(castImpactQueryKey) && castImpactKey !== castImpactQueryKey;
     useEffect(() => {
         let alive = true;
         if (!dramaId || !currentCastId) { setCastImpact(null); return; }
         setCastImpactLoading(true);
         fetchDramaCastImpact(dramaId, currentCastId)
-            .then((result) => { if (alive) setCastImpact(result.ok ? result : null); })
-            .catch(() => { if (alive) setCastImpact(null); })
+            .then((result) => { if (alive) { setCastImpact(result.ok ? result : null); setCastImpactKey(castImpactQueryKey); } })
+            .catch(() => { if (alive) { setCastImpact(null); setCastImpactKey(castImpactQueryKey); } })
             .finally(() => { if (alive) setCastImpactLoading(false); });
         return () => { alive = false; };
     }, [dramaId, currentCastId, castImpactTick]);
 
     // 版本记录：dramaId + 当前设定 assetId 决定真值查询；缺 ID 时清空，不造假列表。
     const currentVersionAssetId = current?.assetId || current?.libraryAssetId || "";
+    const versionQueryKey = dramaId && currentVersionAssetId ? `${dramaId}|${currentVersionAssetId}` : "";
+    const versionsPending = Boolean(versionQueryKey) && assetVersionsKey !== versionQueryKey;
     useEffect(() => {
         let alive = true;
         if (!dramaId || !currentVersionAssetId) { setAssetVersions([]); return; }
         setAssetVersionsLoading(true);
         fetchDramaAssetVersions(dramaId, currentVersionAssetId)
-            .then((r) => { if (alive) setAssetVersions(r.ok ? r.versions || [] : []); })
-            .catch(() => { if (alive) setAssetVersions([]); })
+            .then((r) => { if (alive) { setAssetVersions(r.ok ? r.versions || [] : []); setAssetVersionsKey(versionQueryKey); } })
+            .catch(() => { if (alive) { setAssetVersions([]); setAssetVersionsKey(versionQueryKey); } })
             .finally(() => { if (alive) setAssetVersionsLoading(false); });
         return () => { alive = false; };
     }, [dramaId, currentVersionAssetId]);
@@ -589,6 +976,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
             patch.voice_description = shownDraft.voice.trim();
             patch.identity = stringifyExtra({
                 aliasNames: shownDraft.aliasNames,
+                // 影策 definition.aliases 同名字段：后端 buildCastIndex / auto-voice 从这里读别名，
+                // 只写 aliasNames 会让「剧本称呼→同一人」归一断链。
+                aliases: shownDraft.aliasNames,
                 ...(shownDraft.hasOwnStyle ? {
                     imageStyleId: shownDraft.imageStyleId || styleSlug(shownDraft.imageStyleName),
                     imageStyleName: shownDraft.imageStyleName,
@@ -713,6 +1103,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     voiceAssetId: current.voiceAssetId || String(md.characterVoiceAssetId || prior?.voiceAssetId || ""),
                     images,
                     primaryIndex: Number(md.characterPrimaryIndex ?? prior?.primaryIndex ?? 0),
+                    // 影策 definition.aliases：把这一人的别名写进共享资产，跨集引用按别名归一到同一份资产。
+                    aliases: shownDraft.aliasNames.length ? shownDraft.aliasNames : (Array.isArray(md.characterAliases) ? md.characterAliases : prior?.aliases || []),
+                    role: current.role || prior?.role || String(md.characterRole || "") || undefined,
                 },
             };
         } else if (assetKind === "scene") {
@@ -766,7 +1159,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                 });
                 if (!applied) return;
             }
-            message.success(current.scope === "shared" || Boolean(previous) ? t("canvas.sharedLibrary.update") : t("nodeToolbar.saveAsset"));
+            message.success(current.scope === "shared" || Boolean(previous) ? t("canvas.sharedLibrary.update") : t("canvas.nodeToolbar.saveAsset"));
             setDraft(null);
             setSharedRefreshTick((v) => v + 1); // 重新拉共享画布，新 canonical 节点立即出现在列表
             onChanged();
@@ -802,7 +1195,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     /** 生成参考图（本地真实链路）：把画风写进资产卡 prompt → 为该实体准备画布生成节点 → 打开画布生成并采用。 */
     const handleGenerate = async () => {
         if (!current) return;
-        const basePrompt = shownDraft?.imagePrompt.trim() || current.prompt.trim() || `${current.name}：${current.description || current.appearance}`.trim();
+        const basePrompt = shownDraft?.imagePrompt.trim() || current.prompt.trim() || promptFromAppearance(current);
         if (!basePrompt) return void message.warning("该设定还没有可用的提示词，请先保存外观描述");
         setGenerating(current.key);
         try {
@@ -823,9 +1216,8 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                 // 2) 回读 revision 后在共享画布准备该实体，避免连写撞乐观锁
                 const fresh = await fetchEpisodeProduction({ projectId });
                 await prepareProductionTargets({ projectId }, fresh.production.revision, [resolved.target], `studio-ref-${nanoid()}`);
-                message.success(`已在共享画布为「${current.name}」准备好生成节点：生成并采用后，共享资产版本与 writeThrough 引用自动跟随`);
+                message.success(`已在共享画布为「${current.name}」准备好生成节点，生成在后台进行：采用后共享资产版本与 writeThrough 引用自动跟随`);
                 onChanged();
-                onOpenSharedCanvas?.();
                 return;
             }
             const entityKind = current.entity === "environment" ? "scene" : current.entity === "asset" ? "prop" : "character";
@@ -835,9 +1227,8 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
             // 2) 准备该实体的画布生成节点（重新读 revision，避免连写撞乐观锁）
             const fresh = await fetchEpisodeProduction(current.episodeId as never);
             await prepareProductionTargets(current.episodeId as never, fresh.production.revision, [`entity:${entityKind}:${current.entityId}`], `studio-ref-${nanoid()}`);
-            message.success(`已为「${current.name}」准备好参考图生成节点，正在打开画布：生成后采用即写回并锁定`);
+            message.success(`已为「${current.name}」准备好参考图生成节点，生成在后台进行：采用后写回并锁定`);
             onChanged();
-            onOpenCanvas();
         } catch (error) {
             message.error(`准备生成失败：${(error as Error).message}`);
         } finally {
@@ -849,8 +1240,14 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
     const handlePrepareAll = async () => {
         const pending = entries.filter(e => e.genStatus !== "ready" && e.assetId && e.entityId);
         if (!pending.length) return void message.info("所有设定都已有参考图");
+        await runPrepare(pending);
+    };
+
+    /** 真实写回 + 准备生成节点（一键准备全部参考图，绝不伪造批量接口）。 */
+    const runPrepare = async (pending: Entry[]) => {
         setBatchPrep({ done: 0, total: pending.length });
         let done = 0; let failed = 0;
+        const failedDetails: string[] = [];
         let sharedPrepared = 0; let episodePrepared = 0;
         try {
             // 共享条目：同一共享画布只回读一次 revision，所有实体目标一次 prepare，互不撞乐观锁。
@@ -868,7 +1265,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     const promptOps: ProductionOperation[] = [];
                     for (const { e, r } of usable) {
                         if (!r.assetCardId) continue;
-                        const base = e.imagePrompt.trim() || e.prompt.trim() || `${e.name}：${e.description || e.appearance}`.trim();
+                        const base = e.imagePrompt.trim() || e.prompt.trim() || promptFromAppearance(e);
                         if (!base) continue;
                         promptOps.push({ type: "patch_director_source", entity: "asset_card", id: r.assetCardId,
                             patch: { prompt: e.imageStylePrompt ? withArtStyle(base, e.imageStylePrompt) : withArtStyle(base, artStyle) } });
@@ -880,8 +1277,9 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                         await prepareProductionTargets({ projectId }, fresh.production.revision, targets, `studio-ref-${nanoid()}`);
                         sharedPrepared = usable.length;
                     }
+                    for (const e of sharedEntries) if (!usable.some(u => u.e.key === e.key)) failedDetails.push(`${e.name}（共享节点无正式实体绑定）`);
                     failed += sharedEntries.length - usable.length;
-                } catch { failed += sharedEntries.length; }
+                } catch (err) { failed += sharedEntries.length; failedDetails.push(`共享画布准备失败：${(err as Error).message}`); }
                 done += sharedEntries.length;
                 setBatchPrep({ done, total: pending.length });
             }
@@ -889,7 +1287,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
             for (const e of pending) {
                 if (e.scope === "shared") continue;
                 try {
-                    const basePrompt = e.imagePrompt.trim() || e.prompt.trim() || `${e.name}：${e.description || e.appearance}`.trim();
+                    const basePrompt = e.imagePrompt.trim() || e.prompt.trim() || promptFromAppearance(e);
                     if (!basePrompt) { failed++; continue; }
                     const style = e.imageStylePrompt ? withArtStyle(basePrompt, e.imageStylePrompt) : withArtStyle(basePrompt, artStyle);
                     const entityKind = e.entity === "environment" ? "scene" : e.entity === "asset" ? "prop" : "character";
@@ -898,15 +1296,13 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     fresh = await fetchEpisodeProduction(e.episodeId as never);
                     await prepareProductionTargets(e.episodeId as never, fresh.production.revision, [`entity:${entityKind}:${e.entityId}`], `studio-ref-${nanoid()}`);
                     episodePrepared++;
-                } catch { failed++; }
+                } catch (err) { failed++; failedDetails.push(`${e.name}：${(err as Error).message}`); }
                 done++;
                 setBatchPrep({ done, total: pending.length });
             }
             onChanged();
-            message.success(`已准备 ${done - failed}/${pending.length} 个参考图生成节点（共享画布 ${sharedPrepared}、分集画布 ${episodePrepared}）${failed ? `，${failed} 个失败` : ""}`);
-            // 有共享目标时优先打开共享画布；真实采用由画布既有 runner 完成（生成→采用→登记共享版本→writeThrough 引用跟随）。
-            if (sharedPrepared) onOpenSharedCanvas?.();
-            else if (episodePrepared) onOpenCanvas();
+            // 对齐影策：准备后不跳画布。节点已由 HTTP 备好，生成由后台 runner 完成；本页 onChanged 刷新即可见进度。
+            message.success(`已准备 ${done - failed}/${pending.length} 个参考图生成节点（共享画布 ${sharedPrepared}、分集画布 ${episodePrepared}），生成在后台进行${failed ? `，${failed} 个失败：${failedDetails.slice(0, 3).join("；")}` : ""}`);
         } finally {
             setBatchPrep(null);
         }
@@ -1220,33 +1616,47 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
 
     return (
         <div className="flex min-h-0 flex-1 flex-col" data-studio-cast>
-            {/* 分类 tab + 统计 */}
-            <div className="flex shrink-0 items-center gap-1 border-b border-border px-6 py-2">
-                {KIND_TABS.map(({ key, icon: Icon }) => (
-                    <button key={key} type="button" onClick={() => { setKind(key); setSelectedKey(null); setDraft(null); }}
-                        className={cn("flex h-7 items-center gap-1.5 rounded px-2.5 text-xs transition",
-                            kind === key ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:bg-muted")}>
-                        <Icon className="size-3.5" /> {key} <span className="opacity-60">{key === "造型" ? lookCount : counts[key]}</span>
-                    </button>
-                ))}
-                <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
-                    <button type="button" aria-label="新增设定" onClick={() => setAdding(true)} className="flex items-center gap-1 transition hover:text-foreground"><Plus className="size-3" /> 新增设定</button>
+            {/* 顶栏：分类 tab / 状态筛选 / 操作合成一条 flex-wrap 头栏（对齐影策 drama-view-head） */}
+            <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-5 py-2">
+                {/* 分类 tab：4px 内边距 + 下沉底 + 1px 描边 + 圆角分组（影策 drama-tabs） */}
+                <div className="inline-flex items-center gap-0.5 rounded-lg border border-border bg-muted/60 p-1" role="tablist" aria-label="设定类型">
+                    {KIND_TABS.map(({ key }) => (
+                        <button key={key} type="button" role="tab" aria-selected={kind === key}
+                            onClick={() => { setKind(key); setSelectedKey(null); setDraft(null); }}
+                            className={cn("inline-flex h-[30px] items-center gap-2 rounded-md px-4 text-[11px] transition",
+                                kind === key ? "bg-card font-medium text-foreground shadow-xs" : "text-muted-foreground hover:bg-card/60 hover:text-foreground")}>
+                            {key} <span className="tabular-nums font-medium opacity-60">{key === "造型" ? lookCount : counts[key]}</span>
+                        </button>
+                    ))}
                 </div>
-            </div>
-
-            {/* 状态筛选（影策：全部/失败/生成中/已锁定） */}
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-6 py-1.5 text-[11px]">
-                {([
-                    { key: "all", label: "全部", n: entries.length },
-                    { key: "failed", label: "失败", n: failedCount },
-                    { key: "busy", label: "生成中", n: busyCount },
-                    { key: "locked", label: "已锁定", n: lockedCount },
-                ] as const).map(f => (
-                    <button key={f.key} type="button" onClick={() => setFilter(f.key)}
-                        className={cn("rounded-full px-2 py-0.5 transition", filter === f.key ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-muted/60")}>
-                        {f.label} {f.n}
+                {/* 状态筛选：胶囊按钮 + 独立 <b> 计数（tabular-nums），失败项计数用 destructive 色 */}
+                <div className="flex items-center gap-1 overflow-x-auto thin-scrollbar" role="group" aria-label="筛选">
+                    {([
+                        { key: "all", label: "全部", n: entries.length },
+                        { key: "failed", label: "失败", n: failedCount },
+                        { key: "busy", label: "生成中", n: busyCount },
+                        { key: "locked", label: "已锁定", n: lockedCount },
+                    ] as const).map(f => (
+                        <button key={f.key} type="button" aria-pressed={filter === f.key} onClick={() => setFilter(f.key)}
+                            className={cn("inline-flex h-[26px] shrink-0 items-center whitespace-nowrap rounded-full border px-2 text-[11px] transition",
+                                filter === f.key ? "border-border bg-card text-foreground" : "border-transparent text-muted-foreground hover:bg-muted/60")}>
+                            {f.label}<b className={cn("ml-1 font-semibold tabular-nums", f.key === "failed" && f.n > 0 ? "text-destructive" : "text-muted-foreground/70")}>{f.n}</b>
+                        </button>
+                    ))}
+                </div>
+                {/* 影策 drama-cast-toolbar：两枚描边按钮（link / plus 图标），右对齐；真实动作分别是作品素材导入与新增设定 */}
+                <div className="ml-auto flex flex-wrap items-center gap-2" data-asset-toolbar>
+                    <button type="button" aria-label="关联已有作品素材" onClick={openWorkImport}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-[12px] font-medium text-foreground transition hover:bg-muted"
+                        data-asset-toolbar-import>
+                        <Link2 className="size-3.5" /> 关联已有作品素材
                     </button>
-                ))}
+                    <button type="button" aria-label="新增设定" onClick={() => setAdding(true)}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-card px-3 text-[12px] font-medium text-foreground transition hover:bg-muted"
+                        data-asset-toolbar-create>
+                        <Plus className="size-3.5" /> 新增设定
+                    </button>
+                </div>
             </div>
 
             {/* 造型 tab：剧目级造型真值在画布角色节点，读写走画布 update_node op。
@@ -1261,91 +1671,176 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                     onCountChange={setLookCount}
                 />
             </div>
-            {kind !== "造型" && (entries.length === 0 ? (
-                <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 text-xs text-muted-foreground">
-                    <Users className="size-9 opacity-40" />
+            {kind !== "造型" && (sourcesPending ? (
+                <div className="grid min-h-0 flex-1 place-content-center justify-items-center gap-2 px-4 py-16 text-center text-xs text-muted-foreground" data-studio-cast-sources-loading aria-busy="true">
+                    <RefreshCw className="size-6 animate-spin opacity-50" />
+                    <span>正在读取各集设定…</span>
+                </div>
+            ) : entries.length === 0 ? (
+                <div className="grid min-h-0 flex-1 place-content-center justify-items-center gap-2 px-4 py-16 text-center text-xs text-muted-foreground">
+                    <Users className="size-7 opacity-50" />
                     各集制作稿还没有登记角色/场景/道具。点「新增设定」创建，或在精修画布的设定资产里创建后汇总到这里。
-                    <button type="button" onClick={() => setAdding(true)} className="mt-2 underline-offset-2 hover:underline">新增设定</button>
+                    <button type="button" onClick={() => setAdding(true)} className="mt-1 underline-offset-2 hover:underline">新增设定</button>
                 </div>
             ) : (
-                <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px]">
+                <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_320px] xl:grid-cols-[minmax(0,1fr)_380px]">
                     {/* 卡片网格 */}
-                    <div className="min-h-0 overflow-y-auto p-4">
-                        <div className="mb-3 flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
-                            <Sparkles className="size-3.5 shrink-0" />
-                            <span className="min-w-0 flex-1">先核对名称与外观描述，满意后一键准备生成节点；参考图随剧情段视频请求一起发送，保持人物和道具一致。</span>
+                    <div className="min-h-0 overflow-y-auto px-5 pb-7 pt-4 thin-scrollbar">
+                        {/* 生成参考图横幅：strong 标题 + 说明 + 主按钮；只在真有未就绪设定时出现 */}
+                        {hasPendingRefs ? (
+                        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-[11px]" data-studio-cast-banner>
+                            <Sparkles className="size-5 shrink-0 text-primary" />
+                            <div className="min-w-0 flex-1 leading-relaxed">
+                                <strong className="block font-semibold text-foreground">参考图还没有生成</strong>
+                                <span className="text-muted-foreground">先核对角色、道具、场景与造型的名称和外观描述，满意后再准备生成节点；参考图会随剧情段视频请求一起发送，保持人物和道具一致。</span>
+                            </div>
                             {batchPrep ? (
-                                <span className="shrink-0 text-primary" data-studio-batch-prep-progress>准备中 {batchPrep.done}/{batchPrep.total}</span>
+                                <span className="shrink-0 font-medium text-primary" data-studio-batch-prep-progress>准备中 {batchPrep.done}/{batchPrep.total}</span>
                             ) : (
                                 <button type="button" disabled={Boolean(generating)} onClick={() => void handlePrepareAll()}
-                                    className="flex shrink-0 items-center gap-1 rounded bg-primary px-2 py-1 text-[10px] text-background! transition hover:opacity-90 disabled:opacity-50"
+                                    className="flex h-8 shrink-0 items-center gap-1 rounded-md bg-primary px-3 text-[11px] font-medium text-background! transition hover:opacity-90 disabled:opacity-50"
                                     data-studio-batch-prep>
                                     <Sparkles className="size-3" /> 一键准备全部参考图
                                 </button>
                             )}
                         </div>
-                        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-4">
-                            {visible.length === 0 ? (
-                                <div className="col-span-full py-10 text-center text-xs text-muted-foreground">
-                                    当前筛选下没有设定
+                        ) : null}
+                        {/* 影策 is-wide：按 220px 自适应列宽，卡片接近方形、主图 16:9 横幅 */}
+                        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+                            {sourcesPending ? (
+                                <div className="col-span-full grid justify-items-center gap-2 py-16 text-center text-xs text-muted-foreground" data-studio-cast-sources-loading aria-busy="true">
+                                    <RefreshCw className="size-5 animate-spin opacity-50" />
+                                    <span>正在读取各集设定…</span>
+                                </div>
+                            ) : visible.length === 0 ? (
+                                <div className="col-span-full grid justify-items-center gap-2 py-16 text-center text-xs text-muted-foreground">
+                                    <Users className="size-7 opacity-50" />
+                                    <span>当前筛选下没有设定</span>
                                 </div>
                             ) : null}
-                            {visible.map((e) => (
-                                <button key={e.key} type="button" onClick={() => selectEntry(e)}
-                                    className={cn("overflow-hidden rounded-lg border text-left transition",
-                                        current?.key === e.key ? "border-foreground/40 bg-accent/40" : "border-border bg-card/40 hover:bg-muted/50")}>
-                                    <div className="relative flex aspect-[4/3] items-center justify-center bg-muted/40 text-muted-foreground">
-                                        {(e.thumb || e.coverUrl) ? <img src={e.thumb || e.coverUrl} alt={e.name} className="size-full object-cover" loading="lazy" /> : <ImageIcon className="size-7 opacity-30" />}
-                                        {e.locked ? <span className="absolute right-1 top-1 rounded bg-background/80 p-0.5"><Lock className="size-3" /></span> : null}
-                                        {e.genStatus === "failed" ? <span className="absolute left-1 top-1 rounded bg-rose-500 px-1 py-0.5 text-[9px] text-white">失败</span> : null}
-                                        {e.genStatus === "busy" ? <span className="absolute left-1 top-1 rounded bg-amber-500 px-1 py-0.5 text-[9px] text-white">生成中</span> : null}
-                                    </div>
-                                    <div className="p-2">
-                                        <div className="truncate text-xs font-medium">{e.name}</div>
-                                        <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                                            <span>{e.role}</span>
-                                            {e.genStatus === "ready" ? <span className="text-emerald-500">有参考图</span> : e.genStatus === "idle" ? <span>未生成</span> : null}
-                                            {e.kind === "角色" && e.voiceStorageKey ? (
-                                                <span role="button" tabIndex={0} data-studio-cast-card-voice-preview
-                                                    aria-label={`试听${e.name}的声音样本`}
-                                                    onClick={(ev) => { ev.stopPropagation(); playVoiceSample(e); }}
-                                                    onKeyDown={(ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); playVoiceSample(e); } }}
-                                                    className="ml-auto flex items-center gap-0.5 rounded border border-border px-1 py-0.5 text-[9px] text-foreground hover:bg-muted">
-                                                    <Volume2 className="size-3" /> 试听
-                                                </span>
+                            {visible.map((e) => {
+                                // 影策卡片封面是一整块「真图并排铺满」：有几张真实参考图就并排几张（同高裁切、无间隙）；
+                                // 1 张时铺满整块（不再留白 letterbox）；0 张才用名字首字兜底。绝不复制同一张图凑格。
+                                const coverImages = e.images.slice(0, 3);
+                                const hasVoice = Boolean(e.voiceStorageKey || e.voiceUrl);
+                                return (
+                                <div key={e.key} className={cn("group relative overflow-hidden rounded-[8px] border text-left transition-colors duration-150",
+                                    current?.key === e.key ? "border-foreground/40 bg-accent/40 ring-[3px] ring-foreground/5" : "border-border bg-card/40 hover:border-foreground/30 hover:bg-muted/50")}>
+                                    <button type="button" onClick={() => selectEntry(e)} className="block w-full text-left">
+                                        <div className="relative overflow-hidden text-muted-foreground" style={imgLoadingStyle}>
+                                            <div className="relative isolate flex aspect-[4/3] w-full overflow-hidden bg-[#111114]" data-asset-cover data-asset-image-count={coverImages.length}>
+                                                {coverImages.length ? (
+                                                    <img src={coverImages[0]} alt={`${e.name}设定图`} className="size-full object-cover" loading="lazy" draggable={false} />
+                                                ) : (
+                                                    <span className="absolute inset-0 grid place-items-center bg-[radial-gradient(circle_at_50%_40%,rgba(255,255,255,.1),transparent_62%)]">
+                                                        <span className="grid size-14 place-items-center rounded-full border border-white/15 text-2xl font-normal text-white/75">{Array.from(e.name.trim())[0] || "角"}</span>
+                                                    </span>
+                                                )}
+                                                <span className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/55 to-transparent" />
+                                            </div>
+                                            {/* 媒体框状态覆盖层：busy/failed 由 deriveGenStatus 从真实状态字段派生；无图由占位格表达 */}
+                                            {e.genStatus === "busy" ? (
+                                                <div className="absolute inset-0 grid animate-pulse place-items-center bg-muted/70" data-studio-cast-card-busy
+                                                    style={{ backgroundImage: "linear-gradient(110deg, transparent 30%, color-mix(in oklab, var(--foreground) 8%, transparent) 50%, transparent 70%)", backgroundSize: "200% 100%" }}>
+                                                    <span className="text-[10px] font-medium text-muted-foreground">生成中…</span>
+                                                </div>
+                                            ) : e.genStatus === "failed" ? (
+                                                <div className="absolute inset-0 grid place-items-center bg-background/75 p-2 text-center" data-studio-cast-card-failed>
+                                                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-destructive"><AlertCircle className="size-3.5" /> 生成失败</span>
+                                                </div>
                                             ) : null}
+                                            {e.locked ? <span className="absolute right-1.5 top-1.5 z-10 grid size-5 place-items-center rounded-lg bg-background/80 text-amber-500 backdrop-blur"><Lock className="size-3.5" /></span> : null}
                                         </div>
-                                    </div>
-                                </button>
-                            ))}
+                                        {/* 影策卡片信息层级：封面 → 名称（11/600）→ 角色定位（11 muted）；造型横条与音频行在其下 */}
+                                        <div className="px-2 pb-2 pt-2">
+                                            <div className="truncate text-[11px] font-semibold" title={e.canonicalName && e.canonicalName !== e.name ? `${e.name}（归一为${e.canonicalName}）` : undefined}>{e.name || e.canonicalName}</div>
+                                            {/* 影策卡片副标题：归一主名/别名 → 主角/配角 → 外观描述 → 占位 */}
+                                            <div className="mt-px truncate text-[11px] text-muted-foreground">
+                                                {(e.canonicalName && e.canonicalName !== e.name ? e.canonicalName : "") || e.role || (e.aliasNames.length ? e.aliasNames.join("、") : "") || e.description || "—"}
+                                            </div>
+                                        </div>
+                                    </button>
+                                    {/* 影策角色卡造型缩略图横排（在名称之下、音频之上）：本体之外的真实造型图；无造型整行不渲染，不占位造假。 */}
+                                    {e.kind === "角色" && e.lookThumbs.length ? (
+                                        <div className="flex items-center gap-1 overflow-x-auto px-2 pb-2 thin-scrollbar" role="group" aria-label={`${e.name}的造型`} data-studio-cast-look-switcher>
+                                            {e.lookThumbs.map((url, i) => (
+                                                <span key={`${e.key}:look:${i}`} title={`造型 ${i + 1}`} data-studio-cast-look-thumb
+                                                    className="block h-10 w-12 shrink-0 overflow-hidden rounded-lg border border-border bg-muted/50">
+                                                    <img src={url} alt={`${e.name}造型 ${i + 1}`} className="size-full object-cover" loading="lazy" draggable={false} />
+                                                </span>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                    {/* 影策声音行：有真实音频（character.voice 的 storageKey/url）才出现播放键 + 波形占位条；
+                                        没有可播放真值就保留「无音频」+ 喇叭图标。占位条只是条高固定的视觉占位，不代表真实采样。 */}
+                                    {e.kind === "角色" ? (
+                                        <div className="px-2 pb-2" data-studio-cast-card-audio>
+                                            {hasVoice ? (
+                                                <div className="flex items-center gap-2">
+                                                    <button type="button" data-studio-cast-card-voice-preview
+                                                        aria-label={`${voicePlaying ? "暂停" : "试听"}${e.name}的声音样本`}
+                                                        onClick={(ev) => { ev.stopPropagation(); playVoiceSample(e); }}
+                                                        className="grid size-6 shrink-0 place-items-center rounded-full border border-border bg-background text-foreground transition hover:bg-muted">
+                                                        {voicePlaying ? <Pause className="size-3" /> : <Play className="size-3" />}
+                                                    </button>
+                                                    {/* 真实音频真值只有 URL，没有采样数据，不画假波形；只给可点击的试听入口与文字。 */}
+                                                    <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground" data-studio-cast-card-voice-preview-label>{voicePlaying ? "播放中…" : "试听声音样本"}</span>
+                                                </div>
+                                            ) : (
+                                                <button type="button" data-studio-cast-card-voice-none disabled
+                                                    aria-label={`${e.name}无音频`}
+                                                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                                                    <MicOff className="size-3.5" /> 无音频
+                                                </button>
+                                            )}
+                                        </div>
+                                    ) : null}
+                                </div>
+                                );
+                            })}
                         </div>
                     </div>
 
                     {/* 右侧设定面板（受控可编辑） */}
-                    <aside className="min-h-0 overflow-y-auto border-l border-border bg-card/30 p-3" data-studio-cast-detail>
+                    <aside className="min-h-0 overflow-y-auto border-l border-border bg-card/30 p-4 thin-scrollbar" data-studio-cast-detail>
                         {current && shownDraft ? (
                             <>
-                                <div className="mb-3 flex items-center gap-2 text-xs font-semibold">
-                                    {kind}设定 <span className="text-[10px] font-normal text-muted-foreground">{current.scope === "shared" ? "共享资产画布" : `第 ${sources.find(s => s.episodeId === current.episodeId)?.episodeNo} 集`}</span>
-                                    <button type="button" onClick={() => void handleToggleLock()} disabled={saving}
-                                        className="ml-auto flex items-center gap-1 text-[10px] font-normal text-muted-foreground hover:text-foreground disabled:opacity-50">
-                                        {current.locked ? <Lock className="size-3" /> : <LockOpen className="size-3" />} {current.locked ? "已锁定" : "锁定形象"}
+                                {/* 影策右栏顺序：顶部主图（放大查看），其下才是「角色设定 + 锁定形象」标题行 */}
+                                {detailHeroImage ? (
+                                    <button type="button" onClick={() => setPreviewOpen(true)} className="group relative mb-4 block aspect-video w-full overflow-hidden rounded-[12px] border border-border bg-background" style={imgLoadingStyle} data-studio-cast-preview-open aria-label="放大查看参考图">
+                                        <img src={detailHeroImage} alt={current.name} className="size-full object-contain" />
+                                        {current.genStatus === "busy" || current.genStatus === "failed" ? (
+                                            <span className="absolute inset-x-0 bottom-0 bg-background/85 px-2 py-1 text-center text-[10px] text-muted-foreground">
+                                                {current.genStatus === "failed" ? "参考图生成失败" : "参考图生成中…"}
+                                            </span>
+                                        ) : null}
+                                        <span className="absolute bottom-1.5 right-1.5 grid size-6 place-items-center rounded bg-background/85 text-foreground opacity-0 backdrop-blur transition group-hover:opacity-100 group-focus-visible:opacity-100"><Maximize2 className="size-3.5" /></span>
                                     </button>
+                                ) : (
+                                    /* 状态（影策 hero 占位同款文案）：未生成 / 生成中 / 生成失败 */
+                                    <div className="mb-4 grid aspect-video place-items-center rounded-[12px] border border-border bg-background p-3 text-center text-[11px] leading-5 text-muted-foreground" style={imgLoadingStyle}>
+                                        {current.genStatus === "failed" ? "参考图生成失败" : current.genStatus === "busy" ? "参考图生成中…" : "尚未生成参考图：确认描述后点下方生成，或上传已有的形象图"}
+                                    </div>
+                                )}
+                                <div className="mb-4 flex items-center gap-2 text-[11px] font-semibold tracking-[0.06em] text-foreground/40" data-studio-cast-detail-head>
+                                    {kind}设定 <span className="text-[11px] font-normal tracking-normal text-foreground/40">{current.scope === "shared" ? "共享资产画布" : `第 ${sources.find(s => s.episodeId === current.episodeId)?.episodeNo} 集`}</span>
+                                    {/* 锁定形象：影策同款 label + Switch；角色/场景的锁定在画布侧，点击给出真实引导（不伪造状态）。 */}
+                                    <label className="ml-auto flex items-center gap-2 text-[11px] font-normal tracking-normal text-foreground/60">
+                                        {current.locked ? <Lock className="size-3.5" /> : <LockOpen className="size-3.5" />}
+                                        锁定形象
+                                        <Switch size="small" checked={current.locked} disabled={saving}
+                                            title={current.entity === "asset" ? undefined : "角色/场景的参考图锁定在画布上完成"}
+                                            aria-label="锁定形象" onChange={() => void handleToggleLock()} />
+                                    </label>
                                 </div>
-                                {(current.thumb || current.coverUrl) ? (
-                                    <button type="button" onClick={() => setPreviewOpen(true)} className="group relative mb-3 block w-full overflow-hidden rounded-md border border-border" data-studio-cast-preview-open aria-label="放大查看参考图">
-                                        <img src={current.thumb || current.coverUrl} alt={current.name} className="max-h-40 w-full object-contain" />
-                                        <span className="absolute bottom-1 right-1 flex items-center gap-1 rounded bg-background/85 px-1.5 py-0.5 text-[10px] text-foreground opacity-0 transition group-hover:opacity-100"><Maximize2 className="size-3" /> 放大</span>
-                                    </button>
-                                ) : null}
                                 {/* 设定版本记录：影策 DramaTakeList kind='cast' 等价。真值 drama_asset_versions 按 asset_id 只读。
                                     影策的「设为当前」只对 kind='video' 开放；本地资产版本也没有任何真实写链，故不提供该按钮。 */}
-                                <div className="mb-3 rounded-md border border-border bg-background/40 p-2" data-studio-cast-version-history>
+                                <div className="mb-4 rounded-md border border-border bg-background/40 p-2" data-studio-cast-version-history>
                                     <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium">
                                         <History className="size-3.5 text-muted-foreground" /> 版本记录
                                         {assetVersions.length ? <span className="font-normal text-muted-foreground">共 {assetVersions.length} 条</span> : null}
                                     </div>
-                                    {assetVersionsLoading ? (
+                                    {assetVersionsLoading || versionsPending ? (
                                         <div className="py-2 text-center text-[10px] text-muted-foreground">读取版本记录…</div>
                                     ) : assetVersions.length ? (
                                         <div className="max-h-44 space-y-1.5 overflow-y-auto pr-0.5">
@@ -1353,7 +1848,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                 <div key={v.id} className="flex items-center gap-2 rounded border border-border bg-card/50 p-1.5" data-studio-cast-version-row>
                                                     <button type="button" disabled={!v.storageKey} onClick={() => setVersionPreview(v)}
                                                         aria-label={`放大查看 V${v.sourceVersion} 参考图`} title="放大预览历史版本"
-                                                        className="relative flex size-11 shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-muted/40 disabled:cursor-default">
+                                                        className="relative flex size-11 shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-muted/40 disabled:cursor-default" style={imgLoadingStyle}>
                                                         {v.storageKey ? (
                                                             <>
                                                                 <img src={backendMediaUrl(v.storageKey)} alt={`V${v.sourceVersion}`} className="size-full object-cover" loading="lazy" />
@@ -1364,7 +1859,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-1.5 text-[10px] font-medium">
                                                             <span>V{v.sourceVersion}</span>
-                                                            <span className={cn("rounded px-1 py-0.5 text-[9px] font-normal", v.reviewStatus === "approved" ? "bg-emerald-500/10 text-emerald-500" : "bg-muted text-muted-foreground")}>
+                                                            <span className={cn("rounded-full px-1.5 py-0 text-[10px] font-normal", v.reviewStatus === "approved" ? "bg-emerald-500/10 text-emerald-500" : "bg-muted text-muted-foreground")}>
                                                                 {v.reviewStatus === "approved" ? "已审阅采用" : "自动登记"}
                                                             </span>
                                                         </div>
@@ -1382,19 +1877,24 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                     )}
                                     <p className="mt-1.5 text-[9px] leading-relaxed text-muted-foreground">旧版本保留在版本记录中；本地资产版本为只读，当前版本由设定参考图决定。</p>
                                 </div>
-                                <div className="space-y-2.5 text-[11px]">
+                                <div className="space-y-4 text-[13px]">
                                     <label className="block">
-                                        <span className="mb-1 block text-muted-foreground">名称</span>
-                                        <input value={shownDraft.name} onChange={(e) => patchDraft({ name: e.target.value })} className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none" />
+                                        <span className="mb-2 block text-[11px] font-semibold text-foreground/60">{nameLabel}</span>
+                                        <input value={shownDraft.name} maxLength={60} disabled={formBusy} aria-label={nameLabel}
+                                            onChange={(e) => patchDraft({ name: e.target.value })}
+                                            className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none disabled:opacity-60" />
                                     </label>
 
                                     {/* 别名与称呼：存 character.identity（白名单字段）里的 aliasNames */}
                                     {current.entity === "character" ? (
                                         <div data-studio-cast-aliases>
-                                            <span className="mb-1 block text-muted-foreground">别名与称呼（剧本里这些称呼归到此角色）</span>
-                                            <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1.5">
+                                            <div className="mb-2 flex items-baseline justify-between gap-2">
+                                                <span className="shrink-0 text-[11px] font-semibold text-foreground/60">别名与称呼</span>
+                                                <span className="min-w-0 truncate text-[11px] text-foreground/40">剧本里这些称呼都会归到此角色</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-1 rounded-[12px] border border-border bg-background p-1.5">
                                                 {shownDraft.aliasNames.map((a, i) => (
-                                                    <span key={`${a}:${i}`} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px]">
+                                                    <span key={`${a}:${i}`} className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px]">
                                                         {a}
                                                         <button type="button" aria-label={`移除别名 ${a}`} onClick={() => patchDraft({ aliasNames: shownDraft.aliasNames.filter((_, j) => j !== i) })} className="text-muted-foreground hover:text-foreground">×</button>
                                                     </span>
@@ -1412,20 +1912,25 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                         }
                                                     }}
                                                     placeholder="输入后回车"
-                                                    className="min-w-20 flex-1 bg-transparent text-[11px] outline-none"
+                                                    className="min-w-20 flex-1 bg-transparent outline-none"
                                                 />
                                             </div>
                                         </div>
                                     ) : null}
 
                                     <label className="block">
-                                        <span className="mb-1 block text-muted-foreground">外貌 / 描述</span>
-                                        <textarea value={shownDraft.description} onChange={(e) => patchDraft({ description: e.target.value })} rows={5} className="w-full resize-none rounded-md border border-border bg-background p-2 text-xs leading-5 outline-none" />
+                                        <div className="mb-2 flex items-baseline justify-between gap-2">
+                                            <span className="shrink-0 text-[11px] font-semibold text-foreground/60">{appearanceLabel}</span>
+                                            <span className="min-w-0 truncate text-[11px] text-foreground/40">用于参考图与剧情段视频提示词</span>
+                                        </div>
+                                        <textarea value={shownDraft.description} maxLength={1000} disabled={formBusy} rows={4} aria-label={appearanceLabel}
+                                            onChange={(e) => patchDraft({ description: e.target.value })}
+                                            className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 leading-[21px] outline-none disabled:opacity-60" />
                                     </label>
 
                                     {/* 单独风格开关 + 风格选择器：沿用本地选题 artStyleOptions */}
                                     {current.entity === "character" ? (
-                                        <div className="space-y-2 rounded-md border border-border bg-background/50 p-2" data-studio-cast-style>
+                                        <div className="space-y-2 rounded-[12px] border border-border bg-background/50 p-3" data-studio-cast-style>
                                             <button type="button" onClick={() => patchDraft({ hasOwnStyle: !shownDraft.hasOwnStyle })} className="flex w-full items-center gap-2 text-left text-[11px]">
                                                 <span className={cn("flex size-3.5 items-center justify-center rounded border", shownDraft.hasOwnStyle ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
                                                     {shownDraft.hasOwnStyle ? "✓" : ""}
@@ -1440,7 +1945,7 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                             const name = e.target.value;
                                                             patchDraft({ imageStyleName: name, imageStyleId: styleSlug(name), imageStylePrompt: withArtStyle("", name) });
                                                         }}
-                                                        className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none"
+                                                        className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none"
                                                         data-studio-cast-style-select
                                                     >
                                                         {artStyleOptions(shownDraft.imageStyleName).map((s) => <option key={s} value={s}>{s}</option>)}
@@ -1450,41 +1955,41 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                         onChange={(e) => patchDraft({ imageStylePrompt: e.target.value })}
                                                         rows={2}
                                                         placeholder="单独风格的画风约束语句（留空则沿用所选风格名）"
-                                                        className="w-full resize-none rounded-md border border-border bg-background p-2 text-[11px] outline-none"
+                                                        className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 leading-[21px] outline-none"
                                                     />
                                                 </>
                                             ) : (
-                                                <small className="block text-[10px] text-muted-foreground">沿用作品风格；穿越、幼年或不同世界的造型可在此单独选择。</small>
+                                                <span className="block text-[11px] text-foreground/40">沿用作品风格；穿越、幼年或不同世界的造型可在此单独选择。</span>
                                             )}
                                         </div>
                                     ) : null}
 
                                     {/* 参考图方案：影策内置方案选择器，选中真实决定 pipeline 出图模板（横版16:9）。 */}
                                     <div data-studio-cast-scheme>
-                                        <span className="mb-1 block text-muted-foreground">参考图方案（内置技能模板 · 横版16:9）</span>
+                                        <span className="mb-2 block text-[11px] font-semibold text-foreground/60">参考图方案（内置技能模板 · 横版16:9）</span>
                                         <select
                                             value={shownDraft.scheme}
                                             disabled={saving}
                                             onChange={(e) => patchDraft({ scheme: e.target.value as AssetSchemeId })}
-                                            className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none"
+                                            className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none"
                                         >
                                             {ASSET_SCHEMES.filter((s) => (s.kinds as readonly string[]).includes(
                                                 current.entity === "character" ? "character" : current.entity === "environment" ? "scene" : "prop"
                                             )).map((s) => <option key={s.id} value={s.id}>{s.name} · {s.description}</option>)}
                                         </select>
-                                        <small className="mt-1 block text-[10px] text-muted-foreground">
+                                        <span className="mt-1 block text-[11px] leading-[1.6] text-foreground/40">
                                             {ASSET_SCHEMES.find((s) => s.id === shownDraft.scheme)?.frameHint || "按资产类型自动匹配"}
                                             ；保存后由流水线按此方案拼装提示词出图。
-                                        </small>
+                                        </span>
                                     </div>
 
                                     {/* 参考图生成提示词：存资产卡 prompt（真正驱动生图的字段）+ 重新编排 */}
                                     {current.entity === "character" ? (
                                         <div data-studio-cast-image-prompt>
-                                            <div className="mb-1 flex items-center justify-between">
-                                                <span className="text-muted-foreground">参考图生成提示词</span>
+                                            <div className="mb-2 flex items-center justify-between">
+                                                <span className="shrink-0 text-[11px] font-semibold text-foreground/60">参考图生成提示词</span>
                                                 <button type="button" onClick={rebuildPrompt} disabled={!shownDraft.description.trim()}
-                                                    className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-50">
+                                                    className="flex items-center gap-1 text-[11px] text-foreground/60 hover:text-foreground disabled:opacity-50">
                                                     <RefreshCw className="size-3" /> 重新编排提示词
                                                 </button>
                                             </div>
@@ -1492,54 +1997,66 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                                 value={shownDraft.imagePrompt}
                                                 onChange={(e) => patchDraft({ imagePrompt: e.target.value })}
                                                 rows={4}
+                                                maxLength={12000}
+                                                disabled={formBusy}
+                                                aria-label="参考图生成提示词"
                                                 placeholder="留空按外观、风格和参考图方案自动编排；也可填写自己的生图要求"
-                                                className="w-full resize-none rounded-md border border-border bg-background p-2 text-[11px] leading-5 outline-none"
+                                                className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 leading-[21px] outline-none disabled:opacity-60"
                                             />
-                                            <small className="mt-1 block text-[10px] text-muted-foreground">切换风格后可重新编排。编排是本地画风拼接，不调用模型；保存后点生成才开始生图。</small>
+                                            <span className="mt-1 block text-[11px] leading-[1.6] text-foreground/40">切换风格后可重新编排提示词。编排不调用模型；保存设定后，点击生成才开始生图。</span>
                                         </div>
                                     ) : null}
 
                                     {current.entity === "character" ? (
                                         <>
                                             <label className="block">
-                                                <span className="mb-1 block text-muted-foreground">声线（写进视频提示词）</span>
-                                                <input value={shownDraft.voice} onChange={(e) => patchDraft({ voice: e.target.value })} placeholder="少年音，坚毅，语速偏快" className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none" />
+                                                <div className="mb-2 flex items-baseline justify-between gap-2">
+                                                    <span className="shrink-0 text-[11px] font-semibold text-foreground/60">声线</span>
+                                                    <span className="min-w-0 truncate text-[11px] text-foreground/40">写进视频提示词，由视频模型生成对白</span>
+                                                </div>
+                                                <input value={shownDraft.voice} disabled={formBusy} aria-label="声线"
+                                                    onChange={(e) => patchDraft({ voice: e.target.value })}
+                                                    placeholder="少年音，坚毅，语速偏快"
+                                                    className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none disabled:opacity-60" />
                                             </label>
                                             <label className="block">
-                                                <span className="mb-1 block text-muted-foreground">声音样本（选中即写进 character.voice，含音色库档案）</span>
+                                                <div className="mb-2 flex items-baseline justify-between gap-2">
+                                                    <span className="shrink-0 text-[11px] font-semibold text-foreground/60">声音样本</span>
+                                                    <span className="min-w-0 truncate text-[11px] text-foreground/40">支持参考音频的视频模型会在该角色开口的剧情段带上这段声音</span>
+                                                </div>
                                                 <select
                                                     value={current.voiceAssetId || current.voiceStorageKey || ""}
                                                     disabled={saving || voiceBusy}
                                                     onChange={(e) => void handleVoiceChange(e.target.value)}
                                                     data-studio-cast-voice-select
-                                                    className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs outline-none"
+                                                    className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 outline-none"
                                                 >
                                                     <option value="">不绑定样本</option>
                                                     {profileAudioOptions.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
                                                     {audioAssets.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
                                                 </select>
-                                                {!audioAssets.length ? <span className="mt-1 block text-[10px] text-muted-foreground">素材库还没有音频资产；可在下方上传，或到「资源库」添加。</span> : null}
+                                                {!audioAssets.length ? <span className="mt-1 block text-[11px] text-foreground/40">素材库还没有音频资产；可在下方上传，或到「资源库」添加。</span> : null}
                                                 <button type="button" onClick={previewVoice} disabled={!current.voiceStorageKey && !current.voiceUrl}
-                                                    className="mt-1.5 flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[10px] text-muted-foreground transition hover:bg-muted disabled:opacity-40" data-studio-cast-voice-preview>
+                                                    className="mt-1.5 flex h-7 items-center gap-1 rounded-md border border-border bg-background px-2 text-[11px] text-foreground/60 transition hover:bg-muted disabled:opacity-40" data-studio-cast-voice-preview>
                                                     {voicePlaying ? <Volume2 className="size-3" /> : <Play className="size-3" />} {voicePlaying ? "播放中…" : "试听样本"}
                                                 </button>
                                             </label>
                                             <div className="flex flex-col gap-1.5" data-studio-cast-voice-actions>
                                                 <div className="flex gap-1.5">
                                                     <button type="button" disabled={saving || voiceBusy || recording} onClick={() => audioFileRef.current?.click()}
-                                                        className="flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50">
-                                                        <Upload className="size-3" /> {voiceBusy ? "处理中…" : "上传音频"}
+                                                        className="flex h-[34px] flex-1 items-center justify-center gap-1 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground transition hover:bg-muted disabled:opacity-50">
+                                                        <Upload className="size-3" /> {voiceBusy ? "处理中…" : "上传"}
                                                     </button>
                                                     <button type="button" disabled={saving || voiceBusy || recording} onClick={() => void toggleRecord()} data-studio-cast-voice-record
-                                                        className="flex h-8 flex-1 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50">
-                                                        <Mic className="size-3" /> {recording ? "录音中…" : "录制声音"}
+                                                        className="flex h-[34px] flex-1 items-center justify-center gap-1 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground transition hover:bg-muted disabled:opacity-50">
+                                                        <Mic className="size-3" /> {recording ? "录音中…" : "录制"}
                                                     </button>
                                                 </div>
                                                 {recording ? (
                                                     <div className="flex items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/5 px-2 py-1.5" data-studio-cast-voice-recording>
                                                         <span className="flex items-center gap-1.5 text-[11px] text-rose-500">
                                                             <span className="size-1.5 animate-pulse rounded-full bg-rose-500" />
-                                                            录音中 · 剩余 {recordRemain}s / {VOICE_RECORD_LIMIT_SEC}s
+                                                            正在录音 {VOICE_RECORD_LIMIT_SEC - recordRemain} / {VOICE_RECORD_LIMIT_SEC} 秒
                                                         </span>
                                                         <button type="button" onClick={() => finishRecord(false)} data-studio-cast-voice-record-cancel
                                                             className="ml-auto h-7 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:bg-muted">
@@ -1558,62 +2075,120 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
                                     ) : null}
 
                                     {/* 影策 panels.tsx:497-505 设定级 restyle：勾选后显示真实影响集，保存时真标脏引用段。 */}
-                                    <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2" data-studio-cast-restyle>
+                                    <div className="flex items-center gap-2 rounded-[8px] border border-border bg-muted/30 px-3 py-2" data-studio-cast-restyle>
                                         <Checkbox checked={restyle} disabled={saving || restyleSubmitting}
                                             onChange={(e) => setRestyle(e.target.checked)}>
                                             让引用它的剧情段视频重新生成
                                         </Checkbox>
-                                        {castImpactLoading ? <span className="text-[10px] text-muted-foreground">影响查询中…</span> : castImpact ? (
-                                            <span className="text-[10px] text-muted-foreground">{castImpact.episodes} 集 · {castImpact.segments} 段</span>
+                                        {castImpactLoading || castImpactPending ? <span className="text-[11px] text-foreground/40">影响查询中…</span> : castImpact ? (
+                                            <span className="text-[11px] text-foreground/40">{castImpact.episodes} 集 · {castImpact.segments} 段</span>
                                         ) : null}
                                     </div>
-                                    <button type="button" onClick={() => void handleSave()} disabled={saving}
-                                        className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-foreground text-xs font-medium text-background disabled:opacity-60">
+                                    {/* 保存按钮校验对齐影策：无改动、名称或描述为空时禁用 */}
+                                    <button type="button" onClick={() => void handleSave()} disabled={!dirty || formBusy || !shownDraft.name.trim() || !shownDraft.description.trim()}
+                                        className="flex h-[34px] w-full items-center justify-center gap-1.5 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground transition hover:bg-muted disabled:opacity-60">
                                         <Save className="size-3.5" /> {saving ? "保存中…" : "保存设定"}
                                     </button>
                                     {/* 存入资产库 = 写共享画布 canonical；已存在的显示"更新资产库" */}
                                     <button type="button" onClick={() => void handleSaveToLibrary()} disabled={librarySaving || saving}
-                                        className="flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 text-xs font-medium text-primary transition hover:bg-primary/20 disabled:opacity-50"
-                                        data-studio-cast-save-library aria-label={isLibrarySaved ? t("canvas.sharedLibrary.update") : t("nodeToolbar.saveAsset")}>
+                                        className="flex h-[34px] w-full items-center justify-center gap-1.5 rounded-[8px] border border-primary/40 bg-primary/10 text-[13px] font-medium text-primary transition hover:bg-primary/20 disabled:opacity-50"
+                                        data-studio-cast-save-library aria-label={isLibrarySaved ? t("canvas.sharedLibrary.update") : t("canvas.nodeToolbar.saveAsset")}>
                                         {isLibrarySaved ? <RefreshCw className="size-3.5" /> : <Upload className="size-3.5" />}
-                                        {librarySaving ? t("canvas.sharedLibrary.saving") : isLibrarySaved ? t("canvas.sharedLibrary.update") : t("nodeToolbar.saveAsset")}
+                                        {librarySaving ? t("canvas.sharedLibrary.saving") : isLibrarySaved ? t("canvas.sharedLibrary.update") : t("canvas.nodeToolbar.saveAsset")}
                                     </button>
                                     {/* 形象图采用（影策「上传形象图 / 从素材库选择采用并锁定」的本地真链路）：
                                         选图写 storageKey + 实体节点，剧情段视频按此图生成且不被流水线重生成覆盖。 */}
                                     <div className="grid grid-cols-2 gap-1.5" data-studio-cast-adopt>
                                         <button type="button" disabled={imageAdopting || saving || generating === current.key} onClick={() => imageFileRef.current?.click()}
-                                            className="flex h-8 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50">
+                                            className="flex h-[34px] items-center justify-center gap-1 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground transition hover:bg-muted disabled:opacity-50">
                                             <Upload className="size-3" /> {imageAdopting ? "处理中…" : "上传形象图"}
                                         </button>
                                         <button type="button" disabled={imageAdopting || saving} onClick={() => setAdoptOpen(true)}
-                                            className="flex h-8 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50">
-                                            <ImageIcon className="size-3" /> 从素材库选择并锁定
+                                            className="flex h-[34px] items-center justify-center gap-1 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground transition hover:bg-muted disabled:opacity-50">
+                                            <ImageIcon className="size-3" /> 从素材库选择
                                         </button>
                                         <input ref={imageFileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden data-studio-cast-image-upload
                                             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void handleImageFile(f); }} />
                                     </div>
                                     <div className="grid grid-cols-2 gap-1.5">
-                                        <button type="button" onClick={() => void handleGenerate()} disabled={generating === current.key || saving}
-                                            className="flex h-8 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-50">
+                                        <button type="button" onClick={() => void handleGenerate()} disabled={generating === current.key || saving || !shownDraft.name.trim() || !shownDraft.description.trim()}
+                                            title={!shownDraft.name.trim() || !shownDraft.description.trim() ? "请先填写名称与描述" : undefined}
+                                            className="flex h-[34px] items-center justify-center gap-1 rounded-[8px] border border-transparent bg-foreground text-[13px] font-medium text-background transition hover:opacity-90 disabled:opacity-50">
                                             <Wand2 className={cn("size-3", generating === current.key && "animate-spin")} /> {generating === current.key ? "提交中…" : current.genStatus === "ready" ? "重新生成" : "生成参考图"}
                                         </button>
-                                        <button type="button" onClick={onOpenCanvas} className="flex h-8 items-center justify-center gap-1 rounded-md border border-border text-[11px] text-muted-foreground hover:bg-muted"><ImageIcon className="size-3" /> 画布精修</button>
+                                        <button type="button" onClick={onOpenCanvas} className="flex h-[34px] items-center justify-center gap-1 rounded-[8px] border border-border bg-background text-[13px] font-medium text-foreground hover:bg-muted"><ImageIcon className="size-3" /> 在画布中精修</button>
                                     </div>
                                     {current.scope === "episode" ? (
-                                        <button type="button" onClick={handleDelete} className="flex h-7 w-full items-center justify-center gap-1 rounded-md text-[10px] text-rose-500 hover:bg-rose-500/10"><Trash2 className="size-3" /> 删除设定</button>
+                                        <button type="button" onClick={handleDelete} className="flex h-7 w-full items-center justify-center gap-1 rounded-[8px] text-[11px] text-rose-500 hover:bg-rose-500/10"><Trash2 className="size-3" /> 删除设定</button>
                                     ) : (
-                                        <p className="text-center text-[10px] leading-relaxed text-muted-foreground">共享资产画布的设定请在画布里删除（本入口只删除分集制作稿里的设定）</p>
+                                        <p className="text-center text-[11px] leading-[1.6] text-foreground/40">共享资产画布的设定请在画布里删除（本入口只删除分集制作稿里的设定）</p>
                                     )}
-                                    <p className="text-[10px] leading-relaxed text-muted-foreground">参考图可在画布生成后采用，也可直接上传或从素材库选图采用——选图会真实写回设定参考图并锁定，后续剧情段视频按此图生成，流水线不会自动重生成覆盖。</p>
+                                    <p className="text-[11px] leading-[1.6] text-foreground/40">上传或从素材库采用的形象图会自动锁定，之后的剧情段视频按这张图生成，并要求外貌、发型与服装以它为准；流水线不会自动重生成覆盖。</p>
                                 </div>
                             </>
                         ) : (
-                            <div className="flex h-full items-center justify-center text-center text-xs text-muted-foreground">选中一个{kind}查看设定</div>
+                            <div className="grid justify-items-center gap-2 px-2 py-8 text-[11px] text-muted-foreground"><Users className="size-7 opacity-50" />选中一个{kind}查看设定</div>
                         )}
                     </aside>
                 </div>
             ))}
 
+            {/* 关联已有作品素材：作品来自真实剧目目录，资产来自该作品共享画布真值节点 */}
+            <Modal open={workImportOpen} title="关联已有作品素材"
+                onCancel={() => { if (!importSubmitting) setWorkImportOpen(false); }}
+                onOk={() => void handleImportWork()} okText="导入到本项目" cancelText="取消"
+                confirmLoading={importSubmitting} maskClosable={!importSubmitting} closable={!importSubmitting} keyboard={!importSubmitting}
+                okButtonProps={{ disabled: !importWorkId || importChecked.length === 0 || importSubmitting }}
+                cancelButtonProps={{ disabled: importSubmitting }} destroyOnClose width={720} data-studio-cast-work-import>
+                <div className="space-y-3 py-2" data-studio-cast-work-import-body>
+                    <div>
+                        <span className="mb-1 block text-xs text-muted-foreground">来源作品</span>
+                        {importWorksLoading ? (
+                            <div className="flex items-center gap-2 py-2 text-[11px] text-muted-foreground"><RefreshCw className="size-3.5 animate-spin" /> 正在读取作品列表…</div>
+                        ) : importWorks.length === 0 ? (
+                            <p className="py-2 text-[11px] text-muted-foreground">没有其他可关联的作品（或这些作品尚未绑定共享资产画布）。</p>
+                        ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                                {importWorks.map(w => (
+                                    <button key={w.dramaId} type="button" disabled={importSubmitting || importAssetsLoading}
+                                        onClick={() => { setImportAssetsLoading(true); setImportWorkId(w.dramaId); }}
+                                        className={cn("rounded-md border px-3 py-1 text-xs transition disabled:opacity-50",
+                                            importWorkId === w.dramaId ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:bg-muted")}>
+                                        {w.name || w.dramaId}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <div>
+                        <span className="mb-1 block text-xs text-muted-foreground">共享画布资产{importChecked.length ? ` · 已选 ${importChecked.length} 项` : ""}</span>
+                        {importAssetsLoading ? (
+                            <div className="flex items-center gap-2 py-6 text-[11px] text-muted-foreground"><RefreshCw className="size-3.5 animate-spin" /> 正在读取该作品共享资产…</div>
+                        ) : importAssets.length === 0 ? (
+                            <div className="grid justify-items-center gap-2 py-6 text-[11px] text-muted-foreground"><Link2 className="size-6 opacity-50" />{importWorkId ? "该作品共享画布没有可导入的角色 / 场景 / 道具资产。" : "请选择一个来源作品。"}</div>
+                        ) : (
+                            <div className="max-h-[46vh] space-y-1.5 overflow-y-auto thin-scrollbar pr-1">
+                                {importAssets.map(asset => (
+                                    <label key={asset.sourceNodeId} className={cn("flex cursor-pointer items-center gap-2 rounded-md border px-2 py-1.5 text-xs transition",
+                                        importChecked.includes(asset.sourceNodeId) ? "border-primary bg-primary/5" : "border-border hover:bg-muted/60")}>
+                                        <Checkbox checked={importChecked.includes(asset.sourceNodeId)} disabled={importSubmitting}
+                                            onChange={(e) => setImportChecked(prev => e.target.checked ? [...new Set([...prev, asset.sourceNodeId])] : prev.filter(id => id !== asset.sourceNodeId))} />
+                                        <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded border border-border bg-muted/40" style={imgLoadingStyle}>
+                                            {asset.thumb ? <img src={asset.thumb} alt={asset.name} className="size-full object-cover" loading="lazy" /> : <ImageIcon className="size-4 opacity-50" />}
+                                        </span>
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block truncate font-medium">{asset.name}</span>
+                                            <span className="block text-[10px] text-muted-foreground">{asset.kindLabel} · {asset.storageKeys.length} 张参考图</span>
+                                        </span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    {importError ? <p className="text-[11px] text-destructive" role="alert">{importError}</p> : null}
+                    <p className="text-[10px] leading-relaxed text-muted-foreground">仅导入所选作品的真实共享画布资产；同名资产按去重规则跳过，不会覆盖本项目已有设定。</p>
+                </div>
+            </Modal>
             {/* 新增设定弹窗：提交中(addPending)锁住 Esc/遮罩/X/取消，confirmLoading 用真 pending 而非 open 状态 */}
             <Modal open={adding} title={`新增${addDraft.kind}设定`}
                 onCancel={() => { if (!addPending) setAdding(false); }} onOk={() => void handleAdd()}
@@ -1645,15 +2220,19 @@ export function StudioCastPanel({ dramaId, sharedAssetCanvasId, sources, artStyl
             {/* 素材库选图：复用本地真实素材库资产（allowedKinds=image），选中即写 storageKey 并锁定 */}
             <AssetPickerModal open={adoptOpen} allowedKinds={["image"]} onClose={() => setAdoptOpen(false)} onInsert={(payload) => void handleLibraryPick(payload)} />
             <Modal open={previewOpen} onCancel={() => setPreviewOpen(false)} footer={null} width="min(90vw, 1100px)" centered destroyOnClose data-studio-cast-preview>
-                {current && (current.thumb || current.coverUrl) ? (
-                    <img src={current.thumb || current.coverUrl} alt={`${current.name} 参考图`} className="max-h-[80vh] w-full object-contain" />
+                {detailHeroImage ? (
+                    <div className="grid min-h-[240px] place-items-center" style={imgLoadingStyle}>
+                        <img src={detailHeroImage} alt={`${current?.name || ""} 参考图`} className="max-h-[80vh] w-full object-contain" />
+                    </div>
                 ) : null}
                 <p className="mt-2 text-center text-xs text-muted-foreground">{current?.name || ""} · 参考图放大查看</p>
             </Modal>
             {/* 版本记录缩略图放大：storage_key 走真实 /media，仅查看历史版本，不切换当前设定参考图 */}
             <Modal open={Boolean(versionPreview)} onCancel={() => setVersionPreview(null)} footer={null} width="min(90vw, 1100px)" centered destroyOnClose data-studio-cast-version-preview>
                 {versionPreview?.storageKey ? (
-                    <img src={backendMediaUrl(versionPreview.storageKey)} alt={`V${versionPreview.sourceVersion} 参考图`} className="max-h-[80vh] w-full object-contain" />
+                    <div className="grid min-h-[240px] place-items-center" style={imgLoadingStyle}>
+                        <img src={backendMediaUrl(versionPreview.storageKey)} alt={`V${versionPreview.sourceVersion} 参考图`} className="max-h-[80vh] w-full object-contain" />
+                    </div>
                 ) : null}
                 <p className="mt-2 text-center text-xs text-muted-foreground">
                     {versionPreview ? `V${versionPreview.sourceVersion} · ${versionPreview.snapshot?.title || versionPreview.assetId} · 历史版本仅预览，不影响当前设定` : ""}
