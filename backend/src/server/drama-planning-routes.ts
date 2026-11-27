@@ -448,16 +448,16 @@ export function registerDramaScriptRoutes(router: Router, db: BackendDatabase, s
             .filter((item) => item.episodeNumber < episode.episodeNumber && String(item.fullPlot || "").trim())
             .sort((left, right) => right.episodeNumber - left.episodeNumber)[0];
         const previousTail = previous ? String(previous.fullPlot).trim().split(String.fromCharCode(10)).filter(Boolean).slice(-1)[0] : "";
-        // 改编真值优先取本集覆盖章节的正文（按章编辑后手动「重新改编」立即生效），
-        // 无章映射的老剧目回退整份 sourceScript。
+        // 改编真值只取本集覆盖章节的正文（影策 loadChapters(e.ChapterIDsJSON)），
+        // 不回退整份 sourceScript：那会让每集拿到同一份全书，改编出跨集重复的剧情与镜头。
+        // 无章映射时留空，由分场脚本按本集梗概推进，不复制其它集的内容。
         let episodeSource = "";
         try {
             const chapterTexts = db.listEpisodeChapters(episode.id)
                 .map((chapter) => String(chapter?.body || "").trim())
                 .filter(Boolean);
             if (chapterTexts.length) episodeSource = chapterTexts.join("\n\n");
-        } catch { /* 无章映射时回退整份原文 */ }
-        if (!episodeSource) episodeSource = plan.sourceScript;
+        } catch { /* 取不到章节就不注入原文 */ }
         try {
             // 影策制作设置真生效：把用户指定的钩子/悬念倾向合进 instruction（作为补充要求引导分场），
             // 思考等级随请求透传给 proposeEpisodeScript（不再写死 auto）。

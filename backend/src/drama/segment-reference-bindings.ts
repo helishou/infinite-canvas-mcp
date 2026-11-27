@@ -154,7 +154,9 @@ export function deriveSegmentReferenceBindings(
         if (!shot) continue;
         const byCategory: Record<(typeof CATEGORY_ORDER)[number], AssetDesc[]> = { scene: [], character: [], prop: [] };
 
-        const scene = resolve(textOf(shot.scene_id || shot.sceneId));
+        // 具体场景优先取 beat 级 sceneAssetId（由 shotInputs 透传）；场次级 scene_id 只能是章节占位时用它纠正。
+        const sceneInputId = textOf(recordOf(shotInputs[rawShotId]).sceneAssetId);
+        const scene = resolve(sceneInputId || textOf(shot.scene_id || shot.sceneId));
         if (scene) byCategory.scene.push(scene);
 
         for (const value of (Array.isArray(shot.characters) ? shot.characters : [])) {
@@ -180,13 +182,16 @@ export function deriveSegmentReferenceBindings(
         const sceneAssets = rows(source?.asset_plan).filter((row) =>
             textOf(row.kind || row.asset_kind).toLowerCase() === "scene"
             && keyOf(textOf(row.id || row.asset_id)));
-        const fallbackScene = sceneAssets.map((row) => {
+        // 只有一个场景资产时它是唯一真值，沿用保底；多场景时绝不拿第一张图套所有段——
+        // 那会把「整章一个占位 scene_id」变成全片同一张错误环境图。宁可暴露缺绑，等镜头级 sceneAssetId。
+        if (sceneAssets.length === 1) {
+            const row = sceneAssets[0];
             const assetId = textOf(row.id || row.asset_id);
-            return { assetId, name: textOf(row.asset_name || row.name) || assetId, kind: "scene" } as AssetDesc;
-        })[0];
-        if (fallbackScene) {
+            const fallbackScene = { assetId, name: textOf(row.asset_name || row.name) || assetId, kind: "scene" } as AssetDesc;
             for (const group of grouped) group.byCategory.scene.push(fallbackScene);
             warnings.push(`段 ${segmentId}: shot.scene_id 未解析到具体场景，已回退到默认场景图 ${fallbackScene.name}`);
+        } else if (sceneAssets.length > 1) {
+            warnings.push(`段 ${segmentId}: shot.scene_id 未解析到具体场景，已跳过场景参考；需在镜头上指定 sceneAssetId`);
         }
     }
 

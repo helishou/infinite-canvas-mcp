@@ -61,7 +61,7 @@ type Fixture = {
     close: () => Promise<void>;
 };
 
-async function fixture(): Promise<Fixture> {
+async function fixture(options?: { emptyChapters?: boolean }): Promise<Fixture> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-rescript-"));
     const file = path.join(dir, "runtime.sqlite");
     const raw = new DatabaseSync(file);
@@ -118,7 +118,12 @@ async function fixture(): Promise<Fixture> {
                 return send({ ok: true, text: "【场景：山神庙】\n新稿分场正文：刀客推门、少年抬头、雨停月出。", synopsis: "新稿梗概" });
             }
             if (req.method === "GET" && url === `/drama/episodes/${EP}/chapters`) {
+                if (options?.emptyChapters) return send({ ok: true, chapters: [] });
                 return send({ ok: true, chapters: [{ body: "刀客推门而入。少年抬起头。雨停月出。" }] });
+            }
+            if (req.method === "GET" && url === `/drama/${DRAMA}/planning`) {
+                // 老剧目整份原文：绝不能成为拆镜输入，否则每集都拿全书、镜头跨集重复。
+                return send({ ok: true, sourceScript: "全书独有剧情：皇宫大火、边关雪战、深海沉船。" });
             }
             if (req.method === "PATCH" && url === `/drama/episodes/${EP}`) {
                 state.episodePatches.push(JSON.parse(body || "{}"));
@@ -296,6 +301,18 @@ test("结构化引用随拆镜落库：ops 带 characters/shotInputs.assetIds，
         assert.deepEqual(inputs[ids[1]].assetIds, ["PROP-DAO"], "编造的 PROP-FAKE 被过滤，合法的 PROP-DAO 保留");
         assert.deepEqual(inputs[ids[2]].assetIds, []);
         for (const id of ids) assert.equal(inputs[id].keyframePolicy, "none");
+    } finally { await f.close(); }
+});
+
+test("无本集章节映射时拆镜不注入整份 sourceScript（避免跨集重复镜头）", async () => {
+    const f = await fixture({ emptyChapters: true });
+    try {
+        await (f.p as any).runScript(EP, DRAMA, {});
+        const prompts = f.state.generationPrompts.join("\n");
+        assert.ok(!prompts.includes("皇宫大火"), "拆镜提示词不得含全书独有剧情");
+        assert.ok(!prompts.includes("边关雪战"), "拆镜提示词不得含别集剧情");
+        assert.ok(!prompts.includes("深海沉船"), "拆镜提示词不得含别集剧情");
+        assert.ok(f.state.opsBatches.length > 0, "没有原文时仍用本集分场文本正常拆镜");
     } finally { await f.close(); }
 });
 

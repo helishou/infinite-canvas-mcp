@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FinalComposer, collectFinalVideos, isFinalStale, type RecomposeDeps } from "./final-composer.js";
+import { FinalComposer, collectFinalVideos, isFinalStale, renderReadiness, type RecomposeDeps } from "./final-composer.js";
 
 const FINAL_AT = "2026-01-01T00:00:00Z";
 const NOW = "2026-01-02T00:00:00Z";
@@ -181,4 +181,23 @@ test("force=true 可跳过 stale 判定显式重合成", async () => {
     const f = fixture({ generatedAt: "2025-12-31T00:00:00Z" });
     const result = await new FinalComposer(f.deps).recomposeIfStale("ep", { force: true });
     assert.equal(result.status, "composed");
+});
+
+test("render 准入：未出片/过期的段不允许合成，锁定段跳过", () => {
+    const groups = [
+        { id: "clip-a", nodeId: "h3", segmentId: "seg-a" },
+        { id: "clip-b", nodeId: "h3", segmentId: "seg-b" },
+        { id: "clip-locked", nodeId: "h3", segmentId: "seg-locked" },
+    ];
+    const segments = [
+        { id: "seg-a", resultStorageKey: "video:a" },
+        { id: "seg-b", resultStorageKey: "video:b", inputOutdated: true },
+        { id: "seg-locked", resultStorageKey: "" },
+    ];
+    const source = [{ id: "clip-locked", locked: true }];
+    const ready = renderReadiness({ nodes: [{ id: "h3", metadata: { segments } }] }, groups, source);
+    assert.deepEqual(ready, { total: 2, missing: 0, stale: 1 }, "锁定段不计入，过期段挡住合成");
+
+    const halfDone = renderReadiness({ nodes: [{ id: "h3", metadata: { segments: [segments[0], { id: "seg-b", resultStorageKey: "" }] } }] }, groups, source);
+    assert.deepEqual(halfDone, { total: 2, missing: 1, stale: 0 }, "只出一段视频不能合成整集");
 });

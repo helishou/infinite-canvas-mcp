@@ -70,6 +70,20 @@ import { splitSourceIntoEpisodes, groupSynopsis } from "@/lib/drama/adapt";
  * - planCursor/选章 ← stage.topic 规划集数 vs 实际分集数
  */
 
+/**
+ * useQueries 的结果数组每次渲染都是新引用（React Query v5 的 trackResult 每次 map 出新数组），
+ * 直接进 useMemo deps 会让所有下游派生每帧失效。这里只在 query.data 真变时更新数组引用；
+ * query 对象本身继续保留，供 refetch / isPending 使用。
+ */
+function useStableQueryData<T>(results: ReadonlyArray<{ data: T | undefined }>): ReadonlyArray<T | undefined> {
+    const stable = useRef<ReadonlyArray<T | undefined>>([]);
+    const next = results.map((result) => result.data);
+    if (stable.current.length !== next.length || next.some((value, index) => value !== stable.current[index])) {
+        stable.current = next;
+    }
+    return stable.current;
+}
+
 export type StudioStatus = "待生成" | "需要处理" | "制作中" | "已完成";
 
 /** 影策的每集阶段语义 */
@@ -573,7 +587,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null, 
     const logsQuery = useQuery({
         queryKey: ["drama-studio-logs", backendUrl, dramaId],
         enabled,
-        queryFn: async () => (await fetchBackendGenerationLogs({ limit: 200, summary: true })).logs || [],
+        queryFn: async () => (await fetchBackendGenerationLogs({ dramaId: dramaId!, limit: 200, summary: true })).logs || [],
     });
 
     // 每集制作稿：派生真实 stage / shotCount / segmentCount
@@ -718,30 +732,34 @@ export function useStudioData(dramaId: string | null, episodeId: string | null, 
         })),
     });
 
+    const clipVideosData = useStableQueryData(currentClipVideosQueries);
+    const versionDurationData = useStableQueryData(versionDurationQueries);
+    const productionData = useStableQueryData(productionQueries);
+
     const clipVideosByEpisodeId = useMemo(() => {
         const map = new Map<string, ClipVideoTruth[]>();
         rawEpisodes.forEach((ep, i) => {
-            const data = currentClipVideosQueries[i]?.data;
+            const data = clipVideosData[i];
             if (data !== undefined) map.set(ep.id, data);
         });
         return map;
-    }, [rawEpisodes, currentClipVideosQueries]);
+    }, [rawEpisodes, clipVideosData]);
 
     const versionDurationByEpisodeId = useMemo(() => {
         const map = new Map<string, { durationMs: number | null; durationSource: string | null }>();
         rawEpisodes.forEach((ep, i) => {
-            const data = versionDurationQueries[i]?.data;
+            const data = versionDurationData[i];
             if (data !== undefined) map.set(ep.id, data || { durationMs: null, durationSource: null });
         });
         return map;
-    }, [rawEpisodes, versionDurationQueries]);
+    }, [rawEpisodes, versionDurationData]);
 
     // production 查询结果按索引对应 rawEpisodes
     const prodByEpisodeId = useMemo(() => {
         const map = new Map<string, EpisodeProduction | undefined>();
-        rawEpisodes.forEach((ep, i) => map.set(ep.id, productionQueries[i]?.data as EpisodeProduction | undefined));
+        rawEpisodes.forEach((ep, i) => map.set(ep.id, productionData[i]));
         return map;
-    }, [rawEpisodes, productionQueries]);
+    }, [rawEpisodes, productionData]);
 
     // 只统计本剧分集画布的日志（generation-log.projectId === episode.canvasId），
     // 避免把全局日志算进本剧；同时过滤 [object Object] 这类无意义错误串。
@@ -867,6 +885,8 @@ export function useStudioData(dramaId: string | null, episodeId: string | null, 
     useEffect(() => {
         if (!connected || !dramaId || !busyNow.any) return;
         const timer = window.setInterval(() => {
+            // 后台标签页不发轮询请求：恢复可见后下一个 tick 会补上，不丢状态。
+            if (document.hidden) return;
             const poller = pollerRef.current;
             void poller.episodes();
             void poller.stage();

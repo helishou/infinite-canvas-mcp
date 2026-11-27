@@ -90,6 +90,23 @@ test("空 registry / 无 storageKey → [] 不抛，并给出跳过告警", () =
     assert.ok(noMedia.warnings.some((warning) => warning.includes("没有 storageKey")));
 });
 
+test("镜头级 sceneAssetId 覆盖章节占位 scene_id", () => {
+    const { source, director } = fixture();
+    const shots = [{ id: "shot-x", scene_id: "CHAPTER_TITLE" }];
+    director.shotInputs["shot-x"] = { assetIds: [], sceneAssetId: "ENV_B" };
+    const derived = deriveSegmentReferenceBindings(source, director, "seg-x", ["shot-x"], shots as any);
+    assert.deepEqual(derived.bindings.map((binding) => binding.assetId), [SCENE_B]);
+    assert.deepEqual(derived.warnings, []);
+});
+
+test("多场景时章节占位不再回退第一张场景图", () => {
+    const { source, director } = fixture();
+    const shots = [{ id: "shot-x", scene_id: "CHAPTER_TITLE" }];
+    const derived = deriveSegmentReferenceBindings(source, director, "seg-x", ["shot-x"], shots as any);
+    assert.deepEqual(derived.bindings, []);
+    assert.ok(derived.warnings.some((warning) => warning.includes("已跳过场景参考")));
+});
+
 test("超过 9 张参考图截断到 9，编号 1..9 且有告警", () => {
     const ids = Array.from({ length: 11 }, (_, i) => `PROP_${i + 1}`);
     const source = { asset_plan: ids.map((id) => ({ id, kind: "prop", asset_name: `道具${id}` })), shots: [{ id: "shot-1" }] };

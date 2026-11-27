@@ -117,7 +117,13 @@ export function WorkbenchCanvas({ children, storageKey }: { children: ReactNode;
         return () => { if (visible) setWorkbenchCanvasOverlayTarget(null); };
     }, [target, visible]);
     const host = useMemo(() => target ? { projectId: target.projectId, active: visible, search, requestId, navigate: canvasNavigate, collapse, popupContainer, switchProductionCanvas } : null, [target, visible, search, requestId, canvasNavigate, collapse, popupContainer, switchProductionCanvas]);
-    return <WorkbenchCanvasContext.Provider value={{ openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas: Boolean(target), collapse }}>
+    // context value 必须稳定：跟随目标变化时只更新 host，不让所有 useWorkbenchCanvas 消费方（制作台整页）重渲染。
+    const hasCanvas = Boolean(target);
+    const canvasContextValue = useMemo(
+        () => ({ openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas, collapse }),
+        [openCanvas, restoreCanvas, switchProductionCanvas, visible, hasCanvas, collapse],
+    );
+    return <WorkbenchCanvasContext.Provider value={canvasContextValue}>
         <div ref={workbench} className="h-full" data-workbench-underlay>{children}</div>
         {host && createPortal(<CanvasHostContext.Provider value={host}>
             <div ref={overlay} hidden={!visible} className="fixed inset-0 z-[900] bg-background/60 p-0 sm:p-3" data-workbench-canvas>

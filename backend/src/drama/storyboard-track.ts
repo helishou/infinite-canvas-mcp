@@ -124,7 +124,7 @@ export function derivedStoryboardTracks(data: ProductionLike, segments: Array<Re
         // 草稿行不存 clipGroups（读取时才由画布反推），此时用 Segment 自己记录的镜头成员。
         const shotIds = group ? (group.shotIds as string[]).map(String) : String(segment.sourceShotId || "").split("~").filter(Boolean);
         if (!shotIds.length) continue;
-        const track = deriveStoryboardTrack(data, { shotIds, targetId }, segment);
+        const track = deriveStoryboardTrack(data, { shotIds }, segment);
         if (track) tracks[String(segment.id || targetId)] = track;
     }
     return tracks;

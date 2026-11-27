@@ -1570,15 +1570,14 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                         {continuityPreview ? <p className="text-[11px] text-amber-600" data-studio-continuity-preview>{continuityPreview}</p> : null}
                                     </Section>
 
-                    <Section icon={<Gauge className="size-4" />} title="同时生成数" aside="文字、参考图、段视频分别计算，受账号并发上限约束" desc="文字/段视频/成片合成三池并发真实下发后端流水线（成片合成对应后端 render 池）；排队顺序先按集号，同集内按成片→剧本→段提示词→段视频。参考图池由后端固定上限管理，无剧目级覆盖字段，不设假滑杆。">
-                                        {([["text", "文字"], ["video", "段视频"], ["assemble", "成片合成"]] as const).map(([key, label]) => (
-                                            <Field key={key} label={label}>
-                                                <input type="range" min={1} max={8} value={settings.concurrency[key]}
-                                                    onChange={(e) => patch("concurrency", { ...settings.concurrency, [key]: Number(e.target.value) })}
-                                                    className="flex-1" />
-                                                <span className="w-6 text-right tabular-nums">{settings.concurrency[key]}</span>
-                                            </Field>
-                                        ))}
+                    <Section icon={<Gauge className="size-4" />} title="同时生成数" aside="影策 DramaSettings.Concurrency：四池共用这一个值" desc="文字/参考图/段视频/成片合成四个池各自独立按这个值计数，真实下发后端流水线（影策 dramaDispatchPool 同款）。排队顺序先按集号，同集内按成片→剧本→段提示词→段视频；优先级只决定提交先后，多集可以同时生产。">
+                                        <Field label="同时生成数">
+                                            <input type="range" min={1} max={16} value={settings.concurrency}
+                                                aria-label="同时生成数"
+                                                onChange={(e) => patch("concurrency", Math.max(1, Math.min(16, Number(e.target.value))))}
+                                                className="flex-1" />
+                                            <span className="w-6 text-right tabular-nums">{settings.concurrency}</span>
+                                        </Field>
                                     </Section>
 
                     <Section icon={<ImageIcon className="size-4" />} title="每段最多参考图" aside="自动取参考图时的上限，人物优先；0 为按视频模型上限" desc="影策 referenceLimit：自动取参考图时的上限，人物优先；0 为按视频模型上限。保存后启动流水线真实下发后端（H3 契约硬上限内收窄）。">

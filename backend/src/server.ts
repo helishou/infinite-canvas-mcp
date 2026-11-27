@@ -37,6 +37,7 @@ import type {
   RuntimeTaskStatus,
 } from "./db.js";
 import { createLogger } from "./logger.js";
+import { wouldWipeAiChannels } from "./ai-config-guard.js";
 import { createStores } from "./stores/index.js";
 import type {
   GenerationLogInput,
@@ -95,6 +96,8 @@ export type ServerDeps = {
   retryTask?: (task: RuntimeTask) => RuntimeTask | Promise<RuntimeTask>;
   resolveH3Confirmation?: (id: string, action: H3ConfirmationAction) => RuntimeTask;
   prepareAiConfig?: (config: unknown) => unknown | Promise<unknown>;
+  /** 分集改名后同步制作稿场次名与画布 H3 节点标题；由 index.ts 注入 EpisodeProductionService。 */
+  renameEpisodeTitle?: (episodeId: string, oldTitle: string, newTitle: string) => Promise<void>;
 };
 
 /**
@@ -453,6 +456,18 @@ export function startServer(
       return void res
         .status(400)
         .json({ ok: false, error: "AI 配置必须是对象" });
+    // 常驻 bug 闸门：一次带空 channels 的保存会把用户全部渠道抹掉，且下次加载空配置会自我维持。
+    // 归一前用原始 incoming 判定，避免 normalizeConfig 把「缺 channels」也变成 [] 后无法区分。
+    if (req.body?.allowEmptyChannels !== true && wouldWipeAiChannels(stores.settings.get(AI_CONFIG_KEY), config)) {
+      const currentChannels = Array.isArray((stores.settings.get(AI_CONFIG_KEY) as Record<string, unknown> | undefined)?.channels)
+        ? ((stores.settings.get(AI_CONFIG_KEY) as Record<string, unknown>).channels as unknown[]).length
+        : 0;
+      return void res.status(409).json({
+        ok: false,
+        code: "AI_CONFIG_CHANNEL_WIPE_BLOCKED",
+        error: `拒绝保存：新配置没有任何渠道，将清空当前 ${currentChannels} 个渠道。若确实要清空，请显式传 allowEmptyChannels:true。`,
+      });
+    }
     if (deps.prepareAiConfig) config = await deps.prepareAiConfig(config);
     stores.settings.set(AI_CONFIG_KEY, config);
     events.publish({
@@ -1335,7 +1350,7 @@ export function startServer(
       ...episodeCanvasRead(readCanvas, canvasView),
     });
   });
-  app.patch("/drama/episodes/:episodeId", (req, res) => {
+  app.patch("/drama/episodes/:episodeId", async (req, res) => {
     const body = req.body as {
       episodeNumber?: unknown;
       title?: unknown;
@@ -1362,6 +1377,7 @@ export function startServer(
           .json({ ok: false, error: "episodeNumber 必须是大于等于 1 的整数" });
       patch.episodeNumber = value;
     }
+    const oldTitle = db.getDramaEpisode(req.params.episodeId)?.title || "";
     if (body.title !== undefined) patch.title = String(body.title).trim();
     if (body.synopsis !== undefined) patch.synopsis = String(body.synopsis);
     if (body.fullPlot !== undefined) patch.fullPlot = String(body.fullPlot);
@@ -1389,6 +1405,8 @@ export function startServer(
       const episode = db.updateDramaEpisode(req.params.episodeId, patch);
       if (!episode)
         return void res.status(404).json({ ok: false, error: "分集不存在" });
+      if (deps.renameEpisodeTitle && patch.title && patch.title !== oldTitle)
+        await deps.renameEpisodeTitle(episode.id, oldTitle, patch.title);
       events.publish({
         type: "drama-episode.updated",
         entityId: episode.id,

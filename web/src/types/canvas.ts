@@ -195,7 +195,7 @@ export type CanvasNodeMetadata = {
     characterName?: string;
     characterEnglishName?: string;
     characterDescription?: string;
-    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; role?: string; width: number; height: number; bytes: number; mimeType: string; sourceNodeId?: string }>;
+    characterImages?: Array<{ url: string; storageKey?: string; name: string; outfit: string; outfitDescription: string; role?: string; width: number; height: number; bytes: number; mimeType: string; sourceNodeId?: string; id?: string; fromChapter?: number; toChapter?: number; locked?: boolean; imageStyleId?: string; imageStyleName?: string; imageStylePrompt?: string; imagePrompt?: string }>;
     characterPrimaryIndex?: number;
     characterAliases?: string[];
     characterRole?: string;

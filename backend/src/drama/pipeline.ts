@@ -67,7 +67,7 @@ import { canonicalH3AspectRatio } from "@basketikun/canvas-agent/plugins/minimax
 import { learnedRulesCompact } from "./learned-rules.js";
 
 import { PipelineStore, type JobRow, type PipelineRow } from "./pipeline-store.js";
-import { collectFinalVideos } from "./final-composer.js";
+import { collectFinalVideos, renderReadiness } from "./final-composer.js";
 import { findPipelineAssetEntityNode, generatedMediaStorageKey } from "./pipeline-asset-image.js";
 
 // ── 常量 ─────────────────────────────────────────────────────────────────
@@ -84,8 +84,6 @@ const STALE_JOB_TTL_MS = 90 * 60 * 1000;
 const TASK_POLL_MS = 1200;
 const DEFAULT_POOL_LIMIT = 4;
 const DEFAULT_GLOBAL_LIMIT = 16;
-/** 资产参考图并发上限：本地 engine-image 单张约 60-90s，2 路并发兼顾速度与显存。 */
-const ASSET_IMAGE_CONCURRENCY = 2;
 const MAX_JOBS_PER_TICK = 32;
 const MAX_ATTEMPTS = 3;
 /** 绝对重试红线：无论外部如何 requeue，attempt 超过此值一律强制终态，防止死循环。 */
@@ -105,6 +103,7 @@ const PROMPT_CONDENSE_ATTEMPTS = 3;
  */
 const DEPENDENCY_NOT_READY_CODES = [
     "RENDER_NO_VIDEO",          // 成片作业：画布还没有分镜视频
+    "RENDER_SEGMENTS_NOT_READY",// 成片作业：还有段没出片或产物已过期，不合成半成品
     "EPISODE_CANVAS_MISSING",   // 提示词/视频：分集还没有画布
     "H3_NODE_MISSING",          // 视频：还没拆镜编译
     "PROMPTS_NO_SEGMENTS",      // 提示词：制作稿还没有段
@@ -122,14 +121,8 @@ const RESOURCE_BUSY_PATTERN = /H3 Clip 正被任务|H3_CLIP_OCCUPIED|正被任�
 const SAMPLE_APPROVED_TARGET = "sample";
 /** 持久化 reviewApproval → 审批闸门的对账间隔；后端 HTTP 尚未就绪时下一 tick 自动重试。 */
 const REVIEW_RECONCILE_COOLDOWN_MS = 60_000;
-/** 用户暂停：在跑作业退回的可恢复态错误码（不改 succeeded/failed，resume 后继续）。 */
+/** 旧执行令牌被显式重置时留下的可恢复错误码（暂停本身不再用它中断作业）。 */
 const PAUSED_BY_USER = "paused_by_user";
-/** 暂停取消扫描的单项 HTTP 超时（不能沿用 180s 的生成超时，否则暂停接口会被拖住）。 */
-const PAUSE_CANCEL_HTTP_TIMEOUT_MS = 10_000;
-/** 一次暂停里取消在跑任务的总体预算；超出后记 truncated 并如实返回。 */
-const PAUSE_CANCEL_BUDGET_MS = 20_000;
-/** 取消失败里属于「任务已到终态」的错误（不是失败，不重复请求）。 */
-const TERMINAL_CANCEL_ERROR = /TASK_NOT_FOUND|task not found|不可取消/i;
 
 /**
  * 影策 PromptRules 档位 → 提示词硬文本（与 web/use-studio-data.ts:975-987 手动路径同源）。
@@ -649,8 +642,8 @@ export type DramaPipelineRuntimeOptions = {
         transitionMs?: number;
         pacing?: string;
     };
-    /** 各池并发上限（覆盖构造期默认；池名 text/video/render）。 */
-    concurrency?: { text?: number; video?: number; render?: number };
+    /** 影策单值并发：text/image/video/render 四池各自按它独立计数（1-16）。 */
+    concurrency?: number;
     /** 参考图提示词模板（角色/场景/道具/默认）；空表示沿用内置方案模板。 */
     assetPromptTemplates?: AssetPromptTemplates;
 };
@@ -715,10 +708,6 @@ export class DramaPipeline {
     private readonly budgetState = new Map<string, { spent: number; exceeded: boolean }>();
     /** dramaId → 暂停原因：调度与在跑作业的即时哨兵（DB status 仍是权威，这里让暂停在下一个循环点生效）。 */
     private readonly paused = new Map<string, string>();
-    /** 已成功请求取消（或已确认终态）的任务 id：连续暂停不重复取消同一任务。 */
-    private readonly cancelSettled = new Set<string>();
-    /** 正在请求取消中的任务 id：并发/连续 pause 的互斥锁。 */
-    private readonly cancelPending = new Set<string>();
     /** dramaId → 最近一次暂停结果摘要（供 status 可观测；重启后由 pipeline.pause_reason 顶替）。 */
     private readonly pauseReports = new Map<string, DramaPipelinePauseReport>();
     /** jobId → 当前这次执行的令牌：暂停后退回队列又被 resume 重新领取时，旧执行的迟到结果不得结算新作业。 */
@@ -870,9 +859,15 @@ export class DramaPipeline {
         };
     }
 
-    /** 某剧目某池的并发上限：制作设置覆盖 > 构造期默认。 */
+    /**
+     * 某剧目某池的并发上限：影策 DramaSettings.Concurrency 是单值，四池各自独立计数。
+     * 兼容已持久化的旧三值设置（按池取旧值），新设置直接按单值取；越界回退构造期默认。
+     */
     private poolLimitOf(dramaId: string, pool: PoolName): number {
-        const configured = Number(this.optionsOf(dramaId).concurrency?.[pool as "text" | "video" | "render"] || 0);
+        const raw = this.optionsOf(dramaId).concurrency as unknown;
+        const configured = raw && typeof raw === "object"
+            ? Number((raw as Record<string, unknown>)[pool] || 0)
+            : Number(raw || 0);
         if (configured >= 1 && configured <= 16) return configured;
         return this.poolLimit;
     }
@@ -981,7 +976,11 @@ export class DramaPipeline {
         }
     }
 
-    /** 幂等编排：读全部分集，按七段机把各阶段作业 dedupe 入队。 */
+    /**
+     * 幂等编排（影策 planEpisode 的 stage 分支）：只为已经到达的阶段入队作业。
+     * 影策 render 作业在 stage=render 时才 enqueue，video 作业在 stage=video 时才提交；
+     * 不能一开始就把全部阶段塞进队列，否则成片作业会一直挂着「等待上游」。
+     */
     async plan(dramaId: string, pipeline?: PipelineRow): Promise<void> {
         const row = pipeline || this.store.get(dramaId);
         if (!row || row.status !== "running") return;
@@ -998,11 +997,25 @@ export class DramaPipeline {
 
         const listing = await this.request("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`);
         const episodes: Array<Record<string, any>> = Array.isArray(listing?.episodes) ? listing.episodes : [];
+        const jobs = this.store.listJobs(dramaId);
+        const queuedKeys = new Set(jobs.map((job) => job.dedupe_key));
+        const succeededByEpisode = new Map<string, Set<string>>();
+        for (const job of jobs) {
+            if (job.status !== "succeeded") continue;
+            const key = String(job.episode_id || "");
+            const set = succeededByEpisode.get(key) || new Set<string>();
+            set.add(job.stage);
+            succeededByEpisode.set(key, set);
+        }
         for (const ep of episodes) {
             const episodeId = String(ep?.id || "");
             if (!episodeId) continue;
+            const succeeded = succeededByEpisode.get(episodeId) || new Set<string>();
             for (const { stage: stageName, kind } of STAGE_JOBS) {
                 const dedupeKey = `${dramaId}:${episodeId}:${stageName}`;
+                if (queuedKeys.has(dedupeKey)) continue;
+                // 只有上游阶段已成功才入队本阶段（影策 stage 推进），没到就不制造排队作业。
+                if (!(STAGE_REQUIRES[stageName] || []).every((required) => succeeded.has(required))) continue;
                 this.store.enqueue({
                     id: dedupeKey,
                     dramaId,
@@ -1099,9 +1112,9 @@ export class DramaPipeline {
                     this.store.log(pipeline.drama_id, `忽略已被新执行替代的旧结果 ${job.stage}/${job.kind} (${job.id})`, "warn", job.episode_id, job.id);
                     return;
                 }
-                // 暂停/恢复会把作业退回 queued：迟到的执行结果不得把暂停态覆盖成 succeeded。
-                if (this.isPaused(pipeline.drama_id) || currentStatus() !== "running") {
-                    this.store.log(pipeline.drama_id, `暂停期间忽略迟到结果 ${job.stage}/${job.kind} (${job.id})，作业保持可恢复排队`, "warn", job.episode_id, job.id);
+                // 影策：暂停不打断已派发作业，正常写回终态；只有作业已被重置/取消时才丢弃迟到结果。
+                if (currentStatus() !== "running") {
+                    this.store.log(pipeline.drama_id, `忽略已重置作业的迟到结果 ${job.stage}/${job.kind} (${job.id})`, "warn", job.episode_id, job.id);
                     this.wake(pipeline.drama_id);
                     return;
                 }
@@ -1117,11 +1130,11 @@ export class DramaPipeline {
                 }
                 const message = errText(error);
                 const code = message.split(":")[0].trim();
-                // 暂停导致的退出（含任务被取消、等待循环发现暂停）统一退回可恢复排队，绝不写 failed。
-                if (message === PAUSED_BY_USER || this.isPaused(pipeline.drama_id)) {
+                // 只有显式重置留下的旧执行令牌会带 PAUSED_BY_USER；暂停本身不再中断已派发作业。
+                if (message === PAUSED_BY_USER) {
                     this.store.markPaused(job.id, PAUSED_BY_USER);
                     this.retryAt.delete(job.id);
-                    this.store.log(pipeline.drama_id, `暂停：${job.stage}/${job.kind} (${job.id}) 已退回可恢复排队`, "warn", job.episode_id, job.id);
+                    this.store.log(pipeline.drama_id, `旧执行被重置：${job.stage}/${job.kind} (${job.id}) 退回排队`, "warn", job.episode_id, job.id);
                     this.wake(pipeline.drama_id);
                     return;
                 }
@@ -1236,25 +1249,17 @@ export class DramaPipeline {
         const synopsis = String(proposal?.synopsis || "").trim();
 
         // 对白逐字核查：分场大纲按口径「不写对白」，拆镜 LLM 拿不到台词。
-        // 影策拆镜输入是小说原文，故把原文一并交给拆镜 prompt，要求它逐字提取台词到 beat.dialogue/speaker。
-        // 真值优先取「本集覆盖章节」的正文（按章编辑 source_chapters.body 后改编立即生效），
-        // 失败回退整份 sourceScript（老数据/无章映射时仍可拆镜）。
+        // 影策拆镜输入只来自本集章节（loadChapters(e.ChapterIDsJSON)），所以这里也只读本集覆盖章节的正文：
+        // 绝不能回退整份 sourceScript——那会让每一集都拿全书拆镜，产出跨集重复的镜头。
+        // 无章映射/正文为空时不注入原文，拆镜仍可用本集分场文本 text 进行，不因缺原文而复制别集内容。
         let episodeSource = "";
         try {
             const chaptersRes = await this.request("GET", `/drama/episodes/${encodeURIComponent(episodeId)}/chapters`);
             const chapterTexts = (Array.isArray(chaptersRes?.chapters) ? chaptersRes.chapters : [])
                 .map((chapter: Record<string, unknown>) => String(chapter?.body || "").trim())
                 .filter(Boolean);
-            if (chapterTexts.length) {
-                episodeSource = chapterTexts.join("\n\n");
-            }
-        } catch { /* 无章映射时回退整份原文 */ }
-        if (!episodeSource) {
-            try {
-                const planning = await this.request("GET", `/drama/${encodeURIComponent(dramaId)}/planning?include=sourceScript`);
-                episodeSource = String(planning?.sourceScript || "").trim();
-            } catch { /* 没有原文时退回分场文本，不阻断拆镜 */ }
-        }
+            if (chapterTexts.length) episodeSource = chapterTexts.join("\n\n");
+        } catch { /* 取不到章节就不注入原文，不回退全书 */ }
 
         // 2) 写回：synopsis=自然语言梗概（缺省回退分场文本）；fullPlot=分场正文。
         await this.request("PATCH", `/drama/episodes/${encodeURIComponent(episodeId)}`, {
@@ -1278,7 +1283,19 @@ export class DramaPipeline {
         // 下面的写稿处：清空旧 shots/segments 与写入新分镜放进同一个 productionOps 批次整批原子提交，
         // 任一步校验失败整次回滚，不会出现「旧镜已清、新镜未写」的半写形变。
         const hadShots = (Array.isArray(source.shots) ? source.shots : []).length > 0;
-        const environments: ChapterDemandEnvironment[] = scenes.map(scene => ({ id: scene.environmentId, name: scene.title }));
+        // 拆镜 prompt 的环境清单必须是具体场景实体，不能是「第三章标题」这种剧本场次占位：
+        // 后者会让所有镜头 scene_id 都指向章节，绑定阶段只能瞎猜一张图。剧本场次仍用于镜头归属。
+        const scriptEnvironments: ChapterDemandEnvironment[] = scenes.map(scene => ({ id: scene.environmentId, name: scene.title }));
+        const sceneEntityIds = new Set(
+            (Array.isArray(source.asset_plan) ? source.asset_plan : [])
+                .filter((row: any) => String(row?.kind || row?.asset_kind || "").toLowerCase() === "scene")
+                .map((row: any) => String(row?.entity_id || ""))
+                .filter(Boolean),
+        );
+        const concreteScenes = (Array.isArray(source.scene_registry) ? source.scene_registry : [])
+            .filter((scene: any) => sceneEntityIds.has(String(scene?.id || "")))
+            .map((scene: any) => ({ id: String(scene.id), name: String(scene.name || scene.id) }));
+        const environments: ChapterDemandEnvironment[] = concreteScenes.length ? concreteScenes : scriptEnvironments;
         const environmentOfScene = new Map<string, string>(scenes.map(scene => [scene.environmentId, scene.id]));
         // 影策 CastIDsJSON 规则：结构化引用清单真值全部来自已登记注册表/资产卡。
         // 注册表为空的老剧目 → 清单为空 → 拆镜引用全空（预期回退），绝不编造 id。
@@ -1695,12 +1712,12 @@ export class DramaPipeline {
             const canvasNodes: Array<Record<string, any>> = Array.isArray(project?.nodes) ? project.nodes as Array<Record<string, any>> : [];
             const kindModel = assetOpts.imageModelsByKind || {};
             const defaultModel = String(this.resolveImageModel?.() || "").trim();
-            this.store.log(dramaId, `资产参考图开始生成：${pending.length} 张（默认模型 ${defaultModel || "未配置"}，并发 ${ASSET_IMAGE_CONCURRENCY}）`);
+            const imageConcurrency = this.poolLimitOf(dramaId, "image");
+            this.store.log(dramaId, `资产参考图开始生成：${pending.length} 张（默认模型 ${defaultModel || "未配置"}，并发 ${imageConcurrency}）`);
             let cursor = 0;
             const worker = async () => {
                 while (cursor < pending.length) {
-                    // 暂停即停止再提交新的出图任务（已提交的那张由 pause() 的取消扫描处理）。
-                    if (this.isPaused(dramaId)) return;
+                    // 影策：暂停只挡新作业派发，已派发的出图作业把本批剩余图片跑完。
                     const item = pending[cursor++];
                     try {
                         const key = await this.generateAssetReference(episodeId, canvasId, canvasNodes, item,
@@ -1709,13 +1726,13 @@ export class DramaPipeline {
                         generated += 1;
                         this.store.log(dramaId, `资产 ${item.assetId} 参考图已写回：${key}`);
                     } catch (error) {
-                        if (errText(error) === PAUSED_BY_USER || this.isPaused(dramaId)) return;
+                        if (errText(error) === PAUSED_BY_USER) return;
                         imageFailed += 1;
                         this.store.log(dramaId, `资产 ${item.assetId} 参考图生成失败（不阻断）：${errText(error)}`, "warn");
                     }
                 }
             };
-            await Promise.all(Array.from({ length: Math.min(ASSET_IMAGE_CONCURRENCY, pending.length) }, worker));
+            await Promise.all(Array.from({ length: Math.min(imageConcurrency, pending.length) }, worker));
         } else if (pending.length && !canvasId) {
             this.store.log(dramaId, "分集还没有画布，跳过资产参考图生成", "warn");
         }
@@ -2224,14 +2241,23 @@ export class DramaPipeline {
         // 每段只取当前有效产物（复用 final-composer 的同一口径）；results[] 是审计历史，
         // 把全部历史 storageKey 送进 concat 会让重试过的段在成片里重复出现。
         const unique = collectFinalVideos(canvas);
-        if (!unique.length && !String(this.store.jobPayload(job).renderRecoveryStorageKey || "")) {
+        const recoveredKey = String(this.store.jobPayload(job).renderRecoveryStorageKey || "");
+        if (!unique.length && !recoveredKey) {
             throw new Error("RENDER_NO_VIDEO: 画布还没有可用的分镜视频 storageKey");
         }
 
-        // C3 恢复点：合成任务已成功、仅写回制作稿失败时，storageKey 记在 payload。
-        // retryFailed 分级重放 render 时直接复用，不二次提交 video-concat（对齐影策
-        // RetryDramaResultJobs「成功 provider task 只重应用，不二次提交」）。
-        const recoveredKey = String(this.store.jobPayload(job).renderRecoveryStorageKey || "");
+        // 影策：整集所有段视频生成完才进 render，不能拿一段视频合成半成品。
+        // 与前端 composeReady 同口径：每段要有当前/历史产物且未被标成 inputOutdated；
+        // 锁定的段显式跳过。已合成过的恢复点允许直接重放写回，不再要求产物仍在画布上。
+        const productionForRender = (await this.getProduction(episodeId)).production as any;
+        const groups = Array.isArray(productionForRender?.published?.clipGroups) ? productionForRender.published.clipGroups
+            : Array.isArray(productionForRender?.draft?.clipGroups) ? productionForRender.draft.clipGroups : [];
+        const sources = Array.isArray(productionForRender?.published?.director?.source?.segments) ? productionForRender.published.director.source.segments
+            : Array.isArray(productionForRender?.draft?.director?.source?.segments) ? productionForRender.draft.director.source.segments : [];
+        const readiness = renderReadiness(canvas, groups as Array<Record<string, unknown>>, sources as Array<Record<string, unknown>>);
+        if ((readiness.missing || readiness.stale) && !recoveredKey) {
+            throw Object.assign(new Error(`RENDER_SEGMENTS_NOT_READY: 本集 ${readiness.total} 段中 ${readiness.missing} 段未出片、${readiness.stale} 段已过期，暂不合成`), { code: "RENDER_SEGMENTS_NOT_READY" });
+        }
         let storageKey = recoveredKey;
         let taskId = String(this.store.jobPayload(job).renderRecoveryTaskId || "");
         const dramaId = String(job.drama_id || "");
@@ -2255,7 +2281,7 @@ export class DramaPipeline {
             this.store.log(String(job.drama_id || ""), `render 复用已合成成片 storageKey=${storageKey}（task=${taskId}），跳过二次合成`, "info", episodeId, job.id);
         }
 
-        const production = (await this.getProduction(episodeId)).production as any;
+        const production = productionForRender;
         await this.productionOps(episodeId, production.revision, [{
             type: "set_director_workflow",
             patch: { finalResource: { storageKey, at: new Date().toISOString(), stale: false } },
@@ -2433,19 +2459,16 @@ export class DramaPipeline {
         const path = agent ? `/agent/runtime/tasks/${encodeURIComponent(taskId)}` : `/tasks/${encodeURIComponent(taskId)}`;
         const deadline = Date.now() + TASK_TIMEOUT_MS;
         while (Date.now() < deadline) {
-            // 暂停哨兵：命中即退出等待（任务本身已由 pause() 请求取消，这里只保证作业不继续推进）。
-            if (dramaId && this.isPaused(dramaId)) throw new Error(PAUSED_BY_USER);
+            // 暂停不再中断已派发作业的等待（影策：暂停后任务照常完成并回写）。
             const res = await this.request("GET", path);
             const task = (res?.task || {}) as Record<string, any>;
             const status = String(task?.status || "");
             if (["succeeded", "success", "completed", "done"].includes(status)) return task;
             if (["failed", "error", "canceled", "cancelled", "interrupted"].includes(status)) {
-                if (dramaId && this.isPaused(dramaId)) throw new Error(PAUSED_BY_USER);
                 throw new Error(`TASK_${status.toUpperCase()}: ${task?.error || status}`);
             }
             await this.sleep(TASK_POLL_MS);
         }
-        if (dramaId && this.isPaused(dramaId)) throw new Error(PAUSED_BY_USER);
         throw new Error("TASK_TIMEOUT");
     }
 
@@ -2551,27 +2574,22 @@ export class DramaPipeline {
     }
 
     /**
-     * 用户暂停：停派发 + 停排队 + 请求取消在跑。
-     * - 流水线作业：running → queued（error=paused_by_user，attempt 回退），不删除，resume 后继续；
-     * - 画布生成任务：按本剧各集 canvasId 查 queued/running 任务，逐条走既有 POST /tasks/:id/cancel；
-     * - 连续暂停幂等：成功取消/已终态的任务记入 cancelSettled，不再重复请求同一任务。
-     * 取消失败逐条记日志并在返回摘要里报告，不静默吞掉。
+     * 用户暂停（对齐影策 SetDramaRunning(false)）：只停止派发新作业。
+     * 已派发的流水线作业保持 running、生成任务不取消，照常跑完并回写终态；
+     * resume 只把状态改回 running，各集按当前 stage 接着走，不重排全部作业。
      */
     async pause(dramaId: string, reason = "manual"): Promise<DramaPipelinePauseReport> {
-        // 先落内存哨兵：在跑的 execute/waitTask 下一个循环点立刻停，不依赖 tick 的 DB 轮询。
+        // 影策语义：暂停只是停止派发新作业（dispatch 被 status/paused 哨兵挡住），
+        // 已派发的作业与生成任务照常跑完并回写——不取消、不退回 queued。
+        // 否则段会停在「生成中」，且点继续时所有集的作业会一起重排开跑。
         this.paused.set(dramaId, reason);
-        const running = this.store.listJobs(dramaId, ["running"]);
-        const pausedJobs = this.store.pauseRunning(dramaId, PAUSED_BY_USER);
         const existing = this.store.get(dramaId);
-        // 暂停总是得到一个 paused 状态：没启动过的剧目也落一行，GET status 能看出原因。
         if (existing) this.store.setStatus(dramaId, "paused", reason);
         else this.store.upsert({ dramaId, status: "paused", pauseReason: reason });
-        this.store.log(dramaId, `流水线暂停：${reason}；停止派发，${pausedJobs} 个在跑作业退回可恢复排队`);
-        const report = await this.cancelActiveWork(dramaId, running, reason, pausedJobs);
+        const running = this.store.listJobs(dramaId, ["running"]).length;
+        this.store.log(dramaId, `流水线暂停：${reason}；停止派发新作业，${running} 个已派发作业继续执行并回写`);
+        const report: DramaPipelinePauseReport = { reason, at: new Date().toISOString(), pausedJobs: 0, canceledTasks: 0, canceledQueuedTasks: 0, alreadyTerminal: 0, failedTasks: 0, failures: [], truncated: false };
         this.pauseReports.set(dramaId, report);
-        this.store.log(dramaId,
-            `暂停取消结果：取消画布任务 ${report.canceledTasks} 个（排队中 ${report.canceledQueuedTasks} 个），已终态 ${report.alreadyTerminal} 个，失败 ${report.failedTasks} 个${report.truncated ? "（取消预算耗尽，剩余任务只能等它跑完）" : ""}`,
-            report.failedTasks || report.truncated ? "warn" : "info");
         this.wake(dramaId);
         return report;
     }
@@ -2606,120 +2624,14 @@ export class DramaPipeline {
         return typeof lookup === "function" ? lookup.call(this.store, dramaId)?.status === "paused" : false;
     }
 
-    /** 暂停哨兵：命中即停；若刚提交了任务，先尽力请求取消再退出，避免留下一条没人管的生成。 */
-    private async assertNotPaused(dramaId: string, taskId?: string, agent = false): Promise<void> {
-        if (!dramaId || !this.isPaused(dramaId)) return;
-        if (taskId) await this.requestCancelTask(dramaId, taskId, "暂停后迟到提交", agent);
-        throw new Error(PAUSED_BY_USER);
-    }
-
-    /** 本剧各集画布 id（画布生成任务按 projectId 归属；没有画布的分集跳过）。 */
-    private async canvasIdsOf(dramaId: string): Promise<string[]> {
-        const listing = await this.request("GET", `/drama/projects/${encodeURIComponent(dramaId)}/episodes`, undefined, PAUSE_CANCEL_HTTP_TIMEOUT_MS);
-        const episodes = Array.isArray(listing?.episodes) ? listing.episodes as Array<Record<string, any>> : [];
-        return [...new Set(episodes.map(episode => String(episode?.canvasId || episode?.canvas_id || "")).filter(Boolean))];
-    }
-
-    /** 某画布上指定状态的生成任务（summary 投影只回 id/status 等标量，不带大 prompt）。 */
-    private async canvasTasksOf(canvasId: string, status: "queued" | "running"): Promise<Array<Record<string, any>>> {
-        const res = await this.request("GET",
-            `/tasks?projectId=${encodeURIComponent(canvasId)}&status=${status}&summary=true&limit=500`,
-            undefined, PAUSE_CANCEL_HTTP_TIMEOUT_MS);
-        const tasks = Array.isArray(res?.tasks) ? res.tasks as Array<Record<string, any>> : [];
-        return tasks.filter(task => task && String(task.status || "") === status);
-    }
-
     /**
-     * 请求取消单个任务（复用既有取消路由：画布任务 POST /tasks/:id/cancel，
-     * Agent 侧成片合成 POST /agent/video-concat/tasks/:id/cancel）。
-     * 已成功取消/已确认终态的任务不再重复请求；正在请求中的任务加锁跳过（连续 pause 幂等）。
+     * 影策语义下暂停只挡 dispatch 的派发，不中断已派发作业；这里保留入口是为了不改动
+     * 各执行阶段的控制流，但不再抛错、也不取消任务——已提交的生成照常跑完并回写。
      */
-    private async requestCancelTask(dramaId: string, taskId: string, source: string, agent = false): Promise<{ outcome: "canceled" | "terminal" | "failed" | "skipped"; error?: string }> {
-        if (!taskId) return { outcome: "skipped" };
-        if (this.cancelSettled.has(taskId)) return { outcome: "skipped" };
-        if (this.cancelPending.has(taskId)) return { outcome: "skipped" };
-        this.cancelPending.add(taskId);
-        try {
-            const path = agent
-                ? `/agent/video-concat/tasks/${encodeURIComponent(taskId)}/cancel`
-                : `/tasks/${encodeURIComponent(taskId)}/cancel`;
-            await this.request("POST", path, {}, PAUSE_CANCEL_HTTP_TIMEOUT_MS);
-            this.cancelSettled.add(taskId);
-            this.store.log(dramaId, `已请求取消${source} ${taskId}`, "info");
-            return { outcome: "canceled" };
-        } catch (error) {
-            const message = errText(error);
-            // 任务在取消前已到终态（404 / 「不可取消」）不是失败，不再搭一次请求。
-            if (TERMINAL_CANCEL_ERROR.test(message)) {
-                this.cancelSettled.add(taskId);
-                return { outcome: "terminal" };
-            }
-            // 没有取消接口的执行器会在这里失败：如实记日志，不静默吞掉。
-            this.store.log(dramaId, `取消${source} ${taskId} 失败：${message}（该任务可能只能等它跑完）`, "warn");
-            return { outcome: "failed", error: message };
-        } finally {
-            this.cancelPending.delete(taskId);
-        }
+    private async assertNotPaused(_dramaId: string, _taskId?: string, _agent = false): Promise<void> {
+        return;
     }
 
-    /** 暂停时收集并取消在跑任务：在跑作业的 task_id + 本剧各集画布上的 queued/running 任务。 */
-    private async cancelActiveWork(dramaId: string, running: JobRow[], reason: string, pausedJobs: number): Promise<DramaPipelinePauseReport> {
-        const failures: Array<{ taskId: string; error: string }> = [];
-        // taskId → 取消路由归属（render 走 Agent 合成路由，其余走画布任务路由）。
-        const targets = new Map<string, { label: string; agent: boolean }>();
-        for (const job of running) {
-            if (job.task_id) targets.set(job.task_id, { label: `流水线作业 ${job.stage}/${job.kind}`, agent: job.stage === "render" });
-        }
-        const queued = new Set<string>();
-        const deadline = Date.now() + PAUSE_CANCEL_BUDGET_MS;
-        let canvases: string[] = [];
-        try { canvases = await this.canvasIdsOf(dramaId); }
-        catch (error) { failures.push({ taskId: "canvases", error: `列出分集画布失败：${errText(error)}` }); }
-        for (const canvasId of canvases) {
-            if (Date.now() >= deadline) break;
-            for (const status of ["running", "queued"] as const) {
-                try {
-                    for (const task of await this.canvasTasksOf(canvasId, status)) {
-                        const id = String(task.id || "");
-                        if (!id) continue;
-                        if (!targets.has(id)) targets.set(id, { label: status === "queued" ? "画布排队任务" : "画布生成任务", agent: false });
-                        if (status === "queued") queued.add(id);
-                    }
-                } catch (error) {
-                    failures.push({ taskId: canvasId, error: `列出画布 ${canvasId} 的 ${status} 任务失败：${errText(error)}` });
-                    this.store.log(dramaId, `列出画布 ${canvasId} 的 ${status} 任务失败（不阻断其余取消）：${errText(error)}`, "warn");
-                }
-            }
-        }
-        let canceledTasks = 0;
-        let canceledQueuedTasks = 0;
-        let alreadyTerminal = 0;
-        let truncated = false;
-        for (const [taskId, target] of targets) {
-            if (Date.now() >= deadline) { truncated = true; break; }
-            const result = await this.requestCancelTask(dramaId, taskId, target.label, target.agent);
-            if (result.outcome === "canceled") {
-                canceledTasks += 1;
-                if (queued.has(taskId)) canceledQueuedTasks += 1;
-            } else if (result.outcome === "terminal") {
-                alreadyTerminal += 1;
-                if (queued.has(taskId)) canceledQueuedTasks += 1;
-            } else if (result.outcome === "failed") {
-                failures.push({ taskId, error: result.error || "取消请求失败" });
-            }
-        }
-        return {
-            reason,
-            at: new Date().toISOString(),
-            pausedJobs,
-            canceledTasks,
-            canceledQueuedTasks,
-            alreadyTerminal,
-            failedTasks: failures.length,
-            failures: failures.slice(0, 20),
-            truncated,
-        };
-    }
 
     /**
      * 失败重试分级（对齐影策 RetryFailedDrama 的 prompt/video/cast 分流 +
@@ -2771,9 +2683,40 @@ export class DramaPipeline {
         return { ok: true, jobId: job.id, stage: job.stage, kind: job.kind };
     }
 
+    /**
+     * 队列展示用：说明一条 queued 作业当前被什么挡住。与 jobAllowed 共用同一套闸门真值，
+     * 只是把「不可派发」转成用户可读原因，避免下游作业一开始就入队却显示为可执行的排队中。
+     */
+    private waitReasonOf(job: JobRow, succeededByEpisode: Map<string, Set<string>>): string | undefined {
+        const pipeline = this.store.get(job.drama_id);
+        if (!pipeline) return undefined;
+        const payload = this.store.jobPayload(job);
+        const episodeId = String(payload.episodeId || job.episode_id || "");
+        for (const required of STAGE_REQUIRES[job.stage] || []) {
+            if (!succeededByEpisode.get(episodeId)?.has(required)) return `等待上游：${required}`;
+        }
+        if (Date.now() < (this.retryAt.get(job.id) || 0)) return "等待重试";
+        const approvals = new Set(this.store.approvalTargets(job.drama_id, "approve"));
+        const released = new Set(this.store.approvalTargets(job.drama_id, "release"));
+        const sampleMode = Boolean(this.optionsOf(job.drama_id).sampleMode);
+        const sampleApproved = this.isSampleApproved(job.drama_id, approvals);
+        if (job.stage === "video" && needsReview(pipeline.review_mode, Number(payload.episodeNumber || 0), approvals, episodeId, sampleMode, sampleApproved)) return "等待审阅";
+        if (job.stage === "assets" && mediaHeld(pipeline.media_mode, released, "assets")) return "等待媒体放行";
+        if (job.stage === "render" && mediaHeld(pipeline.media_mode, released, "all")) return "等待媒体放行";
+        return undefined;
+    }
+
     status(dramaId: string): Record<string, unknown> {
         const pipeline = this.store.get(dramaId) || null;
         const jobs = this.store.listJobs(dramaId);
+        const succeededByEpisode = new Map<string, Set<string>>();
+        for (const job of jobs) {
+            if (job.status !== "succeeded") continue;
+            const episodeId = String(this.store.jobPayload(job).episodeId || job.episode_id || "");
+            const set = succeededByEpisode.get(episodeId) || new Set<string>();
+            set.add(job.stage);
+            succeededByEpisode.set(episodeId, set);
+        }
         const byStage: Record<string, Record<string, number>> = {};
         for (const job of jobs) {
             byStage[job.stage] ||= {};
@@ -2812,6 +2755,7 @@ export class DramaPipeline {
                 runtimeTaskId: job.task_id ?? null,
                 // 逐次尝试记录（成功/失败/熔断都追加）：排查「重试到上限，之前几次为什么失败」用。
                 attempts: jobAttempts(job.attempts_json),
+                waitReason: job.status === "queued" ? this.waitReasonOf(job, succeededByEpisode) ?? null : null,
             })),
             logs: this.store.logs(dramaId, 20),
         };

@@ -1,10 +1,9 @@
 /**
- * 暂停语义集成测试（不触发真实生成）：
- * - queued 作业保持 queued（不删除、不改 dedupe），resume 后能被重新领取；
- * - running 作业被退回 queued + error=paused_by_user（可恢复，不写 succeeded/failed）；
- * - 本剧画布上的 running/queued 生成任务收到既有 POST /tasks/:id/cancel（mock 记录）；
- * - 连续 pause 幂等，不重复取消同一任务；
- * - 取消失败逐个记日志，不静默吞掉。
+ * 暂停/继续语义集成测试（对齐影策 drama_orchestrator.go / drama_actions.go，不触发真实生成）：
+ * - 暂停只停止派发新作业：running 作业保持 running，画布任务不被取消；
+ * - 暂停期间已派发作业照常写回 succeeded/failed（否则段会永远停在生成中）；
+ * - resume 只把状态改回 running，不把任何作业退回 queued 重排；
+ * - dispatch 在暂停态不领取新作业，resume 后按 stage 派发。
  * DramaPipeline / PipelineStore 是真代码，只把网络边界换成临时 HTTP 替身；DB 用临时库。
  */
 import assert from "node:assert/strict";
@@ -41,7 +40,7 @@ type Fixture = {
     close: () => Promise<void>;
 };
 
-async function fixture(initialTasks: Array<{ id: string; status: "running" | "queued" }>, options?: { failCancel?: boolean }): Promise<Fixture> {
+async function fixture(initialTasks: Array<{ id: string; status: "running" | "queued" }>): Promise<Fixture> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pipeline-pause-"));
     const file = path.join(dir, "runtime.sqlite");
     const raw = new DatabaseSync(file);
@@ -69,19 +68,13 @@ async function fixture(initialTasks: Array<{ id: string; status: "running" | "qu
         if (req.method === "POST" && cancel) {
             const id = decodeURIComponent(cancel[1]);
             cancels.push(id);
-            if (options?.failCancel) return send({ ok: false, error: "执行器取消失败" }, 500);
-            const current = tasks.get(id);
-            if (current !== "running" && current !== "queued") return send({ ok: false, error: `任务状态 ${current ?? "missing"} 不可取消` }, 409);
             tasks.set(id, "cancelled");
             return send({ ok: true, task: { id, status: "cancelled" } });
         }
-        // Agent 侧成片合成任务走独立取消路由（/tasks/:id/cancel 查不到它）。
         const agentCancel = url.match(/^\/agent\/video-concat\/tasks\/([^/]+)\/cancel$/);
         if (req.method === "POST" && agentCancel) {
-            const id = decodeURIComponent(agentCancel[1]);
-            agentCancels.push(id);
-            tasks.set(id, "cancelled");
-            return send({ ok: true, task: { id, status: "cancelled" } });
+            agentCancels.push(decodeURIComponent(agentCancel[1]));
+            return send({ ok: true });
         }
         send({ ok: false, error: `unexpected ${req.method} ${url}` }, 404);
     });
@@ -114,55 +107,54 @@ function seedJobs(store: PipelineStore): void {
     assert.equal(store.job("job-video")!.status, "running");
 }
 
-test("pause：停派发 + 在跑作业退回可恢复排队 + 取消在跑画布任务；resume 后可重新派发", async () => {
+test("pause：running 作业保持 running、不取消画布任务、不重排；resume 只恢复状态", async () => {
     const f = await fixture([{ id: "task-running", status: "running" }]);
     try {
         seedJobs(f.store);
         const report = await f.pipeline.pause(DRAMA);
 
-        assert.equal(report.pausedJobs, 1, "1 个 running 作业应退回 queued");
-        assert.equal(report.canceledTasks, 1, "1 个在跑画布任务应收到取消");
-        assert.equal(report.failedTasks, 0);
-        assert.deepEqual(f.cancels, ["task-running"], "取消走既有 POST /tasks/:id/cancel");
+        assert.equal(report.pausedJobs, 0, "不把 running 作业退回 queued");
+        assert.equal(report.canceledTasks, 0, "不取消已提交任务");
+        assert.deepEqual(f.cancels, [], "暂停不应请求 /tasks/:id/cancel");
+        assert.equal(f.store.job("job-video")!.status, "running", "已派发作业保持 running");
+        assert.equal(f.store.job("job-script")!.status, "queued", "未派发作业保持 queued");
+        assert.equal(f.store.get(DRAMA)!.status, "paused");
 
-        const running = f.store.job("job-video")!;
-        assert.equal(running.status, "queued", "running 作业必须可恢复（queued），不能写 succeeded/failed");
-        assert.equal(running.error, "paused_by_user");
-        assert.equal(running.attempt, 0, "取消不是失败，不消耗 attempt");
-
-        const queued = f.store.job("job-script")!;
-        assert.equal(queued.status, "queued", "已排队作业保持 queued");
-        assert.equal(queued.error, null);
-
-        const row = f.store.get(DRAMA)!;
-        assert.equal(row.status, "paused");
-        assert.equal(row.pause_reason, "manual");
-
-        const status = f.pipeline.status(DRAMA) as Record<string, any>;
-        assert.equal(status.pause.paused, true);
-        assert.equal(status.pause.reason, "manual");
-        assert.equal(status.pause.lastResult.canceledTasks, 1, "status 能看出取消了多少在跑任务");
-        assert.equal(status.totals.failed, undefined, "暂停不得产生 failed 作业");
-        assert.equal(status.totals.succeeded, undefined);
-
-        // 连续暂停幂等：不报错、不重复取消同一任务。
-        const second = await f.pipeline.pause(DRAMA);
-        assert.equal(second.pausedJobs, 0);
-        assert.equal(second.canceledTasks, 0);
-        assert.deepEqual(f.cancels, ["task-running"], "同一任务不得重复取消");
-
-        f.pipeline.resume(DRAMA);
-        assert.equal(f.store.get(DRAMA)!.status, "running", "resume 恢复 running");
-        // resume 后调度器真的会领取排队作业（只替换 launchJob，避免触发真实生成）。
+        // 暂停态 dispatch 不领取新作业。
         const launched: string[] = [];
         (f.pipeline as any).launchJob = (_pipeline: unknown, job: { id: string }) => { launched.push(job.id); };
         (f.pipeline as any).dispatch(f.store.get(DRAMA)!);
-        assert.deepEqual(launched, ["job-script"], "resume 后 queued 作业被重新派发");
-        assert.equal(f.store.job("job-script")!.status, "running");
+        assert.deepEqual(launched, [], "暂停期间不派发新作业");
+
+        const second = await f.pipeline.pause(DRAMA);
+        assert.equal(second.canceledTasks, 0, "连续暂停幂等");
+
+        f.pipeline.resume(DRAMA);
+        assert.equal(f.store.get(DRAMA)!.status, "running", "resume 只改状态");
+        assert.equal(f.store.job("job-video")!.status, "running", "resume 不重排已在跑的作业");
+        (f.pipeline as any).dispatch(f.store.get(DRAMA)!);
+        assert.deepEqual(launched, ["job-script"], "resume 后按 stage 派发未开始的作业");
     } finally { await f.close(); }
 });
 
-test("pause：render 合成长任务走 Agent 合成取消路由，不误用画布任务取消", async () => {
+test("暂停期间已派发作业完成仍写回 succeeded（影策 syncJobs 语义）", async () => {
+    const f = await fixture([]);
+    try {
+        seedJobs(f.store);
+        const pipeline = f.pipeline as unknown as {
+            execute: (job: unknown) => Promise<Record<string, unknown>>;
+            launchJob: (pipeline: unknown, job: unknown) => void;
+        };
+        pipeline.execute = async () => ({ ok: true });
+        await f.pipeline.pause(DRAMA);
+        pipeline.launchJob(f.store.get(DRAMA)!, f.store.job("job-video")!);
+        await new Promise<void>(resolve => setTimeout(resolve, 30));
+        assert.equal(f.store.job("job-video")!.status, "succeeded", "暂停不吞掉已派发作业的终态");
+        assert.equal(f.store.get(DRAMA)!.status, "paused", "作业回写不改变暂停状态");
+    } finally { await f.close(); }
+});
+
+test("render 合成任务暂停时不走 Agent 取消路由，作业保持 running", async () => {
     const f = await fixture([]);
     try {
         f.store.enqueue({ id: "job-render", dramaId: DRAMA, episodeId: "ep-pause", kind: "render", stage: "render", priority: 0, dedupeKey: `${DRAMA}:ep-pause:render` });
@@ -170,42 +162,14 @@ test("pause：render 合成长任务走 Agent 合成取消路由，不误用画�
         assert.ok(claimed);
         f.store.markRunning(claimed.id, "task-concat");
         const report = await f.pipeline.pause(DRAMA);
-        assert.equal(report.canceledTasks, 1);
-        assert.deepEqual(f.cancels, [], "Agent 任务不在画布 /tasks 表里");
-        assert.deepEqual(f.agentCancels, ["task-concat"], "走 /agent/video-concat/tasks/:id/cancel");
-        assert.equal(f.store.job("job-render")!.status, "queued");
-        assert.equal(f.store.job("job-render")!.error, "paused_by_user");
-    } finally { await f.close(); }
-});
-
-test("pause：本剧画布上排队的生成任务也走取消接口，并计入 canceledQueuedTasks", async () => {
-    const f = await fixture([
-        { id: "task-running", status: "running" },
-        { id: "task-queued", status: "queued" },
-    ]);
-    try {
-        seedJobs(f.store);
-        const report = await f.pipeline.pause(DRAMA);
-        assert.equal(report.canceledTasks, 2);
-        assert.equal(report.canceledQueuedTasks, 1, "排队中的画布任务单独计数");
-        assert.ok(f.cancels.includes("task-queued"));
-        assert.ok(f.cancels.includes("task-running"));
-    } finally { await f.close(); }
-});
-
-test("pause：取消失败逐条记日志（不静默吞掉）并如实计入 failedTasks", async () => {
-    const f = await fixture([{ id: "task-running", status: "running" }], { failCancel: true });
-    try {
-        seedJobs(f.store);
-        const report = await f.pipeline.pause(DRAMA);
-        assert.ok(report.failedTasks >= 1, "取消失败必须计入摘要");
         assert.equal(report.canceledTasks, 0);
-        const logs = f.store.logs(DRAMA, 50).map(item => String(item.message || ""));
-        assert.ok(logs.some(message => message.includes("取消") && message.includes("失败")), "取消失败应有日志");
+        assert.deepEqual(f.cancels, []);
+        assert.deepEqual(f.agentCancels, [], "不请求 /agent/video-concat/tasks/:id/cancel");
+        assert.equal(f.store.job("job-render")!.status, "running");
     } finally { await f.close(); }
 });
 
-test("HTTP：POST /pipeline/pause 返回暂停摘要，GET /pipeline/status 能看到暂停原因与取消数", async () => {
+test("HTTP：POST /pipeline/pause 与 GET /pipeline/status 同源，不再带取消数", async () => {
     const f = await fixture([{ id: "task-running", status: "running" }]);
     try {
         seedJobs(f.store);
@@ -219,16 +183,14 @@ test("HTTP：POST /pipeline/pause 返回暂停摘要，GET /pipeline/status 能�
             const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
             const paused = await (await fetch(`${base}/drama/${DRAMA}/pipeline/pause`, { method: "POST" })).json() as Record<string, any>;
             assert.equal(paused.ok, true);
-            assert.equal(paused.canceledTasks, 1, "暂停响应带取消结果摘要");
-            assert.equal(paused.pausedJobs, 1);
+            assert.equal(paused.canceledTasks, 0, "暂停摘要不再有取消任务");
             const status = await (await fetch(`${base}/drama/${DRAMA}/pipeline/status`)).json() as Record<string, any>;
             assert.equal(status.ok, true);
             assert.equal(status.pause.paused, true);
             assert.equal(status.pause.reason, "manual");
-            assert.equal(status.pause.lastResult.canceledTasks, 1);
+            assert.equal(status.totals.failed, undefined, "暂停不得产生 failed 作业");
             const alias = await (await fetch(`${base}/drama/${DRAMA}/pipeline`)).json() as Record<string, any>;
             assert.equal(alias.pause.paused, true, "GET /drama/:id/pipeline 与 status 同源");
-            assert.equal(alias.pause.lastResult.canceledTasks, 1);
         } finally {
             await new Promise<void>(resolve => server.close(() => resolve()));
         }

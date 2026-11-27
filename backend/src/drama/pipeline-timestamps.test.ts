@@ -153,6 +153,19 @@ test("status 投影：durationMs 用固定 created_at/started_at/finished_at 计
     } finally { f.close(); }
 });
 
+test("status：被前置阶段挡住的排队作业给出等待原因，不显示成可执行的排队中", () => {
+    const f = fixture();
+    try {
+        seedJobs(f.store);
+        const status = f.pipeline.status(DRAMA) as Record<string, any>;
+        const queued = jobOf(status, "job-queued");
+        assert.equal(queued.status, "queued");
+        assert.match(String(queued.waitReason), /等待上游：prompts/);
+        const done = jobOf(status, "job-done");
+        assert.equal(done.waitReason, null, "终态作业不显示排队原因");
+    } finally { f.close(); }
+});
+
 test("重新入队的作业取新的 created_at，不再占旧 FIFO 槽位", () => {
     const f = fixture();
     try {

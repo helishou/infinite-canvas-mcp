@@ -3107,7 +3107,29 @@ export class BackendDatabase {
             next.updatedAt,
             id,
         );
+        // 任务终态由多个入口写入（dispatcher、孤儿回收、运维清理）。在这里集中把仍挂在
+        // running/queued 的生成日志收敛到同一终态，避免制作台队列一直显示假「运行中」。
+        if (patch.status && next.status !== current.status) this.syncTerminalGenerationLogs(next);
         return this.getTask(id)!;
+    }
+
+    /** 任务进入终态时同步其关联且尚未终结的生成日志；已终结的日志不改写。 */
+    private syncTerminalGenerationLogs(task: RuntimeTask): void {
+        if (task.status !== "succeeded" && task.status !== "failed" && task.status !== "cancelled") return;
+        const rows = this.db.prepare(
+            "SELECT id, started_at FROM generation_logs WHERE runtime_task_id=? AND status IN ('queued','running')"
+        ).all(task.id) as Array<{ id: string; started_at: string | null }>;
+        if (!rows.length) return;
+        const status = task.status === "succeeded" ? "success" : task.status;
+        const finishedAt = task.updatedAt || new Date().toISOString();
+        const startedMs = rows.find(row => row.started_at)?.started_at || task.createdAt;
+        const parsed = Date.parse(startedMs);
+        const durationMs = Number.isFinite(parsed) ? Math.max(0, Date.parse(finishedAt) - parsed) : 0;
+        const outputs = Array.isArray(task.outputs) && task.outputs.length ? task.outputs
+            : Array.isArray(task.result?.media) ? task.result!.media as Array<Record<string, unknown>> : [];
+        for (const row of rows) {
+            this.updateGenerationLog(row.id, { status, finishedAt, durationMs, error: task.error || undefined, outputs });
+        }
     }
 
     /** H3 决议与事件必须在同一个 SQLite 事务里落库；状态和版本共同构成 CAS。 */

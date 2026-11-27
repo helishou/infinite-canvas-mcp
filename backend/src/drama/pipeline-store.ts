@@ -133,9 +133,9 @@ export class PipelineStore {
         return true;
     }
 
-    /** 原子领取一条 queued job（priority DESC、created_at ASC）。领取即清掉暂停留下的 error。 */
+    /** 原子领取一条 queued job（集号 ASC、priority DESC、created_at ASC）。领取即清掉暂停留下的 error。 */
     claim(dramaId: string): JobRow | undefined {
-        const row = this.db.prepare("SELECT * FROM drama_pipeline_jobs WHERE drama_id=? AND status='queued' ORDER BY priority DESC, created_at ASC LIMIT 1").get(dramaId) as JobRow | undefined;
+        const row = this.db.prepare("SELECT * FROM drama_pipeline_jobs WHERE drama_id=? AND status='queued' ORDER BY COALESCE(json_extract(payload_json, '$.episodeNumber'), 999999) ASC, priority DESC, created_at ASC LIMIT 1").get(dramaId) as JobRow | undefined;
         if (!row) return undefined;
         const now = new Date().toISOString();
         const changed = this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', attempt=attempt+1, started_at=?, error=NULL, updated_at=? WHERE id=? AND status='queued'").run(now, now, row.id);
@@ -292,12 +292,18 @@ export class PipelineStore {
         return rows.length;
     }
 
+    /**
+     * 按集号优先、集内按阶段（priority DESC）排序：兑现设置页「排队顺序先按集号」的口径。
+     * 影策是每集独立阶段机，不是全剧先 script 再全剧 assets；集号从 payload 真值取，
+     * 没有集号的手工/旧作业排在有集号的作业之后，避免凭空抢到队首。
+     */
     listJobs(dramaId: string, statuses?: JobStatus[]): JobRow[] {
+        const order = "ORDER BY COALESCE(json_extract(payload_json, '$.episodeNumber'), 999999) ASC, priority DESC, created_at ASC";
         if (statuses?.length) {
             const ph = statuses.map(() => "?").join(",");
-            return this.db.prepare(`SELECT * FROM drama_pipeline_jobs WHERE drama_id=? AND status IN (${ph}) ORDER BY priority DESC, created_at ASC`).all(dramaId, ...statuses) as JobRow[];
+            return this.db.prepare(`SELECT * FROM drama_pipeline_jobs WHERE drama_id=? AND status IN (${ph}) ${order}`).all(dramaId, ...statuses) as JobRow[];
         }
-        return this.db.prepare("SELECT * FROM drama_pipeline_jobs WHERE drama_id=? ORDER BY priority DESC, created_at ASC").all(dramaId) as JobRow[];
+        return this.db.prepare(`SELECT * FROM drama_pipeline_jobs WHERE drama_id=? ${order}`).all(dramaId) as JobRow[];
     }
 
     job(id: string): JobRow | undefined {

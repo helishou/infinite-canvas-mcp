@@ -1237,7 +1237,25 @@ function ShotEditor({ shot, fps, busy, isFirst, onPatch, onDialogueSave, onDone 
     );
 }
 
-function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, processJobs, onDiscussShot }: { ep: StudioEpisode; production: EpisodeProduction | undefined; dramaId?: string | null; onRescript: () => void; onChanged?: () => void; busy: boolean; processJobs?: ProcessJobView[]; onDiscussShot?: (shot: { title?: string; visual?: string; camera?: unknown; duration_seconds?: number; dialogues?: unknown }) => void }) {
+type ChapterSourceRow = { no: number; title: string; body: string; id?: string; sourceFormat?: string };
+type SourceSnapshot = { chapterSource: string; sourceChapters: ChapterSourceRow[]; activeChapter: number | null };
+/**
+ * 原文对照最近一次成功读到的正文快照。后台暂时不可用（章节/剧目原文接口失败）时复用它，
+ * 避免面板从章节原文跳回 ep.fullPlot（分场稿）造成正文突跳。切页重挂载也保留同一份快照。
+ */
+const lastGoodSourceByEpisode = new Map<string, SourceSnapshot>();
+const rememberSourceSnapshot = (key: string, snapshot: SourceSnapshot) => {
+    lastGoodSourceByEpisode.delete(key);
+    lastGoodSourceByEpisode.set(key, snapshot);
+    // 分集数量有限，仅兜住异常增长；正常操作不会触发淘汰。
+    while (lastGoodSourceByEpisode.size > 40) {
+        const oldest = lastGoodSourceByEpisode.keys().next().value as string | undefined;
+        if (oldest == null) break;
+        lastGoodSourceByEpisode.delete(oldest);
+    }
+};
+
+function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, rescripting, processJobs, onDiscussShot }: { ep: StudioEpisode; production: EpisodeProduction | undefined; dramaId?: string | null; onRescript: () => void; onChanged?: () => void; busy: boolean; rescripting?: boolean; processJobs?: ProcessJobView[]; onDiscussShot?: (shot: { title?: string; visual?: string; camera?: unknown; duration_seconds?: number; dialogues?: unknown }) => void }) {
     const { message, modal } = App.useApp();
     const [processOpen, setProcessOpen] = useState(false);
     // 原文栏显隐（影策 script-view.tsx:80,126-135 sourceOpen；纯 UI，不影响原文真值）。
@@ -1270,34 +1288,51 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
     const chapterFileInputRef = useRef<HTMLInputElement>(null);
     const chapterImportTarget = useRef<string | null>(null);
     // 原文对照 = 本集覆盖章节正文（真值，与 pipeline.runScript 同源）；老数据无章映射时回退剧目级 sourceScript 派生。
-    const [chapterSource, setChapterSource] = useState("");
-    const [sourceChapters, setSourceChapters] = useState<Array<{ no: number; title: string; body: string; id?: string; sourceFormat?: string }>>([]);
-    /** 原文对照首次读取指示：初值 true，避免首帧「本集暂无原文」先把真实正文闪没。 */
-    const [sourceLoading, setSourceLoading] = useState(true);
-    const [activeChapter, setActiveChapter] = useState<number | null>(null);
+    const sourceKey = `${dramaId || ""}\u0000${ep?.id || ""}\u0000${ep?.no ?? ""}`;
+    const cachedSource = lastGoodSourceByEpisode.get(sourceKey);
+    const [chapterSource, setChapterSource] = useState(cachedSource?.chapterSource ?? "");
+    const [sourceChapters, setSourceChapters] = useState<ChapterSourceRow[]>(cachedSource?.sourceChapters ?? []);
+    /** 原文对照首次读取指示：只有手上完全没有正文时才进 loading，避免重读时先闪空态或分场稿。 */
+    const [sourceLoading, setSourceLoading] = useState(!cachedSource);
+    const [activeChapter, setActiveChapter] = useState<number | null>(cachedSource?.activeChapter ?? null);
     useEffect(() => {
         let alive = true;
-        setSourceLoading(true);
+        // 有上次成功快照就继续展示，重读期间不进 loading；失败时也不清空，避免正文跳回 ep.fullPlot。
+        if (!cachedSource) setSourceLoading(true);
+        const commit = (snapshot: SourceSnapshot) => {
+            rememberSourceSnapshot(sourceKey, snapshot);
+            setSourceChapters(snapshot.sourceChapters);
+            setActiveChapter((prev) => (prev != null && snapshot.sourceChapters.some((r) => r.no === prev) ? prev : null)
+                ?? snapshot.activeChapter ?? snapshot.sourceChapters[0]?.no ?? null);
+            setChapterSource(snapshot.chapterSource);
+            setSourceLoading(false);
+        };
+        // 只有首帧从未读到正文时才允许清空；后台暂时不可用时保留现有正文。
+        const clearIfNoSnapshot = () => {
+            if (!cachedSource) { setChapterSource(""); setSourceChapters([]); setActiveChapter(null); }
+            setSourceLoading(false);
+        };
         // 老数据兜底：剧目级 sourceScript 按章切分派生（真值仍是 chapters API，只有无章映射时才走这里）。
         const fallback = () => {
-            if (!dramaId || !ep?.no) { setChapterSource(""); setSourceChapters([]); setSourceLoading(false); return; }
+            if (!dramaId || !ep?.no) { clearIfNoSnapshot(); return; }
             void fetchDramaPlanningSource(dramaId).then((res) => {
                 if (!alive) return;
                 const source = String(res?.sourceScript || "");
-                if (!source.trim()) { setChapterSource(""); setSourceChapters([]); return; }
+                if (!source.trim()) {
+                    // 明确返回空原文（非网络失败）：旧快照已失效，避免下次挂载又用回它。
+                    lastGoodSourceByEpisode.delete(sourceKey);
+                    setChapterSource(""); setSourceChapters([]); setActiveChapter(null);
+                    return;
+                }
                 const { rows: chapterRows, groups } = splitSourceIntoEpisodes(source, {});
                 const chapters = groups.map((g) => {
                     const raw = groupSynopsis(chapterRows, g, 400000);
                     const body = raw.split("\n").filter((line) => !/^\s*【章】/.test(line)).join("\n").trim();
                     return { no: g.episodeNumber, title: `第 ${g.episodeNumber} 章`, body };
                 });
-                setSourceChapters(chapters);
-                const group = groups.find((g) => g.episodeNumber === ep.no);
-                if (!group) { setChapterSource(""); setActiveChapter(null); return; }
                 const mine = chapters.find((ch) => ch.no === ep.no);
-                setActiveChapter(mine?.no ?? null);
-                setChapterSource(mine?.body || "");
-            }).catch(() => { if (alive) { setChapterSource(""); setSourceChapters([]); } })
+                commit({ chapterSource: mine?.body || "", sourceChapters: chapters, activeChapter: mine?.no ?? null });
+            }).catch(() => { if (alive) clearIfNoSnapshot(); })
                 .finally(() => { if (alive) setSourceLoading(false); });
         };
         if (!ep?.id) { fallback(); return () => { alive = false; }; }
@@ -1312,13 +1347,16 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                 body: String(ch.body || ""),
                 sourceFormat: String(ch.sourceFormat || "novel"),
             }));
-            setSourceChapters(rows);
-            setActiveChapter(rows[0]?.no ?? null);
-            setChapterSource(rows.map((r) => r.body).join("\n\n"));
-            setSourceLoading(false);
+            commit({ chapterSource: rows.map((r) => r.body).join("\n\n"), sourceChapters: rows, activeChapter: rows[0]?.no ?? null });
         }).catch(() => { if (alive) fallback(); });
         return () => { alive = false; };
-    }, [dramaId, ep?.id, ep?.no, sourceUpdatedAt, chapterEditVersion]);
+    }, [sourceKey, sourceUpdatedAt, chapterEditVersion]);
+    /** 切章同时更新缓存，后台暂时不可用时重挂载也停在同一章。 */
+    const selectChapter = (no: number) => {
+        setActiveChapter(no);
+        const snapshot = lastGoodSourceByEpisode.get(sourceKey);
+        if (snapshot) rememberSourceSnapshot(sourceKey, { ...snapshot, activeChapter: no });
+    };
     // 原文对照优先显示派生的章节原文；没有才回退分场正文（fullPlot）。绝不再用 synopsis（那是梗概）。
     const fullText = (activeChapter != null
         ? (sourceChapters.find((ch) => ch.no === activeChapter)?.body || "")
@@ -1553,8 +1591,8 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                             <button type="button" onClick={() => setProcessOpen(true)} disabled={!processJobs?.length} className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground disabled:opacity-50" data-studio-process-open>
                                 <ScanSearch className={cn("size-3")} /> 改编过程
                             </button>
-                            <button type="button" onClick={confirmRescript} disabled={busy} className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground disabled:opacity-50">
-                                <Wand2 className="size-3" /> 重新改编
+                            <button type="button" onClick={confirmRescript} disabled={busy || rescripting} className="flex items-center gap-1 whitespace-nowrap transition hover:text-foreground disabled:opacity-50">
+                                {rescripting ? <LoaderCircle className="size-3 animate-spin" /> : <Wand2 className="size-3" />} {rescripting ? "改编中…" : "重新改编"}
                             </button>
                             <Tooltip title={sourceOpen ? "收起原文" : "对照原文"}>
                                 <button type="button" aria-pressed={sourceOpen} aria-label={sourceOpen ? "收起原文" : "对照原文"}
@@ -1727,9 +1765,9 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                         <p className="mt-1.5 max-w-xs text-[11px] leading-5 text-muted-foreground">
                             {ep.error ? "改编失败，原因见上方提示；可重新改编本集，或在底部队列重试。" : "改编完成后这里会按场次列出镜头与台词；右侧可以先读本集对应的小说原文。"}
                         </p>
-                        <button type="button" onClick={confirmRescript} disabled={busy} className="mt-4 flex h-8 items-center gap-1.5 rounded-md bg-foreground px-4 text-xs font-medium text-background transition hover:opacity-90 disabled:opacity-60">
-                            {busy ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                            {busy ? "改编中…" : "重新改编本集"}
+                        <button type="button" onClick={confirmRescript} disabled={busy || rescripting} className="mt-4 flex h-8 items-center gap-1.5 rounded-md bg-foreground px-4 text-xs font-medium text-background transition hover:opacity-90 disabled:opacity-60">
+                            {rescripting ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+                            {rescripting ? "改编中…" : "重新改编本集"}
                         </button>
                     </section>
                 ) : null}
@@ -1748,7 +1786,7 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, pro
                 {sourceChapters.length > 1 ? (
                     <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-border px-2 py-1.5" role="tablist" aria-label="原文章节" data-studio-source-tabs>
                         {sourceChapters.map((ch) => (
-                            <button key={ch.no} type="button" role="tab" aria-selected={activeChapter === ch.no} onClick={() => setActiveChapter(ch.no)}
+                            <button key={ch.no} type="button" role="tab" aria-selected={activeChapter === ch.no} onClick={() => selectChapter(ch.no)}
                                 className={cn("shrink-0 rounded px-2 py-0.5 text-[11px] transition", activeChapter === ch.no ? "bg-primary/15 text-foreground" : "text-muted-foreground hover:bg-muted/50")}>
                                 {ch.title}
                                 {/* 影策 script-view.tsx:351：章节 tab 带字数（从本文 body 派生，真值不是伪造字段） */}
@@ -4451,7 +4489,7 @@ export type DetailTab = "story" | "shots" | "clips";
 
 export type ProcessJobView = { id: string; stage: string; status: string; attempt: number; error?: string | null; startedAt?: string | null; finishedAt?: string | null };
 
-export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onCompose, onExportJianying, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onApproveVideo, onSwitchToAssets, onChanged, busy, paused, onAutoResume, processJobs, onDiscussShot }: {
+export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onCompose, onExportJianying, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onApproveVideo, onSwitchToAssets, onChanged, busy, rescripting, paused, onAutoResume, processJobs, onDiscussShot }: {
     tab: DetailTab;
     episode: StudioEpisode;
     production: EpisodeProduction | undefined;
@@ -4475,6 +4513,8 @@ export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFai
     onSwitchToAssets?: () => void;
     onChanged?: () => void;
     busy: boolean;
+    /** 本集正在重新改编：按集独立，改编按钮各自显示 loading，不占用其它集。 */
+    rescripting?: boolean;
     /** 流水线暂停真值：暂停不是硬闸门——点生成会先自动恢复制作（影策暂停横幅同语义）。 */
     paused?: boolean;
     /** 把全局暂停转回运行（卡片/批量生成点击时先调用）。 */
@@ -4482,7 +4522,7 @@ export function StudioDetailPanel({ tab, episode, production, clipMedia, clipFai
     processJobs?: ProcessJobView[];
     onDiscussShot?: (shot: { title?: string; visual?: string; camera?: unknown; duration_seconds?: number; dialogues?: unknown }) => void;
 }) {
-    if (tab === "story") return <ScriptPanel ep={episode} production={production} dramaId={dramaId} onRescript={onRescript} onChanged={onChanged} busy={busy} processJobs={processJobs} onDiscussShot={onDiscussShot} />;
-    if (tab === "shots") return <ShotsPanel ep={episode} production={production} clipMedia={clipMedia} clipFailureByTarget={clipFailureByTarget} dramaId={dramaId} assetNames={assetNames} onRescript={onRescript} onOpenCanvas={onOpenCanvas} onSwitchToScript={onSwitchToScript} onWriteSegmentPrompt={onWriteSegmentPrompt} onSaveSegmentPrompt={onSaveSegmentPrompt} onListSegmentVersions={onListSegmentVersions} onSetSegmentCurrentVideo={onSetSegmentCurrentVideo} onListSegmentVideoModels={onListSegmentVideoModels} onSetSegmentVideoModel={onSetSegmentVideoModel} onChanged={onChanged} onApproveVideo={onApproveVideo} onSwitchToAssets={onSwitchToAssets} busy={busy} paused={paused} onAutoResume={onAutoResume} onDiscussShot={onDiscussShot} />;
+    if (tab === "story") return <ScriptPanel ep={episode} production={production} dramaId={dramaId} onRescript={onRescript} onChanged={onChanged} busy={busy} rescripting={rescripting} processJobs={processJobs} onDiscussShot={onDiscussShot} />;
+    if (tab === "shots") return <ShotsPanel ep={episode} production={production} clipMedia={clipMedia} clipFailureByTarget={clipFailureByTarget} dramaId={dramaId} assetNames={assetNames} onRescript={onRescript} onOpenCanvas={onOpenCanvas} onSwitchToScript={onSwitchToScript} onWriteSegmentPrompt={onWriteSegmentPrompt} onSaveSegmentPrompt={onSaveSegmentPrompt} onListSegmentVersions={onListSegmentVersions} onSetSegmentCurrentVideo={onSetSegmentCurrentVideo} onListSegmentVideoModels={onListSegmentVideoModels} onSetSegmentVideoModel={onSetSegmentVideoModel} onChanged={onChanged} onApproveVideo={onApproveVideo} onSwitchToAssets={onSwitchToAssets} busy={busy} rescripting={rescripting} paused={paused} onAutoResume={onAutoResume} onDiscussShot={onDiscussShot} />;
     return <FinalPanel ep={episode} production={production} clipMedia={clipMedia} onCompose={onCompose} onExportJianying={onExportJianying} onOpenCanvas={onOpenCanvas} busy={busy} />;
 }

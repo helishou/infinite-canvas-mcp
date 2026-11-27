@@ -20,6 +20,8 @@ import { useAssetStore, type ImageAsset } from "@/stores/use-asset-store";
 import { resolveModelForCapability, useConfigStore } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
 import { cn } from "@/lib/utils";
+import { withArtStyle } from "@basketikun/canvas-agent/drama/art-style";
+import { artStyleOptions } from "@/pages/drama/planning-topic-logic";
 
 /**
  * 剧目级造型——真值在画布角色节点 metadata.characterImages[]，不在别处另建副本。
@@ -50,6 +52,11 @@ type LookImage = {
     status?: "queued" | "running" | "failed" | "ready";
     error?: string;
     generationLogId?: string;
+    /** 影策 CastImageFields：单独风格与参考图生成提示词，真值与 outfit 一起存在画布 characterImages[]。 */
+    imageStyleId?: string;
+    imageStyleName?: string;
+    imageStylePrompt?: string;
+    imagePrompt?: string;
 };
 type LookStatus = NonNullable<LookImage["status"]>;
 type LookStatusInfo = { status: LookStatus; error?: string; generationLogId?: string };
@@ -107,9 +114,16 @@ type LookForm = {
     storageKey: string;
     url: string;
     role: string;
+    /** 影策 CastImageFields：单独风格开关与风格/提示词字段。 */
+    hasOwnStyle: boolean;
+    imageStyleId: string;
+    imageStyleName: string;
+    imageStylePrompt: string;
+    imagePrompt: string;
 };
-const emptyForm: LookForm = { name: "", appearance: "", from: "", to: "", storageKey: "", url: "", role: "" };
+const emptyForm: LookForm = { name: "", appearance: "", from: "", to: "", storageKey: "", url: "", role: "", hasOwnStyle: false, imageStyleId: "", imageStyleName: "", imageStylePrompt: "", imagePrompt: "" };
 const MAX_EXTRA_LOOKS = 6;
+const styleSlug = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "custom";
 
 function chapterLabel(from?: number, to?: number) {
     if (from && to) return `第 ${from}–${to} 章`;
@@ -423,14 +437,14 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
     };
 
     /** 真提交单设定 restyle：先查真实影响集→用户确认→后端标脏引用段，正在生成的段由后端跳过。 */
-    const doRestyle = async (ch: CharacterLook) => {
+    const doRestyle = async (ch: CharacterLook, lookId?: string) => {
         if (!dramaId) {
             message.warning("当前未定位到剧目，无法查询影响段；请从剧目页进入造型面板");
             return;
         }
         setRestyleSubmitting(true);
         try {
-            const result = await fetchDramaCastImpact(dramaId, ch.castId);
+            const result = await fetchDramaCastImpact(dramaId, ch.castId, undefined, undefined, lookId);
             const generated = result.targets.filter((target) => target.hasVideo && !target.inputOutdated);
             if (!generated.length) {
                 message.info(result.segments
@@ -450,7 +464,7 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                 });
             });
             if (!confirmed) return;
-            const submitted = await restyleDramaCast(dramaId, ch.castId, { restyleSegments: true });
+            const submitted = await restyleDramaCast(dramaId, ch.castId, { restyleSegments: true, lookId });
             if (submitted.affectedSegments) {
                 message.success(`已提交 ${submitted.affectedSegments} 个剧情段重新生成（引用该角色的视频已标脏）`);
             } else {
@@ -465,7 +479,7 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
     };
 
     /** 真实写回画布角色节点：按每张造型图的来源节点分组写回，归一化聚合不混写节点。 */
-    const commit = async (ch: CharacterLook, images: LookImage[], primaryIndex: number, withRestyle: boolean) => {
+    const commit = async (ch: CharacterLook, images: LookImage[], primaryIndex: number, withRestyle: boolean, lookId?: string) => {
         setSaving(true);
         try {
             // 按来源节点分组；新增/无来源的图写到主卡节点。
@@ -491,7 +505,7 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
             // 刷新后造型数组可能增删，清掉按索引定位的选中态，避免右栏指到别的造型。
             setSelectedLook(null);
             setRefreshTick((t) => t + 1);
-            if (withRestyle) await doRestyle(ch);
+            if (withRestyle) await doRestyle(ch, lookId);
         } catch (error) {
             message.error(`保存造型失败：${(error as Error).message}`);
         } finally {
@@ -512,6 +526,9 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
             name: im.outfit || im.name || "", appearance: im.outfitDescription || "",
             from: im.fromChapter ? String(im.fromChapter) : "", to: im.toChapter ? String(im.toChapter) : "",
             storageKey: im.storageKey || "", url: im.url || "", role: im.role || "",
+            hasOwnStyle: Boolean(im.imageStyleId || im.imageStyleName || im.imageStylePrompt),
+            imageStyleId: im.imageStyleId || "", imageStyleName: im.imageStyleName || "",
+            imageStylePrompt: im.imageStylePrompt || "", imagePrompt: im.imagePrompt || "",
         });
         setEditing({ castId: ch.castId, index });
     };
@@ -543,6 +560,25 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
             || (focusLook.castName && c.castName === focusLook.castName));
         if (target) setSelectedCast(target.castId);
     }, [focusLook, characters]);
+    /** 影策 CastForm 的 dirty：保存按钮只有真有改动才可点。 */
+    const formDirty = Boolean(editing && selected && (() => {
+        const prior: LookImage | undefined = editing.index === null ? undefined : selected.images[editing.index];
+        return form.name.trim() !== String(prior?.outfit || prior?.name || "").trim()
+            || form.appearance.trim() !== String(prior?.outfitDescription || "").trim()
+            || (Number(form.from) || 0) !== (prior?.fromChapter || 0)
+            || (Number(form.to) || 0) !== (prior?.toChapter || 0)
+            || form.hasOwnStyle !== Boolean(prior?.imageStyleId || prior?.imageStyleName || prior?.imageStylePrompt)
+            || form.imageStyleName !== (prior?.imageStyleName || "")
+            || form.imageStylePrompt !== (prior?.imageStylePrompt || "")
+            || form.imagePrompt !== (prior?.imagePrompt || "");
+    })());
+    /** 重新编排提示词：影策 rebuildDramaCastImagePrompt 的本地纯字符串等价（withArtStyle，不调模型）。 */
+    const rebuildPrompt = () => {
+        if (!form.appearance.trim()) return void message.warning("请先填写外貌描述");
+        const style = form.hasOwnStyle ? (form.imageStylePrompt || form.imageStyleName) : artStyle;
+        setForm((f) => ({ ...f, imagePrompt: withArtStyle(f.appearance.trim(), style || "") }));
+        message.success("提示词已按外貌与画风重新编排，保存后用于生成参考图");
+    };
     const submitForm = () => {
         if (!selected || !editing || editing.castId !== selected.castId) return;
         // 影策 LookForm：valid = name.trim() && appearance.trim()，两项都必填。
@@ -562,10 +598,19 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
             ...(Number(form.to) ? { toChapter: Number(form.to) } : { toChapter: undefined }),
             id: prior.id || `look-${nanoid()}`,
             ...(form.storageKey ? { locked: true } : {}),
+            // 影策 CastImageFields：关掉单独风格就清空三个字段；提示词保留用户编排结果。
+            ...(form.hasOwnStyle
+                ? {
+                    imageStyleId: form.imageStyleId || styleSlug(form.imageStyleName || artStyle || ""),
+                    imageStyleName: form.imageStyleName || artStyle || "",
+                    imageStylePrompt: form.imageStylePrompt || withArtStyle("", form.imageStyleName || artStyle || ""),
+                }
+                : { imageStyleId: undefined, imageStyleName: undefined, imageStylePrompt: undefined }),
+            ...(form.imagePrompt.trim() ? { imagePrompt: form.imagePrompt.trim() } : { imagePrompt: undefined }),
         };
         const next = [...selected.images];
         if (editing.index === null) next.push(im); else next[editing.index] = im;
-        void commit(selected, next, selected.primaryIndex, restyle);
+        void commit(selected, next, selected.primaryIndex, restyle, im.id);
     };
     const removeLook = (index: number) => {
         if (!selected) return;
@@ -620,11 +665,15 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
         const srcNodeId = im._srcNodeId || ch.nodeId;
         const srcCanvasId = im._srcCanvasId || ch.canvasId;
         const srcCastId = im._srcCastId || ch.castId;
-        const prompt = [
+        // 影策 CastImageFields：用户编排/手写的 imagePrompt 是完整提示词，直接采用；
+        // 没有才按外观拼装，并注入单独风格（优先）或全剧画风。
+        const fallback = [
             identity ? `角色本体设定：${identity}` : "",
             `本次造型：${lookName}${outfit ? ` —— ${outfit}` : ""}`,
             "五官与脸型严格沿用参考的角色本体图，保持同一张脸；只改变服装、发型与妆容。",
         ].filter(Boolean).join("\n");
+        const prompt = String(im.imagePrompt || "").trim()
+            || withArtStyle(fallback, String(im.imageStylePrompt || im.imageStyleName || artStyle || ""));
 
         const stateKey = lookStateKey(im, ch.castId, index);
         setInstantStatuses((s) => ({ ...s, [stateKey]: { status: "running" } }));
@@ -729,6 +778,17 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
     const activeLookName = selected && activeLookImage ? lookLabel(selected, activeLookImage) : "";
     const activeLookStorageKey = activeLookImage?.storageKey || "";
     const activeLookStatus = selected && activeLookImage && activeLookIndex !== null ? lookStatus(selected, activeLookImage, activeLookIndex) : null;
+    /** 造型粒度影响集：按 characterImages[].id 精确反查引用段（后端 planRestyle lookId）。 */
+    useEffect(() => {
+        if (!dramaId || !selected || !activeLookImage?.id) { setImpact(null); return; }
+        let disposed = false;
+        setImpactLoading(true);
+        fetchDramaCastImpact(dramaId, selected.castId, undefined, undefined, activeLookImage.id)
+            .then((result) => { if (!disposed) setImpact(result); })
+            .catch(() => { if (!disposed) setImpact(null); })
+            .finally(() => { if (!disposed) setImpactLoading(false); });
+        return () => { disposed = true; };
+    }, [dramaId, selected?.castId, activeLookImage?.id, impactTick]);
     /** 当前造型的版本记录（真值：生成该形象图的 generation_logs，按时间倒序，首条为「当前」）。 */
     const activeLookVersions = activeLookStorageKey ? lookVersions[`log:${activeLookStorageKey}`] || [] : [];
     const onGenerateActiveLook = () => { if (activeLookIndex !== null && activeLookImage) triggerGenerate(activeLookIndex, activeLookImage); };
@@ -854,7 +914,13 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                             {/* 封面真值 = 该造型 storageKey；无图只留占位，不再用「待生成」徽标刷屏。 */}
                                             <span className="relative block aspect-[4/3] overflow-hidden bg-muted/40" data-studio-look-cover>
                                                 {im.storageKey ? (
-                                                    <img src={backendThumbUrl(im.storageKey, 240)} alt={lookName} className="size-full object-cover" loading="lazy" draggable={false} />
+                                                    // 影策 drama-look-thumb：缩略图点击只放大预览，不触发卡片编辑。
+                                                    <span role="button" tabIndex={0} aria-label={`放大查看${lookName}`}
+                                                        onClick={(e) => { e.stopPropagation(); setPreview({ key: im.storageKey!, title: `${ch.castName} · ${lookName}` }); }}
+                                                        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setPreview({ key: im.storageKey!, title: `${ch.castName} · ${lookName}` }); } }}
+                                                        className="block size-full cursor-zoom-in">
+                                                        <img src={backendThumbUrl(im.storageKey, 240)} alt={lookName} className="size-full object-cover" loading="lazy" draggable={false} />
+                                                    </span>
                                                 ) : (
                                                     <span className="grid size-full place-items-center text-muted-foreground"><Shirt className="size-6 opacity-40" /></span>
                                                 )}
@@ -935,6 +1001,48 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                     <textarea id="studio-look-appearance" aria-label="外貌描述" value={form.appearance} maxLength={1000} onChange={(e) => setForm({ ...form, appearance: e.target.value })} rows={3}
                                         placeholder="这套造型的服装、发型与妆容；五官脸型沿用角色本体"
                                         className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 text-[13px] leading-[21px] outline-none" />
+                                    {/* 影策 CastImageFields：单独风格开关 + 风格选择器 + 画风约束 */}
+                                    <div className="space-y-2 rounded-[12px] border border-border bg-background/50 p-3" data-studio-look-style>
+                                        <button type="button" onClick={() => setForm((f) => ({ ...f, hasOwnStyle: !f.hasOwnStyle }))} className="flex w-full items-center gap-2 text-left text-[11px]">
+                                            <span className={cn("flex size-3.5 items-center justify-center rounded border", form.hasOwnStyle ? "border-primary bg-primary text-primary-foreground" : "border-border")}>
+                                                {form.hasOwnStyle ? "✓" : ""}
+                                            </span>
+                                            为此造型单独设置风格
+                                        </button>
+                                        {form.hasOwnStyle ? (
+                                            <>
+                                                <select value={form.imageStyleName || artStyleOptions("")[0] || ""} aria-label="造型风格"
+                                                    onChange={(e) => {
+                                                        const name = e.target.value;
+                                                        setForm((f) => ({ ...f, imageStyleName: name, imageStyleId: styleSlug(name), imageStylePrompt: withArtStyle("", name) }));
+                                                    }}
+                                                    className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 text-[13px] outline-none" data-studio-look-style-select>
+                                                    {artStyleOptions(form.imageStyleName).map((s) => <option key={s} value={s}>{s}</option>)}
+                                                </select>
+                                                <textarea value={form.imageStylePrompt} aria-label="单独风格画风约束" rows={2}
+                                                    onChange={(e) => setForm((f) => ({ ...f, imageStylePrompt: e.target.value }))}
+                                                    placeholder="单独风格的画风约束语句（留空则沿用所选风格名）"
+                                                    className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 text-[13px] leading-[21px] outline-none" />
+                                            </>
+                                        ) : (
+                                            <span className="block text-[11px] text-foreground/40">沿用作品风格；穿越、幼年或不同世界的造型可在此单独选择。</span>
+                                        )}
+                                    </div>
+                                    {/* 影策 CastImageFields：参考图生成提示词 + 重新编排（本地纯字符串，不调模型） */}
+                                    <div className="space-y-1" data-studio-look-image-prompt>
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className="text-[11px] text-muted-foreground">参考图生成提示词</span>
+                                            <button type="button" onClick={rebuildPrompt} disabled={!form.appearance.trim()}
+                                                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-primary/10 disabled:opacity-40">
+                                                <RefreshCw className="size-3" /> 重新编排提示词
+                                            </button>
+                                        </div>
+                                        <textarea value={form.imagePrompt} aria-label="参考图生成提示词" rows={3}
+                                            onChange={(e) => setForm((f) => ({ ...f, imagePrompt: e.target.value }))}
+                                            placeholder="留空按外观、风格和参考图方案自动编排；也可填写自己的生图要求"
+                                            className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 text-[13px] leading-[21px] outline-none" />
+                                        <small className="block text-[11px] text-muted-foreground">切换风格后可重新编排提示词。编排不调用模型；保存设定后，点击生成才开始生图。</small>
+                                    </div>
                                     <div className="flex flex-wrap items-center gap-2 text-[11px]" data-studio-look-image-source>
                                         <input ref={(el) => { customRef.current = el; }} type="file" accept="image/*" hidden data-studio-look-upload
                                             onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadCustom(f); }} />
@@ -960,15 +1068,21 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                     {/* 单条造型的引用段统计：后端只提供按角色的影响集（/cast/:assetId/impact），
                                         拿不到造型粒度就显示 —，不用角色数字冒充造型数字。 */}
                                     <label className="flex flex-wrap items-center gap-1.5 border-t border-border pt-2 text-[11px] text-muted-foreground" data-studio-look-restyle-look
-                                        title="勾选后保存设定会把引用该角色的剧情段视频标脏（后端只有角色粒度影响集）">
+                                        title="勾选后保存设定会把明确引用这套造型的剧情段视频标脏（按 outfitId 精确反查）">
                                         <input type="checkbox" checked={restyle} onChange={(e) => setRestyle(e.target.checked)} />
                                         让引用它的剧情段视频重新生成
-                                        <span className="ml-auto font-medium text-foreground" data-studio-look-restyle-look-impact>— 集 · — 段</span>
-                                        <small className="w-full">单条造型的引用段暂无统计口径：后端影响集只按角色统计（角色行见页头）。</small>
+                                        <span className="ml-auto font-medium text-foreground" data-studio-look-restyle-look-impact>
+                                            {impactLoading ? "查询中…" : impact ? `${impact.episodes} 集 · ${impact.segments} 段` : "0 集 · 0 段"}
+                                        </span>
+                                        <small className="w-full">
+                                            {impact
+                                                ? `按造型图 ID 精确反查：${impact.targets.filter(t => t.hasVideo && !t.inputOutdated && !t.hasActiveTask).length} 段已出片待重做；不拿角色级命中冒充。`
+                                                : "按造型图 ID（characterImages[].id）精确反查引用段；无引用时如实显示 0。"}
+                                        </small>
                                     </label>
 
                                     <div className="flex flex-wrap items-center gap-1.5" data-studio-look-actions>
-                                        <button type="button" onClick={submitForm} disabled={saving || !form.name.trim() || !form.appearance.trim()} data-studio-look-save
+                                        <button type="button" onClick={submitForm} disabled={saving || !formDirty || !form.name.trim() || !form.appearance.trim()} data-studio-look-save
                                             className="flex h-7 items-center gap-1 rounded-md bg-foreground px-2 text-[12px] font-medium text-background disabled:opacity-50">
                                             <Check className="size-3.5" /> {saving ? "保存中…" : "保存设定"}
                                         </button>
@@ -983,17 +1097,19 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                         </button>
                                         {activeLookImage ? (
                                             <button type="button" onClick={onGenerateActiveLook} data-studio-look-generate
-                                                disabled={!baseImage?.storageKey || activeLookStatus?.busy}
+                                                disabled={!baseImage?.storageKey || activeLookStatus?.busy || formDirty}
                                                 title={!baseImage?.storageKey
                                                     ? "请先生成或上传角色本体参考图，造型图需要以它为底图"
-                                                    : activeLookStatus?.failed
-                                                        ? "上次造型图生成失败，点此重试"
-                                                        : activeLookImage.locked
-                                                            ? "已锁定：重新生成会覆盖当前造型图"
-                                                            : activeLookImage.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
+                                                    : formDirty
+                                                        ? "设定已修改，请先保存再生成"
+                                                        : activeLookStatus?.failed
+                                                            ? "上次造型图生成失败，点此重试"
+                                                            : activeLookImage.locked
+                                                                ? "已锁定：重新生成会覆盖当前造型图"
+                                                                : activeLookImage.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
                                                 className={cn("flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-muted-foreground hover:bg-muted disabled:opacity-50",
                                                     activeLookStatus?.busy && "text-primary", activeLookStatus?.failed && "text-rose-500")}>
-                                                <Play className="size-3.5" /> {activeLookStatus?.busy ? "生成中…" : "重新生成"}
+                                                <Play className="size-3.5" /> {activeLookStatus?.busy ? "生成中…" : formDirty ? "保存后生成" : activeLookImage.storageKey ? "重新生成" : "生成造型图"}
                                             </button>
                                         ) : null}
                                         <button type="button" onClick={onOpenCanvas}

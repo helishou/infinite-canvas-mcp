@@ -1066,20 +1066,16 @@ export default function NewDramaPage() {
                                     <span className="text-[10px] text-muted-foreground">{t("newDrama.page.microcredits")}</span>
                                 </FieldRow>
                                 <FieldRow label={t("newDrama.page.concurrent")} marker={"concurrency"} hint={t("newDrama.page.concurrentHint")}>
-                                    {([["text", t("newDrama.page.concurrentText")], ["video", t("newDrama.page.concurrentVideo")], ["assemble", t("newDrama.page.concurrentAssemble")]] as const).map(([key, label]) => (
-                                        <span key={key} className="inline-flex items-center gap-1.5" data-new-drama-concurrency={key}>
-                                            <span className="text-[10px] text-muted-foreground">{label}</span>
-                                            <InputNumber
-                                                className="!w-[72px]"
-                                                size="small"
-                                                min={1}
-                                                max={8}
-                                                aria-label={label}
-                                                value={studio.concurrency[key]}
-                                                onChange={(value) => patchStudio({ concurrency: { ...studio.concurrency, [key]: Math.max(1, Math.min(8, Math.round(Number(value) || 1))) } })}
-                                            />
-                                        </span>
-                                    ))}
+                                    <InputNumber
+                                        className="!w-[92px]"
+                                        size="small"
+                                        min={1}
+                                        max={16}
+                                        aria-label={t("newDrama.page.concurrent")}
+                                        data-new-drama-concurrency="concurrency"
+                                        value={studio.concurrency}
+                                        onChange={(value) => patchStudio({ concurrency: Math.max(1, Math.min(16, Math.round(Number(value) || 4))) })}
+                                    />
                                 </FieldRow>
                                 <FieldRow label={t("newDrama.page.backgroundMusic")} marker={"backgroundMusic"} hint={t("newDrama.page.backgroundMusicHint")}>
                                     <Switch size="small" checked={plan.backgroundMusicEnabled === true} onChange={(on) => patchPlan({ backgroundMusicEnabled: on })} />

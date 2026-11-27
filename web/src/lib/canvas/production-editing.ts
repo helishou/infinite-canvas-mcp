@@ -2,7 +2,7 @@ import type { CanvasNodeData } from "@/types/canvas";
 import type { CanvasProductionEditing, CanvasProductionStoryboardEditor, CanvasStoryboardTracks } from "@/types/canvas-plugin";
 import { productionSceneEntries, shotStoryboardKeyframe, type DirectorProduction, type ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
 import { nanoid } from "nanoid";
-import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchCanvasStoryboardTracks, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
+import { applyProductionCompilation, BackendApiError, compileProduction, editEpisodeProduction, fetchBackendProject, fetchCanvasStoryboardTracks, fetchEpisodeProduction, fetchProductionCanvasContext, fetchProductionCompilation, fetchProductionWorkbench, prepareProductionTargets, type ProductionCompilationStatus, type ProductionTarget } from "@/services/backend-api";
 
 type Input = Parameters<CanvasProductionEditing["reverseSyncPrompt"]>[0];
 type Handler = CanvasProductionEditing["reverseSyncPrompt"];
@@ -429,6 +429,9 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
             ...(override?.mode === "manual" ? { mode: "manual" as const, order: (override.order as string[]) || [], disabled: (override.disabled as string[]) || [] } : {}),
             additions: input.additions, additionsMode: "replace",
         }]);
+        // 单一真值：写完源稿立刻 prepare，把参考直接投影进画布 Clip，不靠读时派生。
+        const fresh = await fetchEpisodeProduction(owner);
+        await prepareProductionTargets(owner, Number(fresh.production?.revision || 0), [`segment:${input.targetId}`], `studio-canvas-ref-${nanoid()}`);
         if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("drama-production:refresh-storyboard-track", { detail: { canvasId: projectId } }));
         return { sourceSaved: true };
     }, replaceStoryboardTrack: async (input: CanvasProductionStoryboardEditor) => {

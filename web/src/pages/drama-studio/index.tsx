@@ -1,4 +1,4 @@
-import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, startTransition, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Checkbox, Input } from "antd";
 import {
@@ -73,8 +73,6 @@ import {
 import { StudioDetailPanel, type DetailTab } from "./studio-detail-panel";
 import { deriveReviewBanners } from "./studio-review-banner";
 import type { DirectorWorkspace } from "@/pages/drama/director-panel";
-import { StudioChapterPickerModal } from "./studio-chapter-picker";
-import { StudioVersionCompare } from "./studio-version-compare";
 import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
 import { orderStudioQueue } from "./studio-queue-order";
 
@@ -88,6 +86,8 @@ const StudioInboxTab = lazy(() => import("./studio-inbox-tab").then((m) => ({ de
 const StudioSettingsTab = lazy(() => import("./studio-settings-tab").then((m) => ({ default: m.StudioSettingsTab })));
 const StudioGenesis = lazy(() => import("./studio-genesis").then((m) => ({ default: m.StudioGenesis })));
 const AdaptStoryboardPanel = lazy(() => import("@/pages/drama/adapt-storyboard-panel").then((m) => ({ default: m.AdaptStoryboardPanel })));
+const StudioChapterPickerModal = lazy(() => import("./studio-chapter-picker").then((m) => ({ default: m.StudioChapterPickerModal })));
+const StudioVersionCompare = lazy(() => import("./studio-version-compare").then((m) => ({ default: m.StudioVersionCompare })));
 
 /** 分块加载占位：与原有「加载制作稿…」同款，不新增布局跳动。 */
 function TabChunkFallback() {
@@ -136,7 +136,12 @@ const compact = (value: string) => value.replace(/\s+/g, "");
 /** 影策 AddEpisodeModal：单集原文文件上限 2MB，字数口径与后端（去空白）一致。 */
 const EPISODE_FILE_MAX_BYTES = 2 * 1024 * 1024;
 const EPISODE_TEXT_FILE = /\.(txt|md|markdown|csv|tsv)$/i;
-const episodeSourceChars = (text: string) => [...text.replace(/\s/g, "")].length;
+/** 与后端去空白字数口径一致；逐字符计数，避免长原文每次击键都分配百万级字符数组。 */
+const episodeSourceChars = (text: string) => {
+    let count = 0;
+    for (const char of text) if (!/\s/.test(char)) count += 1;
+    return count;
+};
 
 /** 建集弹窗状态：add 追加到末尾；insert 插到锚点集前/后。 */
 type EpisodeDraft = { mode: "add" | "insert"; no?: number; position?: "before" | "after" };
@@ -561,6 +566,27 @@ type PipelinePauseLite = {
 const pipelinePauseOf = (status: DramaPipelineStatus | null | undefined): PipelinePauseLite | undefined =>
     (status as { pause?: PipelinePauseLite } | null | undefined)?.pause;
 
+/**
+ * 流水线轮询签名：3s 回包每次都是新对象，只有界面真正消费的字段变化才更新 state。
+ * 刻意不含 last_tick_at / logs 等调度器每次 tick 都会变的非展示字段，否则守卫形同虚设。
+ */
+function pipelineStateSignature(status: DramaPipelineStatus | null | undefined): string {
+    if (!status) return "";
+    const pause = (status as DramaPipelineStatus & { pause?: { paused?: boolean; reason?: string | null } }).pause;
+    const jobs = (status.jobs || []).map((job) => [
+        job.id, job.stage, job.kind, job.status, job.attempt, job.episodeId, job.error,
+        job.retryExhausted, job.createdAt, job.startedAt, job.finishedAt, job.durationMs,
+        job.runtimeTaskId, job.waitReason, Array.isArray(job.attempts) ? job.attempts.length : 0,
+    ].join("\u0001")).join("\u0002");
+    return [
+        status.pipeline?.status, status.pipeline?.review_mode, status.pipeline?.media_mode,
+        status.pipeline?.pause_reason, status.pipeline?.revision,
+        (status.approvals || []).join(","), (status.releasedMedia || []).join(","), status.sampleMode,
+        status.budget?.limitMicrocredits, status.budget?.spentMicrocredits, status.budget?.exceeded,
+        pause?.paused, pause?.reason, jobs,
+    ].join("\u0003");
+}
+
 function DramaStudioInner() {
     const navigate = useNavigate();
     const canvasHost = useWorkbenchCanvas();
@@ -689,35 +715,8 @@ function DramaStudioInner() {
     const [queueAttemptsLoading, setQueueAttemptsLoading] = useState(false);
     /** 详情日志与选中作业的关联口径：job=按 runtimeTaskId 命中本作业；episode=仅本集上下文（非本作业）。 */
     const [queueLogScope, setQueueLogScope] = useState<"job" | "episode" | "none">("none");
-    /** 「全部」页签的成功生成历史（近期 generation_logs.status=success）；只读，不参与进行中/失败过滤。 */
-    const [queueHistory, setQueueHistory] = useState<BackendGenerationLog[]>([]);
-    const [queueHistoryLoading, setQueueHistoryLoading] = useState(false);
-    const [queueHistoryError, setQueueHistoryError] = useState("");
-    // 队列面板打开时每 3s 刷新一次（对齐影策 queue-bar 的 refetchInterval），关闭后停止。
-    useEffect(() => {
-        if (!queueOpen) return;
-        let alive = true;
-        let timer: number | null = null;
-        const load = (first: boolean) => {
-            if (first) { setQueueHistoryLoading(true); setQueueHistoryError(""); }
-            // 队列「全部」要同时看到活跃任务与历史：成功历史 + 排队/运行中。失败项由待处理 inbox 承载，不在这里重复。
-            void fetchBackendGenerationLogs({ dramaId: dramaId ?? undefined, limit: 120, summary: true })
-                .then((res) => {
-                    if (!alive) return;
-                    setQueueHistory((res.logs || []).filter((log) => ["success", "running", "queued"].includes(String(log.status))));
-                    setQueueHistoryError("");
-                })
-                .catch((error: unknown) => {
-                    if (!alive) return;
-                    if (first) setQueueHistory([]);
-                    setQueueHistoryError((error as Error)?.message || "未知错误");
-                })
-                .finally(() => { if (alive && first) setQueueHistoryLoading(false); });
-        };
-        load(true);
-        timer = window.setInterval(() => load(false), 3000);
-        return () => { alive = false; if (timer) window.clearInterval(timer); };
-    }, [queueOpen, dramaId]);
+    // 队列行只来自流水线作业（影策 DramaJob）：generation_logs 是单次模型请求，
+    // 在作业详情里按 runtimeTaskId 查看，不单独占一行（影策队列没有这种行）。
     /** 影策 job-detail.tsx:105-128 的 facts：只取该作业自己的真实字段，缺失显示「—」。 */
     const queueFacts = useMemo(() => {
         // 后端已给每个 job 补 createdAt/startedAt/finishedAt/durationMs：facts 只用作业自身字段，
@@ -842,6 +841,14 @@ function DramaStudioInner() {
     const [studioSettings, setStudioSettings] = useState<StudioProductionSettings>(() => loadStudioSettings(dramaId));
     const [savingSettings, setSavingSettings] = useState(false);
     const [busy, setBusy] = useState<string | null>(null);
+    // 重新改编按集独立（影策每集一个 rescript.isPending）：改编 A 集不占住 B 集的改编按钮，
+    // 也不把全局 busy 置真影响其它页签操作。按钮各自显示「改编中…」loading。
+    const [rescriptingIds, setRescriptingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+    const markRescripting = (id: string, on: boolean) => setRescriptingIds((prev) => {
+        const next = new Set(prev);
+        if (on) next.add(id); else next.delete(id);
+        return next;
+    });
     // 集标题内联编辑（对齐影策 detail.tsx：回车保存 / Esc 取消 / 失焦保存）
     const [renaming, setRenaming] = useState(false);
 
@@ -850,6 +857,7 @@ function DramaStudioInner() {
     const [episodeTitle, setEpisodeTitle] = useState("");
     const [episodeFormat, setEpisodeFormat] = useState<DramaSourceFormat>("novel");
     const [episodeText, setEpisodeText] = useState("");
+    const episodeSourceCharCount = useMemo(() => episodeSourceChars(episodeText.trim()), [episodeText]);
     const episodeFileRef = useRef<HTMLInputElement>(null);
 
     // 删集确认弹窗：客户端初判可先给快速确认，最终以服务端 409 为准动态切换成输入确认。
@@ -864,9 +872,10 @@ function DramaStudioInner() {
         if (!dramaId || !connected) { setPipeline(null); return; }
         let alive = true;
         const poll = () => {
+            if (document.hidden) return;
             void fetchDramaPipelineStatus(dramaId).then(s => {
                 if (!alive || !s?.ok) return;
-                setPipeline(s);
+                setPipeline(prev => pipelineStateSignature(prev) === pipelineStateSignature(s) ? prev : s);
                 // 初始化（每剧目一次）用后端 pause 真值校正本地暂停态：刷新后按钮不会与后端相反。
                 const pause = pipelinePauseOf(s);
                 if (pause && pause.paused !== undefined && pauseSyncedRef.current !== dramaId) {
@@ -930,13 +939,9 @@ function DramaStudioInner() {
             ...(studioSettings.assetPromptTemplates && Object.values(studioSettings.assetPromptTemplates).some((v) => String(v || "").trim())
                 ? { assetPromptTemplates: Object.fromEntries(Object.entries(studioSettings.assetPromptTemplates).filter(([, v]) => String(v || "").trim())) }
                 : {}),
-            // 前端 assemble 对应后端 render 池；image 池后端暂未使用，不下发。
             budgetMicrocredits: studioSettings.budgetMicrocredits, // 影策预算护栏，0/不设=不限
-            concurrency: {
-                text: studioSettings.concurrency.text,
-                video: studioSettings.concurrency.video,
-                render: studioSettings.concurrency.assemble,
-            },
+            // 影策单值并发：后端 text/image/video/render 四池各自按它计数。
+            concurrency: studioSettings.concurrency,
         },
     };
     /** 全自动已全部完成：所有 job 都 succeeded（此时点「全自动」是幂等的，不该显示成还在跑）。 */
@@ -1104,6 +1109,15 @@ function DramaStudioInner() {
 
     const selectedId = query.get("episodeId");
     const current: StudioEpisode | undefined = episodes.find((ep) => ep.id === selectedId) || episodes[0];
+    const episodeById = useMemo(() => new Map(episodes.map((ep) => [ep.id, ep])), [episodes]);
+    /** 传给详情面板的作业行：父级每帧重建数组会让整棵剧本/分镜子树跟着重渲。 */
+    const processJobs = useMemo(
+        () => (pipeline?.jobs || []).filter((job) => job.episodeId === current?.id).map((job) => ({
+            id: String(job.id), stage: String(job.stage), status: String(job.status),
+            attempt: Number(job.attempt) || 0, error: job.error ? String(job.error) : null,
+        })),
+        [pipeline?.jobs, current?.id],
+    );
     // 影策 episode-rail.tsx:94：切换集时把当前集滚进可视范围，长列表不丢位置（仅列表模式）。
     useEffect(() => {
         if (view !== "list") return;
@@ -1113,7 +1127,10 @@ function DramaStudioInner() {
 
     // ── 顶部审阅/放行横幅（对齐影策 detail.tsx:374-409 / 679-729）──────────────
     // 判定收敛到纯函数 studio-review-banner.ts，只吃 status() 真实字段与每集派生状态。
-    const { awaitingMedia, reviewing, sampleReview, sampleWaiting } = deriveReviewBanners(pipeline, episodes, current);
+    const { awaitingMedia, reviewing, sampleReview, sampleWaiting } = useMemo(
+        () => deriveReviewBanners(pipeline, episodes, current),
+        [pipeline, episodes, current],
+    );
     const firstEpisode = episodes.find((ep) => ep.no === 1);
 
     /** 横幅「生成本集视频」：本地 media 闸门只认 all/assets，episodes 目标不参与 jobAllowed，
@@ -1478,7 +1495,8 @@ function DramaStudioInner() {
     };
 
     /** 按集核查/资产库：读某集制作稿 source + revision + 生成状态（真实数据，不经第二份真值）。 */
-    const productionOf = async (episodeId: string): Promise<{ source: Record<string, unknown> | null; revision: number; assets: Record<string, unknown>; assetCards: unknown[]; artifacts: Array<Record<string, unknown>> } | null> => {
+    // 稳定引用：作为 StudioAssetsTab 汇总 effect 的依赖，渲染体内新建会让每次父级重渲染都重拉全剧制作稿。
+    const productionOf = useCallback(async (episodeId: string): Promise<{ source: Record<string, unknown> | null; revision: number; assets: Record<string, unknown>; assetCards: unknown[]; artifacts: Array<Record<string, unknown>> } | null> => {
         try {
             const result = await fetchEpisodeProduction(episodeId as never);
             const draft = (result.production?.draft || {}) as Record<string, unknown>;
@@ -1493,7 +1511,7 @@ function DramaStudioInner() {
                 artifacts: Array.isArray(director.artifacts) ? director.artifacts as Array<Record<string, unknown>> : [],
             };
         } catch { return null; }
-    };
+    }, []);
 
     /** 与本集「小影/导演」讨论：复用本地导演 agent 面板，带上剧目与本集上下文。 */
     const discussWithDirector = () => {
@@ -1702,17 +1720,10 @@ function DramaStudioInner() {
                     setPausedPersist(false);
                     message.success("已恢复全自动流水线");
                 } else {
-                    // pause 返回本次取消摘要（canceledTasks/canceledQueuedTasks/failedTasks），原样展示后端真值。
-                    const report = await pauseDramaPipeline(dramaId) as { ok?: boolean } & NonNullable<PipelinePauseLite["lastResult"]>;
+                    // 影策语义：暂停只停止派发新作业，已提交的生成任务继续跑完并回写。
+                    await pauseDramaPipeline(dramaId);
                     setPausedPersist(true);
-                    const canceled = Number(report?.canceledTasks || 0);
-                    const queued = Number(report?.canceledQueuedTasks || 0);
-                    const failed = Number(report?.failedTasks || 0);
-                    const detail = canceled
-                        ? `已暂停：取消 ${canceled} 个画布任务（其中排队 ${queued} 个）`
-                        : "已暂停全自动流水线：当前没有在跑的画布任务";
-                    if (failed > 0) message.warning(`${detail}；${failed} 个任务取消失败，可能仍会跑完`);
-                    else message.success(detail);
+                    message.success("已暂停派发新作业；已提交的生成任务会继续完成");
                 }
                 setPipeline(await fetchDramaPipelineStatus(dramaId));
             } catch (error) {
@@ -1805,7 +1816,7 @@ function DramaStudioInner() {
         for (const j of pipeline?.jobs || []) {
             if (String(j.status || "").toLowerCase() !== "failed") continue;
             const stage = String(j.stage || "");
-            const ep = episodes.find((e) => e.id === String(j.episodeId || ""));
+            const ep = episodeById.get(String(j.episodeId || ""));
             const label = PIPELINE_STAGE_LABEL[stage] || stage || "作业";
             items.push({
                 id: `pipeline:${String(j.id || "")}`,
@@ -1820,12 +1831,12 @@ function DramaStudioInner() {
             });
         }
         return items;
-    }, [hookInbox, pipeline?.jobs, episodes]);
+    }, [hookInbox, pipeline?.jobs, episodeById]);
 
     // 底部队列失败项：覆盖 inbox 全部真实失败 kind（cast_failed 参考图 / segment_failed 段视频 /
     // episode_error 分集错误 / job_failed 任务失败），排除 stage_gap（规划缺口非生成失败）。
     // 之前只取 episode_error|job_failed，漏掉 cast_failed（如缺主图1参考图）→ 队列显示「无失败任务」但「待重试6」。
-    const errorInbox = inbox.filter((item) => item.kind !== "stage_gap");
+    const errorInbox = useMemo(() => inbox.filter((item) => item.kind !== "stage_gap"), [inbox]);
 
     // 影策 awaitingMedia = 本地 status「待生成」：已拆镜有镜头、但尚未发布成片（publishedVersion===0）。
     // 见 use-studio-data.ts:205 状态派生；stage=video 反而是"已发布成片"，不能用来判 awaiting。
@@ -1839,103 +1850,81 @@ function DramaStudioInner() {
         runtimeTaskId?: string; waitReason?: string; stage?: string; attempt?: number;
         attempts?: QueueAttemptRecord[];
     };
-    // 「全部」并入近期成功生成：数据来自 generation_logs（与 jobCounts/inbox 同源），按 id 去重后截断上限。
+    // 影策队列行 = DramaJob（流水线作业 + 失败 inbox + 批次），不把 generation_logs 的单次模型请求当行。
     const QUEUE_ALL_LIMIT = 120;
-    /** 生成日志只有 taskMode/platform，没有队列承接 work 的 kind：按真实字段归类，识别不出就留空不编造。 */
-    const logKindOf = (log: BackendGenerationLog): string => {
-        const mode = `${log.taskMode || ""} ${log.platform || ""}`.toLowerCase();
-        if (/t2i|image/.test(mode)) return "image";
-        if (/va|video|h3/.test(mode)) return "video";
-        if (/text|chat/.test(mode)) return "text";
-        return "";
-    };
-    const historyJobs: QueueJob[] = queueHistory.map((log) => {
-        const ep = episodes.find((item) => item.canvasId === log.projectId);
-        const kind = logKindOf(log);
-        return {
-            id: log.id, title: `${ep ? `第 ${ep.no} 集` : "画布"} · ${log.model || JOB_KIND_LABEL[kind] || log.platform || "生成"}`,
-            error: log.error || "", prompt: log.prompt, status: log.status, episodeId: ep?.id,
-            kind: kind ? JOB_KIND_LABEL[kind] || kind : undefined,
-            createdAt: log.createdAt, startedAt: log.startedAt, finishedAt: log.finishedAt,
-            durationMs: log.durationMs, runtimeTaskId: log.runtimeTaskId,
-            ...(log.waitReason ? { waitReason: log.waitReason } : {}),
-        };
-    });
-    const queueJobs: QueueJob[] = [
-        // inbox 的 pipeline:<jobId> 项与下面的流水线行同源，且去重时排在前面：把该作业自己的
-        // 时间/attempt/attempts 一并带上，否则详情里只剩最终错误，逐次尝试不可查。
-        ...errorInbox.map((it) => {
-            const jobId = it.id.startsWith("pipeline:") ? it.id.slice("pipeline:".length) : "";
-            const job = jobId ? (pipeline?.jobs || []).find((j) => String(j.id || "") === jobId) : undefined;
-            return {
-                id: it.id, title: it.title, error: it.detail || "", prompt: undefined,
-                status: "failed", episodeId: it.episodeId,
-                kind: it.kind === "cast_failed" ? "参考图失败"
-                    : it.kind === "segment_failed" ? "段视频失败"
-                        : it.kind === "job_failed" ? "任务失败"
-                            : it.kind === "stage_gap" ? "阶段缺口" : "分集错误",
-                ...(job ? {
-                    stage: String(job.stage || "") || undefined,
-                    attempt: Number(job.attempt) || 0,
-                    createdAt: job.createdAt ? String(job.createdAt) : undefined,
-                    startedAt: job.startedAt ? String(job.startedAt) : undefined,
-                    finishedAt: job.finishedAt ? String(job.finishedAt) : undefined,
-                    durationMs: typeof job.durationMs === "number" ? job.durationMs : undefined,
-                    runtimeTaskId: job.runtimeTaskId ? String(job.runtimeTaskId) : undefined,
-                    attempts: queueAttemptsOf(job.attempts),
-                } : {}),
-            };
-        }),
-        ...batches.map((b) => ({
-            id: b.runId, title: `批次 v${b.version} · ${b.targets?.length || 0} 目标`,
-            error: b.error || "", status: (b.status || "").toLowerCase(), episodeId: b.episodeId,
-            prompt: b.plan ? JSON.stringify(b.plan, null, 2) : undefined,
-            kind: "批次生成", createdAt: b.createdAt,
-        })),
-        // 流水线阶段作业（script/assets/prompts/video/render）是真正在跑的操作，
-        // 后端 status.jobs 已带 stage/status/attempt/error/episodeId 与 createdAt/startedAt/finishedAt/durationMs。
-        ...(pipeline?.jobs || []).map((j) => {
-            const stage = String(j.stage || "");
-            const ep = episodes.find((e) => e.id === String(j.episodeId || ""));
-            const status = String(j.status || "").toLowerCase();
-            const err = j.error ? String(j.error) : "";
-            const durationMs = typeof j.durationMs === "number" ? j.durationMs : undefined;
-            return {
-                id: `pipeline:${String(j.id || "")}`,
-                title: `${ep ? `第 ${ep.no} 集` : "剧目"} · ${PIPELINE_STAGE_LABEL[stage] || stage || "作业"}${Number(j.attempt) > 1 ? `（第 ${j.attempt} 次）` : ""}`,
-                error: err, status, episodeId: ep?.id,
-                kind: PIPELINE_STAGE_LABEL[stage] || undefined,
-                stage, attempt: Number(j.attempt) || 0,
-                createdAt: j.createdAt ? String(j.createdAt) : undefined,
-                startedAt: j.startedAt ? String(j.startedAt) : undefined,
-                finishedAt: j.finishedAt ? String(j.finishedAt) : undefined,
-                durationMs,
-                // 逐次尝试记录：后端 attempts_json 投影，旧作业没有该字段 → 空数组（详情里如实说明未采集）。
-                attempts: queueAttemptsOf(j.attempts),
-            } as QueueJob;
-        }),
-    ];
-    // 「进行中」「失败」保持原过滤语义；「全部」追加成功历史，再按 id 去重并限制总行数。
-    const mergedQueue = queueFilter === "all" ? [...queueJobs, ...historyJobs] : queueJobs;
-    const seenQueueIds = new Set<string>();
-    const filteredQueue = (() => {
-        const rows = mergedQueue
+    // 队列派生包含 JSON.stringify(b.plan) 与 O(n log n) 排序，队列收起时不必每次父级渲染都跑。
+    const filteredQueue = useMemo<QueueJob[]>(() => {
+        const queueJobs: QueueJob[] = [
+            // inbox 的 pipeline:<jobId> 项与下面的流水线行同源，且去重时排在前面：把该作业自己的
+            // 时间/attempt/attempts 一并带上，否则详情里只剩最终错误，逐次尝试不可查。
+            ...errorInbox.map((it) => {
+                const jobId = it.id.startsWith("pipeline:") ? it.id.slice("pipeline:".length) : "";
+                const job = jobId ? (pipeline?.jobs || []).find((j) => String(j.id || "") === jobId) : undefined;
+                return {
+                    id: it.id, title: it.title, error: it.detail || "", prompt: undefined,
+                    status: "failed", episodeId: it.episodeId,
+                    kind: it.kind === "cast_failed" ? "参考图失败"
+                        : it.kind === "segment_failed" ? "段视频失败"
+                            : it.kind === "job_failed" ? "任务失败"
+                                : it.kind === "stage_gap" ? "阶段缺口" : "分集错误",
+                    ...(job ? {
+                        stage: String(job.stage || "") || undefined,
+                        attempt: Number(job.attempt) || 0,
+                        createdAt: job.createdAt ? String(job.createdAt) : undefined,
+                        startedAt: job.startedAt ? String(job.startedAt) : undefined,
+                        finishedAt: job.finishedAt ? String(job.finishedAt) : undefined,
+                        durationMs: typeof job.durationMs === "number" ? job.durationMs : undefined,
+                        runtimeTaskId: job.runtimeTaskId ? String(job.runtimeTaskId) : undefined,
+                        attempts: queueAttemptsOf(job.attempts),
+                    } : {}),
+                };
+            }),
+            ...batches.map((b) => ({
+                id: b.runId, title: `批次 v${b.version} · ${b.targets?.length || 0} 目标`,
+                error: b.error || "", status: (b.status || "").toLowerCase(), episodeId: b.episodeId,
+                prompt: b.plan ? JSON.stringify(b.plan, null, 2) : undefined,
+                kind: "批次生成", createdAt: b.createdAt,
+            })),
+            // 流水线阶段作业（script/assets/prompts/video/render）是真正在跑的操作，
+            // 后端 status.jobs 已带 stage/status/attempt/error/episodeId 与 createdAt/startedAt/finishedAt/durationMs。
+            ...(pipeline?.jobs || []).map((j) => {
+                const stage = String(j.stage || "");
+                const ep = episodeById.get(String(j.episodeId || ""));
+                const status = String(j.status || "").toLowerCase();
+                const err = j.error ? String(j.error) : "";
+                const durationMs = typeof j.durationMs === "number" ? j.durationMs : undefined;
+                return {
+                    id: `pipeline:${String(j.id || "")}`,
+                    title: `${ep ? `第 ${ep.no} 集` : "剧目"} · ${PIPELINE_STAGE_LABEL[stage] || stage || "作业"}${Number(j.attempt) > 1 ? `（第 ${j.attempt} 次）` : ""}`,
+                    error: err, status, episodeId: ep?.id,
+                    kind: PIPELINE_STAGE_LABEL[stage] || undefined,
+                    stage, attempt: Number(j.attempt) || 0,
+                    waitReason: j.waitReason ? String(j.waitReason) : undefined,
+                    createdAt: j.createdAt ? String(j.createdAt) : undefined,
+                    startedAt: j.startedAt ? String(j.startedAt) : undefined,
+                    finishedAt: j.finishedAt ? String(j.finishedAt) : undefined,
+                    durationMs,
+                    // 逐次尝试记录：后端 attempts_json 投影，旧作业没有该字段 → 空数组（详情里如实说明未采集）。
+                    attempts: queueAttemptsOf(j.attempts),
+                } as QueueJob;
+            }),
+        ];
+        // 三个页签都是同一批流水线作业，只是过滤状态不同；按 id 去重后按状态桶+真实时间排序。
+        const seenQueueIds = new Set<string>();
+        const rows = queueJobs
             .filter((j) => {
                 if (queueFilter === "all") return true;
                 if (queueFilter === "failed") return ["failed", "error", "retry"].includes(j.status) || Boolean(j.error);
                 return ["running", "checking", "compiling", "applying", "queued"].includes(j.status);
-            });
-        const deduped = rows.filter((j) => {
+            })
+            .filter((j) => {
                 if (seenQueueIds.has(j.id)) return false;
                 seenQueueIds.add(j.id);
                 return true;
             });
-        // 影策队列排序：运行中永远置顶，其次排队，然后失败/待重试，最后完成历史；
-        // 桶内按真实时间排。流水线作业（created_at ASC）与生成日志（created_at DESC）
-        // 的数据源顺序相反，按到达顺序拼接会乱排，统一交给 studio-queue-order 处理。
-        const ordered = orderStudioQueue(deduped);
+        const ordered = orderStudioQueue(rows);
         return queueFilter === "all" ? ordered.slice(0, QUEUE_ALL_LIMIT) : ordered;
-    })();
+    }, [errorInbox, batches, pipeline?.jobs, episodeById, queueFilter]);
 
     /** 作品/分集方式展示用的真实分集口径（来自 folder.productionPlan.sourceSplit / episodeMode）。 */
     const sourceSplit = (currentFolder?.productionPlan as Record<string, unknown> | undefined)?.sourceSplit as Record<string, unknown> | undefined;
@@ -2457,7 +2446,7 @@ function DramaStudioInner() {
                             <Search className="size-3.5 shrink-0 text-muted-foreground" />
                             <input
                                 value={search}
-                                onChange={(e) => setSearch(e.target.value)}
+                                onChange={(e) => { const value = e.target.value; startTransition(() => setSearch(value)); }}
                                 onKeyDown={(e) => { if (e.key === "Enter" && visibleEpisodes[0]) selectEpisode(visibleEpisodes[0]); }}
                                 placeholder="集号或标题"
                                 aria-label="搜索剧集"
@@ -2825,10 +2814,11 @@ function DramaStudioInner() {
                                     busy={Boolean(busy)}
                                     paused={paused}
                                     onAutoResume={resumeIfPaused}
-                                    processJobs={(pipeline?.jobs || []).filter((j) => j.episodeId === current.id).map((j) => ({ id: String(j.id), stage: String(j.stage), status: String(j.status), attempt: Number(j.attempt) || 0, error: j.error ? String(j.error) : null }))}
+                                    processJobs={processJobs}
                                     onDiscussShot={discussShotWithDirector}
                                     onRescript={() => void (async () => {
-                                        setBusy("rescript");
+                                        const rescriptId = current.id;
+                                        markRescripting(rescriptId, true);
                                         try {
                                             // 写作技能真实注入：选中「分镜拆分」技能时，取其 SKILL.md 方法要点作为 instruction
                                             // 传给改编请求（后端 instruction 上限 2000 字），让选择的技能真实影响生成。
@@ -2881,8 +2871,9 @@ function DramaStudioInner() {
                                             message.success(done ? `${how}重新改编本集，分镜已重拆并同步画布` : "已提交重新改编，分镜正在后台重拆，完成后请刷新查看");
                                         } catch (error) {
                                             message.error(`改编失败：${(error as Error).message}`);
-                                        } finally { setBusy(null); }
+                                        } finally { markRescripting(rescriptId, false); }
                                     })()}
+                                    rescripting={rescriptingIds.has(current.id)}
                                     onCompose={() => void (async () => {
                                         const videos = clipMedia
                                             .filter((c) => String(c.storageKey || "").startsWith("video:"))
@@ -3027,12 +3018,7 @@ function DramaStudioInner() {
                                     {key === "all" ? "全部" : key === "active" ? "进行中" : "失败"}
                                 </button>
                             ))}
-                            <span className="ml-auto truncate text-[11px] text-muted-foreground">
-                                {queueFilter === "all" && queueHistoryLoading ? "读取生成历史…" : null}
-                                {queueFilter === "all" && queueHistoryError ? <span className="text-rose-500" role="alert">生成历史读取失败：{queueHistoryError}</span> : null}
-                                {queueFilter === "all" && !queueHistoryLoading && !queueHistoryError ? "点击任一行查看请求详情" : null}
-                                {queueFilter !== "all" ? "点击任一行查看请求详情" : null}
-                            </span>
+                            <span className="ml-auto truncate text-[11px] text-muted-foreground">点击任一行查看作业详情</span>
                         </div>
                         {/* 影策：7 列 grid + 34px 行高 + 11px 字号 + 圆角 8 / hover 底色；列表 max-h 280（约 8 行）。 */}
                         <div className="max-h-[280px] overflow-y-auto overflow-x-hidden thin-scrollbar" role="list" data-studio-queue-list>
@@ -3312,23 +3298,27 @@ function DramaStudioInner() {
                 </div>
             </Modal>
 
-            <StudioChapterPickerModal
-                folder={currentFolder || null}
-                episodes={rawEpisodes}
-                open={chapterPickerOpen}
-                onClose={() => setChapterPickerOpen(false)}
-                onDone={refreshAll}
-                onProduced={(ids) => Promise.all(ids.map((id) => adaptEpisode(id))).then(() => undefined)}
-            />
+            {chapterPickerOpen ? <Suspense fallback={null}>
+                <StudioChapterPickerModal
+                    folder={currentFolder || null}
+                    episodes={rawEpisodes}
+                    open={chapterPickerOpen}
+                    onClose={() => setChapterPickerOpen(false)}
+                    onDone={refreshAll}
+                    onProduced={(ids) => Promise.all(ids.map((id) => adaptEpisode(id))).then(() => undefined)}
+                />
+            </Suspense> : null}
 
             {/* 版本记录与对比：真版本对比弹窗，版本列表与 diff 全部由 version-compare API 派生 */}
-            <StudioVersionCompare
-                open={versionCompareOpen}
-                onClose={() => setVersionCompareOpen(false)}
-                episodeId={current?.id || ""}
-                episodeTitle={current?.title}
-                dramaId={dramaId || undefined}
-            />
+            {versionCompareOpen ? <Suspense fallback={null}>
+                <StudioVersionCompare
+                    open={versionCompareOpen}
+                    onClose={() => setVersionCompareOpen(false)}
+                    episodeId={current?.id || ""}
+                    episodeTitle={current?.title}
+                    dramaId={dramaId || undefined}
+                />
+            </Suspense> : null}
 
             {/* 队列任务详情（对齐影策 JobDetailModal：复制错误信息 / 复制提示词） */}
             <Modal
@@ -3498,11 +3488,11 @@ function DramaStudioInner() {
                 destroyOnClose
                 footer={
                     <div className="flex items-center gap-2">
-                        <span className={cn("mr-auto text-[11px]", episodeSourceChars(episodeText.trim()) > EPISODE_SOURCE_CHARS ? "text-rose-500" : "text-muted-foreground")} data-studio-episode-chars>
-                            {episodeSourceChars(episodeText.trim())} / {EPISODE_SOURCE_CHARS} 字{episodeSourceChars(episodeText.trim()) > EPISODE_SOURCE_CHARS ? " · 超出部分会丢台词，请拆成多集" : ""}
+                        <span className={cn("mr-auto text-[11px]", episodeSourceCharCount > EPISODE_SOURCE_CHARS ? "text-rose-500" : "text-muted-foreground")} data-studio-episode-chars>
+                            {episodeSourceCharCount} / {EPISODE_SOURCE_CHARS} 字{episodeSourceCharCount > EPISODE_SOURCE_CHARS ? " · 超出部分会丢台词，请拆成多集" : ""}
                         </span>
                         <button type="button" disabled={Boolean(busy)} onClick={() => setEpisodeDraft(null)} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted">取消</button>
-                        <button type="button" disabled={Boolean(busy) || episodeSourceChars(episodeText.trim()) > EPISODE_SOURCE_CHARS} onClick={() => void submitEpisodeDraft()} className="rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background disabled:opacity-50" data-studio-episode-submit>
+                        <button type="button" disabled={Boolean(busy) || episodeSourceCharCount > EPISODE_SOURCE_CHARS} onClick={() => void submitEpisodeDraft()} className="rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background disabled:opacity-50" data-studio-episode-submit>
                             {busy === "add" || busy === "insert" ? "提交中…" : (episodeDraft?.mode === "insert" ? "插入" : "添加")}
                         </button>
                     </div>

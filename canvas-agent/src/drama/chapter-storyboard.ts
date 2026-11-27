@@ -141,6 +141,8 @@ export type ShotCamera = {
 export type PlannedShot = {
     id: string;
     scene_id: string;
+    /** 模型在 beat 上指定的具体场景 entity id；Shot.scene_id 仍受场次归属约束，此值落到 shotInputs.sceneAssetId。 */
+    sceneEnvironmentId?: string;
     timeline_id: string;
     story_order: number;
     title: string;
@@ -348,6 +350,7 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
             const shot: PlannedShot = {
                 id: stableId("shot", input.chapterId, scene.sceneKey || environmentId, beatIndex, beat.title, beat.visual),
                 scene_id: environmentId,
+                sceneEnvironmentId: String(beat.sceneId || "").trim() || undefined,
                 timeline_id: timelineId,
                 story_order: order + beatIndex,
                 title: beat.title || `镜头 ${beatIndex + 1}`,
@@ -604,7 +607,11 @@ export function toSceneStoryboardOps(plan: StoryboardPlan, environmentOfScene: M
                 .map(segment => ({ id: segment.id, shot_ids: segment.shot_ids, mode: segment.mode })),
             // 后端要求 shotInputs 精确覆盖本场每个镜头（键集合 === 镜头 ID 集合），空对象会被拒。
             // assetIds 只放在 shotInputs（合法位置），绝不塞进 shot；无道具留空数组。
-            shotInputs: Object.fromEntries(shots.map(shot => [shot.id, { keyframePolicy: "none", assetIds: shot.propAssetIds ?? [] }])),
+            shotInputs: Object.fromEntries(shots.map(shot => [shot.id, {
+                keyframePolicy: "none",
+                assetIds: shot.propAssetIds ?? [],
+                ...(shot.sceneEnvironmentId ? { sceneAssetId: shot.sceneEnvironmentId } : {}),
+            }])),
         });
     }
     return ops;

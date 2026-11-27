@@ -58,6 +58,8 @@ export const DialoguePadMs = 500;
 export const DefaultShotMs = 3000;
 export const MinSegmentShots = 3;
 export const MaxSegmentShots = 9;
+/** 编译器 canvas_source_contract.py 对单个 Clip 的硬上限：15 秒。仅用于合并短段时放宽上限。 */
+export const MaxClipMs = 15000;
 export const MaxStoryboardShotSeconds = 60;
 export const MinSegmentSeconds = 4;
 export const MaxSegmentSeconds = 60;
@@ -557,7 +559,7 @@ export function segmentTitle(scenes: string[]): string {
 /**
  * SegmentShotsForVideo：按分镜规则把镜头切成剧情段（timing.go:138-184）。
  * - MaxMs 溢出 / 满 9 镜 / 场景切换（当前段须已达 MinMs）断开；fixed 模式不在场景切换处断开。
- * - 不足下限或镜头过少的段，在不超上限时并入前一段。
+ * - 不足下限或镜头过少的段，在不超编译器硬限 15s 时并入前一段（本地放宽，见 fits 处注释）。
  * - 尾段不足下限时从前段挪最少镜头补足。
  */
 export function SegmentShotsForVideo(scenes: string[], durations: number[], limits: SegmentLimits): Segment[] {
@@ -599,8 +601,11 @@ export function SegmentShotsForVideo(scenes: string[], durations: number[], limi
                 run.End - run.Start < MinSegmentShots ||
                 prev.End - prev.Start < MinSegmentShots ||
                 span(run.Start, run.End) < limits.MinMs;
+            // 本地调整（偏离影策原版）：合并短段时使用编译器硬限 15s，而非规划上限 limits.MaxMs。
+            // 规划上限 10s 会把「7s 段 + 4s 单镜」这类组合挡在合并门外，合并后 11s 仍远低于硬限。
+            // 切段断开仍用 limits.MaxMs，这里只放宽合并判断；rebalance 仍按 limits.MaxMs 约束。
             const fits =
-                (limits.MaxMs <= 0 || span(prev.Start, run.End) <= limits.MaxMs) &&
+                (limits.MaxMs <= 0 || span(prev.Start, run.End) <= Math.max(limits.MaxMs, MaxClipMs)) &&
                 run.End - prev.Start <= MaxSegmentShots;
             if (short && fits) {
                 merged[last].End = run.End;

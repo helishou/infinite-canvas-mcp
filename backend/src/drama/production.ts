@@ -1858,6 +1858,39 @@ export class EpisodeProductionService {
         return this.get(episodeId, false, false);
     }
 
+    /**
+     * 分集改名后同步制作稿里由章节标题派生的场次名与 H3 节点标题。
+     * 只改与旧标题完全相同的章节占位，不碰「婚房洞房夜」等具体场景，也不重写镜头/段标题。
+     */
+    async renameEpisodeSceneTitle(episodeId: string, oldTitle: string, newTitle: string): Promise<void> {
+        const old = String(oldTitle || "").trim(), next = String(newTitle || "").trim();
+        if (!old || !next || old === next) return;
+        const director = this.get(episodeId).draft.director;
+        if (!director) return;
+        const scenes = (Array.isArray(director.source.script_scenes) ? director.source.script_scenes : [])
+            .filter((scene: any) => String(scene?.scene_name || scene?.scene_id || "") === old);
+        const environments = (Array.isArray(director.source.scene_registry) ? director.source.scene_registry : [])
+            .filter((scene: any) => String(scene?.id || "") === old && String(scene?.name || "") === old);
+        const ops = [
+            ...scenes.map((scene: any) => ({ type: "patch_director_source", entity: "scene", id: String(scene.id), patch: { scene_name: next } })),
+            ...environments.map(() => ({ type: "patch_director_source", entity: "environment", id: old, patch: { name: next } })),
+        ];
+        if (!ops.length) return;
+        const current = this.get(episodeId);
+        await this.edit(episodeId, { operationId: `rename-episode-${crypto.randomUUID()}`, expectedRevision: current.revision, ops });
+        const canvasId = this.db.getDramaEpisode(episodeId)?.canvasId;
+        const project = canvasId ? this.db.getCanvasProject(canvasId) : null;
+        if (!project) return;
+        const nodeOps = ((project.nodes || []) as Array<Record<string, any>>)
+            .filter((node) => String(node.type || "").startsWith("minimax-h3")
+                && (String(node.title || "") === `${old} · H3` || String(node.title || "") === `${old} · H3 Clips`))
+            .map((node: any) => ({ type: "update_node", id: String(node.id), patch: { title: String(node.title).replace(old, next) } }));
+        if (nodeOps.length) await this.db.applyCanvasProjectOperations(canvasId!, Number(project.revision || 0), nodeOps as any, {
+            operationId: `rename-episode-canvas-${crypto.randomUUID()}`,
+            source: { kind: "system", label: "分集改名同步" },
+        } as any);
+    }
+
     get(episodeId: string, maintenanceLegacyRead = false, projectRuntimeView = true): ProductionRecord {
         const linked = this.linked(episodeId); if (linked) return linked.service.get(linked.id, maintenanceLegacyRead, projectRuntimeView);
         this.episode(episodeId);

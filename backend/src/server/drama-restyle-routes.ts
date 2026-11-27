@@ -49,7 +49,15 @@ function characterAliases(nodes: RestyleNode[], assetId: string, groupId: string
 }
 
 /** 段是否引用该角色：与影策 DramaShotsReferencingCast 等价的本地结构化反查。 */
-function segmentReferences(segment: Row, aliases: Set<string>, groupId: string): boolean {
+function segmentReferences(segment: Row, aliases: Set<string>, groupId: string, lookId: string): boolean {
+    // 造型粒度反查：只认段上 referenceBindings 的 outfitId（即 characterImages[].id），
+    // 不拿角色级命中冒充造型命中；没有 lookId 时保持原角色/组反查。
+    if (lookId) {
+        for (const ref of rows(segment.referenceBindings)) {
+            if (str(ref.outfitId) === lookId || str(ref.pictureBindingId) === lookId) return true;
+        }
+        return false;
+    }
     for (const [key, raw] of Object.entries(obj(segment.h3CharacterGroups))) {
         const group = obj(raw);
         if (groupId && (key === groupId || str(group.id) === groupId)) return true;
@@ -87,6 +95,8 @@ function episodeByCanvas(db: BackendDatabase, dramaId: string): Map<string, stri
 export type RestylePlanOptions = {
     assetId?: string;
     groupId?: string;
+    /** 造型粒度：仅统计/标脏明确引用该 characterImages[].id 的段。 */
+    lookId?: string;
     dramaId?: string;
     restyleSegments?: boolean;
     /** 判断该段是否已有在跑的生成任务；注入以便单测，不传则按段元数据保守判断。 */
@@ -97,7 +107,7 @@ const ACTIVE_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "runnin
 
 /** 只读规划：反查引用段 + 决定哪些段真要标脏；不修改任何画布数据。 */
 export function planRestyle(db: BackendDatabase, options: RestylePlanOptions): RestylePlan {
-    const assetId = str(options.assetId).trim(), groupId = str(options.groupId).trim();
+    const assetId = str(options.assetId).trim(), groupId = str(options.groupId).trim(), lookId = str(options.lookId).trim();
     if (!assetId && !groupId) throw new Error("RESTYLE_ASSET_REQUIRED: 需要 assetId 或 groupId");
     const nodes = db.listCanvasNodesForRestyle();
     const aliases = characterAliases(nodes, assetId, groupId);
@@ -109,7 +119,7 @@ export function planRestyle(db: BackendDatabase, options: RestylePlanOptions): R
         const segments = rows(metadata.segments);
         if (!segments.length) continue;
         for (const segment of segments) {
-            if (!segmentReferences(segment, aliases, groupId)) continue;
+            if (!segmentReferences(segment, aliases, groupId, lookId)) continue;
             const segmentId = str(segment.id), nodeId = node.nodeId, projectId = node.projectId;
             const key = `${projectId}\0${nodeId}\0${segmentId}`;
             if (seen.has(key)) continue;
@@ -199,6 +209,7 @@ export function registerDramaRestyleRoutes(router: Router, db: BackendDatabase, 
     const readPlan = (req: Request): RestylePlan => planRestyle(db, {
         assetId: String(req.params.assetId || ""),
         groupId: typeof req.query.groupId === "string" ? req.query.groupId : "",
+        lookId: typeof req.query.lookId === "string" ? req.query.lookId : "",
         dramaId: String(req.params.dramaId || ""),
         restyleSegments: true,
         isActive: makeActiveTaskChecker(stores, db),
@@ -231,11 +242,12 @@ export function registerDramaRestyleRoutes(router: Router, db: BackendDatabase, 
             const plan = planRestyle(db, {
                 assetId: String(req.params.assetId || ""),
                 groupId: typeof req.query.groupId === "string" ? req.query.groupId : str(body.groupId),
+                lookId: str(body.lookId) || (typeof req.query.lookId === "string" ? req.query.lookId : ""),
                 dramaId: String(req.params.dramaId || ""),
                 restyleSegments: true,
                 isActive: makeActiveTaskChecker(stores, db),
             });
-            const idempotencyBase = `${req.params.dramaId}\0${req.params.assetId}\0${str(body.groupId)}`;
+            const idempotencyBase = `${req.params.dramaId}\0${req.params.assetId}\0${str(body.groupId)}\0${str(body.lookId)}`;
             const { marked } = applyRestylePlan(db, plan, idempotencyBase);
             let submitted = 0;
             if (body.submitGeneration === true && generation) {

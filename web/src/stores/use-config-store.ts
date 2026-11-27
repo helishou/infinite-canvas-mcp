@@ -653,8 +653,12 @@ export async function hydrateConfigFromBackend(): Promise<boolean> {
         if (!useBackendStore.getState().connected) return false;
         const [response, storedWebdav] = await Promise.all([fetchBackendAiConfig(), fetchStructuredSetting<WebdavSyncConfig>("webdav")]);
         const legacy = readLegacyConfigState();
-        let config = response?.config ? normalizeConfig(response.config as Partial<AiConfig>) : null;
-        if (!config && legacy?.config) {
+        // 后端返回空对象/缺 channels 时不当作有效配置：否则 normalizeConfig 会把 channels 归一成 []，
+        // 后续任意设置保存都会 PUT 这份空 channels，把用户渠道反复抹掉（常驻 bug）。
+        const backendConfig = response?.config as Partial<AiConfig> | null | undefined;
+        const backendHasChannels = Array.isArray(backendConfig?.channels) && backendConfig.channels.length > 0;
+        let config = backendHasChannels ? normalizeConfig(backendConfig!) : null;
+        if (!config && legacy?.config && Array.isArray(legacy.config.channels) && legacy.config.channels.length > 0) {
             config = normalizeConfig(legacy.config);
             await syncBackendAiConfig(config);
         }

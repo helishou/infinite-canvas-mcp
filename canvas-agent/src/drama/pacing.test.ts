@@ -312,38 +312,50 @@ describe("SegmentShotsForVideo（timing.go:132-184）", () => {
             [4000, 4000, 4000, 1000],
             limits({ Mode: SegmentRange, MinMs: 5000, MaxMs: 12000 }),
         );
+        // 本地放宽合并上限到 15s：4+4+4+1=13s 直接并成一段，不再进入 rebalance。
         expect(shape(balanced)).toEqual([
-            [0, 2, "a"],
-            [2, 4, "a"],
+            [0, 4, "a"],
         ]);
         const kept = SegmentShotsForVideo(
             same.slice(0, 3),
             [5000, 5000, 1000],
             limits({ Mode: SegmentRange, MinMs: 6000, MaxMs: 10000 }),
         );
+        // 本地放宽合并上限到 15s：5+5+1=11s 直接并成一段。
         expect(shape(kept)).toEqual([
-            [0, 2, "a"],
-            [2, 3, "a"],
+            [0, 3, "a"],
         ]);
         const overflow = SegmentShotsForVideo(
             same,
             [5000, 5000, 9000, 2000],
             limits({ Mode: SegmentRange, MinMs: 3000, MaxMs: 10000 }),
         );
+        // 本地放宽合并上限到 15s：9s 段 + 2s 单镜 = 11s 并入前一段；
+        // 但 5+5+9=19s 已超硬限，前三镜仍单独成段。
         expect(shape(overflow)).toEqual([
             [0, 2, "a"],
-            [2, 3, "a"],
-            [3, 4, "a"],
+            [2, 4, "a"],
         ]);
         const auto = SegmentShotsForVideo(
             ["a", "a", "b", "b"],
             [4000, 4000, 2000, 1000],
             limits({ Mode: SegmentAuto, MinMs: 4000, MaxMs: 10000 }),
         );
+        // 本地放宽合并上限到 15s：4+4+2+1=11s 并成一段；制作台后续按 scene_id 切开跨场景段。
         expect(shape(auto)).toEqual([
-            [0, 1, "a"],
-            [1, 4, "a / b"],
+            [0, 4, "a / b"],
         ]);
+    });
+
+    it("本地放宽：7s 双镜 + 4s 单镜在 10s 规划上限下仍能合并", () => {
+        // 制作台 auto 模式实测场景：切段时 7+4>10s 断开，旧逻辑因同一 10s 上限拒绝合并，
+        // 4s 尾段又恰好等于 MinMs 不触发 rebalance，留下孤儿段。
+        const segments = SegmentShotsForVideo(
+            ["大厅", "大厅", "大厅"],
+            [3500, 3500, 4000],
+            limits({ Mode: SegmentAuto, MinMs: 4000, MaxMs: 10000 }),
+        );
+        expect(shape(segments)).toEqual([[0, 3, "大厅"]]);
     });
 
     it("空输入 / 长度不一致返回空数组（Go 返回 nil）", () => {

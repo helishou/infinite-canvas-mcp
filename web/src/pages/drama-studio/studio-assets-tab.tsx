@@ -719,7 +719,7 @@ export function StudioAssetsTab({ dramaId, sharedAssetCanvasId, artStyle, episod
     const auditGenerating = sub === "audit" && ["script", "assets", "shots", "video"].includes(auditStage || "");
     useEffect(() => {
         if (!auditGenerating) return;
-        const timer = window.setInterval(() => setReloadTick((v) => v + 1), 4_000);
+        const timer = window.setInterval(() => { if (!document.hidden) setReloadTick((v) => v + 1); }, 4_000);
         return () => window.clearInterval(timer);
     }, [auditGenerating]);
 

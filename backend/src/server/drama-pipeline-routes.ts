@@ -56,7 +56,8 @@ export const pipelineOptionsSchema = z.object({
         transitionMs: z.number().optional(),
         pacing: z.string().optional(),
     }).optional(),
-    concurrency: z.object({ text: z.number().optional(), video: z.number().optional(), render: z.number().optional() }).optional(),
+    // 影策 DramaSettings.Concurrency：单值，text/image/video/render 四池各自独立计数。
+    concurrency: z.number().int().min(1).max(16).optional(),
     // 参考图提示词模板（制作设置「角色/场景/默认提示词」）：空则用内置方案模板拼装。
     assetPromptTemplates: z.object({
         default: z.string().max(8000).optional(),

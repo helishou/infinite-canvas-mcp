@@ -68,6 +68,35 @@ export function collectFinalVideos(canvas: Record<string, any> | null | undefine
     return [...new Set(videos)].filter(Boolean);
 }
 
+/**
+ * render 准入（影策：整集所有段视频就绪且未过期才合成）。
+ * 与前端 composeReady 同口径：每段要有当前/历史产物且未被标成 inputOutdated；
+ * 锁定的段跳过。missing/stale 都大于 0 时不应合成，否则会产出半成品成片。
+ */
+export function renderReadiness(
+    canvas: Record<string, any> | null | undefined,
+    groups: readonly Record<string, unknown>[],
+    sources: readonly Record<string, unknown>[],
+): { total: number; missing: number; stale: number } {
+    const nodes = Array.isArray(canvas?.nodes) ? canvas!.nodes as Array<Record<string, any>> : [];
+    const locked = new Set(sources.filter((segment) => segment?.locked === true).map((segment) => String(segment.id || "")));
+    let missing = 0;
+    let stale = 0;
+    let total = 0;
+    for (const group of groups) {
+        if (locked.has(String(group.id || ""))) continue;
+        total += 1;
+        const node = nodes.find((item) => item.id === group.nodeId);
+        const segments = Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Array<Record<string, any>> : [];
+        const segment = segments.find((item) => String(item.id || "") === String(group.segmentId || ""));
+        const results = Array.isArray(segment?.results) ? segment.results as Array<Record<string, any>> : [];
+        const hasVideo = Boolean(segment?.resultStorageKey || results.some((item) => Boolean(item?.storageKey)));
+        if (!hasVideo) missing += 1;
+        else if (segment?.inputOutdated === true) stale += 1;
+    }
+    return { total, missing, stale };
+}
+
 export type DbLike = {
     getDramaEpisode(id: string): { id: string; canvasId?: string | null } | null;
     getCanvasProject(id: string): Record<string, any> | null;

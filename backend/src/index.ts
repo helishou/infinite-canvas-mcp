@@ -185,12 +185,14 @@ async function startBackendHttpServer() {
     runtime.db,
   );
   const canvasReferences = new CanvasReferenceService(runtime.stores, (alert) => logger.warn("疑似参考资产循环写入", alert));
+  let episodeProduction: EpisodeProductionService;
   const devReload = process.env.INFINITE_CANVAS_DEV_WATCH === "1" && process.send ? createDevReloadGate() : null;
   const devActiveTask = devReload ? db.db.prepare("SELECT 1 FROM tasks WHERE status IN ('queued','running','awaiting_confirmation') LIMIT 1") : null;
   const { app, drainHttpConnections } = startServer(runtime.db, config, {
     devReloadMiddleware: devReload?.middleware,
     events: runtime.events,
     stores: runtime.stores,
+    renameEpisodeTitle: (episodeId, oldTitle, newTitle) => episodeProduction.renameEpisodeSceneTitle(episodeId, oldTitle, newTitle),
     resolveH3Confirmation: () => {
       throw new Error("H3 生成已迁移到执行引擎");
     },
@@ -271,7 +273,7 @@ async function startBackendHttpServer() {
   registerDramaRestyleRoutes(app, runtime.db, runtime.stores, canvasGeneration);
   // 影策审计缺口#6：按当前方案一键重做参考图（资产卡反查 → 真出图 → 写回 → 可选标脏）。
   registerDramaAssetRegenerateRoutes(app, runtime.db, runtime.stores, canvasGeneration);
-  const episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
+  episodeProduction = new EpisodeProductionService(runtime.db, runtime.events);
 
   // 成片自动重合成（影策 finalStale 真链路）：复用 VideoConcatBackend 这个后端合成引擎。
   // 触发点选 canvas-h3-run 父任务 task.completed —— 段视频已全部回写、父任务刚转 succeeded，

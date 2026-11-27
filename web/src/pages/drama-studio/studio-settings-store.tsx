@@ -5,6 +5,7 @@ import { modelOptionLabel, selectableModelsByCapability, useConfigStore, VIDEO_C
 import { cn } from "@/lib/utils";
 
 import type { SkillRef } from "./studio-skill-picker";
+import { resolveConcurrency } from "./studio-settings-concurrency";
 
 /**
  * 剧目级「制作设置」的真值模块：设置页（studio-settings-tab）与新建页（new-drama-page）共用
@@ -83,9 +84,9 @@ export type StudioProductionSettings = {
     imageResolution: "1k" | "2k" | "4k";
     // 段落衔接（#31 #46）
     continuationMode: "tail" | "parallel";
-    // 同时生成数（#32）：text/video/assemble 三池真实下发 pipelineOpts.concurrency（assemble→render）。
-    // image 池后端无剧目级并发覆盖字段，不设假开关。
-    concurrency: { text: number; video: number; assemble: number };
+    // 同时生成数（影策 DramaSettings.Concurrency）：一个值，文字/参考图/视频/成片四池各自独立计数。
+    // 旧版本是 {text,video,assemble} 三值对象，resolveStudioSettings 会收敛成单值。
+    concurrency: number;
     // 预算上限（影策 budgetMicrocredits）：微积分；0/不设=不限。达标暂停流水线（budget_exceeded）。
     budgetMicrocredits: number;
     // 镜头节奏（#33）
@@ -140,7 +141,7 @@ export const DEFAULT_STUDIO_SETTINGS: StudioProductionSettings = {
     sceneImageModel: "",
     imageResolution: "1k",
     continuationMode: "tail",
-    concurrency: { text: 2, video: 1, assemble: 1 },
+    concurrency: 4, // 影策 DEFAULT_CONCURRENCY=4（drama_types.go:227）
     // 默认值逐项对齐影策 DEFAULT_STORYBOARD（storyboard-rules 默认档）：极快 / 密集 / 150ms / 表演 7 / 运镜 3。
     // 剧情段切分默认保留本地后端的 auto（pipeline.ts 未收到 segmentMode 时也按 auto 切段），不写影策的 fixed。
     pacing: "极快",
@@ -286,7 +287,7 @@ export function resolveStudioSettings(partial: Partial<StudioProductionSettings>
     return {
         ...base,
         ...source,
-        concurrency: { ...base.concurrency, ...(source.concurrency || {}) },
+        concurrency: resolveConcurrency(source.concurrency, base.concurrency),
         // 老剧目 localStorage 没有 segmentMode 时按默认 auto；非法值收敛，不让坏值进 UI/下发。
         segmentMode: (["auto", "fixed", "range"] as const).includes(source.segmentMode as "auto") ? source.segmentMode as "auto" | "fixed" | "range" : base.segmentMode,
         // 影策 clamp（storyboard.ts:62-85）：剧情段 4–60 秒、单集 30–1200 秒、转场 150–1500 毫秒，越界值收敛后才进 UI/下发。

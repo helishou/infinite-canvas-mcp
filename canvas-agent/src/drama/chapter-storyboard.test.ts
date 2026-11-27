@@ -218,6 +218,25 @@ test("Clip 的 mode 落在编译器枚举内，默认 T2VA，可显式覆盖为 
     assert.equal(build("Ref2VA").segments[0].mode, "Ref2VA");
 });
 
+test("beat.sceneId 透传到 shotInputs.sceneAssetId，不改写 shot.scene_id", () => {
+    const plan = planChapterStoryboard({
+        chapterId: "EP-10",
+        scenes: [{
+            sceneKey: "chapter",
+            environmentId: "CHAPTER_TITLE",
+            beats: [
+                { title: "甲", visual: "荒郊的蟒骨露出来。", seconds: 2, sceneId: "entity-scene-bones" },
+                { title: "乙", visual: "县衙公堂开审。", seconds: 2 },
+            ],
+        }],
+    });
+    const op = toSceneStoryboardOps(plan, new Map([["CHAPTER_TITLE", "script-1"]]))[0];
+    const [withScene, withoutScene] = op.shots.map(shot => String(shot.id));
+    assert.equal((op.shotInputs[withScene] as Record<string, unknown>).sceneAssetId, "entity-scene-bones");
+    assert.equal(Object.hasOwn(op.shotInputs[withoutScene] as Record<string, unknown>, "sceneAssetId"), false);
+    assert.ok(op.shots.every(shot => shot.scene_id === "CHAPTER_TITLE"), "场次归属不能被 beat 级场景改写");
+});
+
 test("op.shots[].characters 非空才写；shotInputs.assetIds 来自 beat.propIds，键集合一致且不含帧窗字段", () => {
     const plan = planChapterStoryboard({
         chapterId: "EP-REF",

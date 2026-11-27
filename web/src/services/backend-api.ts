@@ -327,8 +327,11 @@ export function fetchBackendDramaEpisode(episodeId: string) {
 }
 
 /** 单设定 restyle：只读预览「引用该角色的剧情段」影响集（对齐影策 getDramaCastImpact）。 */
-export function fetchDramaCastImpact(dramaId: string, assetId: string, groupId?: string, signal?: AbortSignal) {
-    const query = groupId ? `?groupId=${encodeURIComponent(groupId)}` : "";
+export function fetchDramaCastImpact(dramaId: string, assetId: string, groupId?: string, signal?: AbortSignal, lookId?: string) {
+    const params = new URLSearchParams();
+    if (groupId) params.set("groupId", groupId);
+    if (lookId) params.set("lookId", lookId);
+    const query = params.size ? `?${params}` : "";
     return request<{
         ok: boolean;
         episodes: number;
@@ -338,7 +341,7 @@ export function fetchDramaCastImpact(dramaId: string, assetId: string, groupId?:
 }
 
 /** restyle=true 真把引用段的视频标脏；submitGeneration=true 同时真提交重生成（跳过在跑段）。 */
-export function restyleDramaCast(dramaId: string, assetId: string, input: { restyleSegments: boolean; groupId?: string; submitGeneration?: boolean }) {
+export function restyleDramaCast(dramaId: string, assetId: string, input: { restyleSegments: boolean; groupId?: string; lookId?: string; submitGeneration?: boolean }) {
     return request<{
         ok: boolean;
         affectedSegments: number;
@@ -1438,7 +1441,8 @@ export type DramaPipelineStartOptions = {
         episodeSeconds?: number; segmentRange?: { min: number; max: number };
         dialogueDensity?: string; transitionMode?: string; transitionMs?: number; pacing?: string;
     };
-    concurrency?: { text?: number; video?: number; render?: number };
+    /** 影策单值并发：后端 text/image/video/render 四池各自按它独立计数（1-16）。 */
+    concurrency?: number;
     /** 参考图提示词模板（角色/场景/道具/默认）：空则后端用内置方案模板拼装。 */
     assetPromptTemplates?: { default?: string; character?: string; scene?: string; prop?: string };
     /** 写作技能引用（plan/extract/storyboard/prompt）：后端按 name 读 SKILL.md 方法要点注入对应生成步骤。 */
