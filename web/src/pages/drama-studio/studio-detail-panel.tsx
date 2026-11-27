@@ -1631,7 +1631,7 @@ function ScriptPanel({ ep, production, dramaId, onRescript, onChanged, busy, res
                 </section>
 
                 {/* 对白逐字核查（影策 script-view.tsx:271-308）：原文引号台词逐句核对镜头台词 */}
-                <DialogueCheckNotice sourceLines={dialogueSourceLines} shotLines={dialogueShotLines} busy={busy} onRescript={confirmRescript} />
+                <DialogueCheckNotice sourceLines={dialogueSourceLines} shotLines={dialogueShotLines} busy={busy || Boolean(rescripting)} onRescript={confirmRescript} />
 
                 {/* 按场次组织的镜头列表（对齐影策 ScriptView）：点镜头联动右侧原文定位 */}
                 {sp.scenes.length ? (
@@ -2200,11 +2200,11 @@ export function boardData(production: EpisodeProduction | undefined, clipMedia: 
     return { shots, segments, cards, totalSec, promptReady, videoReady, fps };
 }
 
-function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onApproveVideo, onSwitchToAssets, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onChanged, busy, paused, onAutoResume, onDiscussShot }: {
+function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, assetNames, onRescript, onOpenCanvas, onSwitchToScript, onWriteSegmentPrompt, onSaveSegmentPrompt, onApproveVideo, onSwitchToAssets, onListSegmentVersions, onSetSegmentCurrentVideo, onListSegmentVideoModels, onSetSegmentVideoModel, onChanged, busy, rescripting, paused, onAutoResume, onDiscussShot }: {
     ep: StudioEpisode; production: EpisodeProduction | undefined; clipMedia: StudioClipMedia[]; clipFailureByTarget?: Readonly<Record<string, string>>; dramaId?: string | null;
     /** 资产真名表：参考图绑定缺 name 时用它兜底显示「角色 参考图 2 · 崇良」。 */
     assetNames?: Readonly<Record<string, string>>;
-    onRescript: () => void; onOpenCanvas: (segmentId?: string) => void; onSwitchToScript: () => void; busy: boolean;
+    onRescript: () => void; onOpenCanvas: (segmentId?: string) => void; onSwitchToScript: () => void; busy: boolean; rescripting?: boolean;
     /** 流水线暂停真值：暂停不是硬闸门——点生成会先自动恢复制作（影策暂停横幅同语义）。 */
     paused?: boolean;
     /** 把全局暂停转回运行（点生成/重试时调用）。 */

@@ -612,9 +612,8 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
         if (editing.index === null) next.push(im); else next[editing.index] = im;
         void commit(selected, next, selected.primaryIndex, restyle, im.id);
     };
-    const removeLook = (index: number) => {
-        if (!selected) return;
-        const name = String(selected.images[index]?.name || `第 ${index + 1} 套造型`);
+    const removeLook = (ch: CharacterLook, index: number) => {
+        const name = String(ch.images[index]?.name || `第 ${index + 1} 套造型`);
         modal.confirm({
             title: `删除造型「${name}」？`,
             content: "会从画布角色节点移除这套妆造；引用该造型的参考图需重新生成。此操作写回画布角色节点。",
@@ -622,9 +621,9 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
             okButtonProps: { danger: true },
             cancelText: "取消",
             onOk: () => {
-                const next = selected.images.filter((_, j) => j !== index);
-                const primaryIndex = Math.min(selected.primaryIndex, Math.max(0, next.length - 1));
-                void commit(selected, next, primaryIndex, restyle);
+                const next = ch.images.filter((_, j) => j !== index);
+                const primaryIndex = Math.min(ch.primaryIndex, Math.max(0, next.length - 1));
+                void commit(ch, next, primaryIndex, restyle);
             },
         });
     };
@@ -751,10 +750,10 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
         }
     };
 
-    const triggerGenerate = (index: number, im: LookImage) => {
-        if (!selected || !baseImage?.storageKey) return;
+    const triggerGenerate = (ch: CharacterLook, index: number, im: LookImage) => {
+        if (!baseImage?.storageKey) return;
         if (generatingIndex !== null) return;
-        const current = mergeLookStatus(instantStatuses[lookStateKey(im, selected.castId, index)], im.storageKey ? derivedStatuses[`log:${im.storageKey}`] : undefined);
+        const current = mergeLookStatus(instantStatuses[lookStateKey(im, ch.castId, index)], im.storageKey ? derivedStatuses[`log:${im.storageKey}`] : undefined);
         if (current?.status === "queued" || current?.status === "running") return;
         // 已锁定的造型重新生成需先确认解锁（对齐影策 cast-looks.tsx:166）。
         if (im.locked) {
@@ -763,11 +762,11 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                 content: "将按已保存的外观描述生成新图，并覆盖当前已锁定的造型图。",
                 okText: "解锁并生成",
                 cancelText: "取消",
-                onOk: () => { void generateLook(selected, index, im); },
+                onOk: () => { void generateLook(ch, index, im); },
             });
             return;
         }
-        void generateLook(selected, index, im);
+        void generateLook(ch, index, im);
     };
 
     // 右栏当前造型：只要仍属于当前角色；index=null 表示本体（基础造型）。
@@ -791,8 +790,8 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
     }, [dramaId, selected?.castId, activeLookImage?.id, impactTick]);
     /** 当前造型的版本记录（真值：生成该形象图的 generation_logs，按时间倒序，首条为「当前」）。 */
     const activeLookVersions = activeLookStorageKey ? lookVersions[`log:${activeLookStorageKey}`] || [] : [];
-    const onGenerateActiveLook = () => { if (activeLookIndex !== null && activeLookImage) triggerGenerate(activeLookIndex, activeLookImage); };
-    const onRemoveActiveLook = () => { if (activeLookIndex !== null) removeLook(activeLookIndex); };
+    const onGenerateActiveLook = () => { if (selected && activeLookIndex !== null && activeLookImage) triggerGenerate(selected, activeLookIndex, activeLookImage); };
+    const onRemoveActiveLook = () => { if (selected && activeLookIndex !== null) removeLook(selected, activeLookIndex); };
     /** 当前造型唯一键：锁定写回的 saving/错误提示都按它定位，不串到别的造型。 */
     const activeLookKey = selected && activeLookImage && activeLookIndex !== null ? lookStateKey(activeLookImage, selected.castId, activeLookIndex) : "";
     /**
@@ -906,9 +905,10 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                     const st = lookStatus(ch, im, i);
                                     const isSelected = selectedLook?.castId === ch.castId && selectedLook.index === i;
                                     return (
-                                        <button type="button" key={`${ch.castId}:${im.storageKey}:${i}`}
+                                        <div role="button" tabIndex={0} key={`${ch.castId}:${im.storageKey}:${i}`}
                                             data-studio-look data-studio-look-card aria-pressed={isSelected}
                                             onClick={() => openLookCard(ch, i)}
+                                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLookCard(ch, i); } }}
                                             className={cn("overflow-hidden rounded-[8px] border bg-card/40 text-left transition-colors duration-150 hover:border-foreground/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                                                 isSelected ? "border-primary ring-1 ring-primary/60" : "border-border")}>
                                             {/* 封面真值 = 该造型 storageKey；无图只留占位，不再用「待生成」徽标刷屏。 */}
@@ -938,7 +938,22 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, foc
                                                     {styleSubtitle(ch)}
                                                 </span>
                                             </span>
-                                        </button>
+                                            {/* 影策 CastLooks 卡片操作：每张卡自带生成/编辑/删除，不必先去右栏找按钮。 */}
+                                            <span className="flex items-center gap-1 border-t border-border px-2 py-1" onClick={(e) => e.stopPropagation()}>
+                                                <button type="button" onClick={() => openLookCard(ch, i)} aria-label={`编辑造型 ${lookName}`}
+                                                    className="flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-muted-foreground hover:bg-muted">编辑</button>
+                                                <button type="button" onClick={() => triggerGenerate(ch, i, im)} disabled={!baseImage?.storageKey || st.busy}
+                                                    title={!baseImage?.storageKey ? "请先生成或上传角色本体参考图" : im.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
+                                                    aria-label={`${im.storageKey ? "重新生成" : "生成"}造型图 ${lookName}`}
+                                                    className="flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-40">
+                                                    <Play className="size-3" /> {im.storageKey ? "重新生成" : "生成"}
+                                                </button>
+                                                <button type="button" onClick={() => removeLook(ch, i)} aria-label={`删除造型 ${lookName}`}
+                                                    className="ml-auto flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-rose-500 hover:bg-rose-500/10">
+                                                    <Trash2 className="size-3" /> 删除
+                                                </button>
+                                            </span>
+                                        </div>
                                     );
                                 })}
                             </div>

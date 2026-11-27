@@ -75,6 +75,7 @@ import { deriveReviewBanners } from "./studio-review-banner";
 import type { DirectorWorkspace } from "@/pages/drama/director-panel";
 import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
 import { orderStudioQueue } from "./studio-queue-order";
+import { updateRescriptingIds } from "./studio-rescript-state";
 
 /**
  * 首屏按需分包：默认 tab=制作/剧本 只需要左栏 + 剧本面板；
@@ -844,11 +845,7 @@ function DramaStudioInner() {
     // 重新改编按集独立（影策每集一个 rescript.isPending）：改编 A 集不占住 B 集的改编按钮，
     // 也不把全局 busy 置真影响其它页签操作。按钮各自显示「改编中…」loading。
     const [rescriptingIds, setRescriptingIds] = useState<ReadonlySet<string>>(() => new Set<string>());
-    const markRescripting = (id: string, on: boolean) => setRescriptingIds((prev) => {
-        const next = new Set(prev);
-        if (on) next.add(id); else next.delete(id);
-        return next;
-    });
+    const markRescripting = (id: string, on: boolean) => setRescriptingIds((prev) => updateRescriptingIds(prev, id, on));
     // 集标题内联编辑（对齐影策 detail.tsx：回车保存 / Esc 取消 / 失焦保存）
     const [renaming, setRenaming] = useState(false);
 

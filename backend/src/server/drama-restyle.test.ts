@@ -56,6 +56,36 @@ test("只读反查：assetId / groupId 都能查到真实引用段，未引用�
     db.close();
 });
 
+test("造型粒度：lookId 只认 referenceBindings.outfitId，不拿角色级命中冒充", () => {
+    const db = new BackendDatabase(":memory:");
+    const charNode = {
+        id: "char-node", type: "character", title: "慕璃",
+        metadata: { characterAssetId: "AST-CHAR-MULI", productionEntity: { entityId: "ENT-MULI" } },
+    };
+    const h3Node = {
+        id: "h3-node", type: "minimax-h3:video",
+        metadata: {
+            segments: [
+                segment("clip-look-a", {
+                    referenceBindings: [{ id: "rb-a", outfitId: "look-red", sourceNodeId: "char-node", storageKey: "image:red" }],
+                    resultStorageKey: "video:a",
+                }),
+                segment("clip-role-only", {
+                    h3CharacterGroups: { "GROUP-MULI": { characterAssetId: "AST-CHAR-MULI", outfits: [] } },
+                    resultStorageKey: "video:b",
+                }),
+            ],
+        },
+    };
+    db.createCanvasProject({ id: "canvas-look", nodes: [charNode, h3Node], connections: [] });
+    const byLook = planRestyle(db, { assetId: "AST-CHAR-MULI", lookId: "look-red", dramaId: "drama-1" });
+    assert.deepEqual(byLook.all.map((target) => target.segmentId), ["clip-look-a"], "只命中明确引用该造型的段");
+    assert.equal(byLook.toMark.length, 1);
+    const byRole = planRestyle(db, { assetId: "AST-CHAR-MULI", dramaId: "drama-1" });
+    assert.equal(byRole.all.length, 2, "角色粒度仍命中两段，不受 lookId 改动影响");
+    db.close();
+});
+
 test("restyle=false 语义：只换造型，不标脏任何段", () => {
     const db = fixture();
     const plan = planRestyle(db, { assetId: "AST-CHAR-MULI", dramaId: "drama-1", restyleSegments: false });
