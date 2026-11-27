@@ -2544,7 +2544,8 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, a
         setRefBusy("restore");
         try {
             await commitProductionOps(ep.id as never, [{ type: "set_segment_reference_policy", segmentId: editingSegmentId, mode: "auto" }]);
-            message.success("已恢复自动参考图：顺序与启停改回编译派生");
+            await prepareSegmentReference(ep.id as never, editingSegmentId);
+            message.success("已恢复自动参考图：画布已按源稿重新投影");
             setRefReload(n => n + 1);
             onChanged?.();
         } catch (error) { message.error(`恢复自动参考失败：${(error as Error).message}`); }
@@ -2660,8 +2661,8 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, a
                 role: "other", tags: [], enabled: true, usage: "reference", mediaType: "image",
                 storageKey: item.storageKey, url: item.url,
             }));
-            // 写入收敛到制作稿单一入口：additions 进 director.source.segments[].referenceOverrides，
-            // 由读时派生统一投影回画布段（storyboard-track.ts）。不再直写画布 binding，避免双源。
+            // 单一真值：additions 进源稿 referenceOverrides，登记资产后立刻 prepare 把参考直接投影进画布 Clip。
+            // 画布与段卡只读画布 referenceBindings，不再依赖读时派生/编译快照兜底。
             await commitProductionOps(ep.id as never, [{
                 type: "set_segment_reference_policy", segmentId: editingSegmentId,
                 mode: refTruth.mode === "manual" ? "manual" : "auto",
@@ -2672,7 +2673,8 @@ function ShotsPanel({ ep, production, clipMedia, clipFailureByTarget, dramaId, a
                 id: `asset-${item.storageKey}`, label: item.label, mediaType: "image", role: "other",
                 tags: [], storageKey: item.storageKey, url: item.url, mimeType: "image/*",
             })));
-            message.success(`已加入 ${chosen.length} 张参考图，可在下方继续排序 / 启停`);
+            await prepareSegmentReference(ep.id as never, editingSegmentId);
+            message.success(`已加入 ${chosen.length} 张参考图并投影到画布，可继续排序 / 启停`);
             setRefManageOpen(false);
             setRefManageSelected({});
             setRefReload(n => n + 1);
