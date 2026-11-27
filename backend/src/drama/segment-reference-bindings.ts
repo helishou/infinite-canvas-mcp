@@ -132,9 +132,17 @@ export function deriveSegmentReferenceBindings(
     segmentId: string,
     shotIds: string[],
     shots: Rec[],
+    storageOverride?: Map<string, string>,
 ): DerivedSegmentReferenceBindings {
     const { resolve, byAssetId } = buildEntityAssetMap(source);
     const assets = recordOf(director?.assets);
+    // 权威源：共享画布资产节点的真图 storageKey（override）；分集 director.assets 只是冗余缓存，
+    // 可能与节点真值漂移（重拆/生图失败后尤其），只在 override 缺失时兜底。
+    const keyOf = (assetId: string): string => {
+        const authoritative = storageOverride?.get(assetId);
+        if (authoritative) return authoritative;
+        return textOf(recordOf(assets[assetId]).storageKey);
+    };
     const shotInputs = recordOf(director?.shotInputs);
     const shotById = new Map(rows(shots).map((shot) => [textOf(shot.id), shot]));
     const warnings: string[] = [];
@@ -171,7 +179,7 @@ export function deriveSegmentReferenceBindings(
     if (!anyScene) {
         const sceneAssets = rows(source?.asset_plan).filter((row) =>
             textOf(row.kind || row.asset_kind).toLowerCase() === "scene"
-            && textOf(recordOf(assets[textOf(row.id || row.asset_id)]).storageKey));
+            && keyOf(textOf(row.id || row.asset_id)));
         const fallbackScene = sceneAssets.map((row) => {
             const assetId = textOf(row.id || row.asset_id);
             return { assetId, name: textOf(row.asset_name || row.name) || assetId, kind: "scene" } as AssetDesc;
@@ -194,7 +202,7 @@ export function deriveSegmentReferenceBindings(
                 // 投影阶段的真实场景资产，指向同一 storageKey）。按 storageKey 再去重一次，
                 // 否则 H3 会收到两个编号都指向同一张图（实网 ep1 段1 的 <图1><图1>）。
                 // 先用有 storageKey 的做键；没有 storageKey 的稍后由 withMedia 阶段剔除。
-                const storageKey = textOf(recordOf(assets[desc.assetId]).storageKey);
+                const storageKey = keyOf(desc.assetId);
                 if (storageKey && seenStorage.has(storageKey)) continue;
                 seen.add(desc.assetId);
                 if (storageKey) seenStorage.add(storageKey);
@@ -206,7 +214,7 @@ export function deriveSegmentReferenceBindings(
 
     // 没有归档图的资产不能提交给 H3：跳过并记告警，绝不抛错打断整条流水线。
     const withMedia = ordered.filter((desc) => {
-        const storageKey = textOf(recordOf(assets[desc.assetId]).storageKey);
+        const storageKey = keyOf(desc.assetId);
         if (!storageKey) {
             warnings.push(`资产 ${desc.assetId} 没有 storageKey，段 ${segmentId} 跳过该参考图`);
             return false;
@@ -236,7 +244,7 @@ export function deriveSegmentReferenceBindings(
             enabled: true,
             usage: "reference",
             mediaType: "image",
-            storageKey: textOf(recordOf(assets[desc.assetId]).storageKey),
+            storageKey: keyOf(desc.assetId),
             order: index,
         });
         legend.push({ ordinal: index + 1, assetId: desc.assetId, name: desc.name || desc.assetId, kind: desc.kind, role });

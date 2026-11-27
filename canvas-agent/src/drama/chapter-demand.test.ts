@@ -17,6 +17,13 @@ test("提示词带上环境清单、JSON 结构与时长上限", () => {
     assert.ok(user.includes("雨夜。"));
 });
 
+test("拆镜提示词把原文叙述句标为 speaker=旁白（对齐影策 prompts.go）", () => {
+    const { system } = buildChapterDemandPrompt({ chapterTitle: "第三章", chapterBody: "雨夜。", environments });
+    assert.match(system, /旁白/, "拆镜提示词必须提到旁白");
+    assert.match(system, /逐字摘.*原文叙述|逐字.*旁白|speaker.*旁白/, "必须要求 model 把原文叙述句逐字摘成 speaker=旁白");
+    assert.match(system, /不要自己写旁白|不要编造旁白/, "必须禁止 model 自编旁白");
+});
+
 test("解析容忍 ```json 围栏与前后闲聊", () => {
     const reply = [
         "好的，这是分镜草案：",

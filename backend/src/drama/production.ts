@@ -6852,19 +6852,37 @@ export class EpisodeProductionService {
     }
 }
 
-/** 段级参考图策略写入创作源稿真值：mode=auto 删除覆写恢复自动派生；manual 合并 order/disabled。 */
+/** 段级参考图策略写入创作源稿真值：mode=auto 只恢复自动排序/启停；additions 是显式加入的绑定，独立保留。 */
 function setSegmentReferenceOverrides(director: DirectorProduction, op: Extract<ProductionOperation, { type: "set_segment_reference_policy" }>) {
     const source = director.source as Record<string, unknown>;
     const segments = (Array.isArray(source.segments) ? source.segments : []).map(record);
     const index = segments.findIndex(segment => String(segment.id || "") === op.segmentId);
     if (index < 0) throw new Error(`SEGMENT_REFERENCE_TARGET_UNKNOWN: 段 ${op.segmentId} 不存在于当前源稿`);
+    const current = record(segments[index].referenceOverrides);
+    // additions 按稳定 binding id 去重；同一 storageKey 也只保留一条，避免重复占 Picture 槽位。
+    // append（默认）= 制作台追加；replace = 画布手工编辑后的全量清单，删除的绑定才会被移除。
+    const sourceRows = op.additionsMode === "replace"
+        ? (op.additions || [])
+        : [...(Array.isArray(current.additions) ? current.additions : []), ...(op.additions || [])];
+    const byId = new Map<string, Record<string, unknown>>();
+    const seenKeys = new Set<string>();
+    for (const row of sourceRows) {
+        const binding = record(row), id = String(binding.id || "");
+        const key = String(binding.storageKey || "");
+        if (!id || !key || seenKeys.has(key) || byId.has(id)) continue;
+        byId.set(id, binding);
+        seenKeys.add(key);
+    }
+    const additions = [...byId.values()];
+    const withAdditions = additions.length ? { additions } : {};
     if (op.mode === "auto") {
-        delete segments[index].referenceOverrides;
+        // 恢复自动排序/启停，但不丢弃用户显式加入的绑定（它们是创作内容，不是排序策略）。
+        if (additions.length) segments[index].referenceOverrides = { mode: "auto", order: [], disabled: [], ...withAdditions };
+        else delete segments[index].referenceOverrides;
     } else {
-        const current = record(segments[index].referenceOverrides);
         const order = op.order !== undefined ? op.order.map(String) : Array.isArray(current.order) ? current.order.map(String) : [];
         const disabled = op.disabled !== undefined ? op.disabled.map(String) : Array.isArray(current.disabled) ? current.disabled.map(String) : [];
-        segments[index].referenceOverrides = { mode: "manual", order, disabled };
+        segments[index].referenceOverrides = { mode: "manual", order, disabled, ...withAdditions };
     }
     source.segments = segments;
 }

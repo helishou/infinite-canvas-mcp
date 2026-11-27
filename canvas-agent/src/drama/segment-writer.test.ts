@@ -135,3 +135,4 @@ test("可拍字段与台词共存：台词逐字保留，不被新字段挤掉",
     assert.ok(draft.includes("台词：崇良：“我揭了这榜”"));
     assert.ok(draft.includes("台词：路人：“你当真要去？”"));
 });
+

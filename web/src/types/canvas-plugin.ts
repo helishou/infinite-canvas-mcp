@@ -170,6 +170,8 @@ export type CanvasProductionEditing = {
      * H3 面板用它覆盖画布 segment 上的副本，避免「制作台改了、节点没跟」。
      */
     getStoryboardTrack?: (input: { nodeId?: string }) => Promise<CanvasStoryboardTracks>;
+    /** 段级参考清单回写制作稿：正式 Clip 的手工参考编辑经此入口收敛到 source.segments[].referenceOverrides。 */
+    setSegmentReferencePolicy?: (input: { nodeId: string; segmentId: string; targetId: string; additions: Array<Record<string, unknown>> }) => Promise<{ sourceSaved: boolean }>;
     reverseSyncPrompt: (input: { nodeId: string; segmentId: string; prompt: string; artifactId: string; sourceHash: string; basePromptHash: string }) => Promise<{ sourceSaved: boolean }>;
     compilePrompt: (input: { nodeId: string; segmentId: string }) => Promise<{ prompt: string }>;
     replaceStoryboardTrack: (input: CanvasProductionStoryboardEditor) => Promise<{ sourceSaved: boolean; segment?: Record<string, unknown> }>;

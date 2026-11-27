@@ -57,7 +57,7 @@ export type ChapterDemandPromptInput = {
     sceneHints?: string;
 };
 
-const DEFAULT_MAX_SHOT_SECONDS = 8; // 影策 relaxed 舒缓档上限，情绪戏可给到8秒
+const DEFAULT_MAX_SHOT_SECONDS = 5; // H3 单段上限 15 秒；单镜压到 5 秒，才能让一段装下 2–3 个镜头而不是一镜独占一段
 /** 兜底切节拍时每段的字数，约等于一个镜头能承载的信息量。 */
 const FALLBACK_BEAT_CHARS = 120;
 
@@ -79,9 +79,11 @@ export function buildChapterDemandPrompt(input: ChapterDemandPromptInput) {
         "JSON 结构：",
         '{"demand":"字符串","scenes":[{"sceneKey":"英文短键","sceneName":"场景名","environmentId":"已登记环境 ID","beats":[{"title":"镜头小标题","visual":"画面描述","action":"画面里发生的具体动作","shotSize":"特写/近景/中景/全景/远景","camera":"运镜（固定/推/拉/摇/跟/环绕，可空）","imagePrompt":"本镜起幅画面","videoPrompt":"本镜镜内动作与运镜的时序","seconds":数字,"dialogue":"台词（可空）","speaker":"说话人（有台词时必填）","sourceQuote":"对应的原文小句","character_ids":["角色ID数组"],"prop_ids":["道具ID数组"],"scene_id":"场景ID或空串"}]}]}',
         "硬性要求：",
-        `1. 每个 beat 的 seconds 是时长提示（3–${maxShotSeconds} 秒，整数或 .5）：动作/冲突镜给 3–4 秒短镜，情绪戏/对话/关键场面给 6–${maxShotSeconds} 秒长镜，普通叙事给 4–5 秒。按剧情需要分配，不要所有镜头都用同一个秒数。`,
+        `1. 每个 beat 的 seconds 是时长提示（2–${maxShotSeconds} 秒，整数或 .5）：普通叙事 3–4 秒，动作/冲突 2–3 秒，情绪与关键场面最多 ${maxShotSeconds} 秒。单镜不要超过 ${maxShotSeconds} 秒：多个镜头合起来才构成一个剧情段，镜头过长会让整段只剩一个镜头。按剧情需要分配，不要所有镜头都用同一个秒数。`,
+        "3b. 单镜台词超过约 16 字时，必须拆成两个或更多连续 beat，每个 beat 只带其中一段逐字台词并给出 speaker，各自配独立的画面与景别；不要把一个长句塞进一个 beat 并把 seconds 拉到 6 秒以上。",
         "2. environmentId 只能填下面场景清单里 environmentId: 后面引号中的 ID 原值（只填 ID，不要带引号、场景名或「｜」）；清单为空时才允许留空串。",
         "3. 原文里每段引号内的对白都必须逐字提取到某个 beat 的 dialogue，并同时给出 speaker；这是硬要求，不是可选项。宁可把带对白的段落拆成独立镜头，也不要把台词省略或只写进 visual 叙述。",
+        "3c. 旁白（画外音）：原文里承担叙事串联、时间跳跃、因果交代的叙述句（非角色对白），确需时用一个 beat 的 dialogue 逐字摘取该原文叙述句，speaker 填「旁白」；不要自己写旁白，旁白只能逐字取自原文，不要编造旁白。旁白镜头画面要有明确的动作或反应承接。没有合适叙述句就不设旁白，不要用旁白复述画面。",
         "4. demand 是给人看的需求正文：【场景：X】与【时间：Y】各占一行（不要写在同一行），每个镜头用【镜头 N】单独起行，镜头正文原样叙述，不要写 JSON。",
         "5. 不要新增原文没有的人物关系；不要写音乐、字幕、转场特效。",
         "6. 每个 beat 的 character_ids / prop_ids / scene_id 用于自动绑定参考图：id 只能从下方对应清单里逐字复制，不得新编、不得改写、不得用名称代替 id；清单里没有就 character_ids/prop_ids 给空数组、scene_id 给空串；同一镜内按出场顺序去重，同一个 id 只写一次。",

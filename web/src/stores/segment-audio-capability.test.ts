@@ -84,12 +84,16 @@ test("失败模式③：纯名（无 ::）仍按原有跨渠道精确名语义�
     );
 });
 
-test("回退不臆造能力：模型匹配到了但没登记 generateAudio 时声音行依然不渲染", () => {
+test("未登记 generateAudio 的视频模型默认能出声（用户口径），显式 false 仍是无声", () => {
     const unregistered = configWith([{ id: "engine-local", models: [{ name: "H3 展开流", capability: "video", maxAudios: 2 }] }]);
-    assert.equal(soundRowText(unregistered, "engine-local::H3 展开流"), null);
-    assert.equal(soundRowText(unregistered, "local-comfyui::H3 展开流"), null);
-    assert.deepEqual(modelVideoCapabilitiesOf(unregistered, "local-comfyui::H3 展开流"), {});
-    // 渠道 id 与模型名都找不到时仍是 null。
+    // 默认：视频模型都能出声，所以未登记也渲染「模型同步生成对白与音效」。
+    assert.equal(soundRowText(unregistered, "engine-local::H3 展开流"), HAS_SOUND);
+    assert.equal(soundRowText(unregistered, "local-comfyui::H3 展开流"), HAS_SOUND);
+    assert.equal(modelVideoCapabilitiesOf(unregistered, "local-comfyui::H3 展开流").generateAudio, true);
+    // 显式登记 false 的模型不受默认值影响。
+    const silent = configWith([{ id: "engine-local", models: [{ name: "无声模型", capability: "video", generateAudio: false }] }]);
+    assert.equal(soundRowText(silent, "engine-local::无声模型"), NO_SOUND);
+    // 渠道 id 与模型名都找不到时仍是 null（模型未知不臆造）。
     assert.equal(soundRowText(registered, "engine-local::不存在"), null);
     assert.equal(soundRowText(registered, "不存在"), null);
 });

@@ -314,14 +314,10 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
             // 影策节奏：beat.seconds 是时长 hint，经 ShotMs 按 pacing 档位夹到范围（默认 relaxed 2.5–8s），
             // 并按 beat.dialogue 台词长度拟合（保证逐字台词说得完）。不再把 hint 直接乘 fps（旧逻辑全给3秒→镜头急）。
             const rawHint = Number(beat.seconds);
-            // 影策节奏修复：LLM 常给所有镜头 3 秒（或走兜底），情绪戏会被压成短镜。
-            // 按画面文字识别情绪/关键场面，主动把 hint 提到 6-7 秒，再交给 ShotMs 按 pacing 档位夹。
-            const visual = String(beat.visual || "");
-            const emotionalRe = /笑|泪|哭|望|回身|回首|转身|坐|跪|睡|沉默|痴|惊|喜|怒|哀|惧|愣|怔|叹|犹豫|对视|抱|握|留|信|酒|求|墓|别|死|醒|知|真相|跌坐|心爱|不弃|独坐|酣睡/;
-            const actionRe = /奔|冲|追|打|斗|战|刺|斩|逃|飞|跃|跌|倒|吞|袭|赶|挥|拔|射|杀/;
-            let hint = Number.isFinite(rawHint) && rawHint > 0 ? rawHint : 3;
-            if (emotionalRe.test(visual)) hint = Math.max(hint, 7);
-            else if (actionRe.test(visual)) hint = Math.max(hint, 4);
+            // 时长以草案给的 seconds 为准；情绪/动作只在不给 hint 时兜一个短值。
+            // 旧逻辑把含「笑/望/坐/酒」这类常见字的镜头一律抬到 7 秒，导致中位数 7 秒、
+            // 一段只装一个镜头。H3 单段上限 15 秒，单镜压到 5 秒才能让一段装下 2–3 镜。
+            const hint = Number.isFinite(rawHint) && rawHint > 0 ? rawHint : 4;
             const shotMs = yingceShotMs(
                 hint,
                 String(beat.dialogue || ""),
@@ -337,6 +333,11 @@ export function planChapterStoryboard(input: ChapterStoryboardInput): Storyboard
             const cappedFrames = Math.min(h3MaxFrames, rawFrames);
             if (cappedFrames < rawFrames) {
                 diagnostics.push(`镜头「${String(beat.title || `镜头 ${beatIndex + 1}`)}」台词拟合时长 ${(rawFrames / fps).toFixed(1)}s 超过 H3 单段上限 15s，已压到 15s；建议在草案里把该镜台词拆成两镜`);
+            }
+            // 单镜超过 5 秒会让一段只剩一镜；超过时留诊断，提示把长台词按 16 字拆成多镜。
+            if (cappedFrames > Math.round(5 * fps)) {
+                const dialogueRun = Array.from(String(beat.dialogue || "")).length;
+                diagnostics.push(`镜头「${String(beat.title || `镜头 ${beatIndex + 1}`)}」${(cappedFrames / fps).toFixed(1)}s 偏长${dialogueRun > 16 ? `（台词 ${dialogueRun} 字，建议拆成多镜，每镜 ≤16 字）` : ""}；建议压缩 seconds 或拆镜`);
             }
             const durationFrames = Math.max(minFrames, cappedFrames);
             if (Number.isFinite(hint) && hint > 0 && durationFrames !== Math.round(hint * fps)) {
@@ -501,7 +502,10 @@ function planYingceSegments(
     fps: number,
     diagnostics: string[],
 ): PlannedSegment[] {
-    const model: DurationOptions = { Values: [], Min: 4, Max: 15, Step: 1 };
+    // 规划上限收到 10 秒：编译器硬限是 15 秒，但 auto/range 的合并逻辑（MinSegmentShots=3、
+    // 尾段 rebalance）会把段撑到上限之外。实测用 15 会偶发 17 秒段被编译拒，10 秒则三集
+    // 都能做到零单镜段、零超长段。这里只是规划值，不改动编译器的 4–15 秒硬约束。
+    const model: DurationOptions = { Values: [], Min: 4, Max: 10, Step: 1 };
     const positive = (value: number | undefined, fallback: number) =>
         Number.isFinite(value) && (value ?? 0) > 0 ? Number(value) : fallback;
     const fixedSeconds = positive(input.segmentSeconds, positive(input.clipSeconds, DEFAULT_CLIP_SECONDS));

@@ -204,6 +204,23 @@ export class CanvasVideoDispatcher {
     resume(task: RuntimeTask) {
         if (task.kind !== "canvas-video" || !["queued", "running"].includes(task.status)) return;
         const input = task.input as CanvasVideoGenerationInput;
+        // 已提交到引擎的任务（有 engine_submitted 回执）不能再走 execute 重新 createVideo，
+        // 否则重启后同一段被提交两次、引擎里出现两个 prompt、重复出片。改为按原 engineTaskId
+        // 接回观察：复用 reclaim 的目标解析与 waitReclaimed 等待链，只是任务本就是 running。
+        const submission = this.stores.tasks.events(task.id).find((event) => event.type === "engine_submitted")?.payload as { engineTaskId?: string; baseUrl?: string; model?: string } | undefined;
+        if (submission?.engineTaskId && submission.baseUrl) {
+            try {
+                const config = this.stores.settings.get("ai.config");
+                const candidates = [findEngineChannel(config, submission.model || ""), findComfyuiEngineTarget(config, submission.model || "")].filter((item): item is EngineChannelTarget => Boolean(item));
+                const target = candidates.find((item) => item.baseUrl === submission.baseUrl) || candidates[0];
+                if (!target) throw new Error("原引擎渠道已不在设置里，请在原配置下回捞");
+                const log = this.stores.logs.list({ runtimeTaskId: task.id, limit: 1 })[0];
+                const plan: Plan = { input, kind: "engine", engine: target };
+                void this.waitReclaimed(task, submission.engineTaskId, target, plan, log?.id || null)
+                    .catch((error) => this.fail(task, input, error, log?.id || null, Date.now()));
+                return;
+            } catch (error) { this.fail(task, input, error); return; }
+        }
         try {
             const project = this.target(input);
             const node = project && (project.nodes as Array<Record<string, any>>).find((node) => node.id === input.nodeId);
@@ -463,7 +480,20 @@ export class CanvasVideoDispatcher {
         const config = this.stores.settings.get("ai.config");
         // 引擎渠道：模型属于 media-engine，执行走 /v1/videos 异步协议（自定义 comfyUrl 仍本地）
         const engineTarget = input.comfyUrl ? null : (findEngineChannel(config, input.model) ?? findComfyuiEngineTarget(config, input.model));
-        if (engineTarget) return { input, kind: "engine", engine: engineTarget };
+        if (engineTarget) {
+            // 引擎渠道提交时读的是顶层 input.size/seconds（见 executeEngine：createVideo({ size: plan.input.size })），
+            // 而 H3 runner 把尺寸放进 params.selectedVideoParams → params.size。若不在 plan 阶段提到顶层，
+            // 引擎收不到 size，工作流的 megapixels 派生字段算不出值，就会用工作流默认 MP（实测 1.1→800p）。
+            // 与 workflowValues 的兜底同口径：顶层为空才用 params 里的值，不覆盖显式传入。
+            const lifted: CanvasVideoGenerationInput = { ...input };
+            for (const key of ["seconds", "size", "resolution", "width", "height"] as const) {
+                if (lifted[key] === undefined && input.params?.[key] !== undefined) {
+                    (lifted as Record<string, unknown>)[key] = input.params[key];
+                }
+            }
+            if (lifted.seconds === undefined && input.params?.duration !== undefined) lifted.seconds = String(input.params.duration);
+            return { input: lifted, kind: "engine", engine: engineTarget };
+        }
         if (usesWorkflowExecutor(config, input.model)) {
             const resolved = resolveWorkflowBindingForModel(config, input.model, Number.isSafeInteger(input.workflowReferenceCount) ? Number(input.workflowReferenceCount) : (input.references || []).length);
             if (!resolved.ok) throw new Error(`${workflowResolutionMessage(resolved)}（模型=${input.model}）`);
@@ -600,7 +630,11 @@ function workflowValues(input: CanvasVideoGenerationInput, workflow: string) {
  */
 function describeFailure(error: unknown, depth = 0): string {
     if (error instanceof Error) return error.message || error.name || "未知错误";
-    if (typeof error === "string") return error.trim() || "未知错误";
+    if (typeof error === "string") {
+        const s = error.trim();
+        if (s === "[object Object]") return "引擎错误对象未能解析（[object Object]）；请查引擎 :8300 / ComfyUI :8188 日志确认真实失败原因";
+        return s || "未知错误";
+    }
     if (error && typeof error === "object") {
         if (depth >= 3) {
             try {

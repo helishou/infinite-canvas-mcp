@@ -48,19 +48,21 @@ export function isFinalStale(final: FinalResource | undefined, segments: readonl
     });
 }
 
-/** 与 pipeline.runRender 完全一致的段视频收集顺序：H3 段 resultStorageKey + results[].storageKey，去重保序。 */
+/** 与 pipeline.runRender 共用的段视频收集：每段只取当前有效产物，results[] 只作审计历史。
+ *  重试/换模型后一段会有多个 storageKey；若把历史全送进 concat，同一段会在成片里重复出现。 */
 export function collectFinalVideos(canvas: Record<string, any> | null | undefined): string[] {
     const nodes = Array.isArray(canvas?.nodes) ? canvas!.nodes as Array<Record<string, any>> : [];
     const videos: string[] = [];
     for (const node of nodes) {
         const segments = Array.isArray(node?.metadata?.segments) ? node.metadata.segments as Array<Record<string, any>> : [];
         for (const segment of segments) {
-            const key = String(segment?.resultStorageKey || "");
+            const current = String(segment?.resultStorageKey || "");
+            if (current) { videos.push(current); continue; }
+            // 无当前产物时才从历史里取最后一个有效项，且只取一个。
+            const history = Array.isArray(segment?.results) ? segment.results as Array<Record<string, any>> : [];
+            const last = [...history].reverse().find((result) => String(result?.storageKey || ""));
+            const key = String(last?.storageKey || "");
             if (key) videos.push(key);
-            for (const result of (Array.isArray(segment?.results) ? segment.results : [])) {
-                const rk = String((result as Record<string, any>)?.storageKey || "");
-                if (rk) videos.push(rk);
-            }
         }
     }
     return [...new Set(videos)].filter(Boolean);

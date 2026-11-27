@@ -338,7 +338,8 @@ export function normalizeModelVideoCapabilities(value: unknown): ModelVideoCapab
         ? model.videoResolutions.slice()
         : undefined;
     if (resolutions) out.videoResolutions = resolutions;
-    if (typeof model.generateAudio === "boolean") out.generateAudio = model.generateAudio;
+    // 用户口径：视频模型默认都能出声；只有显式登记 generateAudio:false 才当无声模型。
+    out.generateAudio = typeof model.generateAudio === "boolean" ? model.generateAudio : true;
     if (typeof model.tailFrameChain === "boolean") out.tailFrameChain = model.tailFrameChain;
     if (typeof model.maxVideoSeconds === "number" && Number.isFinite(model.maxVideoSeconds) && model.maxVideoSeconds > 0) {
         out.maxVideoSeconds = model.maxVideoSeconds;

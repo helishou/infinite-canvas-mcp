@@ -19,6 +19,7 @@ import { prepareDatabaseUpgrade, DATABASE_SCHEMA_VERSION, MINIMUM_DATABASE_SCHEM
 import { createDatabaseSnapshot } from "./database-snapshots.js";
 import { syncScriptNodeEdits } from "./drama/script-nodes.js";
 import { syncH3ModeEdits } from "./drama/h3-mode-sync.js";
+import { syncH3SegmentStructureEdits } from "./drama/canvas-production-sync.js";
 import { syncImageReferenceEdits } from "./drama/image-inputs.js";
 import { productionLayoutPlanSchema, type ProductionLayoutPlan, type ProductionLayoutReceipt } from "@basketikun/canvas-agent/drama/production-contract";
 import { completedImageSlots, dropImageSlots, imageSourceStatus, linkedCharacterImageUpdates } from "./canvas/image-result-slots.js";
@@ -279,6 +280,23 @@ export class BackendDatabase {
     listCanvasProjects(): CanvasProject[] {
         const rows = this.db.prepare("SELECT id FROM canvas_projects ORDER BY updated_at DESC").all() as Array<{ id: string }>;
         return rows.flatMap(({ id }) => { const project = this.getCanvasProject(id); return project ? [project] : []; });
+    }
+
+    /**
+     * 反查引用段用的轻量节点投影：一次查询只取项目/节点 id 与原始 metadata，
+     * 不重建项目头、连线，也不做共享资产解析（反查只读 ID 与段字段）。
+     */
+    listCanvasNodesForRestyle(): Array<{ projectId: string; nodeId: string; type: string; metadata: Record<string, unknown> }> {
+        const rows = this.db.prepare("SELECT project_id AS projectId, node_id AS nodeId, node_json AS nodeJson FROM canvas_nodes ORDER BY project_id, ordinal").all() as Array<{ projectId: string; nodeId: string; nodeJson: string }>;
+        return rows.flatMap(({ projectId, nodeId, nodeJson }) => {
+            try {
+                const node = JSON.parse(nodeJson) as Record<string, unknown>;
+                if (!node || typeof node !== "object" || Array.isArray(node)) return [];
+                const metadata = node.metadata;
+                const safeMetadata = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata as Record<string, unknown> : {};
+                return [{ projectId, nodeId, type: String(node.type || ""), metadata: safeMetadata }];
+            } catch { return []; }
+        });
     }
 
     listCanvasProjectsByEpisode(episodeId: string): CanvasProject[] {
@@ -556,8 +574,12 @@ export class BackendDatabase {
     private restoreH3OutputOperation(projectId: string, project: Record<string, unknown>, operation: CanvasOperation): CanvasOperation {
         const nodeId = String(operation.nodeId || "");
         const segmentId = String(operation.segmentId || "");
-        const log = this.getGenerationLog(String(operation.generationLogId || ""));
-        if (!log || log.projectId !== projectId || log.nodeId !== nodeId) throw new Error("历史输出不属于当前 H3 节点");
+        const requestedKey = String(operation.storageKey || "");
+        const log = operation.generationLogId ? this.getGenerationLog(String(operation.generationLogId)) : null;
+        const logUsable = Boolean(log && log.projectId === projectId && log.nodeId === nodeId);
+        // 没有可用日志时仍可切换：H3 节点自己留存的结果（clip.results[]）是画布内生成/恢复的成品清单，
+        // 生成日志被裁剪、或画布直接生成时只有这里还留着；下面按 storageKey 从本 Clip 的留存里定位。
+        if (!logUsable && !requestedKey) throw new Error("历史输出不属于当前 H3 节点");
         const node = (Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : []).find((item) => String(item.id) === nodeId);
         if (!isH3CanvasNode(node)) throw new Error("找不到目标 H3 节点");
         const activeTaskId = String(recordOf(node!.metadata).runtimeTaskId || "");
@@ -565,22 +587,40 @@ export class BackendDatabase {
         const segment = (Array.isArray(recordOf(node!.metadata).segments) ? recordOf(node!.metadata).segments as Array<Record<string, unknown>> : []).find((item) => String(item.id) === segmentId);
         if (!segment) throw new Error("找不到目标 Clip");
         if (["queued", "loading", "awaiting_confirmation"].includes(String(segment.status || ""))) throw new Error("Clip 正在运行，不能还原历史输出");
-        const requestedKey = String(operation.storageKey || "");
-        const output = log.outputs.find((item) => (!requestedKey || item.storageKey === requestedKey) && String(item.mimeType || "video/mp4").startsWith("video/"));
-        const storageKey = String(output?.storageKey || "");
-        const media = storageKey ? this.getMediaFile(storageKey) : null;
-        if (!media || !fs.existsSync(media.filePath)) throw new Error("历史输出媒体已丢失，不能还原");
         const settings = recordOf(operation.settings);
         if (Object.keys(settings).some((key) => key === "id" || H3_RUNTIME_SEGMENT_FIELDS.includes(key as typeof H3_RUNTIME_SEGMENT_FIELDS[number]))) throw new Error("历史参数包含后台运行字段");
+        let storageKey = "";
+        let mimeType = "video/mp4";
+        let generationLogId = logUsable ? log!.id : "";
+        if (logUsable) {
+            const output = log!.outputs.find((item) => (!requestedKey || item.storageKey === requestedKey) && String(item.mimeType || "video/mp4").startsWith("video/"));
+            storageKey = String(output?.storageKey || "");
+            mimeType = String(output?.mimeType || "video/mp4");
+        } else {
+            const kept = (Array.isArray(segment.results) ? segment.results as Array<Record<string, unknown>> : [])
+                .find((item) => String(item.storageKey || "") === requestedKey
+                    && (String(item.mimeType || "video/").startsWith("video/") || requestedKey.startsWith("video:")));
+            if (!kept) throw new Error("历史输出不属于当前 H3 节点");
+            storageKey = String(kept.storageKey);
+            mimeType = String(kept.mimeType || "video/mp4");
+            generationLogId = String(kept.generationLogId || "");
+        }
+        const media = storageKey ? this.getMediaFile(storageKey) : null;
+        if (!media || !fs.existsSync(media.filePath)) throw new Error("历史输出媒体已丢失，不能还原");
         const url = `/media/${encodeURIComponent(storageKey)}`;
+        // 保留 Clip 自己留存的其它历史结果，只把被选中的这一项标为 restore 并放到首位。
+        // 之前整体替换成单条会让只在 results[] 留存、日志已裁剪的版本永久消失，再次按 storageKey 还原会报「不属于当前节点」。
+        const priorResults = (Array.isArray(segment.results) ? segment.results as Array<Record<string, unknown>> : [])
+            .filter((item) => String(item.storageKey || "") !== storageKey)
+            .map((item) => ({ ...item }));
         return { type: "update_h3_segment", nodeId, segmentId, patch: {
             ...withH3ParameterEdits(segment, settings),
             // restore 是真实写回：在当前结果条目上落来源标记 + 生成日志凭证，
             // 段版本派生据此把「当前项」显示为 restore（切版本），其余历史版本仍读各自生成日志来源。
             result: url, resultStorageKey: storageKey, results: [{
-                url, storageKey, mimeType: String(output?.mimeType || "video/mp4"),
-                generationLogId: log.id, source: "restore",
-            }],
+                url, storageKey, mimeType,
+                ...(generationLogId ? { generationLogId } : {}), source: "restore",
+            }, ...priorResults],
             status: "success", progress: 1, runtimeTaskId: "", cacheFingerprint: "",
             firstPassReady: false, firstPassResult: "", firstPassStorageKey: "", firstPassFingerprint: "",
         } };
@@ -878,6 +918,9 @@ export class BackendDatabase {
             }) : undefined;
             const scriptBaseline = !context?.runtimeWrite && context?.source?.clientId !== "production:scripts" ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionScriptId)) } : undefined;
             const entityBaseline = !["production:scripts", "production:layout"].includes(String(context?.source?.clientId || "")) ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => node.metadata?.productionEntity)) } : undefined;
+            // 方案二：画布与制作台对等维护 Clip。操作前保存 H3 节点段列表快照，供回写制作稿时对比增删重排。
+            const segmentBaseline = !context?.runtimeWrite && !String(context?.source?.clientId || "").startsWith("production:")
+                ? { nodes: structuredClone((Array.isArray(project.nodes) ? project.nodes as Record<string, any>[] : []).filter(node => String((node as Record<string, any>).type || "").startsWith("minimax-h3:"))) } : undefined;
             if (!this.db.prepare("SELECT 1 FROM canvas_collaboration_checkpoints WHERE project_id = ?").get(id)) {
                 this.db.prepare("INSERT INTO canvas_collaboration_checkpoints (project_id, revision, data_json) VALUES (?, ?, ?)").run(id, currentRevision, JSON.stringify(current));
             }
@@ -1060,7 +1103,7 @@ export class BackendDatabase {
                 operationResults.push(...result);
             }
             const productionUpdates = [...(scriptBaseline ? syncScriptNodeEdits(this, id, scriptBaseline, project) : []), ...entitySync.updates,
-                ...syncH3ModeEdits(this, id, current, project, context)];
+                ...syncH3ModeEdits(this, id, current, project, context), ...(segmentBaseline ? syncH3SegmentStructureEdits(this, id, segmentBaseline, project, context) : [])];
             if (imageInputBaseline) {
                 const synced = syncImageReferenceEdits(this, id, imageInputBaseline, project);
                 productionUpdates.push(...synced.updates);
@@ -1293,8 +1336,11 @@ export class BackendDatabase {
                 const metadata = {
                     content: output.url, url: output.url, storageKey: output.storageKey || "", mimeType: output.mimeType || "image/png",
                     bytes: output.bytes, naturalWidth: output.width, naturalHeight: output.height,
-                    ...(!taskParams.canvasFrozenInput ? { prompt: input.prompt, model: input.model }
-                        : restoreFrozenProductionPrompt ? { prompt: input.prompt, composerContent: input.prompt } : {}),
+                    // 提示词与 composerContent 成对写入：画布输入框和用户回看都以 composerContent 为准，
+                    // 只写 prompt 会让生成节点打开后显示为空（共享资产画布的生图节点曾踩此坑）。
+                    ...(!taskParams.canvasFrozenInput || restoreFrozenProductionPrompt
+                        ? { prompt: input.prompt, composerContent: input.prompt, model: input.model }
+                        : {}),
                     generationType: input.references?.length ? "edit" : "generation",
                     status: "success", runProgress: 1, generationTaskId: task.id, inputOutdated: false, generatedImageHistory: [...(Array.isArray(sourceMetadata.generatedImageHistory) ? sourceMetadata.generatedImageHistory : []), ...media.map(output => ({ ...output, taskId: task.id, inputHash: frozenHash }))],
                 };
@@ -2044,6 +2090,10 @@ export class BackendDatabase {
             const deleted = Number(this.db.prepare("DELETE FROM canvas_folders WHERE id = ?").run(id).changes);
             const deleteCanvas = this.db.prepare("DELETE FROM canvas_projects WHERE id=?");
             for (const canvasId of uniqueCanvasIds) deleteCanvas.run(canvasId);
+            // 级联清理全自动流水线记录：剧目删了却留着 running 流水线会后台空转（pause 时报 404）。
+            this.db.prepare("DELETE FROM drama_pipeline_jobs WHERE drama_id=?").run(id);
+            this.db.prepare("DELETE FROM drama_pipeline_events WHERE drama_id=?").run(id);
+            this.db.prepare("DELETE FROM drama_pipelines WHERE drama_id=?").run(id);
             this.db.exec("COMMIT");
             return deleted;
         } catch (error) {
@@ -3141,6 +3191,23 @@ export class BackendDatabase {
         const { where, values, limit, offset } = this.taskListWhere(filter);
         const rows = this.db.prepare(`SELECT * FROM tasks ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as Array<Record<string, unknown>>;
         return rows.map((row) => this.taskFromRow(row));
+    }
+
+    /** 在跑任务的轻量绑定索引：只读状态与节点/段身份，供引用段反查判断跳过，避免逐段解码大任务行。 */
+    listActiveTaskBindings(): Array<{ projectId: string; nodeIds: string[]; segmentIds: string[] }> {
+        const rows = this.db.prepare("SELECT project_id AS projectId, node_id AS nodeId, segment_id AS segmentId, input_json AS inputJson FROM tasks WHERE status IN ('queued', 'running', 'awaiting_confirmation')").all() as Array<Record<string, unknown>>;
+        return rows.map((row) => {
+            let input: Record<string, unknown> = {};
+            if (row.inputJson != null) {
+                try { const parsed = decodeStoredJson<unknown>(row.inputJson); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>; } catch { /* 坏行不阻断反查 */ }
+            }
+            const ids = (value: unknown) => value === undefined || value === null ? [] : [String(value)];
+            return {
+                projectId: String(row.projectId || ""),
+                nodeIds: [...new Set([...ids(row.nodeId), ...ids(input.nodeId)])],
+                segmentIds: [...new Set([...ids(row.segmentId), ...ids(input.segmentId)])],
+            };
+        });
     }
 
     listCanvasTaskModelUsage(): Array<{ model: string; channelId: string; count: number }> {

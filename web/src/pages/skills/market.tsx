@@ -3,6 +3,7 @@ import { App, Button, Drawer, Empty, Input, Segmented, Select, Spin, Switch, Tag
 import { Bookmark, Boxes, Check, Download, FileArchive, FileText, Heart, MessageSquareText, Plus, RefreshCw, Search, Trash2, UploadCloud } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Streamdown } from "streamdown";
+import "streamdown/styles.css";
 
 import {
     fetchMarketSkills, fetchSkillDetail, fetchSkillSlotMap, fileToBase64, installCatalogSkill, installMarketSkill, readSkillFrontmatter, splitSkillFrontmatter,

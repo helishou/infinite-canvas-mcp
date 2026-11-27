@@ -15,11 +15,10 @@ const located = {
 
 const input = { dramaId: "d1", assetId: "a1", restyleSegments: true } as RegenerateReferenceInput;
 
-test("无模板时与内置方案模板一致（默认行为不变）", () => {
+test("无模板时与内置方案模板一致（影策逐字模板，不再追加画幅/规则行）", () => {
     const prompt = buildRegeneratePrompt(located, input, "写实", "zh");
-    assert.match(prompt, /崇良/);
-    assert.match(prompt, /青衫少年，佩剑/);
-    assert.match(prompt, /16:9/);
+    assert.match(prompt, /^写实。角色定妆照：崇良。青衫少年，佩剑。/);
+    assert.doesNotMatch(prompt, /【参考图用法】|最终输出画幅必须为|用户长期规则：/);
 });
 
 test("传剧目模板时用模板渲染并替换变量", () => {

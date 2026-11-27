@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
     fetchBackendDramaEpisodes,
@@ -37,6 +37,7 @@ import { deriveInboxFailureItems, SEGMENT_VIDEO_PLATFORMS, type InboxActiveRefMa
 import { deriveSegmentVersionDuration, shotsDurationSecOf } from "./studio-version-duration";
 export type { StudioInboxItem };
 import type { ProductionOperation } from "@basketikun/canvas-agent/drama/production-contract";
+import { compileReferenceSubmission } from "@basketikun/canvas-agent/reference-contract";
 import {
     buildAssetExtractPrompt,
     parseAssetExtract,
@@ -142,8 +143,14 @@ export type StudioClipMedia = {
     /** 画布 H3 段的创作真值：提示词与参考图绑定。制作台段卡优先显示画布内容，artifact 只作 fallback。 */
     prompt?: string;
     referenceBindings?: ReadonlyArray<Record<string, unknown>>;
+    /** 编译器按提交顺序给图片绑定分配的 Picture N；段卡编号与提示词引用统一读它，不再按 label/下标另算。 */
+    submissionOrdinals?: Readonly<Record<string, number>>;
     /** 画布段的真实生成模式（t2v/i2v/fl2v/ref2va）。段卡模式标签以此为准，勿用过时 source.segment.mode。 */
     taskMode?: string;
+    /** 画布段真值：本段开启「尾帧参考」时，运行时会把本段最后一帧截成图片交给下一段当首帧。 */
+    tailFrameContinuation?: boolean;
+    /** 画布段真值：已截取的本段尾帧图片 storageKey（tailFrameAnchor.storageKey），没有就为空。 */
+    tailFrameAnchorKey?: string;
 };
 
 /** 段 targetId → 画布 H3 节点 errorDetails：失败段无成片、进不了 clipMedia，靠这张表也能显示失败原因。 */
@@ -164,6 +171,17 @@ export type StudioSegmentState = {
     custom?: boolean;
     /** 视频是否仅后处理失败（影策 videoReprocessable）：成片已在库，重试只重处理后处理。 */
     videoReprocessable?: boolean;
+    /** 后端派生的视频阶段（对齐影策 videoStatus：queued/loading/running/ready/stale/failed）。无真值缺省。 */
+    videoStatus?: string;
+    /** 后端派生的视频失败原因，失败态优先展示；无真值缺省，不编造。 */
+    videoError?: string;
+    /** 提交请求的可观测真值：首帧等待/提交操作/实际附图数/是否因上限少附图。字段缺席即未知。 */
+    request?: {
+        firstFramePending?: boolean;
+        operation?: string;
+        referencesSent?: number;
+        referenceLimited?: boolean;
+    };
 };
 
 /**
@@ -238,6 +256,8 @@ export type StudioSegmentVersion = {
     durationSec: number | null;
     /** durationSec 的来源；null = 无真值。 */
     durationSource: "media-file" | "shots-frames" | null;
+    /** true = 只在画布 Clip 的 results[] 里留存、generation_logs 已无对应记录（日志被裁剪或画布内直接生成）。 */
+    canvasKept?: boolean;
 };
 
 /** 影策 production 状态机 */
@@ -516,7 +536,7 @@ function withSegmentDurations(production: EpisodeProduction | undefined): Episod
     return { ...production, draft: nextDraft };
 }
 
-export function useStudioData(dramaId: string | null, episodeId: string | null) {
+export function useStudioData(dramaId: string | null, episodeId: string | null, options?: { pollActive?: boolean }) {
     const queryClient = useQueryClient();
     const backendUrl = useBackendStore((state) => state.url);
     const connected = useBackendStore((state) => state.connected);
@@ -548,19 +568,27 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
         queryFn: async () => (await fetchBackendAssets({ dramaId: dramaId! })).assets || [],
     });
 
-    // 全剧任务日志（summary 裁掉大列），用于 jobCounts / inbox / episode.error 派生
+    // 全剧任务日志（summary 裁掉大列），用于 jobCounts / inbox / episode.error 派生。
+    // 首屏只取最近 200 条（约 160KB → 比 500 条省一半以上）；更老的历史在队列详情里按需翻页。
     const logsQuery = useQuery({
         queryKey: ["drama-studio-logs", backendUrl, dramaId],
         enabled,
-        queryFn: async () => (await fetchBackendGenerationLogs({ limit: 500, summary: true })).logs || [],
+        queryFn: async () => (await fetchBackendGenerationLogs({ limit: 200, summary: true })).logs || [],
     });
 
     // 每集制作稿：派生真实 stage / shotCount / segmentCount
     const rawEpisodes = episodesQuery.data || [];
+    /**
+     * 每集制作稿的拉取开关。
+     * 曾经尝试「首屏只拉当前集」：hook 里拿不到页面真实的选中集（URL 常不带 episodeId，
+     * 选中态在页面层），按第一集猜会把首屏内容推迟到 6s 后才出来（实测 剧本 2.1s → 8.3s）。
+     * 所以保留全量并发，「只拉当前集」需要后端轻量投影才安全（见 report 的未做项）。
+     */
+    const episodeProductionEnabled = () => connected;
     const productionQueries = useQueries({
         queries: rawEpisodes.map((ep) => ({
             queryKey: ["drama-studio-production", backendUrl, ep.id],
-            enabled: connected && Boolean(ep.canvasId),
+            enabled: episodeProductionEnabled() && Boolean(ep.canvasId),
             queryFn: async () => (await fetchEpisodeProduction(ep.id)).production,
         })),
     });
@@ -608,6 +636,15 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                     // 画布段的提示词/参考图绑定是创作真值，即使该段还没有成片也要带出（段卡据此显示，不再只依赖过时 artifact）。
                     const canvasPrompt = String(s.prompt || "");
                     const canvasRefs = Array.isArray(s.referenceBindings) ? s.referenceBindings as Array<Record<string, unknown>> : [];
+                    // Picture N 与 @引用编号统一取编译器产出，不按 label/数组下标另算，
+                    // 否则 disabled、音轨插入或分镜重排时段卡编号会与实际提交槽位分叉。
+                    let submissionOrdinals: Record<string, number> | undefined;
+                    try {
+                        const compiled = compileReferenceSubmission((detail.canvas || {}) as Record<string, unknown>, s);
+                        submissionOrdinals = Object.fromEntries(
+                            compiled.references.filter((ref) => ref.mediaType === "image").map((ref) => [String(ref.id), ref.ordinal]),
+                        );
+                    } catch { /* 编译视图不可用时退回 label/下标编号，不阻断段卡展示 */ }
                     out.push({
                         id: String(s.id || String(node.id)),
                         // 段卡片的 segId 就是 productionClipProjection.targetId；没有投影就不猜关联。
@@ -621,7 +658,11 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                         errorDetails: nodeError && nodeError !== "[object Object]" ? nodeError : undefined,
                         prompt: canvasPrompt,
                         referenceBindings: canvasRefs,
+                        submissionOrdinals,
                         taskMode: String(s.taskMode || ""),
+                        // 尾帧参考与尾帧截图都是画布段真值：制作台只读透传，不改写。
+                        tailFrameContinuation: s.tailFrameContinuation === true,
+                        tailFrameAnchorKey: String((s.tailFrameAnchor as Record<string, unknown> | undefined)?.storageKey || ""),
                     });
                 }
             }
@@ -654,7 +695,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
     const currentClipVideosQueries = useQueries({
         queries: rawEpisodes.map((ep) => ({
             queryKey: ["drama-studio-clip-videos-current", backendUrl, ep.id],
-            enabled: connected && Boolean(ep.canvasId),
+            enabled: episodeProductionEnabled() && Boolean(ep.canvasId),
             queryFn: async (): Promise<ClipVideoTruth[]> => (await fetchClipVideosCurrent(ep.id)).clipVideos || [],
         })),
     });
@@ -663,7 +704,7 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
     const versionDurationQueries = useQueries({
         queries: rawEpisodes.map((ep) => ({
             queryKey: ["drama-studio-version-duration", backendUrl, ep.id],
-            enabled: connected && Boolean(ep.canvasId),
+            enabled: episodeProductionEnabled() && Boolean(ep.canvasId),
             queryFn: async (): Promise<{ version: number; durationMs: number | null; durationSource: string | null } | null> => {
                 const versions = (await fetchVersionCompareVersions(ep.id)).versions || [];
                 if (!versions.length) return null;
@@ -790,6 +831,55 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
     }, [rawEpisodes, stageQuery.data, prodByEpisodeId, logStatByCanvas, episodeId, clipMediaQuery.data, clipMedia, clipVideosByEpisodeId, versionDurationByEpisodeId]);
 
     const assets: StudioAsset[] = useMemo(() => (assetsQuery.data || []).map(toAsset).filter((item): item is StudioAsset => Boolean(item)), [assetsQuery.data]);
+
+    /**
+     * 运行期自动刷新：只复用现有 query 的 refetch，不新增请求类型。
+     * 有排队/运行中的作业（流水线、日志、段视频、资产出图、批次）时每 4s 轮询一次；
+     * 全部空闲（含失败/成功终态）立即停表，避免空闲时无谓请求与重渲染。
+     * 不使用 setState 驱动，数据身份不变时 react-query 结构共享会让卡片 props 保持原引用。
+     */
+    const busyNow = useMemo(() => {
+        const BUSY = new Set(["queued", "running", "loading", "pending", "generating", "checking", "compiling", "applying", "awaiting_confirmation"]);
+        const clipsBusy = (clipMediaQuery.data?.clips || []).some((clip) => BUSY.has(String(clip.status || "").toLowerCase()));
+        const assetsBusy = (assetsQuery.data || []).some((raw) => {
+            const item = (raw || {}) as Record<string, unknown>;
+            const data = (item.data && typeof item.data === "object" ? item.data : {}) as Record<string, unknown>;
+            const meta = (item.metadata && typeof item.metadata === "object" ? item.metadata : {}) as Record<string, unknown>;
+            return BUSY.has(String(data.status || "").toLowerCase()) || BUSY.has(String(meta.generation_status || "").toLowerCase());
+        });
+        const batchesBusy = (batchesQuery.data || []).some((batch) => BUSY.has(String(batch.status || "").toLowerCase()));
+        return {
+            any: Boolean(options?.pollActive) || clipsBusy || batchesBusy,
+            assets: assetsBusy,
+        };
+    }, [clipMediaQuery.data, assetsQuery.data, batchesQuery.data, options?.pollActive]);
+    // refetch 句柄单独存 ref：query 对象每次渲染都是新引用，直接进 deps 会让 interval 每帧重建（等于轮询风暴）。
+    const pollerRef = useRef({
+        episodes: episodesQuery.refetch, stage: stageQuery.refetch, logs: logsQuery.refetch,
+        production: productionQuery.refetch, clipMedia: clipMediaQuery.refetch,
+        batches: batchesQuery.refetch, assets: assetsQuery.refetch,
+    });
+    pollerRef.current = {
+        episodes: episodesQuery.refetch, stage: stageQuery.refetch, logs: logsQuery.refetch,
+        production: productionQuery.refetch, clipMedia: clipMediaQuery.refetch,
+        batches: batchesQuery.refetch, assets: assetsQuery.refetch,
+    };
+    useEffect(() => {
+        if (!connected || !dramaId || !busyNow.any) return;
+        const timer = window.setInterval(() => {
+            const poller = pollerRef.current;
+            void poller.episodes();
+            void poller.stage();
+            void poller.logs();
+            if (episodeId) {
+                void poller.production();
+                void poller.clipMedia();
+                void poller.batches();
+            }
+            if (busyNow.assets) void poller.assets();
+        }, 4000);
+        return () => window.clearInterval(timer);
+    }, [connected, dramaId, episodeId, busyNow.any, busyNow.assets]);
 
     /** 制作台开场四步卡真值：章节字数来自 source_chapters.chars（正文真实字符数），无章节则不编造字数。 */
     const sourceChapterTruth = useMemo<{ count: number; wordCount: number } | null>(() => {
@@ -1405,7 +1495,28 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
                 durationSource: duration.durationSource,
             } satisfies StudioSegmentVersion;
         });
-        return rows.reverse();
+        // 画布 Clip 自己留存的结果（H3 节点/插件写入 results[]）：生成日志被裁剪、或画布内直接出图时，
+        // 这是唯一还留着的老版本真值；只补日志里没有的 storageKey，不重复、不编号、不改来源。
+        const knownKeys = new Set(rows.map((r) => r.storageKey).filter(Boolean));
+        const canvasKept = currentResults
+            .map((r) => ({
+                id: `canvas:${String(r.storageKey || "")}`,
+                version: null,
+                startedAt: "",
+                model: "",
+                taskMode: "",
+                status: "success",
+                error: "",
+                source: (String(r.source || "canvas") || "canvas") as StudioVersionSource,
+                storageKey: String(r.storageKey || ""),
+                url: String(r.storageKey || "") ? backendMediaUrl(String(r.storageKey)) : "",
+                current: Boolean(String(r.storageKey || "") && String(r.storageKey) === currentKey),
+                durationSec: null,
+                durationSource: null,
+                canvasKept: true,
+            } satisfies StudioSegmentVersion))
+            .filter((r) => r.storageKey && !knownKeys.has(r.storageKey));
+        return [...canvasKept, ...rows].reverse();
     };
 
     /**
@@ -1414,15 +1525,33 @@ export function useStudioData(dramaId: string | null, episodeId: string | null) 
      * status、progress 等运行字段写到画布 H3 Clip（直接 patch resultStorageKey 会被
      * operation-authority 的 H3_RUNTIME_SEGMENT_FIELDS 拒绝）。settings 传空 = 保留当前
      * 提示词与 H3 参数，只切换视频版本，与 H3 插件 formal Clip 的语义一致。
+     * 只有画布 Clip 留存、日志已无记录的版本（id 以 canvas: 开头）不带日志凭证，后端按 storageKey 校验留存。
      */
     const setSegmentCurrentVideo = async (episodeId: string, segmentId: string, version: StudioSegmentVersion) => {
         if (!version.storageKey) throw new Error("该版本没有可用的视频产物，不能设为当前");
         const target = await resolveSegmentCanvasTarget(episodeId, segmentId);
+        const hasLog = !version.id.startsWith("canvas:");
+        // 正式 Clip 且有日志凭证时走 select_director_result：它在同一事务写草稿选用回执（clipGroups[].selectedResult）
+        // 并下发 restore_h3_output 切画布输出，制作台与画布历史选用才一致。无日志的画布留存版本仍只还原画布。
+        if (hasLog && segmentId) {
+            try {
+                const prod = (await fetchEpisodeProduction(episodeId)).production;
+                await editEpisodeProduction(episodeId, Number(prod?.revision || 0), [{
+                    type: "select_director_result", targetKind: "segment", targetId: segmentId,
+                    nodeId: target.nodeId, generationLogId: version.id, storageKey: version.storageKey,
+                    canvasRevision: Number(target.project.revision || 0),
+                }]);
+                await refreshAll();
+                return;
+            } catch {
+                // 归属/版本校验不通过时回落为画布还原，不阻断用户切版本；选用状态仍保留原值待核对。
+            }
+        }
         await applyBackendCanvasOperations(target.canvasId, [{
             type: "restore_h3_output",
             nodeId: target.nodeId,
             segmentId: target.canvasSegmentId,
-            generationLogId: version.id,
+            generationLogId: hasLog ? version.id : "",
             storageKey: version.storageKey,
             settings: {},
         }], Number(target.project.revision || 0));

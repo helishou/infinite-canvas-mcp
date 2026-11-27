@@ -35,8 +35,10 @@ export function H3ContentExact({ ctx: sharedContext }: CanvasNodeContentProps) {
     const ctxRef = useRef(ctx);
     ctxRef.current = ctx;
     const storedSelectedId = String(metadata.selectedSegmentId || "");
-    const selected = segments.find((item) => item.id === storedSelectedId) || segments[0];
-    const selectedIndex = Math.max(0, segments.findIndex((item) => item.id === selected?.id));
+    // 当前段与提示词区跟时间线一样读派生视图：分镜换图后九宫格和引用编号同步更新，
+    // 不再出现时间线已是新图、当前段仍是旧存储副本。编辑仍按稳定 id 落回画布真值。
+    const selected = displaySegments.find((item) => item.id === storedSelectedId) || displaySegments[0];
+    const selectedIndex = Math.max(0, displaySegments.findIndex((item) => item.id === selected?.id));
     const appliedDeepLinkRef = useRef("");
     const emittedFocusRef = useRef(0);
     const focusRequest = Number(metadata.h3FocusRequest || 0);

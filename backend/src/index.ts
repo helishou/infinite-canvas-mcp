@@ -39,7 +39,7 @@ import { CanvasVideoDispatcher } from "./canvas/video-dispatcher.js";
 import { DirectVideoBackend } from "./engine-contract/direct-video.js";
 import { DirectAudioBackend } from "./engine-contract/direct-audio.js";
 import { CanvasAudioDispatcher } from "./canvas/audio-dispatcher.js";
-import { CanvasH3Runner } from "./canvas/h3-runner.js";
+import { CanvasH3Runner, boundH3ParentTaskIds } from "./canvas/h3-runner.js";
 import { CANVAS_BROWSER_TASK_KIND, CanvasBrowserScriptDispatcher } from "./canvas/browser-script-dispatcher.js";
 import { registerCanvasBrowserScriptRoutes } from "./server/browser-script-routes.js";
 import { acquireBackendInstanceLock } from "./instance-lock.js";
@@ -471,11 +471,15 @@ async function startBackendHttpServer() {
     config,
     stores.mcpObservability,
     () => canvasRealtime.focusedProjectId(),
+    undefined,
+    () => db.listPluginDeclarations(),
   );
   markStartupStage("routesAndAgent");
-  // 启动时只读取最新 10 条需要恢复的生成任务；超出范围的记录保持原状，
-  // 不因未入选而标记失败。终态只考虑仍绑定的 H3 父任务和未收口的生成日志。
-  const recoveryTasks = db.listStartupRecoveryTasks([], 10);
+  // 启动时读取需要恢复的生成任务：除 running/queued/终态未收口日志外，还要纳入
+  // 画布上仍绑定的终态 H3 父任务（写回 CAS 被拒或进程在写回窗口被杀，段会卡 loading）。
+  // 传空数组会让这些父任务被 SQL 排除；limit 太小会让僵尸任务永久漏检。
+  const boundParents = [...boundH3ParentTaskIds(stores.projects.list())];
+  const recoveryTasks = db.listStartupRecoveryTasks(boundParents, 100);
   markStartupStage("recoverySelection");
   for (const task of recoveryTasks) {
     const binding = task.params?.canvasBinding as { generationLogId?: string } | undefined;
@@ -490,6 +494,22 @@ async function startBackendHttpServer() {
         }),
       );
       continue;
+    }
+    if (task.kind === "canvas-h3-run") {
+      // 后端重启杀掉父任务执行循环后，子任务可能已终态失败而父任务仍 running，
+      // 画布段永远 loading、界面永远「生成中」。收敛这类僵尸父任务，不重新提交生成任务。
+      if (canvasH3Runner.reconcileOrphanedRunning(task)) continue;
+      // 终态父任务但节点投影没收口（写回 CAS 被拒/进程在写回窗口被杀）：
+      // 重放缺失的 Clip 回写并按父任务终态收敛节点，避免段永久 loading。
+      if (["succeeded", "failed", "cancelled"].includes(task.status)) {
+        void canvasH3Runner.reconcileTerminal(task).catch((error) =>
+          logger.warn("H3 父任务终态投影修复失败", {
+            taskId: task.id,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+        continue;
+      }
     }
     if (
       ["queued", "running"].includes(task.status) &&

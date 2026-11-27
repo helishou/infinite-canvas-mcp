@@ -57,6 +57,10 @@ export type CanvasProjectStore = {
         input: { projectId: string; nodeId: string; prompt: string; model: string; references?: Array<Record<string, unknown>>; resultPolicy?: "replace-active" | "append"; imageIds?: string[] },
         media: Array<Record<string, unknown>>,
     ): { project: CanvasProject; operations: CanvasOperation[] } | null;
+    /** 生成结果落到正式制作实体节点后，把媒体写回制作台资产卡与实体节点权威图。 */
+    syncProductionAssetImageWriteBack(
+        input: { projectId: string; nodeId: string; storageKey: string; taskId?: string },
+    ): { ok: true; scope: "episode" | "shared"; assetId: string; storageKey: string } | { ok: false; reason: string };
     markCanvasImageTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;
     writeBackCanvasVideoTask(task: RuntimeTask, input: { projectId: string; nodeId: string; prompt: string; model: string }, media: Record<string, unknown>): { project: CanvasProject; operations: CanvasOperation[] } | null;
     markCanvasVideoTaskFailed(task: RuntimeTask, input: { projectId: string; nodeId: string }, error: string): { project: CanvasProject; operations: CanvasOperation[] } | null;

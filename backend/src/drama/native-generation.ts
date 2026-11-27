@@ -159,8 +159,21 @@ export class NativeProductionGeneration {
         if (this.binding.has(taskId)) return;
         const row = this.db.db.prepare("SELECT * FROM production_task_bindings WHERE task_id=? AND status='submitted'").get(taskId) as Record<string, any> | undefined;
         const task = row && this.stores.tasks.get(taskId);
-        if (!row || !task || task.status !== "succeeded") return;
+        if (!row || !task) return;
         this.binding.add(taskId);
+        // 失败/取消的终态也必须收口 submitted 占用：否则该目标永久被失败任务占据，
+        // 后续重试被 H3_CLIP_OCCUPIED 拒绝，流水线 attempt 累加到硬上限，待处理页重试按钮一直 busy。
+        // 这里只释放占用（不改媒体归属），成片和任务历史都保留。
+        if (["failed", "cancelled"].includes(task.status)) {
+            this.db.db.prepare("UPDATE production_task_bindings SET status='failed', error=COALESCE(?, error) WHERE task_id=? AND status='submitted'")
+                .run(task.error || "任务已失败，释放占用", taskId);
+            this.events.publish({ type: "drama-production.updated", entityId: row.owner_id, payload: { taskId, bindingFailed: true } });
+            this.binding.delete(taskId);
+            return;
+        }
+        // 非终态（queued/running/awaiting_confirmation）本次不收口，但必须释放防重入标记：
+        // 否则 Set 永久残留，后续真正的终态事件会被入口守卫（binding.has）短路，占用永不释放。
+        if (task.status !== "succeeded") { this.binding.delete(taskId); return; }
         try {
             const latest = this.db.db.prepare("SELECT task_id FROM production_task_bindings WHERE owner_kind=? AND owner_id=? AND target_kind=? AND target_id=? ORDER BY rowid DESC LIMIT 1").get(row.owner_kind, row.owner_id, row.target_kind, row.target_id);
             if (latest?.task_id !== taskId) { this.db.db.prepare("UPDATE production_task_bindings SET status='superseded' WHERE task_id=?").run(taskId); return; }

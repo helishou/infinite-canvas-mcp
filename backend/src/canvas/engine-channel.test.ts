@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findChannelConfig, findEngineChannel, isEngineModel } from "./engine-channel.js";
+import { findChannelConfig, findComfyuiEngineTarget, findEngineChannel, isEngineModel } from "./engine-channel.js";
 
 /** 引擎渠道解析：模型名 → 渠道 baseUrl/token。渠道是唯一配置入口，不再有全局开关。 */
 
@@ -58,6 +58,23 @@ test("第三方生图 API 渠道的 gpt-image 不算引擎模型（回归：带�
     assert.equal(isEngineModel(thirdParty, "gUIhQvjmKncb3eo3am204::gpt-image-2.6-1k"), false);
     // 真引擎渠道里的工作流模型照常识别，不能被这次收紧误伤
     assert.equal(findEngineChannel(CONFIG, "eng::2.1")?.baseUrl, "http://127.0.0.1:8300");
+});
+
+test("findComfyuiEngineTarget 不把纯语音/文本渠道当引擎（回归：voiceStudio :3900 瞬失败）", () => {
+    // 真实故障：voiceStudio（kind=local, apiFormat=openai, baseUrl=:3900，模型全是 audio/text）
+    // 排在 engine-local 前面，被当成图片生成转发目标，端口已关 → 执行引擎不可用：fetch failed。
+    const cfg = {
+        channels: [
+            { id: "voiceStudio", name: "voiceStudio", kind: "local", apiFormat: "openai", baseUrl: "http://127.0.0.1:3900/v1", apiKey: "11",
+              models: [{ name: "faster-whisper", capability: "text" }, { name: "kittentts", capability: "audio" }] },
+            { id: "comfy", kind: "comfyui", models: [{ name: "全能图片模型P", workflows: ["a.json"] }] },
+            { id: "engine-local", name: "engine-local", kind: "local", apiFormat: "openai", baseUrl: "http://127.0.0.1:8300", apiKey: "e",
+              models: [{ name: "全能图片模型P", capability: "image" }, { name: "H3", capability: "video" }] },
+        ],
+    };
+    const target = findComfyuiEngineTarget(cfg, "全能图片模型P");
+    assert.ok(target, "comfyui 渠道模型应解析到引擎目标");
+    assert.equal(target!.baseUrl, "http://127.0.0.1:8300", "必须选图像引擎渠道，不能选纯语音渠道 :3900");
 });
 
 test("findChannelConfig 带出 apiFormat 与 extraBody（渠道级自定义参数）", () => {

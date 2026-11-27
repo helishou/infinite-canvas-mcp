@@ -1,4 +1,4 @@
-import { withArtStyle } from "./art-style.js";
+import { normalizeArtStyle, withArtStyle } from "./art-style.js";
 import { z } from "zod";
 
 /**
@@ -210,31 +210,36 @@ export function schemeAppliesTo(scheme: AssetSchemeId, kind: AssetSpecKind): boo
 }
 
 /**
- * 按「方案 + 资产名 + 外观描述」拼参考图提示词（影策 buildDramaCastImagePrompt 的本地等价）。
- * 只依赖 name/appearance，不需要完整 AssetSpec，便于 pipeline 建档后直接出图。
- * 选中方案会真实改变发送内容（不同版式约束），不是只读装饰。
+ * 按「方案 + 资产名 + 外观描述」拼参考图提示词（影策 CastImagePrompt 的本地等价）。
+ * 直接渲染 `defaultAssetPromptTemplate()`，与模板路径逐字一致：不再追加「【参考图用法】」和画幅说明，
+ * 用户长期规则只落在模板自带的 `{{画面规则}}` 位置（影策 CastImagePrompt 传 visualRules）。
  */
 export function buildSchemePrompt(kind: AssetSpecKind, name: string, appearance: string,
-    scheme: AssetSchemeId, options: { artStyle?: string; language?: string } = {}): string {
-    const body = appearance.trim();
-    let core: string;
-    if (kind === "scene") {
-        core = `场景概念设定图：${name}。${body}\n横版宽景构图，无人物、空镜，构图完整，主体空间与出入口清晰，前中后景层次分明；光源方向明确。禁止文字、水印、边框。`;
-    } else if (kind === "prop") {
-        core = `道具设定图：${name}。${body}\n横版构图，单件道具居中完整展示，四周留白，干净背景，柔和棚拍光，外形材质颜色细节清晰；无人物、无手部。禁止文字、水印、边框。`;
-    } else if (scheme === "turnaround") {
-        core = `专业人物三视图设定板：${name}。${body}\n画面严格分成三个等宽竖向区域，从左到右正面全身、右侧面全身、背面全身；同一个人同一服装同一发型同一体型。站立中性姿势，头顶到脚底完整入画不裁切，纯净中性浅色背景。禁止文字、边框、道具说明、额外人物。`;
-    } else if (scheme === "fourview") {
-        core = `角色四格资产参考图：${name}。${body}\n全图共4格等高排列：①面部特写（唯一清晰的脸，五官特征完整锁定）；②正面全身（面部弱化）；③90°侧面全身；④背面全身。全身格头顶到鞋底完整入画；四格服装发型体型配饰完全一致。禁止文字（除音色标签外）、边框、第二张可辨认的脸、额外人物。`;
-    } else {
-        core = `角色定妆照：${name}。${body}\n横版构图，单人居中，正面半身，中性表情，目视镜头；干净浅色纯背景，柔和均匀正面光，五官发型服装细节清晰。禁止文字、水印、道具遮挡面部、额外人物。`;
-    }
+    scheme: AssetSchemeId, options: { artStyle?: string; language?: string; rules?: string } = {}): string {
     const schemeInfo = ASSET_SCHEMES.find((s) => s.id === scheme);
-    const withHint = schemeInfo ? `${core}\n【参考图用法】${schemeInfo.frameHint}` : core;
-    // 对齐影策 WithAssetRatio：明确写出横版画幅，保证提示词文字与实际 16:9 像素一致；
-    // 同时去掉画风里可能夹带的"9:16/竖屏"等冲突字样（StripFrameDirectives）。
-    const withRatio = `${withHint}\n最终输出画幅必须为 16:9，横版，宽度大于高度。`;
-    return withArtStyle(withRatio, stripFrameDirectives(options.artStyle), options.language);
+    const template = defaultAssetPromptTemplate(kind, scheme);
+    const rendered = fillAssetPromptTemplate(template, {
+        项目画风: normalizeArtStyle(options.artStyle),
+        资产名称: String(name ?? "").trim(),
+        资产设定: String(appearance ?? "").trim(),
+        画面规则: String(options.rules ?? "").trim(),
+        方案名称: schemeInfo?.name || "",
+        方案要求: schemeInfo?.frameHint || "",
+    });
+    return withTemplateArtStyle(rendered, template, options.artStyle, options.language);
+}
+
+/** 归一化后判断画风正文是否已渲染进提示词：忽略空白与标点，避免「全片统一画风：」前缀导致漏判。 */
+function promptContainsStyle(prompt: string, style: string): boolean {
+    const squash = (value: string) => value.replace(/[\s\p{P}]/gu, "");
+    const needle = squash(style);
+    return Boolean(needle) && squash(prompt).includes(needle);
+}
+
+/** 模板自带 `{{项目画风}}` 且画风已渲染时不再追加「全片统一画风」后缀，同一画风只出现一次。 */
+function withTemplateArtStyle(prompt: string, template: string, style: unknown, language?: string): string {
+    if (/\{\{\s*项目画风\s*\}\}/.test(template) && promptContainsStyle(prompt, normalizeArtStyle(style))) return prompt;
+    return withArtStyle(prompt, stripFrameDirectives(style), language);
 }
 
 /** 去掉画风文本里与横版画幅冲突的指令（对齐影策 StripFrameDirectives）。 */export function stripFrameDirectives(style: unknown): string {
@@ -244,6 +249,54 @@ export function buildSchemePrompt(kind: AssetSpecKind, name: string, appearance:
         .replace(/(9:16|竖屏|竖版)/gi, "")
         .replace(/[，,]{2,}/g, "，").replace(/^，|，$/g, "")
         .trim();
+}
+
+/**
+ * 影策 `assets.go` 的内置参考图提示词模板，逐字照抄；只把影策变量名换成本地变量体系：
+ * `{{角色名称}}/{{道具名称}}/{{场景名称}}` → `{{资产名称}}`，`{{角色设定}}/{{道具设定}}/{{场景设定}}` → `{{资产设定}}`。
+ * 画幅由生成参数传，不写进文本；用户长期规则只落在模板自带的 `{{画面规则}}`。
+ */
+const propPrompt = "{{项目画风}}。道具设定图：{{资产名称}}。{{资产设定}}。\n横版构图，单件道具居中完整展示，四周留白，干净浅灰背景，柔和棚拍光，外形、材质、颜色与细节清晰；无人物、无手部。\n禁止文字、水印、边框。{{画面规则}}";
+
+const scenePrompt = "{{项目画风}}。场景概念设定图：{{资产名称}}。{{资产设定}}。\n横版宽景构图，无人物，空镜，构图完整，主体空间与出入口清晰，前中后景层次分明；光源方向明确，色调与时代服化道统一。\n禁止文字、水印、边框。{{画面规则}}";
+
+/** 角色定妆照 */
+const portraitPrompt = "{{项目画风}}。角色定妆照：{{资产名称}}。{{资产设定}}。\n横版构图，单人居中，正面半身，中性表情，目视镜头；干净浅色纯背景，柔和均匀的正面光，五官、发型与服装细节清晰。\n禁止文字、水印、道具遮挡面部、额外人物。{{画面规则}}";
+
+/** 三视图设定板 */
+const turnaroundPrompt = "{{项目画风}}。专业人物三视图设定板：{{资产名称}}。{{资产设定}}。\n画面严格分成三个等宽竖向区域，从左到右依次为正面全身、右侧面全身、背面全身；三个视角是同一角色、同一服装、同一发型、同一体型与比例。\n站立中性姿势，完整显示头顶到脚底，不裁切头部和脚。纯净中性浅色背景，均匀设定稿光线，不改变项目画风的绘画或渲染媒介。\n禁止文字、边框、道具说明、表情变化和额外人物。{{画面规则}}";
+
+/** 四格资产板 · 声纹 */
+const fourViewPrompt = "{{项目画风}}。角色四格资产参考图：{{资产名称}}。{{资产设定}}。\n横版白色纯背景，全图共 4 格，等高排列：\n① 面部特写：唯一一张清晰的脸，五官、脸型、发际线、眉眼、鼻唇、肤色、痣与疤痕等特征完整锁定；\n② 正面全身（面部弱化）；③ 90° 侧面全身（面部弱化）；④ 背面全身。\n全身格从头顶到鞋底完整入画，不裁切头部；四格中的服装、发型、体型与配饰完全一致。\n画面底部一条细横带：声纹波形 / 频谱可视化图形，旁边一行不超过 8 个英文单词的音色标签。\n除音色标签外不出现任何文字。负面：全身格出现清晰五官、第二张可辨认的脸、马赛克或像素化遮挡、额外人物。{{画面规则}}";
+
+/** 与影策 `renderAssetTemplate` 同口径：替换变量，未知变量原样保留，并清掉空变量残留的「。。」「：。」。 */
+function fillAssetPromptTemplate(template: string, values: Record<string, string>, unknownVars?: string[]): string {
+    const rendered = template.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (all, key: string) => {
+        if (key in values) return values[key];
+        if (unknownVars && !unknownVars.includes(key)) unknownVars.push(key);
+        return all;
+    }).replace(/。。/g, "。").replace(/：。/g, "。").trim();
+    // 影策 CastImagePrompt 总会兜底画风，本地画风可能为空；别让模板首句以孤立句号开头。
+    if (!String(values["项目画风"] ?? "").trim() && /^\{\{\s*项目画风\s*\}\}。/.test(template)) {
+        return rendered.replace(/^。\s*/, "");
+    }
+    return rendered;
+}
+
+/** 未单独覆盖的组合的通用模板：变量齐全、可直接渲染，不写死任何真实资产名。设置页「默认」档预填这一句。 */
+export const ASSET_PROMPT_FALLBACK_TEMPLATE = "{{项目画风}}。{{方案名称}}：{{资产名称}}。{{资产设定}}\n{{方案要求}}\n{{画面规则}}";
+
+/**
+ * 某资产类型 + 方案的内置提示词模板（变量用 {{项目画风}}/{{资产名称}}/{{资产设定}}/{{画面规则}}）。
+ * 正文与影策 `assets.go` 逐字一致；未单独覆盖的组合返回通用回退模板。
+ */
+export function defaultAssetPromptTemplate(kind: AssetSpecKind, scheme: AssetSchemeId): string {
+    if (kind === "prop" && scheme === "prop") return propPrompt;
+    if (kind === "scene" && scheme === "scene") return scenePrompt;
+    if (kind === "character" && scheme === "portrait") return portraitPrompt;
+    if (kind === "character" && scheme === "turnaround") return turnaroundPrompt;
+    if (kind === "character" && scheme === "fourview") return fourViewPrompt;
+    return ASSET_PROMPT_FALLBACK_TEMPLATE;
 }
 
 /**
@@ -265,14 +318,13 @@ export function assetPromptTemplateFor(kind: AssetSpecKind, templates: AssetProm
     return String(own ?? "").trim() || String(t.default ?? "").trim();
 }
 
-const ASSET_RATIO_LINE = "最终输出画幅必须为 16:9，横版，宽度大于高度。";
-
 /**
  * 用剧目模板渲染参考图提示词。
- * - 模板为空 → 回退 `buildSchemePrompt`（默认行为不变，已有生成结果不受影响）。
+ * - 模板为空 → 回退 `buildSchemePrompt`（同一套内置模板与渲染口径）。
  * - 未知变量 `{{xxx}}` 原样保留并回报，绝不静默删内容。
- * - 模板里没写 `{{画面规则}}` 时，把长期规则追加到末尾（与旧行为一致）；写了则由用户决定位置，不重复追加。
- * - 画幅：模板里没提 16:9 时补一行，避免与实际像素不一致。
+ * - 规则只由模板的 `{{画面规则}}` 承载，缺失时不再追加「用户长期规则：」段。
+ * - 模板自带 `{{项目画风}}` 时画风只出现一次，不再追加「全片统一画风」后缀。
+ * - 画幅作为生成参数传递，不在文本里补画幅行。
  */
 export function renderAssetPromptWithTemplate(
     kind: AssetSpecKind,
@@ -283,9 +335,6 @@ export function renderAssetPromptWithTemplate(
     vars: AssetPromptTemplateVars = {},
 ): { prompt: string; usedTemplate: boolean; unknownVars: string[] } {
     const template = assetPromptTemplateFor(kind, templates);
-    const options = { artStyle: vars["项目画风"], language: vars.language };
-    if (!template) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars: [] };
-
     const schemeInfo = ASSET_SCHEMES.find((s) => s.id === scheme);
     const values: Record<string, string> = {
         项目画风: String(vars["项目画风"] ?? "").trim(),
@@ -295,19 +344,12 @@ export function renderAssetPromptWithTemplate(
         方案名称: String(vars["方案名称"] ?? schemeInfo?.name ?? "").trim(),
         方案要求: String(vars["方案要求"] ?? schemeInfo?.frameHint ?? "").trim(),
     };
-    const unknownVars: string[] = [];
-    const rendered = template.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (all, key: string) => {
-        if (key in values) return values[key];
-        if (!unknownVars.includes(key)) unknownVars.push(key);
-        return all;
-    }).trim();
-    if (!rendered) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars };
+    const options = { artStyle: values["项目画风"], language: vars.language, rules: values["画面规则"] };
+    if (!template) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars: [] };
 
-    const parts = [rendered];
-    if (!/\{\{\s*画面规则\s*\}\}/.test(template)) {
-        if (values["画面规则"]) parts.push(`用户长期规则：${values["画面规则"]}。`);
-    }
-    if (!/16\s*[:：]\s*9/.test(rendered)) parts.push(ASSET_RATIO_LINE);
-    const prompt = withArtStyle(parts.join("\n"), stripFrameDirectives(options.artStyle), options.language);
+    const unknownVars: string[] = [];
+    const rendered = fillAssetPromptTemplate(template, values, unknownVars);
+    if (!rendered) return { prompt: buildSchemePrompt(kind, name, appearance, scheme, options), usedTemplate: false, unknownVars };
+    const prompt = withTemplateArtStyle(rendered, template, options.artStyle, options.language);
     return { prompt, usedTemplate: true, unknownVars };
 }

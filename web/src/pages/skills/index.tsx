@@ -3,6 +3,9 @@ import { App, Button, Empty, Input, Modal, Segmented, Switch, Tag } from "antd";
 import { Blocks, Clapperboard, FileText, Pencil, Search, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Streamdown } from "streamdown";
+// streamdown 样式原来由 bootstrap 全局引入；为了让制作台首屏不加载 streamdown/mermaid，
+// 全站样式改为各使用方按需引入（本页是懒加载路由，不影响首屏）。
+import "streamdown/styles.css";
 
 import { PageHeader } from "@/components/layout/page-header";
 import { request } from "@/services/backend-api";

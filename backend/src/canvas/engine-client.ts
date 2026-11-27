@@ -2,6 +2,32 @@ import { Readable } from "node:stream";
 import type { WorkflowConfig, WorkflowField } from "../db.js";
 import type { MediaStore, SettingStore } from "../stores/types.js";
 
+/** 引擎 error 可能是 {code,message} 对象；直接进 task.error 会变成 [object Object]。
+ *  与 h3-runner 的 describeFailure 同一口径：取 message 字段，否则 JSON 序列化。 */
+function engineErrorText(error: unknown): string | undefined {
+    if (error === null || error === undefined) return undefined;
+    if (typeof error === "string") {
+        const s = error.trim();
+        // 引擎侧已把 error 对象 String 化时只剩这串，本地无法还原；至少留下可行动的排查提示。
+        if (s === "[object Object]") return "引擎返回的错误对象无法解析（[object Object]）；请查引擎侧 :8300 任务日志或 ComfyUI :8188 日志确认真实失败原因";
+        return s || undefined;
+    }
+    if (error instanceof Error) return error.message || error.name;
+    if (typeof error === "object") {
+        const e = error as { message?: unknown; error?: unknown; code?: unknown };
+        for (const v of [e.message, e.error]) {
+            if (typeof v === "string" && v.trim()) return v;
+            if (v && typeof v === "object") {
+                const nested = engineErrorText(v);
+                if (nested) return nested;
+            }
+        }
+        if (typeof e.code === "string" && e.code.trim()) return e.code;
+        try { const json = JSON.stringify(error); if (json && json !== "{}") return json; } catch { /* ignore */ }
+    }
+    return String(error) || undefined;
+}
+
 /**
  * 画布 → 执行引擎的 HTTP 客户端。
  *
@@ -61,7 +87,10 @@ export type EngineVideoRequest = {
     size?: string;
 };
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
+// H3 自定义工作流出片常需 20-40 分钟（多步扩散 + llm 预解析），15 分钟会把
+// 仍在引擎里正常生成的任务误判超时，导致同一 Clip 被反复重提、comfyui2api 重复出片却无人取回。
+// 超时不取消任务（见 waitVideo），调大后给足出片时间。
+export const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 
 export class EngineRequestError extends Error {
     constructor(message: string, readonly status: number, readonly taskId?: string) {
@@ -96,9 +125,18 @@ export class CanvasEngineClient {
                 let message = text || `HTTP ${response.status}`;
                 let taskId: string | undefined;
                 try {
-                    const parsed = JSON.parse(text) as { error?: { message?: string; task_id?: string } };
-                    message = parsed.error?.message || message;
-                    taskId = parsed.error?.task_id;
+                    const parsed = JSON.parse(text) as { error?: unknown; code?: string; message?: string };
+                    // 引擎 error 可能是对象 {code,message,...}；只取 .message 会在 message 本身是
+                    // 对象/「[object Object]」时丢掉真实原因。优先整体解析，字符串兜底再取 message。
+                    const parsedText = engineErrorText(parsed.error) || engineErrorText(parsed);
+                    if (parsedText && parsedText !== "[object Object]") message = parsedText;
+                    else if (parsed && typeof parsed === "object") {
+                        const p = parsed as { error?: { message?: unknown; task_id?: string }; message?: unknown; task_id?: string };
+                        const inner = p.error?.message ?? p.message;
+                        const innerText = engineErrorText(inner);
+                        if (innerText && innerText !== "[object Object]") message = innerText;
+                        taskId = p.error?.task_id ?? p.task_id;
+                    }
                 } catch { /* 非 JSON 错误体 */ }
                 throw new EngineRequestError(message, response.status, taskId);
             }
@@ -181,19 +219,44 @@ export class CanvasEngineClient {
         return { taskId: body.id };
     }
 
-    /** 轮询视频任务到终态；超时不取消任务，抛出带 taskId 的错误便于上层提示。 */
-    async waitVideo(taskId: string, options: { timeoutMs?: number; pollMs?: number } = {}): Promise<{ status: string; media: EngineMedia[]; error?: string }> {
+    /** 轮询中可重试的瞬时错误：网络断线(status=0)、请求超时/冲突/过早/限流、5xx、任务暂不可见(404)。 */
+    private static isTransientPollError(error: unknown): boolean {
+        if (!(error instanceof EngineRequestError)) return false;
+        const s = error.status;
+        if (s === 0) return true;                       // 网络断线 / fetch failed
+        if (s === 404) return true;                     // 任务刚提交、查询侧还没可见
+        if ([408, 409, 425, 429].includes(s)) return true;
+        return s >= 500;
+    }
+
+    /** 轮询视频任务到终态；瞬时断线沿原 taskId 继续查询，不重新提交（对齐影策断线重连）。 */
+    async waitVideo(taskId: string, options: { timeoutMs?: number; pollMs?: number; maxTransient?: number } = {}): Promise<{ status: string; media: EngineMedia[]; error?: string }> {
         const timeoutMs = options.timeoutMs ?? this.timeoutMs;
         const pollMs = options.pollMs ?? 500;
+        const maxTransient = options.maxTransient ?? 12;   // 连续瞬时错误上限，防死循环
         const deadline = Date.now() + timeoutMs;
+        let transientFailures = 0;
         while (Date.now() < deadline) {
-            const body = await this.request<{ status?: string; media?: EngineMedia[]; error?: string | null }>(`/v1/videos/${encodeURIComponent(taskId)}`);
+            let body: { status?: string; media?: EngineMedia[]; error?: string | null };
+            try {
+                body = await this.request(`/v1/videos/${encodeURIComponent(taskId)}`);
+            } catch (error) {
+                // 断线/限流等瞬时错误：重试查询原任务，绝不抛出让上层重新提交（否则同一段重复出片）。
+                if (!CanvasEngineClient.isTransientPollError(error)) throw error;
+                transientFailures++;
+                if (transientFailures > maxTransient) throw error;
+                // 退避：pollMs → 最多 8×pollMs，和影策指数退避同思路。
+                const backoff = Math.min(pollMs * Math.pow(2, transientFailures - 1), 8 * pollMs);
+                await new Promise((resolve) => setTimeout(resolve, backoff));
+                continue;
+            }
+            transientFailures = 0;   // 查询成功即清零，允许后续再次断线重连
             const status = String(body.status ?? "");
             // 引擎按 OpenAI 词表返回 queued/in_progress/completed/failed；
             // 老代码只认内部词 succeeded，会一直等到超时（节点永远停在 loading）。
             if (["succeeded", "completed", "failed", "cancelled", "canceled"].includes(status)) {
                 const normalized = status === "completed" ? "succeeded" : status === "canceled" ? "cancelled" : status;
-                return { status: normalized, media: body.media ?? [], error: body.error ?? undefined };
+                return { status: normalized, media: body.media ?? [], error: engineErrorText(body.error) };
             }
             await new Promise((resolve) => setTimeout(resolve, pollMs));
         }

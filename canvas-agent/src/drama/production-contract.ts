@@ -125,11 +125,12 @@ export const directorSceneWorkSchema = z.object({
 }).strict();
 export type DirectorSharedReviewWork = Omit<z.infer<typeof directorSceneWorkSchema>, "sceneId" | "stage" | "runIds" | "artifactIds" | "cursor" | "generationAuthorized" | "assetReviews"> & { assetIds?: string[] };
 export const directorSharedReviewWorkSchema: z.ZodType<DirectorSharedReviewWork> = directorSceneWorkSchema.omit({ sceneId: true, stage: true, runIds: true, artifactIds: true, cursor: true, generationAuthorized: true, assetReviews: true }).extend({ assetIds: z.array(id).optional() });
-/** 段级参考图覆写真值，落在 director.source.segments[].referenceOverrides。auto 表示未覆写、完全按编译派生。 */
+/** 段级参考图覆写真值，落在 director.source.segments[].referenceOverrides。order/disabled 是人工排序启停，additions 是显式加入的绑定；mode=auto 仅恢复自动排序，不丢弃 additions。 */
 export const segmentReferenceOverridesSchema = z.object({
     mode: z.enum(["auto", "manual"]),
     order: z.array(id).default([]),
     disabled: z.array(id).default([]),
+    additions: z.array(z.record(z.unknown())).default([]),
 }).strict();
 export type SegmentReferenceOverrides = z.infer<typeof segmentReferenceOverridesSchema>;
 export const directorWorkflowSchema = z.object({
@@ -897,7 +898,7 @@ export const productionOperationSchema = z.discriminatedUnion("type", [
      * 投影层按该覆写重排并启停 H3 Clip 的 referenceBindings；mode=auto 清除覆写恢复自动派生。
      * order/disabled 都是 H3 Clip 上稳定的 binding ID（见 segment.referenceBindings[].id）。
      */
-    z.object({ type: z.literal("set_segment_reference_policy"), segmentId: id, mode: z.enum(["auto", "manual"]).optional(), order: z.array(id).optional(), disabled: z.array(id).optional() }).strict(),
+    z.object({ type: z.literal("set_segment_reference_policy"), segmentId: id, mode: z.enum(["auto", "manual"]).optional(), order: z.array(id).optional(), disabled: z.array(id).optional(), additions: z.array(z.record(z.unknown())).optional(), additionsMode: z.enum(["append", "replace"]).optional() }).strict(),
     z.object({ type: z.literal("bind_director_asset"), assetId: id, nodeId: id }).strict(),
     z.object({ type: z.literal("bind_director_segment"), targetId: id, nodeId: id, segmentId: id }).strict(),
     z.object({ type: z.literal("set_director_boundary"), boundary: directorBoundarySchema }).strict(),

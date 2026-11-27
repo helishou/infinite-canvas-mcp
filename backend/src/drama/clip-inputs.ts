@@ -26,17 +26,32 @@ export function applySegmentReferenceOverrides(segment: Record<string, any>, sou
     const policy = object((Array.isArray(sourceSegments) ? sourceSegments : [])
         .map(object)
         .find(item => String(item.id || "") === String(targetId))?.referenceOverrides);
-    if (policy.mode !== "manual" || !Array.isArray(segment.referenceBindings)) return segment;
-    const disabled = new Set((Array.isArray(policy.disabled) ? policy.disabled : []).map(String));
-    const position = new Map((Array.isArray(policy.order) ? policy.order : []).map(String).map((id, index) => [id, index]));
-    const bindings: Array<Record<string, any>> = (segment.referenceBindings as Array<Record<string, any>>).map(binding => ({
-        ...object(binding),
-        enabled: !disabled.has(String(object(binding).id || "")),
+    if (!Array.isArray(segment.referenceBindings)) return segment;
+    const additions = (Array.isArray(policy.additions) ? policy.additions : []).map(object);
+    // auto 且无新增绑定时完全不干预（既有契约：自动派生不改写排序/启停）。
+    if (policy.mode !== "manual" && !additions.length) return segment;
+    const existing = (segment.referenceBindings as Array<Record<string, any>>).map(object);
+    const seenIds = new Set(existing.map(binding => String(binding.id || "")));
+    const seenKeys = new Set(existing.map(binding => String(binding.storageKey || "")));
+    const appended = additions.filter(binding => {
+        const id = String(binding.id || ""), key = String(binding.storageKey || "");
+        if (!id || !key || seenIds.has(id) || seenKeys.has(key)) return false;
+        seenIds.add(id); seenKeys.add(key); return true;
+    });
+    const disabled = new Set(policy.mode === "manual" ? (Array.isArray(policy.disabled) ? policy.disabled : []).map(String) : []);
+    const position = new Map(policy.mode === "manual" ? (Array.isArray(policy.order) ? policy.order : []).map(String).map((id, index) => [id, index]) : []);
+    const bindings: Array<Record<string, any>> = [...existing, ...appended].map(binding => ({
+        ...binding,
+        enabled: !disabled.has(String(binding.id || "")),
     }));
     // V8 的 Array.prototype.sort 稳定，未列入 order 的绑定按原有相对顺序追加到末尾。
-    bindings.sort((a, b) => (position.get(String(a.id || "")) ?? Number.MAX_SAFE_INTEGER) - (position.get(String(b.id || "")) ?? Number.MAX_SAFE_INTEGER));
+    if (policy.mode === "manual") {
+        bindings.sort((a, b) => (position.get(String(a.id || "")) ?? Number.MAX_SAFE_INTEGER) - (position.get(String(b.id || "")) ?? Number.MAX_SAFE_INTEGER));
+    }
     segment.referenceBindings = bindings;
-    segment.referenceOrder = bindings.map(binding => String(object(binding).id || "")).filter(Boolean);
+    if (policy.mode === "manual" || appended.length) {
+        segment.referenceOrder = bindings.map(binding => String(object(binding).id || "")).filter(Boolean);
+    }
     return segment;
 }
 export type ReferenceSync = { targetId: string; status: "ready" | "blocked"; referenceCount: number; inputHash?: string; diagnostics: Array<{ code: string; message: string }> };

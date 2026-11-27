@@ -74,7 +74,7 @@ const startSchema = z.object({
     options: pipelineOptionsSchema.optional(),
 }).strict();
 
-const rewritePromptsSchema = z.object({ episodeId: z.string().min(1) }).strict();
+const rewritePromptsSchema = z.object({ episodeId: z.string().min(1), segments: z.array(z.number().int().nonnegative()).optional() }).strict();
 const rewriteScriptSchema = z.object({
     episodeId: z.string().min(1),
     instruction: z.string().optional(),
@@ -83,6 +83,7 @@ const rewriteScriptSchema = z.object({
 }).strict();
 
 const approveSchema = z.object({ episodeId: z.string().min(1) }).strict();
+const manualRetrySchema = z.object({ jobId: z.string().min(1) }).strict();
 const releaseSchema = z.object({ target: z.enum(["assets", "episodes", "all"]).default("all") }).strict();
 const bindAssetImageSchema = z.object({
     episodeId: z.string().min(1),
@@ -113,9 +114,10 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         } catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
-    // 暂停 / 恢复（影策 /pause 与 /start 的等价物；没有单独 resume 路由，恢复=start）
-    router.post("/drama/:dramaId/pipeline/pause", (req, res) => {
-        try { pipeline.pause(String(req.params.dramaId)); res.json({ ok: true }); }
+    // 暂停（影策 /pause 等价物）：停派发 + 在跑作业退回可恢复排队 + 请求取消本剧在跑画布任务。
+    // 返回暂停摘要（pausedJobs/canceledTasks/failedTasks…），连续暂停幂等。
+    router.post("/drama/:dramaId/pipeline/pause", async (req, res) => {
+        try { res.json({ ok: true, ...await pipeline.pause(String(req.params.dramaId)) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
     router.post("/drama/:dramaId/pipeline/resume", async (req, res) => {
@@ -128,12 +130,17 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
         try { res.json({ ok: true, ...pipeline.status(String(req.params.dramaId)) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
+    // 状态别名：GET /drama/:id/pipeline 与 /pipeline/status 返回同一份数据（含 pause.reason / pause.lastResult）。
+    router.get("/drama/:dramaId/pipeline", (req, res) => {
+        try { res.json({ ok: true, ...pipeline.status(String(req.params.dramaId)) }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
 
     // 强制重写段提示词：忽略画布已有的旧 prompt，逐段用真 LLM 重写并 update_h3_segment 写回。
     router.post("/drama/pipeline/prompts/rewrite", async (req, res) => {
         const parsed = rewritePromptsSchema.safeParse(req.body || {});
         if (!parsed.success) return void res.status(400).json({ ok: false, error: "episodeId 必填" });
-        try { res.json({ ok: true, ...await pipeline.rewritePrompts(parsed.data.episodeId) }); }
+        try { res.json({ ok: true, ...await pipeline.rewritePrompts(parsed.data.episodeId, parsed.data.segments) }); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 
@@ -168,6 +175,13 @@ export function registerDramaPipelineRoutes(router: Router, pipeline: DramaPipel
     // 失败重试（影策 /retry-failed）
     router.post("/drama/:dramaId/pipeline/retry-failed", (req, res) => {
         try { res.json({ ok: true, ...pipeline.retryFailed(String(req.params.dramaId)) }); }
+        catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
+    });
+    // 人工单作业重试：只有用户点击才绕过熔断上限，重置 attempt 后重新入队。
+    router.post("/drama/:dramaId/pipeline/retry-job", (req, res) => {
+        const parsed = manualRetrySchema.safeParse(req.body || {});
+        if (!parsed.success) return void res.status(400).json({ ok: false, error: "jobId 必填" });
+        try { res.json(pipeline.retryJobManually(String(req.params.dramaId), parsed.data.jobId)); }
         catch (error) { res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) }); }
     });
 

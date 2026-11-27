@@ -198,9 +198,14 @@ export function fetchBackendAiConfig(signal?: AbortSignal) {
 }
 
 
+/** 连接探测必须有上限：不可达端口在某些网络下会一直挂着不返回，30s 级等待全落在首屏体感上。 */
+const HEALTH_TIMEOUT_MS = 2000;
+const CONFIG_TIMEOUT_MS = 2500;
+const BUSINESS_PROBE_TIMEOUT_MS = 2500;
+
 export async function backendHealth(): Promise<{ ok: boolean; protocolVersion?: number; node?: string; pid?: number }> {
     try {
-        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(3000) });
+        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
         if (!res.ok) return { ok: false };
         return await res.json();
     } catch {
@@ -218,7 +223,7 @@ export async function probeBackendBusinessApi(): Promise<{ ok: boolean; detail: 
     const base = getBackendUrl().replace(/\/$/, "");
     const token = getBackendTokenShared();
     try {
-        const res = await fetch(`${base}/canvas/assets?kind=text&token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(5000) });
+        const res = await fetch(`${base}/canvas/assets?kind=text&token=${encodeURIComponent(token)}`, { signal: AbortSignal.timeout(BUSINESS_PROBE_TIMEOUT_MS) });
         if (res.status === 404) return { ok: false, detail: `${base} 不是总后台：该地址对 /canvas/assets 返回 404（可能是旧版 canvas-agent 兼容代理，或反代路径不对）` };
         if (res.status === 401) return { ok: false, detail: `${base} 拒绝了当前连接密钥（HTTP 401），请在连接设置里重新获取 Token` };
         if (!res.ok) return { ok: false, detail: `${base} 业务接口异常：HTTP ${res.status}` };
@@ -233,7 +238,7 @@ export async function probeBackendBusinessApi(): Promise<{ ok: boolean; detail: 
 export async function discoverBackendToken(): Promise<BackendTokenResponse> {
     try {
         const token = getBackendTokenShared();
-        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+        const res = await fetch(`${getBackendUrl().replace(/\/$/, "")}/config`, { headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(CONFIG_TIMEOUT_MS) });
         if (!res.ok) return { ok: false, token: "", reloading: await isBackendReloading(res) };
         const data = await res.json();
         return { ok: Boolean(data.ok), token: data.token || "" };
@@ -1180,6 +1185,11 @@ export function backendMediaUrl(storageKey: string): string {
     return `${base}/media/${key}?token=${token}`;
 }
 
+/** 资产卡缩略图：后端按 w 参数即时生成 WebP，避免把几 MB 原图当缩略图拉。 */
+export function backendThumbUrl(storageKey: string, width = 320): string {
+    return `${backendMediaUrl(storageKey)}&w=${Math.round(width)}`;
+}
+
 /** acheng-director skill 的 132 段运镜白模镜头库（只读，视频由 Backend 直接流式提供）。 */
 export type CameraLibraryMove = {
     id: string; key: string; nameZh: string; nameEn: string; category: string;
@@ -1461,7 +1471,11 @@ export function releaseDramaPipelineMedia(dramaId: string, target: "assets" | "e
     return request<{ ok: boolean }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/release`, { target });
 }
 export function retryFailedDramaPipeline(dramaId: string) {
-    return request<{ ok: boolean; requeued?: number }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-failed`, {});
+    return request<{ ok: boolean; requeued?: number; skippedByLimit?: number }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-failed`, {});
+}
+/** 人工确认的单作业重试：显式重置 attempt 绕过熔断上限（自动 retryFailed 不会重排超限作业）。 */
+export function retryDramaPipelineJob(dramaId: string, jobId: string) {
+    return request<{ ok: boolean; jobId?: string }>("POST", `/drama/${encodeURIComponent(dramaId)}/pipeline/retry-job`, { jobId });
 }
 /** 按章编辑原文后重新改编：服务端重置本集全部作业并重入队 script（清旧镜→按新稿重拆→同步画布）。 */
 export function rewriteDramaEpisodeScript(episodeId: string, opts?: { instruction?: string; model?: string; options?: Record<string, unknown> }) {

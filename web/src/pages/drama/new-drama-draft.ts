@@ -1,11 +1,16 @@
 import localforage from "localforage";
 import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
 
+import type { StudioProductionSettings } from "@/pages/drama-studio/studio-settings-store";
+
 /**
- * 新建剧目面板的草稿：关掉弹窗不丢「原文 + 选题 + 分集 + 模型选择」。
+ * 新建短剧整页的草稿：离开页面或停笔 700ms 就存「原文 + 选题 + 分集 + 模型选择 + 制作设置」，
+ * 下次打开 /drama-studio/new 自动回填（保存草稿按钮也写同一份）。
  *
  * 原文可能有几十万字，放 localforage 的大对象存储，不用只装小配置的 localStorage。
  * 上传的风格参考图是浏览器 File，跨会话留不住，这里不存，回来重选即可。
+ * studio 与创建后写进剧目的制作设置是同一份字段（studio-settings-store），刷新恢复后再创建
+ * 得到的就是刷新前看到的配置。
  */
 const store = localforage.createInstance({ name: "infinite-canvas", storeName: "drama_new_draft" });
 const KEY = "new-drama";
@@ -20,6 +25,8 @@ export type NewDramaDraft = {
     autoEpisodes: boolean;
     handoff: boolean;
     step: number;
+    /** 文字步骤 / 参考图 / 分镜规则 / 审阅与生成节奏的选择；老草稿没有该字段时按默认补。 */
+    studio: StudioProductionSettings;
     savedAt: string;
 };
 

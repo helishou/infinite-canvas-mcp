@@ -10,6 +10,7 @@ import { summarizeCanvasState, validateCanvasStateInput, type StateInput } from 
 import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { assetConsumers, sourceOf, type AssetWriteCommand } from "./canvas/drama-asset-library.js";
 import { ensureProductionCanvas, productionCanvasContext } from "./drama/production-canvas.js";
 import { sharedAssetVersionsForAsset } from "./drama/shared-assets.js";
@@ -1292,6 +1293,11 @@ export function startServer(
     const episode = db.getDramaEpisode(req.params.episodeId);
     if (!episode)
       return void res.status(404).json({ ok: false, error: "分集不存在" });
+    // 制作台段卡与画布面板/生成准备读同一份派生视图：分镜关键帧 + 人工排序/启停即时生效，
+    // 不再把画布上那份可能停在旧编译的副本当真值。ref 视图没有节点正文，无需派生。
+    const readCanvas = episode.canvasId && canvasView === "full"
+      ? withDerivedStoryboardTracks(db, episode.canvasId, db.getCanvasProject(episode.canvasId)).project ?? null
+      : (episode.canvasId ? db.getCanvasProject(episode.canvasId) : null);
     if (view === "summary") {
       const { fullPlot: _fullPlot, sourceText: _sourceText, ...summary } = episode;
       return void res.json({ ok: true, episode: summary });
@@ -1321,12 +1327,12 @@ export function startServer(
       return void res.json({ ok: true, episode: episodeSummary, fullPlotChunk: {
         sha256, bytes: bytes.length, offset,
         text: new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, end)), nextCursor,
-      }, ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView) });
+      }, ...episodeCanvasRead(readCanvas, canvasView) });
     }
     res.json({
       ok: true,
       episode,
-      ...episodeCanvasRead(episode.canvasId ? db.getCanvasProject(episode.canvasId) : null, canvasView),
+      ...episodeCanvasRead(readCanvas, canvasView),
     });
   });
   app.patch("/drama/episodes/:episodeId", (req, res) => {
@@ -1777,12 +1783,48 @@ export function startServer(
   });
 
   /** 代理读取媒体文件。视频必须支持 Range，浏览器才能按需缓冲和 seek，避免整段读入内存后播放卡顿。 */
+  /** 缩略图缓存：资产库卡片只需要几百像素，不能把 2~3 MB 原图当缩略图拉。有界内存缓存，进程重启后按需重建。 */
+  const mediaThumbCache = new Map<string, Buffer>();
+  const MEDIA_THUMB_CACHE_LIMIT = 256;
+  const mediaThumb = async (filePath: string, storageKey: string, width: number): Promise<Buffer> => {
+    const cacheKey = `${storageKey}:${width}`;
+    const cached = mediaThumbCache.get(cacheKey);
+    if (cached) return cached;
+    const data = await sharp(filePath, { failOn: "none" })
+      .rotate()
+      .resize({ width, withoutEnlargement: true })
+      .webp({ quality: 78 })
+      .toBuffer();
+    if (mediaThumbCache.size >= MEDIA_THUMB_CACHE_LIMIT) {
+      const oldest = mediaThumbCache.keys().next().value;
+      if (oldest) mediaThumbCache.delete(oldest);
+    }
+    mediaThumbCache.set(cacheKey, data);
+    return data;
+  };
+
   app.get("/media/:storageKey", async (req, res) => {
     const storageKey = decodeURIComponent(req.params.storageKey);
     const media = stores.media.meta(storageKey);
     if (!media)
       return void res.status(404).json({ ok: false, error: "media not found" });
     try {
+      const thumbWidth = Number(req.query.w);
+      if (
+        media.mimeType.startsWith("image/") && media.mimeType !== "image/svg+xml"
+        && Number.isFinite(thumbWidth) && thumbWidth >= 16 && thumbWidth <= 1024
+      ) {
+        try {
+          const thumb = await mediaThumb(media.filePath, storageKey, Math.round(thumbWidth));
+          res.setHeader("Cache-Control", "private, max-age=86400");
+          res.setHeader("Content-Type", "image/webp");
+          res.setHeader("Content-Length", String(thumb.length));
+          res.end(thumb);
+          return;
+        } catch {
+          // 缩略图失败就回退原图，不能让卡片彻底打不开。
+        }
+      }
       res.setHeader("Cache-Control", "private, max-age=3600");
       res.setHeader("Content-Type", media.mimeType);
       if (media.mimeType === "image/svg+xml") {

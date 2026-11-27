@@ -1005,7 +1005,7 @@ export class CanvasImageDispatcher {
   private canvasHooks(input: CanvasImageGenerationInput): DispatcherHooks {
     return {
       onCompleted: async (result, task) => {
-        this.stores.projects.writeBackCanvasImageTask(
+        const written = this.stores.projects.writeBackCanvasImageTask(
           task,
           {
             projectId: input.projectId!,
@@ -1022,6 +1022,22 @@ export class CanvasImageDispatcher {
           },
           result.media.map((media) => ({ ...media })),
         );
+        if (!written) return;
+        // 正式制作资产实体节点的生成结果还要写回制作台资产卡与实体节点权威图，
+        // 否则资产卡一直显示未生成、后续取参考图仍读不到这张图。普通生成节点没有
+        // productionEntity 绑定，sync 会明确跳过，不改变既有画布生成行为。
+        const storedKey = String(
+          (((written.project.nodes || []) as Array<Record<string, any>>)
+            .find((node) => node?.id === input.nodeId)?.metadata || {}).storageKey || "",
+        );
+        if (!storedKey) return;
+        try {
+          this.stores.projects.syncProductionAssetImageWriteBack({
+            projectId: input.projectId!, nodeId: input.nodeId!, storageKey: storedKey, taskId: task.id,
+          });
+        } catch {
+          // 制作台回写失败不改变生成任务已完成的事实；后续采用或流水线对账仍可补齐。
+        }
       },
       onFailed: async (error, task) => {
         this.stores.projects.markCanvasImageTaskFailed(

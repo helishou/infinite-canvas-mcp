@@ -19,6 +19,8 @@
     "dev:web": "node scripts/pnpm.mjs run predev:web && node scripts/pnpm.mjs --filter infinite-canvas run dev",
     "predev:services": "node scripts/prepare-dev-services.mjs && node scripts/dev-engine.mjs --build",
     "dev:services": "node scripts/pnpm.mjs run predev:services && concurrently -n engine,backend,agent,web \"node scripts/dev-engine.mjs\" \"node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run dev\" \"node scripts/pnpm.mjs run dev:agent\" \"node scripts/pnpm.mjs --filter infinite-canvas run dev\"",
+    "preview:studio": "node scripts/preview-proxy.mjs",
+    "preview:studio:build": "node scripts/pnpm.mjs --filter infinite-canvas run build && node scripts/preview-proxy.mjs",
     "dev:local": "scripts\\dev-local.bat",
     "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-local-stop.ps1",
     "build": "node scripts/pnpm.mjs run build:plugins && node scripts/pnpm.mjs --filter @basketikun/canvas-agent run build && node scripts/pnpm.mjs --filter @basketikun/media-engine run build && node scripts/pnpm.mjs --filter @helishou/infinite-canvas-backend run build && node scripts/pnpm.mjs --filter infinite-canvas run build",

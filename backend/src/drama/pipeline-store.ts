@@ -133,46 +133,122 @@ export class PipelineStore {
         return true;
     }
 
-    /** 原子领取一条 queued job（priority DESC、created_at ASC）。 */
+    /** 原子领取一条 queued job（priority DESC、created_at ASC）。领取即清掉暂停留下的 error。 */
     claim(dramaId: string): JobRow | undefined {
         const row = this.db.prepare("SELECT * FROM drama_pipeline_jobs WHERE drama_id=? AND status='queued' ORDER BY priority DESC, created_at ASC LIMIT 1").get(dramaId) as JobRow | undefined;
         if (!row) return undefined;
         const now = new Date().toISOString();
-        const changed = this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', attempt=attempt+1, started_at=?, updated_at=? WHERE id=? AND status='queued'").run(now, now, row.id);
+        const changed = this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', attempt=attempt+1, started_at=?, error=NULL, updated_at=? WHERE id=? AND status='queued'").run(now, now, row.id);
         if (changed.changes !== 1) return undefined;
-        return { ...row, status: "running", attempt: row.attempt + 1 };
+        return { ...row, status: "running", attempt: row.attempt + 1, error: null };
     }
 
-    /** 原子领取指定 id 的 queued job（dispatch 选定具体 job 后用）。 */
+    /** 原子领取指定 id 的 queued job（dispatch 选定具体 job 后用）。领取即清掉暂停留下的 error。 */
     claimById(id: string): JobRow | undefined {
         const row = this.db.prepare("SELECT * FROM drama_pipeline_jobs WHERE id=? AND status='queued'").get(id) as JobRow | undefined;
         if (!row) return undefined;
         const now = new Date().toISOString();
-        const changed = this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', attempt=attempt+1, started_at=?, updated_at=? WHERE id=? AND status='queued'").run(now, now, id);
+        const changed = this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', attempt=attempt+1, started_at=?, error=NULL, updated_at=? WHERE id=? AND status='queued'").run(now, now, id);
         if (changed.changes !== 1) return undefined;
-        return { ...row, status: "running", attempt: row.attempt + 1 };
+        return { ...row, status: "running", attempt: row.attempt + 1, error: null };
     }
 
+    /** 记录作业当前任务号；已暂停（status 不再是 running）时不复活作业状态。 */
     markRunning(id: string, taskId: string | null) {
-        this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', task_id=?, updated_at=? WHERE id=?").run(taskId, new Date().toISOString(), id);
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='running', task_id=?, updated_at=? WHERE id=? AND status='running'").run(taskId, new Date().toISOString(), id);
+    }
+
+    /**
+     * 追加一条逐次尝试记录 {at, attempt?, error?, result?}：读改写，保留最近 20 条。
+     * 成功与失败共用同一格式，前端队列详情按它逐条列出每次尝试的原因与时间。
+     */
+    private appendAttempt(id: string, entry: Record<string, unknown>) {
+        const row = this.db.prepare("SELECT attempts_json FROM drama_pipeline_jobs WHERE id=?").get(id) as { attempts_json?: string } | undefined;
+        const parsed = parseJson(row?.attempts_json, []);
+        const attempts = Array.isArray(parsed) ? parsed : [];
+        attempts.push(entry);
+        this.db.prepare("UPDATE drama_pipeline_jobs SET attempts_json=? WHERE id=?").run(JSON.stringify(attempts.slice(-20)), id);
     }
 
     succeed(id: string, result: Record<string, unknown>) {
         const now = new Date().toISOString();
         this.db.prepare("UPDATE drama_pipeline_jobs SET status='succeeded', finished_at=?, updated_at=? WHERE id=?").run(now, now, id);
-        const row = this.db.prepare("SELECT attempts_json FROM drama_pipeline_jobs WHERE id=?").get(id) as { attempts_json?: string } | undefined;
-        const attempts = parseJson(row?.attempts_json, []) as unknown[];
-        attempts.push({ at: now, result });
-        this.db.prepare("UPDATE drama_pipeline_jobs SET attempts_json=? WHERE id=?").run(JSON.stringify(attempts.slice(-20)), id);
+        const row = this.db.prepare("SELECT attempt FROM drama_pipeline_jobs WHERE id=?").get(id) as { attempt?: number } | undefined;
+        this.appendAttempt(id, { at: now, attempt: Number(row?.attempt || 0), result });
     }
 
+    /** 失败：终态错误照旧写 error；同时把本次失败（含第几次）追加进 attempts_json，供事后排查。 */
     fail(id: string, error: string) {
         const now = new Date().toISOString();
-        this.db.prepare("UPDATE drama_pipeline_jobs SET status='failed', error=?, finished_at=?, updated_at=? WHERE id=?").run(String(error).slice(0, 2000), now, now, id);
+        const message = String(error).slice(0, 2000);
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='failed', error=?, finished_at=?, updated_at=? WHERE id=?").run(message, now, now, id);
+        const row = this.db.prepare("SELECT attempt FROM drama_pipeline_jobs WHERE id=?").get(id) as { attempt?: number } | undefined;
+        this.appendAttempt(id, { at: now, attempt: Number(row?.attempt || 0), error: message });
     }
 
+    /** 熔断终态：failed 且 attempt 顶到硬上限，使 retryFailed/launchJob 都不再重排（等人工介入）。 */
+    failCircuit(id: string, error: string, attempt: number) {
+        const now = new Date().toISOString();
+        const message = String(error).slice(0, 2000);
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='failed', error=?, attempt=?, finished_at=?, updated_at=? WHERE id=?")
+            .run(message, attempt, now, now, id);
+        this.appendAttempt(id, { at: now, attempt, error: message });
+    }
+
+    /**
+     * 退回 queued。created_at 是队列 FIFO 的排序键（listJobs/claim 按 priority DESC、created_at ASC），
+     * 重新入队必须取新时间戳，否则重试作业仍占旧槽位，插到后来真正先提交的同阶段作业前面。
+     */
     requeue(id: string) {
-        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, updated_at=? WHERE id=?").run(new Date().toISOString(), id);
+        const now = new Date().toISOString();
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, created_at=?, updated_at=? WHERE id=?").run(now, now, id);
+    }
+
+    /** 手动/分级重试：退回 queued 且重置 attempt，让重跑从干净计数开始（避免历史 attempt 累加触发硬上限死循环）。 */
+    requeueForRetry(id: string) {
+        const now = new Date().toISOString();
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, attempt=0, task_id=NULL, started_at=NULL, finished_at=NULL, created_at=?, updated_at=? WHERE id=?")
+            .run(now, now, id);
+    }
+
+    /**
+     * 用户暂停：把本剧目所有 running 作业退回 queued（保留 dedupe/阶段依赖与恢复点），
+     * attempt 回退一格（取消不是作业失败，不该消耗重试次数），task_id 清空避免恢复时误用旧任务号，
+     * error 记暂停原因供前端/status 辨认。返回被退回的作业数。
+     */
+    pauseRunning(dramaId: string, reason = "paused_by_user"): number {
+        const now = new Date().toISOString();
+        const changed = this.db.prepare(
+            "UPDATE drama_pipeline_jobs SET status='queued', error=?, attempt=MAX(0,attempt-1), task_id=NULL, started_at=NULL, created_at=?, updated_at=? WHERE drama_id=? AND status='running'",
+        ).run(reason, now, now, dramaId);
+        return Number(changed.changes || 0);
+    }
+
+    /**
+     * 单条在跑作业退回可恢复排队：暂停时执行 Promise 迟到的结果不得把作业写成 succeeded/failed。
+     * 只对仍处于 running 的行生效，已被 pauseRunning 退回的作业保持原样（幂等）。
+     */
+    markPaused(id: string, reason = "paused_by_user"): boolean {
+        const now = new Date().toISOString();
+        const changed = this.db.prepare(
+            "UPDATE drama_pipeline_jobs SET status='queued', error=?, attempt=MAX(0,attempt-1), task_id=NULL, started_at=NULL, created_at=?, updated_at=? WHERE id=? AND status='running'",
+        ).run(reason, now, now, id);
+        return Number(changed.changes || 0) === 1;
+    }
+
+    /**
+     * 进程重启后，内存中的执行 Promise 随之消失，但数据库里的 job 仍是 running，
+     * 后续阶段因前置依赖未 succeeded 永远无法入队（队列整体卡死）。
+     * 这里把 started_at 超过 TTL 的 running 作业退回 queued，让调度器重新执行。
+     * TTL 取 30 分钟，大于正常单作业耗时，避免误伤真正在跑的长任务。
+     */
+    recoverStaleRunning(dramaId: string, ttlMs: number): number {
+        const cutoff = new Date(Date.now() - ttlMs).toISOString();
+        const rows = this.db.prepare("SELECT id FROM drama_pipeline_jobs WHERE drama_id=? AND status='running' AND (started_at IS NULL OR started_at < ?)").all(dramaId, cutoff) as Array<{ id: string }>;
+        const now = new Date().toISOString();
+        const update = this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, task_id=NULL, started_at=NULL, created_at=?, updated_at=? WHERE id=?");
+        for (const row of rows) update.run(now, now, row.id);
+        return rows.length;
     }
 
     cancelQueued(dramaId: string) {
@@ -189,11 +265,29 @@ export class PipelineStore {
     resetJobsForEpisode(dramaId: string, episodeId: string, scriptPatch?: Record<string, unknown>): number {
         const rows = this.listJobs(dramaId).filter(job => job.episode_id === episodeId);
         const now = new Date().toISOString();
-        const update = this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, attempt=0, task_id=NULL, started_at=NULL, finished_at=NULL, payload_json=?, updated_at=? WHERE id=?");
+        const update = this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, attempt=0, task_id=NULL, started_at=NULL, finished_at=NULL, payload_json=?, created_at=?, updated_at=? WHERE id=?");
         for (const job of rows) {
             const base = this.jobPayload(job);
             const payload = scriptPatch && job.stage === "script" ? { ...base, ...scriptPatch } : base;
-            update.run(JSON.stringify(payload), now, job.id);
+            update.run(JSON.stringify(payload), now, now, job.id);
+        }
+        return rows.length;
+    }
+
+    /**
+     * 重写提示词后的下游重排：只把本集指定阶段的作业重置为 queued，不动其它阶段。
+     * 对齐影策 invalidateDramaSegment：提示词改了，用旧提示词生成的 video/render 必须作废重跑，
+     * 但 script/assets 已完成的不该被牵连。dedupe_key 保留，重排不堆重复作业。
+     */
+    resetJobsForEpisodeStages(dramaId: string, episodeId: string, stages: string[], scriptPatch?: Record<string, unknown>): number {
+        const wanted = new Set(stages);
+        const rows = this.listJobs(dramaId).filter(job => job.episode_id === episodeId && wanted.has(job.stage));
+        const now = new Date().toISOString();
+        const update = this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', error=NULL, attempt=0, task_id=NULL, started_at=NULL, finished_at=NULL, payload_json=?, created_at=?, updated_at=? WHERE id=?");
+        for (const job of rows) {
+            const base = this.jobPayload(job);
+            const payload = scriptPatch && job.stage === "script" ? { ...base, ...scriptPatch } : base;
+            update.run(JSON.stringify(payload), now, now, job.id);
         }
         return rows.length;
     }
@@ -216,8 +310,9 @@ export class PipelineStore {
 
     /** C6：依赖未就绪时把作业退回 queued 且回退 attempt（不消耗重试次数），等上游就绪后下一轮重排。 */
     deferDependency(id: string): void {
-        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', attempt=MAX(0,attempt-1), error=NULL, updated_at=? WHERE id=?")
-            .run(new Date().toISOString(), id);
+        const now = new Date().toISOString();
+        this.db.prepare("UPDATE drama_pipeline_jobs SET status='queued', attempt=MAX(0,attempt-1), error=NULL, created_at=?, updated_at=? WHERE id=?")
+            .run(now, now, id);
     }
 
     /** 幂等写 job 的恢复点（如 render 已合成成片的 storageKey）；重放时复用，避免二次提交 provider task。 */

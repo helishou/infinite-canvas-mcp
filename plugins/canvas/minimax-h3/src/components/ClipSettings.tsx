@@ -39,6 +39,10 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     const styleTemplates = resolveAvailableH3StyleTemplates(defaults);
     const resolved = resolveH3Runtime(raw as Record<string, unknown>, {}, metadata, defaults);
     const segment = inputSegment ? { ...inputSegment, ...resolved.params, videoSteps: resolved.params.steps } as H3Segment : undefined;
+    // 制作台绑定的正式 Clip：时长由制作稿 Shot 时长求和派生，不是可编辑配置（canvas-contracts.md:96）。
+    // 画布侧禁止手改 duration，避免与源稿分叉；普通手工 Clip 不受限制。
+    const projection = (segment?.productionClipProjection || raw.productionClipProjection) as Record<string, unknown> | undefined;
+    const durationLocked = typeof projection?.targetId === "string" && Boolean(projection.targetId);
     const selectedVideoReferenceCount = selectedVideoWorkflowReferenceCount(segment);
     const patch = savePatch;
     const [selectedVideoModelSchema, setSelectedVideoModelSchema] = useState<CanvasVideoModelSchema | null>(null);
@@ -100,16 +104,17 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
         const next = { ...selectedModelValues, [item.id]: value };
         patch({
             selectedVideoModelFieldValues: { ...allSelectedModelValues, [selectedModelSchemaKey]: next },
-            ...(["duration", "seconds"].includes(item.id) && Number.isFinite(Number(value)) ? { duration: Number(value) } : {}),
+            ...(!durationLocked && ["duration", "seconds"].includes(item.id) && Number.isFinite(Number(value)) ? { duration: Number(value) } : {}),
         });
     };
     const renderSelectedModelField = (item: CanvasVideoModelField) => {
         const value = defaultSelectedModelFieldValue(item);
         const label = `${item.name || item.id}${item.required ? " *" : ""}`;
-        if (item.type === "boolean") return control(label, <Switch checked={value === true || String(value).toLowerCase() === "true"} onChange={(next) => patchSelectedModelField(item, next)} />);
-        if (item.type === "number" || item.type === "slider") return control(label, <InputNumber style={field} min={item.min} max={item.max} step={item.step || (item.type === "slider" ? 0.01 : 1)} value={value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : undefined} onChange={(next) => patchSelectedModelField(item, next ?? "")} />);
-        if (item.type === "dropdown" && item.options?.length) return control(label, <H3Dropdown values={item.options} value={value === undefined || value === null ? undefined : String(value)} onChange={(next) => patchSelectedModelField(item, String(next))} allowClear placeholder={label} searchable />);
-        return control(label, <Input value={value === undefined || value === null ? "" : String(value)} placeholder={item.default === undefined ? label : String(item.default)} onChange={(event) => patchSelectedModelField(item, event.target.value)} />);
+        const durationFieldLocked = durationLocked && ["duration", "seconds"].includes(item.id);
+        if (item.type === "boolean") return control(label, <Switch disabled={durationFieldLocked} checked={value === true || String(value).toLowerCase() === "true"} onChange={(next) => patchSelectedModelField(item, next)} />);
+        if (item.type === "number" || item.type === "slider") return control(label, <InputNumber disabled={durationFieldLocked} style={field} min={item.min} max={item.max} step={item.step || (item.type === "slider" ? 0.01 : 1)} value={value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)) ? Number(value) : undefined} onChange={(next) => patchSelectedModelField(item, next ?? "")} />);
+        if (item.type === "dropdown" && item.options?.length) return control(label, <H3Dropdown values={item.options} value={value === undefined || value === null ? undefined : String(value)} onChange={(next) => patchSelectedModelField(item, String(next))} allowClear placeholder={label} searchable disabled={durationFieldLocked} />);
+        return control(label, <Input disabled={durationFieldLocked} value={value === undefined || value === null ? "" : String(value)} placeholder={item.default === undefined ? label : String(item.default)} onChange={(event) => patchSelectedModelField(item, event.target.value)} />);
     };
     // 标准视频参数（清晰度/尺寸/秒数）固定呈现：有宽/高/秒工作流字段就写字段，
     // 没有就退回节点级 aspectRatio/megapixels/duration（H3 真正的出片参数），不让控件变成摆设。
@@ -159,15 +164,16 @@ export function ClipSettings({ ctx, metadata, segment: inputSegment, patch: save
     // 秒数：标准 seconds 经引擎 durationTarget 注入帧；H3 段的权威时长是 segment.duration。
     // 帧数字段是派生落点（引擎会从 seconds 重算并摘掉它），不写入，避免把秒数误当帧数存进去。
     const presetSeconds = segment.duration != null && Number(segment.duration) > 0 ? Number(segment.duration) : (numFieldValue(secondsField) ?? 6);
-    const writePresetSeconds = (seconds: number) => patch({ duration: seconds });
+    const writePresetSeconds = (seconds: number) => { if (!durationLocked) patch({ duration: seconds }); };
     // 标准控件无条件渲染。模型没声明标准角色时，宽度/秒数落在节点级出片参数上，不是摆设。
+    // 制作台绑定的正式 Clip 时长由源稿派生，隐藏秒数入口，避免与源稿分叉。
     const standardPresetsPanel = <H3VideoOutputParams
         width={presetWidth}
         height={presetHeight}
         seconds={presetSeconds}
         secondsMax={15}
         showSize
-        showSeconds
+        showSeconds={!durationLocked}
         onSize={(width, height) => writePresetSize(width, height)}
         onSeconds={(seconds) => writePresetSeconds(seconds)}
     />;

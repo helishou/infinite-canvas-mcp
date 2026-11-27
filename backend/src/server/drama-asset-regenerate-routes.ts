@@ -319,7 +319,7 @@ export async function regenerateDramaAssetReference(deps: RegenerateReferenceDep
             groupId: located.groupId,
             dramaId: input.dramaId,
             restyleSegments: true,
-            isActive: makeActiveTaskChecker(stores),
+            isActive: makeActiveTaskChecker(stores, db),
         });
         affectedSegments = applyRestylePlan(db, plan, `${input.dramaId}\0${input.assetId}\0${taskId}`).marked;
     }

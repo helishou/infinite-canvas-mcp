@@ -77,8 +77,8 @@ export function AgentChatComposer({
         }
     };
     return (
-        <div className={`px-2 pb-2 pt-2 ${className || ""}`} onWheelCapture={(event) => event.stopPropagation()}>
-            <div className="rounded-[24px] border px-3 pb-3 pt-3 shadow-lg" style={{ background: theme.toolbar.panel, borderColor: theme.node.stroke }}>
+        <div className={`px-4 pb-3 pt-1.5 ${className || ""}`} onWheelCapture={(event) => event.stopPropagation()}>
+            <div className="rounded-[16px] border bg-muted/50 p-3 shadow-sm" style={{ borderColor: theme.node.stroke }}>
                 {attachments.length ? (
                     <div className="thin-scrollbar mb-2 flex gap-2 overflow-x-auto pb-1">
                         {attachments.map((item) => (
@@ -99,7 +99,7 @@ export function AgentChatComposer({
                 ) : null}
                 <AgentChatPromptInput value={prompt} disabled={disabled || sending} placeholder={placeholder} theme={theme} onChange={onPromptChange} onSubmit={submit} onAddFiles={onAddFiles} />
                 <div className="@container mt-2 flex items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-1">
+                    <div className="flex min-w-0 items-center gap-2">
                         {onAddFiles ? (
                             <>
                                 <input ref={fileInputRef} hidden type="file" accept="image/*,video/*" multiple onChange={(event) => {
@@ -107,7 +107,7 @@ export function AgentChatComposer({
                                     event.target.value = "";
                                 }} />
                                 <Tooltip title={t("agent.composer.uploadImage")}>
-                                    <Button type="text" shape="circle" className="!h-9 !w-9 !min-w-9" disabled={disabled || sending} style={{ color: theme.node.muted }} icon={<ImagePlus className="size-4" />} onClick={() => fileInputRef.current?.click()} aria-label={t("agent.composer.uploadImage")} />
+                                    <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" disabled={disabled || sending} style={{ color: theme.node.muted }} icon={<ImagePlus className="size-4" />} onClick={() => fileInputRef.current?.click()} aria-label={t("agent.composer.uploadImage")} />
                                 </Tooltip>
                             </>
                         ) : null}
@@ -118,12 +118,12 @@ export function AgentChatComposer({
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
                         {queueActive && !sending && onQueue ? (
-                            <Tooltip title={t("agent.composer.queueSubmit")} placement="top"><Button type="primary" shape="circle" className="!h-10 !w-10 !min-w-10" disabled={!canQueue} icon={<ListPlus className="size-4" />} onClick={submit} aria-label={t("agent.composer.queueSubmit")} /></Tooltip>
+                            <Tooltip title={t("agent.composer.queueSubmit")} placement="top"><Button type="primary" shape="circle" className="!h-8 !w-8 !min-w-8" disabled={!canQueue} icon={<ListPlus className="size-4" />} onClick={submit} aria-label={t("agent.composer.queueSubmit")} /></Tooltip>
                         ) : null}
                         {(sending || waiting) && onStop ? (
-                            <Tooltip title={t("agent.composer.stop")} placement="top"><Button danger shape="circle" className="!h-10 !w-10 !min-w-10" icon={<Square className="size-4" />} onClick={() => void onStop()} aria-label={t("agent.composer.stop")} /></Tooltip>
+                            <Tooltip title={t("agent.composer.stop")} placement="top"><Button danger shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Square className="size-3.5" />} onClick={() => void onStop()} aria-label={t("agent.composer.stop")} /></Tooltip>
                         ) : queueActive ? null : (
-                            <Tooltip title={t("agent.composer.send")} placement="top"><Button type="primary" shape="circle" className="!h-10 !w-10 !min-w-10" disabled={!canSubmit} icon={sending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />} onClick={() => void onSubmit()} aria-label={t("agent.composer.send")} /></Tooltip>
+                            <Tooltip title={t("agent.composer.send")} placement="top"><Button type="primary" shape="circle" className="!h-8 !w-8 !min-w-8" disabled={!canSubmit} icon={sending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />} onClick={() => void onSubmit()} aria-label={t("agent.composer.send")} /></Tooltip>
                         )}
                     </div>
                 </div>
@@ -143,10 +143,10 @@ function AgentModelControls({ models, model, reasoningEffort, onModelChange, onR
             <Tooltip title={t("agent.composer.model", { model: current.displayName || current.model })} placement="top" open={modelOpen ? false : undefined}>
                 <span className="inline-flex shrink-0">
                     <Select value={model} open={modelOpen} onOpenChange={setModelOpen} onValueChange={onModelChange}>
-                        <SelectTrigger hideChevron className="h-9 w-9 min-w-9 justify-center gap-0 rounded-full border-0 bg-transparent px-0 text-xs font-medium shadow-none hover:bg-black/5 focus:ring-0 @min-[660px]:w-auto @min-[660px]:min-w-36 @min-[660px]:max-w-36 @min-[660px]:justify-start @min-[660px]:gap-1.5 @min-[660px]:px-2.5 dark:bg-transparent dark:hover:bg-white/10" aria-label={t("agent.composer.selectModel", { model: current.displayName || current.model })}>
+                        <SelectTrigger hideChevron className="h-8 w-8 min-w-8 justify-center gap-0 rounded-full border-0 bg-transparent px-0 !text-[12px] font-medium shadow-none hover:bg-black/5 focus:ring-0 @min-[520px]:w-auto @min-[520px]:min-w-32 @min-[520px]:max-w-40 @min-[520px]:justify-start @min-[520px]:gap-1.5 @min-[520px]:px-2.5 dark:bg-transparent dark:hover:bg-white/10" aria-label={t("agent.composer.selectModel", { model: current.displayName || current.model })}>
                             <Cpu className="size-3.5 shrink-0 opacity-70" />
-                            <span className="hidden min-w-0 flex-1 truncate text-left @min-[660px]:inline">{current.displayName || current.model}</span>
-                            <ChevronUp className="hidden size-3 opacity-50 @min-[660px]:block" />
+                            <span className="hidden min-w-0 flex-1 truncate text-left @min-[520px]:inline">{current.displayName || current.model}</span>
+                            <ChevronUp className="hidden size-3 opacity-50 @min-[520px]:block" />
                         </SelectTrigger>
                         <SelectContent data-canvas-no-zoom position="popper" side="top" align="start" sideOffset={6} className="z-[1200] w-64 rounded-xl border border-border/70 bg-popover p-1 shadow-xl">
                             {models.map((item) => <SelectItem key={item.model} value={item.model}>{item.displayName || item.model}</SelectItem>)}
@@ -157,10 +157,10 @@ function AgentModelControls({ models, model, reasoningEffort, onModelChange, onR
             {reasoningEffort && current.supportedReasoningEfforts.length > 0 && <Tooltip title={t("agent.composer.reasoning", { effort: effortLabel(reasoningEffort) })} placement="top" open={reasoningOpen ? false : undefined}>
                 <span className="inline-flex shrink-0">
                     <Select value={reasoningEffort} open={reasoningOpen} onOpenChange={setReasoningOpen} onValueChange={(value: string) => onReasoningEffortChange(value as AgentReasoningEffort)}>
-                        <SelectTrigger hideChevron className="h-9 w-9 min-w-9 justify-center gap-0 rounded-full border-0 bg-transparent px-0 text-xs font-medium shadow-none hover:bg-black/5 focus:ring-0 @min-[660px]:w-auto @min-[660px]:min-w-[4.5rem] @min-[660px]:justify-start @min-[660px]:gap-1.5 @min-[660px]:px-2.5 dark:bg-transparent dark:hover:bg-white/10" aria-label={t("agent.composer.selectReasoning", { effort: effortLabel(reasoningEffort) })}>
+                        <SelectTrigger hideChevron className="h-8 w-8 min-w-8 justify-center gap-0 rounded-full border-0 bg-transparent px-0 !text-[12px] font-medium shadow-none hover:bg-black/5 focus:ring-0 @min-[520px]:w-auto @min-[520px]:min-w-[4.5rem] @min-[520px]:justify-start @min-[520px]:gap-1.5 @min-[520px]:px-2.5 dark:bg-transparent dark:hover:bg-white/10" aria-label={t("agent.composer.selectReasoning", { effort: effortLabel(reasoningEffort) })}>
                             <Gauge className="size-3.5 opacity-70" />
-                            <span className="hidden @min-[660px]:inline">{effortLabel(reasoningEffort)}</span>
-                            <ChevronUp className="hidden size-3 opacity-50 @min-[660px]:block" />
+                            <span className="hidden @min-[520px]:inline">{effortLabel(reasoningEffort)}</span>
+                            <ChevronUp className="hidden size-3 opacity-50 @min-[520px]:block" />
                         </SelectTrigger>
                         <SelectContent data-canvas-no-zoom position="popper" side="top" align="start" sideOffset={6} className="z-[1200] min-w-32 rounded-xl border border-border/70 bg-popover p-1 shadow-xl">
                             {current.supportedReasoningEfforts.map((item) => <SelectItem key={item.reasoningEffort} value={item.reasoningEffort}>{effortLabel(item.reasoningEffort)}</SelectItem>)}
@@ -197,10 +197,10 @@ function PermissionModeMenu({ permissionMode, theme, onChange }: { permissionMod
                         })),
                     }}
                 >
-                    <button type="button" className="flex h-9 w-9 min-w-9 shrink-0 items-center justify-center gap-0 rounded-full px-0 text-xs font-medium transition hover:bg-black/5 @min-[660px]:h-9 @min-[660px]:w-auto @min-[660px]:min-w-0 @min-[660px]:justify-start @min-[660px]:gap-1.5 @min-[660px]:px-2.5 dark:hover:bg-white/10" style={{ color: permissionMode === "full" ? "#ea580c" : theme.node.text }} aria-label={t("agent.composer.selectPermission", { mode: current.title })}>
+                    <button type="button" className={`flex h-8 w-8 min-w-8 shrink-0 items-center justify-center gap-0 rounded-full px-0 !text-[12px] font-medium transition hover:bg-black/5 @min-[520px]:h-8 @min-[520px]:w-auto @min-[520px]:min-w-0 @min-[520px]:justify-start @min-[520px]:gap-1.5 @min-[520px]:px-2.5 dark:hover:bg-white/10 ${permissionMode === "full" ? "bg-orange-500/15" : "bg-amber-500/15 text-amber-600 dark:text-amber-400"}`} style={permissionMode === "full" ? { color: "#ea580c" } : undefined} aria-label={t("agent.composer.selectPermission", { mode: current.title })}>
                         {current.icon}
-                        <span className="hidden @min-[660px]:inline">{current.shortTitle}</span>
-                        <ChevronUp className="hidden size-3 opacity-50 @min-[660px]:block" />
+                        <span className="hidden @min-[520px]:inline">{current.shortTitle}</span>
+                        <ChevronUp className="hidden size-3 opacity-50 @min-[520px]:block" />
                     </button>
                 </Dropdown>
             </span>
@@ -235,10 +235,10 @@ function ToolConfirmationMenu({ confirmTools, theme, onChange }: { confirmTools:
                         ],
                     }}
                 >
-                    <button type="button" className="flex h-9 w-9 min-w-9 shrink-0 items-center justify-center gap-0 rounded-full px-0 text-xs font-medium transition hover:bg-black/5 @min-[660px]:w-auto @min-[660px]:min-w-0 @min-[660px]:justify-start @min-[660px]:gap-1.5 @min-[660px]:px-2.5 dark:hover:bg-white/10" style={{ color: theme.node.text }} aria-label={t("agent.composer.tools.select", { mode })}>
+                    <button type="button" className="flex h-8 w-8 min-w-8 shrink-0 items-center justify-center gap-0 rounded-full px-0 !text-[12px] font-medium transition hover:bg-black/5 @min-[520px]:w-auto @min-[520px]:min-w-0 @min-[520px]:justify-start @min-[520px]:gap-1.5 @min-[520px]:px-2.5 dark:hover:bg-white/10" style={{ color: theme.node.muted }} aria-label={t("agent.composer.tools.select", { mode })}>
                         {confirmTools ? <Hand className="size-3.5" /> : <RefreshCw className="size-3.5" />}
-                        <span className="hidden @min-[660px]:inline">{mode}</span>
-                        <ChevronUp className="hidden size-3 opacity-50 @min-[660px]:block" />
+                        <span className="hidden @min-[520px]:inline">{mode}</span>
+                        <ChevronUp className="hidden size-3 opacity-50 @min-[520px]:block" />
                     </button>
                 </Dropdown>
             </span>

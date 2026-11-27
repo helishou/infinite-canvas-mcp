@@ -169,7 +169,7 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
 
     return (
         <div ref={containerRef} className="relative">
-            {!value.trim() ? <div className="pointer-events-none absolute left-1 top-1 text-sm leading-6" style={{ color: theme.node.placeholder }}>{placeholder}</div> : null}
+            {!value.trim() ? <div className="pointer-events-none absolute left-1 top-1 text-[15px] leading-7" style={{ color: theme.node.placeholder }}>{placeholder}</div> : null}
             <div
                 ref={editorRef}
                 contentEditable={!disabled}
@@ -177,7 +177,7 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
                 role="textbox"
                 aria-multiline="true"
                 aria-label={placeholder}
-                className="thin-scrollbar max-h-32 min-h-20 w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-1 py-1 text-sm leading-6 outline-none"
+                className="thin-scrollbar max-h-40 min-h-[84px] w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent px-1 py-1 text-[15px] leading-7 outline-none"
                 style={{ color: theme.node.text, cursor: disabled ? "default" : "text" }}
                 onInput={() => {
                     if (!composingRef.current) syncFromEditor();

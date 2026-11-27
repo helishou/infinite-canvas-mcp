@@ -13,6 +13,7 @@ import { ProductionValidationError } from "@basketikun/canvas-agent/drama/produc
 import { productionCompileSchema, productionCompileSubmissionSchema, productionApplyCompilationSchema, productionReadSchema, projectProductionRead, projectProductionVersion, validateProductionSourceFields } from "@basketikun/canvas-agent/drama/production-contract";
 import { compilationArtifactFreshness } from "@basketikun/canvas-agent/drama/compilation-scope";
 import { withSegmentState, type SegmentStateRuntime } from "../drama/segment-state.js";
+import { storedJsonText } from "../json-storage.js";
 import { findReprocessableVideo, VideoReprocessFailure, type VideoReprocessDeps } from "../drama/video-reprocess.js";
 import { ProductionCompilationService } from "../drama/compilation.js";
 import { ClipRefreshCoordinator } from "../drama/clip-refresh.js";
@@ -35,8 +36,71 @@ function batchReceipt(batch: ReturnType<EpisodeProductionService["getBatch"]>) {
 }
 
 /**
+ * 画布 Clip 段状态真值：逐字段从 metadata.segments[] 原样搬运，缺席字段留 undefined（不编造默认）。
+ * referenceBindings 只取 storageKey/label/ordinal（真实存储里 ordinal 常写作 order）。
+ */
+type ClipStateTruth = {
+    status?: string;
+    errorDetails?: unknown;
+    inputOutdated?: boolean;
+    resultStorageKey?: string;
+    tailFrameContinuation?: boolean;
+    taskMode?: string;
+    referenceBindings?: Array<{ storageKey?: string; label?: string; ordinal?: number }>;
+    segmentIndex?: number;
+    /** 渠道排队原因：tasks/generation_logs 的 params.waitReason，拿到槽位后会被清空，只有非空才填。 */
+    waitReason?: string;
+};
+
+type BindingTruth = { storageKey?: string; label?: string; ordinal?: number; enabled?: boolean; assetId?: string };
+
+/** 画布参考绑定真值：真实存储里序号写作 order，少数写作 ordinal；enabled/assetId 也原样带给下游过滤。 */
+function collectBindings(segment: any): BindingTruth[] | undefined {
+    if (!Array.isArray(segment?.referenceBindings)) return undefined;
+    return segment.referenceBindings.map((binding: any) => {
+        const item: BindingTruth = {};
+        if (typeof binding?.storageKey === "string" && binding.storageKey) item.storageKey = binding.storageKey;
+        if (typeof binding?.label === "string" && binding.label) item.label = binding.label;
+        const ordinal = binding?.ordinal ?? binding?.order;
+        if (typeof ordinal === "number" && Number.isFinite(ordinal)) item.ordinal = ordinal;
+        if (typeof binding?.enabled === "boolean") item.enabled = binding.enabled;
+        if (typeof binding?.assetId === "string" && binding.assetId) item.assetId = binding.assetId;
+        return item;
+    });
+}
+
+function collectClipState(segment: any, bindings?: BindingTruth[]): ClipStateTruth {
+    const state: ClipStateTruth = {};
+    if (typeof segment?.status === "string" && segment.status) state.status = segment.status;
+    if (segment?.errorDetails !== undefined && segment.errorDetails !== null) state.errorDetails = segment.errorDetails;
+    if (typeof segment?.inputOutdated === "boolean") state.inputOutdated = segment.inputOutdated;
+    if (typeof segment?.resultStorageKey === "string" && segment.resultStorageKey) state.resultStorageKey = segment.resultStorageKey;
+    if (typeof segment?.tailFrameContinuation === "boolean") state.tailFrameContinuation = segment.tailFrameContinuation;
+    if (typeof segment?.taskMode === "string" && segment.taskMode) state.taskMode = segment.taskMode;
+    if (bindings) state.referenceBindings = bindings;
+    if (typeof segment?.segmentIndex === "number" && Number.isFinite(segment.segmentIndex)) state.segmentIndex = segment.segmentIndex;
+    return state;
+}
+
+/** params_json 可能是 TEXT JSON，也可能是 ICBR1 Brotli BLOB（项目统一存储格式）。 */
+function paramsWaitReason(value: unknown): string | undefined {
+    try {
+        const parsed = JSON.parse(storedJsonText(value)) as { waitReason?: unknown } | null;
+        const reason = parsed?.waitReason;
+        return typeof reason === "string" && reason.trim() ? reason.trim() : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+/**
  * 段状态的运行态真值：
- * - 等待原因/上游阶段：只读 drama_pipeline_jobs（前端 pipeline.jobs 同源）与 episode_production_runs。
+ * - 等待原因/上游阶段：drama_pipeline_jobs（前端 pipeline.jobs 同源）、episode_production_runs，
+ *   以及 tasks.params.waitReason / generation_logs.params.waitReason（渠道排队真值，拿到槽位后即清空）。
+ *   upstreamStage 是本地流水线阶段，不是 providerStage：本地 task_events 没有阶段文案，providerStage 不填。
+ * - clipStates：画布 Clip 的段状态真值，按 productionClipProjection.targetId 索引（status/errorDetails/
+ *   inputOutdated/resultStorageKey/tailFrameContinuation/taskMode/referenceBindings/segmentIndex/waitReason）。
+ *   bindingsBySegment 同源喂给下游的 references 真值入口。
  * - custom：画布 Clip 的 productionClipProjection.targetId → promptCustom（用户手动改写提示词的真值）。
  * - videoReprocessable：复用 findReprocessableVideo 对每段做只读判定（已生成视频但后处理失败）。
  * 任何读取失败（旧库无表、无画布、无剧集）都退化为不带该真值，绝不编造。
@@ -64,14 +128,53 @@ export function readSegmentStateRuntime(service: EpisodeProductionService, episo
                 : [];
             const customSegments: Record<string, boolean> = {};
             const reprocessablePairs: Array<{ targetId: string; clipId: string }> = [];
+            const clipStates: Record<string, ClipStateTruth> = {};
+            // 下游 segment-state 同时读 bindingsBySegment（references 真值源）；与 clipStates.referenceBindings 同源同值。
+            const bindingsBySegment: Record<string, BindingTruth[]> = {};
+            // segment_id（Clip id）与 targetId 都可能出现在 tasks/generation_logs 上，两者都登记。
+            const clipKeys = new Map<string, string>();
             for (const segment of segments) {
                 const targetId = String(segment?.productionClipProjection?.targetId || "");
                 if (!targetId) continue;
                 if (typeof segment?.promptCustom === "boolean") customSegments[targetId] = segment.promptCustom;
                 const clipId = String(segment?.id || "");
                 if (clipId) reprocessablePairs.push({ targetId, clipId });
+                const bindings = collectBindings(segment);
+                const state = collectClipState(segment, bindings);
+                if (Object.keys(state).length) clipStates[targetId] = state;
+                if (bindings) bindingsBySegment[targetId] = bindings;
+                if (clipId) clipKeys.set(clipId, targetId);
+                clipKeys.set(targetId, targetId);
             }
             if (Object.keys(customSegments).length) runtime.customSegments = customSegments;
+
+            // waitReason 真值：渠道排队时写进 tasks/generation_logs 的 params.waitReason，拿到槽位后清空。
+            // 只认非空的真实文本；按 project_id 走索引，限定本画布的 Clip，避免全表扫描。
+            try {
+                const keys = [...clipKeys.keys()].filter(Boolean);
+                if (keys.length) {
+                    const placeholders = keys.map(() => "?").join(",");
+                    const waitReasons: Record<string, string> = {};
+                    for (const table of ["tasks", "generation_logs"] as const) {
+                        const rows = db.prepare(`SELECT segment_id, params_json FROM ${table} WHERE project_id=? AND segment_id IN (${placeholders}) AND segment_id IS NOT NULL`)
+                            .all(canvasId, ...keys) as Array<{ segment_id: unknown; params_json: unknown }>;
+                        for (const row of rows) {
+                            const targetId = clipKeys.get(String(row.segment_id || ""));
+                            if (!targetId || waitReasons[targetId]) continue;
+                            const reason = paramsWaitReason(row.params_json);
+                            if (reason) waitReasons[targetId] = reason;
+                        }
+                    }
+                    for (const [targetId, reason] of Object.entries(waitReasons)) {
+                        if (clipStates[targetId]) clipStates[targetId].waitReason = reason;
+                        else clipStates[targetId] = { waitReason: reason };
+                    }
+                }
+            } catch {
+                // waitReason 只是诊断信息：读不到（旧库无列/损坏 BLOB）不影响其它真值。
+            }
+            if (Object.keys(clipStates).length) (runtime as any).clipStates = clipStates;
+            if (Object.keys(bindingsBySegment).length) (runtime as any).bindingsBySegment = bindingsBySegment;
 
             if (reprocessablePairs.length) {
                 // findReprocessableVideo 只用到 deps.db（stores/events 仅在真正重跑时用到），预览判定是纯只读。

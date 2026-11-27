@@ -160,12 +160,18 @@ export async function ensurePluginsLoaded() {
     if (loaded) return;
     if (loading) return loading;
     loading = (async () => {
-        let backendLoadSucceeded = false;
         try {
+            // 读取失败（Backend 未连接、token 未就绪、重载中）时直接退出，绝不写回：
+            // 此时 store 为空，继续 persist 会把后端已保存的插件列表覆盖成空数组。
+            // loaded 保持 false，等 backend-connected 事件后再重试；finally 会把 loading 置回 null。
+            let installed;
             try {
-                usePluginStore.getState().setPlugins(((await fetchBackendInstalledPlugins()).plugins || []).filter((record) => !HOST_SYSTEM_PLUGIN_IDS.has(record.id)));
-                backendLoadSucceeded = true;
-            } catch (error) { console.warn("[plugin] Failed to load installed plugins", error); }
+                installed = (await fetchBackendInstalledPlugins()).plugins || [];
+            } catch (error) {
+                console.warn("[plugin] Failed to load installed plugins, retry on backend-connected", error);
+                return;
+            }
+            usePluginStore.getState().setPlugins(installed.filter((record) => !HOST_SYSTEM_PLUGIN_IDS.has(record.id)));
             const records = usePluginStore.getState().plugins.filter((record) => record.enabled);
             await Promise.all(
                 records.map(async (record) => {
@@ -180,7 +186,7 @@ export async function ensurePluginsLoaded() {
             await persistInstalledPlugins();
             await loadDevPlugins();
             await syncPluginMcpToBackend();
-            loaded = backendLoadSucceeded;
+            loaded = true;
         } finally {
             loading = null;
         }

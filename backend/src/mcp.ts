@@ -112,6 +112,7 @@ async function createBackendMcpInstance(
   preparedH3Updates: NonNullable<PluginMcpBackend["preparedH3Updates"]> = new PreparedH3UpdateFiles(),
   profile: McpProfile = "full",
   schemaMode: McpSchemaMode = DEFAULT_MCP_SCHEMA_MODE,
+  reader?: PluginDeclarationReader,
 ): Promise<BackendMcpInstance> {
   const state: McpSessionState = {
     profile,
@@ -185,7 +186,7 @@ async function createBackendMcpInstance(
   registerBackendCanvasTools(server, config, backendApi, state, recordEvent, getBrowserActiveProjectId);
   registerDirectComfyTools(server, backendApi);
   registerAgentSessionCompatibilityTools(server, config);
-  const declarations = await loadPluginMcpDeclarationsFromBackend(backendApi);
+  const declarations = await loadPluginDeclarations(config, reader);
   await registry.apply(declarations);
   pluginDeclarationFingerprints.set(registry, crypto.createHash("sha256").update(JSON.stringify(declarations)).digest("hex"));
   return { server, registry, profile, schemaMode };
@@ -217,12 +218,12 @@ function zodToolContract(value: unknown, seen = new Set<object>()): unknown {
 async function refreshPluginDeclarations(
   config: ResolvedConfig,
   registries: PluginMcpRegistry[],
+  reader?: PluginDeclarationReader,
 ) {
   if (!registries.length) return;
   if (pluginDeclarationRefresh) return pluginDeclarationRefresh;
   pluginDeclarationRefresh = (async () => {
-    const backend = createBackendClient(config.url);
-    const declarations = await loadPluginMcpDeclarationsFromBackend(backend);
+    const declarations = await loadPluginDeclarations(config, reader);
     const fingerprint = crypto.createHash("sha256").update(JSON.stringify(declarations)).digest("hex");
     const stale = registries.filter(registry => pluginDeclarationFingerprints.get(registry) !== fingerprint);
     await Promise.all(stale.map((registry) => registry.apply(declarations)));
@@ -234,6 +235,14 @@ async function refreshPluginDeclarations(
 
 let pluginDeclarationRefresh: Promise<void> | null = null;
 const pluginDeclarationFingerprints = new WeakMap<PluginMcpRegistry, string>();
+
+/** Backend 进程内可直接读权威声明；进程外 stdio 仍走 HTTP。 */
+type PluginDeclarationReader = () => unknown[] | Promise<unknown[]>;
+
+async function loadPluginDeclarations(config: ResolvedConfig, reader?: PluginDeclarationReader) {
+  if (reader) return loadPluginMcpDeclarationsFromBackend({ listPluginDeclarations: async () => await reader() });
+  return loadPluginMcpDeclarationsFromBackend(createBackendClient(config.url));
+}
 
 type HttpMcpSession = {
   instance: BackendMcpInstance;
@@ -264,6 +273,7 @@ export function registerBackendMcpHttpRoutes(
   observability?: McpObservabilityStore,
   getBrowserActiveProjectId?: BrowserActiveProjectResolver,
   preparedH3Updates: NonNullable<PluginMcpBackend["preparedH3Updates"]> = new PreparedH3UpdateFiles(),
+  reader?: PluginDeclarationReader,
 ) {
   const sessions = new Map<string, HttpMcpSession>();
   let declarationSync: ReturnType<typeof setInterval> | null = null;
@@ -279,7 +289,7 @@ export function registerBackendMcpHttpRoutes(
       const registries = [...sessions.values()].map(
         ({ instance }) => instance.registry,
       );
-      void refreshPluginDeclarations(config, registries).catch((error) =>
+      void refreshPluginDeclarations(config, registries, reader).catch((error) =>
         logger.error("插件 MCP 声明同步失败", {
           error: error instanceof Error ? error.message : String(error),
         }),
@@ -388,6 +398,7 @@ export function registerBackendMcpHttpRoutes(
         preparedH3Updates,
         (req.query.profile as McpProfile | undefined) ?? "full",
         (req.query.schema as McpSchemaMode | undefined) ?? DEFAULT_MCP_SCHEMA_MODE,
+        reader,
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),

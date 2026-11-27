@@ -28,6 +28,18 @@ export const H3_LOCAL_VIEW_DEFAULTS = {
 const localKeys = new Set(Object.keys(H3_LOCAL_VIEW_DEFAULTS));
 const productionStoryboardFields = ["referenceBindings", "refs", "refItems", "storyboardShots", "storyboardDurations", "storyboardModeEnabled"] as const;
 
+const isDerivedFrameRole = (ref: Record<string, unknown>) => ["storyboard", "keyframe"].includes(String(inferReferenceRole(ref as any)));
+
+/** 普通参考（非分镜格）变化：正式 Clip 走制作稿回写；普通 Clip 仍直接落画布。 */
+function ordinaryReferenceEditChanged(before: Record<string, any>, after: Record<string, any>) {
+    const fingerprint = (segment: Record<string, any>) => JSON.stringify(
+        (Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [])
+            .filter((ref: Record<string, unknown>) => !isDerivedFrameRole(ref))
+            .map((ref: Record<string, any>) => [ref.id, ref.role, ref.mediaType, ref.storageKey ?? "", ref.url ?? "", ref.enabled !== false]),
+    );
+    return fingerprint(before) !== fingerprint(after);
+}
+
 function storyboardEditChanged(before: Record<string, any>, after: Record<string, any>) {
     // 指纹只取身份与归属字段。存储绑定与 withSegmentRefs 重建绑定的字段集不同
     // （重建会丢掉 order 等、补上 mimeType 等），直接 JSON 比较会让任何参考写入
@@ -115,17 +127,25 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
                 if (!before || !(productionOwned || before.productionClipProjection?.targetId) || !storyboardEditChanged(before, segment)) return [];
                 return [{ before, segment: clearDeletedStoryboardBindings(before, segment) }];
             });
-            if (!routed.length) { ctx.updateMetadata(shared); return; }
+            // 正式 Clip 的普通参考编辑也回写制作稿；无 projection 的手工 Clip 保持原画布写入。
+            const referenceRouted = (nextSegments || []).flatMap(segment => {
+                const before = beforeById.get(String(segment.id || ""));
+                const targetId = String(before?.productionClipProjection?.targetId || "");
+                if (!before || !targetId || routed.some(item => item.before === before) || !ordinaryReferenceEditChanged(before, segment)) return [];
+                return [{ before, segment, targetId }];
+            });
+            if (!routed.length && !referenceRouted.length) { ctx.updateMetadata(shared); return; }
 
             // This host boundary catches every H3 subpanel that edits a formal
             // storyboard, even if it doesn't call the workbench's explicit handler.
             const routedIds = new Set(routed.map(item => String(item.before.id || "")));
+            const referenceRoutedIds = new Set(referenceRouted.map(item => String(item.before.id || "")));
             const committedSegments = new Map<string, Record<string, any>>();
             const ordinaryPatch = { ...shared };
             if (nextSegments) {
                 const ordinarySegments = nextSegments.map(segment => {
                     const id = String(segment.id || ""), before = beforeById.get(id);
-                    if (!before || !routedIds.has(id)) return segment;
+                    if (!before || !(routedIds.has(id) || referenceRoutedIds.has(id))) return segment;
                     const ordinary = { ...segment };
                     for (const field of productionStoryboardFields) {
                         if (Object.hasOwn(before, field)) ordinary[field] = before[field]; else delete ordinary[field];
@@ -146,6 +166,14 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
                     if (!result.sourceSaved) throw new Error("制作台未保存分镜与主体引用更改。");
                     if (result.segment) committedSegments.set(String(segment.id), result.segment as Record<string, any>);
                 }
+                for (const { segment, targetId } of referenceRouted) {
+                    const bindings = (Array.isArray(segment.referenceBindings) ? segment.referenceBindings : [])
+                        .filter((ref: Record<string, unknown>) => !isDerivedFrameRole(ref))
+                        .map((ref: Record<string, unknown>) => ({ ...ref }));
+                    if (!ctx.production?.setSegmentReferencePolicy) throw new Error("正式制作参考回写需要制作台接收；当前工作台未连接。");
+                    const result = await ctx.production.setSegmentReferencePolicy({ nodeId: ctx.node.id, segmentId: String(segment.id), targetId, additions: bindings });
+                    if (!result.sourceSaved) throw new Error("制作台未保存段参考清单更改。");
+                }
                 if (nextSegments && ordinaryPatch.segments) {
                     // The production edit reprojects the authoritative Shot list back to this H3 Clip.
                     // Merge unrelated Quick Storyboard fields onto that latest projection; never replay
@@ -155,7 +183,7 @@ export function useH3LocalView(ctx: CanvasNodeContext): CanvasNodeContext {
                     const latestById = new Map(latestSegments.map(segment => [String(segment.id || ""), segment]));
                     ordinaryPatch.segments = nextSegments.map(segment => {
                         const id = String(segment.id || "");
-                        if (!routedIds.has(id)) return segment;
+                        if (!(routedIds.has(id) || referenceRoutedIds.has(id))) return segment;
                         const latest = committedSegments.get(id) || latestById.get(id) || beforeById.get(id) || {};
                         const merged = { ...segment };
                         for (const field of productionStoryboardFields) {

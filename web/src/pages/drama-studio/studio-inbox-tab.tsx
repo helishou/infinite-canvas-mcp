@@ -47,6 +47,7 @@ type Group = {
  * 真实 platform + segment_id 的派生分类；其余 kind 直接映射。
  */
 function reasonCodeFor(g: Group): string {
+    if (g.items.length && g.items.every((i) => i.retryExhausted)) return "RETRY_LIMIT";
     const kinds = new Set(g.items.map((i) => i.kind));
     if (kinds.has("cast_failed")) return "CAST_FAILED";
     if (kinds.has("segment_failed")) return "SEGMENT_FAILED";
@@ -58,7 +59,7 @@ function reasonCodeFor(g: Group): string {
     return g.kind.toUpperCase();
 }
 
-export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenEpisode, onReview, onOpenSettings, onStartVideo, onRetryAll, onReleaseMedia, onOpenAssets, onOpenSegment }: {
+export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenEpisode, onReview, onOpenSettings, onStartVideo, onRetryAll, onRetryJobs, onReleaseMedia, onOpenAssets, onOpenSegment }: {
     inbox: StudioInboxItem[];
     episodes: StudioEpisode[];
     busy: boolean;
@@ -69,6 +70,8 @@ export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenE
     onOpenSettings: () => void;
     onStartVideo: () => void;
     onRetryAll: () => void;
+    /** 人工确认的单作业重试：绕过自动熔断上限，重置 attempt 后重新入队。 */
+    onRetryJobs: (jobIds: string[]) => void;
     onReleaseMedia?: () => void;
     /** 参考图生成失败 → 跳项目资产页（带出错的集） */
     onOpenAssets?: (episodeId?: string) => void;
@@ -114,7 +117,9 @@ export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenE
             out.push({
                 key: "errors", kind: "episode_error", severity: "error",
                 title: errors.length > 1 ? `${errors.length} 项生成失败` : errors[0].title,
-                detail: errors.length > 1 ? "逐集查看失败原因，可在底部队列全部重试。" : "本集生成任务失败，查看原因后可重试。",
+                detail: errors.every((e) => e.retryExhausted)
+                    ? "作业已达重试上限被自动重试熔断。确认根因已处理可点「手动重试」（重置次数重新入队）；否则先重新改编本集或重跑流水线。"
+                    : errors.length > 1 ? "逐集查看失败原因，可在底部队列全部重试。" : "本集生成任务失败，查看原因后可重试。",
                 reason: errors.map((e) => e.detail).filter(Boolean).join("；").slice(0, 400),
                 items: errors,
                 episodeId: errors[0].episodeId,
@@ -301,6 +306,7 @@ export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenE
                 <div className="grid items-start gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 460px), 1fr))" }}>
                 {groups.map((g) => {
                     const action = actionFor(g);
+                    const manualJobIds = g.items.filter((i) => i.retryExhausted && i.jobId).map((i) => i.jobId!);
                     return (
                         <article key={g.key} data-studio-group={g.key} className={`rounded-xl border bg-card p-4 ${
                             g.severity === "error" ? "border-destructive/30"
@@ -312,7 +318,12 @@ export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenE
                                     g.severity === "error" ? "text-rose-500" : g.severity === "warning" ? "text-amber-500" : "text-sky-500"
                                 }`}>{iconFor(g)}</span>
                                 <div className="min-w-0 flex-1">
-                                    <div className="text-sm font-semibold leading-5">{g.title}</div>
+                                    <div className="flex flex-wrap items-center gap-2 text-sm font-semibold leading-5">
+                                        {g.title}
+                                        {g.items.some((i) => i.retryExhausted) ? (
+                                            <span data-studio-retry-exhausted className="rounded border border-destructive/30 bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">已达上限 · 可手动重试</span>
+                                        ) : null}
+                                    </div>
                                     <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{g.detail}</div>
                                     {g.reason ? <div className="mt-2 rounded-md border border-border/60 bg-background/50 p-2 text-[11px] leading-relaxed text-muted-foreground" title={g.reason}>
                                         <span className="mr-1.5 rounded bg-muted px-1 py-0.5 align-middle font-mono text-[10px] text-foreground/70" data-studio-reason-code>{reasonCodeFor(g)}</span>
@@ -335,12 +346,20 @@ export function StudioInboxTab({ inbox, episodes, busy, loading = false, onOpenE
                                         className="h-8 rounded-md bg-foreground px-3 text-[11px] font-medium text-background transition hover:opacity-90 disabled:opacity-50">
                                         {g.kind === "review" ? <Play className="mr-1 inline size-3" /> : null}{action.label}
                                     </button>
-                                    {(g.kind === "episode_error" || g.kind === "cast_failed" || g.kind === "segment_failed") && g.items.length ? (
+                                    {manualJobIds.length ? (
+                                        <button type="button" disabled={busy} onClick={() => onRetryJobs(manualJobIds)}
+                                            title="人工确认后重置该作业尝试次数并重新入队；不受自动熔断上限限制，暂停时会先继续制作"
+                                            data-studio-manual-retry
+                                            className="flex h-7 items-center gap-1 rounded-md border border-destructive/40 px-2 text-[11px] font-medium text-destructive transition hover:bg-destructive/10 disabled:opacity-50">
+                                            <RotateCcw className="size-3" /> 手动重试{manualJobIds.length > 1 ? ` ${manualJobIds.length} 项` : ""}
+                                        </button>
+                                    ) : null}
+                                    {(g.kind === "episode_error" || g.kind === "cast_failed" || g.kind === "segment_failed") && g.items.some((i) => !i.retryExhausted) ? (
                                         <button type="button" disabled={busy} onClick={onRetryAll}
                                             title="独立全部重试：重新拉取制作数据并重试全部失败任务（与顶部按钮同一真实链路）"
                                             data-studio-group-retry
                                             className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50">
-                                            <RotateCcw className="size-3" /> 全部重试 {g.items.length} 项
+                                            <RotateCcw className="size-3" /> 全部重试 {g.items.filter((i) => !i.retryExhausted).length} 项
                                         </button>
                                     ) : null}
                                 </div>

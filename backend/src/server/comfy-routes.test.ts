@@ -123,3 +123,38 @@ test("comfy/models 读取失败不缓存，下一次请求重新读取", async (
         await new Promise<void>((resolve) => server.close(() => resolve()));
     }
 });
+
+/**
+ * 这条路由原先只把画布任务标成 cancelled，不转发引擎、不中断 ComfyUI——
+ * 调用方拿到「已取消」，显卡照旧满载。现在统一回 410，并且绝不碰任务状态。
+ */
+test("comfy/tasks/:id/cancel 已下线：回 410，不再把任务标成已取消", async () => {
+    const cancelled: string[] = [];
+    const stores = {
+        tasks: {
+            cancel: (id: string) => {
+                cancelled.push(id);
+                return { id, status: "cancelled" };
+            },
+        },
+    } as unknown as Stores;
+    const app = express();
+    app.use(express.json());
+    registerComfyRoutes({ app, stores, config: { url: "", token: "", port: 0, origins: [] } as ResolvedConfig }, mockBridge({ count: 0 }));
+    const server = app.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+        const res = await fetch(`${base}/comfy/tasks/t1/cancel`, { method: "POST" });
+        assert.equal(res.status, 410);
+        const body = await res.json() as { ok: boolean; code: string; error: string };
+        assert.equal(body.ok, false);
+        assert.equal(body.code, "COMFY_CONSOLE_MOVED");
+        assert.match(body.error, /v1\/tasks/, "要给出引擎侧的取消入口");
+        assert.deepEqual(cancelled, [], "取消已下线，不得再改画布任务状态");
+    } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+});

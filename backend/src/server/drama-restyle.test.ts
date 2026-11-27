@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { BackendDatabase } from "../db.js";
-import { planRestyle, applyRestylePlan, type RestyleTarget } from "./drama-restyle-routes.js";
+import { planRestyle, applyRestylePlan, makeActiveTaskChecker, type RestyleTarget } from "./drama-restyle-routes.js";
 
 type Seg = Record<string, any>;
 const segment = (id: string, extra: Seg): Seg => ({ id, title: id, status: "succeeded", ...extra });
@@ -82,6 +82,16 @@ test("真标脏 + 幂等：重放不重复写，保留原视频", () => {
     assert.equal(replay.toMark.length, 0, "已过期段不再进入 toMark");
     assert.equal(replay.skippedAlreadyOutdated, 2);
     assert.deepEqual(applyRestylePlan(db, replay, "asset-idempotency-key"), { marked: 0 });
+    db.close();
+});
+
+test("活跃任务跳过走轻量绑定索引，不逐段解码任务大列", () => {
+    const db = fixture();
+    db.createTask("canvas-h3-run", { projectId: "canvas-1", nodeId: "h3-node", segmentId: "clip-a" });
+    const checker = makeActiveTaskChecker({} as Parameters<typeof makeActiveTaskChecker>[0], db);
+    const plan = planRestyle(db, { assetId: "AST-CHAR-MULI", dramaId: "drama-1", isActive: checker });
+    assert.equal(plan.skippedActiveTask, 1);
+    assert.deepEqual(plan.toMark.map(target => target.segmentId), ["clip-b"]);
     db.close();
 });
 

@@ -95,3 +95,4 @@ test("a draft row without clipGroups still derives from the Segment's own shot m
     assert.equal(tracks["clip-1"].referenceBindings[0].storageKey, "image:new");
     assert.equal(derivedStoryboardTracks(data, [{ id: "manual", storyboardShots: [] }] as any)["manual"], undefined);
 });
+

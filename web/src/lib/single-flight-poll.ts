@@ -18,12 +18,17 @@ export type SingleFlightPoller = {
 /** Schedule the next poll only after the current one settles; refresh signals coalesce. */
 export function startSingleFlightPoller(options: {
     poll: () => Promise<unknown>;
-    intervalMs: number;
+    /** 固定间隔，或按当前状态返回间隔（用于连接失败时的指数退避）。 */
+    intervalMs: number | (() => number);
     initiallyPaused?: boolean;
     scheduler?: PollTimerScheduler;
     onError?: (error: unknown) => void;
 }): SingleFlightPoller {
-    if (!Number.isFinite(options.intervalMs) || options.intervalMs < 1) throw new Error("intervalMs must be a positive number");
+    const nextInterval = () => {
+        const value = typeof options.intervalMs === "function" ? options.intervalMs() : options.intervalMs;
+        return Math.max(1, Number.isFinite(value) ? value : 1);
+    };
+    if (typeof options.intervalMs === "number" && (!Number.isFinite(options.intervalMs) || options.intervalMs < 1)) throw new Error("intervalMs must be a positive number");
 
     const scheduler = options.scheduler || browserTimers;
     let active = true;
@@ -43,7 +48,7 @@ export function startSingleFlightPoller(options: {
         timer = scheduler.setTimeout(() => {
             timer = null;
             void run();
-        }, options.intervalMs);
+        }, nextInterval());
     };
 
     const run = async (): Promise<void> => {

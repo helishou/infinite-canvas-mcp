@@ -103,6 +103,36 @@ test("restore_h3_output 在当前结果条目写入 source=restore 与 generatio
     assert.equal(chosen.generationLogId, log.id, "保留生成日志凭证供版本行回查");
 });
 
+test("restore_h3_output 可切回只存在于画布 Clip 留存里的结果（无生成日志）", (t) => {
+    const db = new BackendDatabase(":memory:");
+    t.after(() => db.close());
+    const stores = createStores(db);
+    const kept = stores.media.store(Buffer.from("canvas-kept-video"), { name: "kept.mp4", mimeType: "video/mp4", category: "output" });
+    const newer = stores.media.store(Buffer.from("newer-video"), { name: "newer.mp4", mimeType: "video/mp4", category: "output" });
+    db.createCanvasProject({
+        id: "p",
+        nodes: [{ id: "h3", type: "minimax-h3", metadata: { segments: [{
+            id: "clip", status: "success", resultStorageKey: newer.storageKey,
+            // 画布自己留存的老版本：有 storageKey/媒体，但 generation_logs 里已没有对应记录。
+            results: [{ storageKey: kept.storageKey, mimeType: "video/mp4", source: "canvas" }, { storageKey: newer.storageKey, mimeType: "video/mp4" }],
+        }] } }],
+        connections: [],
+    });
+    const result = db.applyCanvasProjectOperations("p", undefined, [{
+        type: "restore_h3_output", nodeId: "h3", segmentId: "clip", generationLogId: "", storageKey: kept.storageKey, settings: {},
+    }], { source: { clientId: "test", kind: "browser", label: "设为当前" } });
+    const segment = (((result.project.nodes as Array<Record<string, unknown>>)[0]).metadata as { segments: Array<Record<string, unknown>> }).segments[0];
+    assert.equal(segment.resultStorageKey, kept.storageKey, "画布留存版本可以设为当前");
+    const chosen = (segment.results as Array<Record<string, unknown>>)[0];
+    assert.equal(chosen.source, "restore");
+    assert.equal(chosen.generationLogId, undefined, "没有日志就不编造凭证");
+    assert.ok((segment.results as Array<Record<string, unknown>>).some((r) => r.storageKey === newer.storageKey), "恢复旧版本不应丢掉 Clip 留存的其它历史结果");
+    // 不在留存列表里的 storageKey 仍然拒绝，不能借端点在节点上凭空写入任意媒体。
+    assert.throws(() => db.applyCanvasProjectOperations("p", undefined, [{
+        type: "restore_h3_output", nodeId: "h3", segmentId: "clip", generationLogId: "", storageKey: "video:not-in-clip", settings: {},
+    }], { source: { clientId: "test", kind: "browser", label: "x" } }), /历史输出不属于当前 H3 节点/);
+});
+
 function imageSourceFixture() {
     const db = new BackendDatabase(":memory:");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "image-source-"));

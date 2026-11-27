@@ -119,27 +119,19 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
     if (!isH3CanvasNode(node)) return;
     const metadata = recordOf(node!.metadata);
     const segments = Array.isArray(metadata.segments) ? metadata.segments as Record<string, unknown>[] : [];
-    if (["add_h3_segment", "delete_h3_segment", "move_h3_segment"].includes(operation.type) && isProductionBoundNode(node!)) {
-        // 制作稿拥有的段（productionClipProjection.targetId）不可从画布增删/重排；
-        // 孤儿段（重拆镜污染遗留、无制作稿归属）允许画布独立删除，以打通两侧一致性。
-        if (operation.type === "delete_h3_segment") {
-            const target = segments.find(segment => String(segment.id) === String(operation.segmentId));
-            // 无制作稿归属的孤儿段可直接删；带投影但调用方显式确认（confirmed:true，已核实 targetId 在源稿悬空）也可删。
-            const orphan = target && !Boolean(recordOf(target.productionClipProjection).targetId);
-            if (orphan || operation.confirmed === true) {
-                // 放行删除：孤儿段无制作稿归属，或调用方已显式确认悬空投影段的清理。
-            } else {
-                throw collaborationError("PRODUCTION_CLIP_MEMBERSHIP_OWNED", "制作绑定的 Clip 由制作台维护，不能从画布删除；无制作稿归属的孤儿段或经确认的悬空投影段可独立删除");
-            }
-        } else {
-            throw collaborationError("PRODUCTION_CLIP_MEMBERSHIP_OWNED", "制作绑定的 Clip 由制作台维护，不能从画布独立新增或重排");
-        }
-    }
+    // 方案二：画布与制作台对等维护 Clip，制作稿不再是独占权威源。
+    // 段的新增/删除/重排一律放行，结构变更由 canvas-production-sync 回写制作稿 draft，
+    // 保证两边统一数据源；不再按 productionClipProjection.targetId 拦截画布的结构操作。
     const protectFormal = (previous: Record<string, unknown>, incoming: Record<string, unknown>, deleted?: unknown) => {
         if (Object.hasOwn(incoming, "productionClipProjection") && commandFingerprint(incoming.productionClipProjection) !== commandFingerprint(previous.productionClipProjection) || Array.isArray(deleted) && deleted.includes("productionClipProjection")) throw collaborationError("FORMAL_CLIP_OWNED", withFieldEntry("productionClipProjection", "制作投影摘要由 Backend 管理"));
         if (!previous.productionClipProjection) return;
         // 创作字段允许手动编辑；保留原编译摘要作为基线，重新投影时检测并保留人工修改。
         for (const field of ["directorEngine", "directorSourceHash"]) if (Array.isArray(deleted) && deleted.includes(field) || Object.hasOwn(incoming, field) && commandFingerprint(incoming[field]) !== commandFingerprint(previous[field])) throw collaborationError("FORMAL_CLIP_OWNED", withFieldEntry(field, `字段 ${field} 由 Backend 维护，不能直接修改编译身份`));
+        // 正式 Clip 时长由制作稿 Shot 时长求和派生，不是可编辑配置（canvas-contracts.md:96）。
+        // 只允许编译投影（runtimeWrite，不经过本函数）改写；画布手工 ops 改 duration 一律拒绝。
+        if (Object.hasOwn(incoming, "duration") && Number(incoming.duration) !== Number(previous.duration)) {
+            throw collaborationError("FORMAL_CLIP_DURATION_OWNED", withFieldEntry("duration", "正式 Clip 时长由制作台分镜派生，请在制作台调整镜头时长"));
+        }
     };
     const preserveSegments = (incoming: unknown) => {
         if (!Array.isArray(incoming)) return;
@@ -174,7 +166,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
                     throw collaborationError("PRODUCTION_SCENE_BINDING_OWNED", "制作场次绑定由制作台维护");
                 }
             }
-            assertProductionSegmentMembership(metadata, update.segments);
+            // 方案二：段成员/顺序由画布与制作台共同维护，不再校验归属段不可增删重排。
         }
         if (Array.isArray(operation.metadataDelete)) operation.metadataDelete = operation.metadataDelete.filter((field) => !H3_LOCAL_VIEW_FIELDS.includes(field as typeof H3_LOCAL_VIEW_FIELDS[number]));
         checkPatch(metadata, update, operation.metadataDelete, H3_RUNTIME_NODE_FIELDS);
@@ -191,7 +183,7 @@ export function prepareClientCanvasOperation(project: Record<string, unknown>, o
         }
         validateH3Edit(Object.fromEntries(Object.entries(patch).filter(([key]) => !H3_RUNTIME_SEGMENT_FIELDS.includes(key as any) && key !== "productionClipProjection")), true);
     } else if (operation.type === "replace_h3_segments") {
-        assertProductionSegmentMembership(metadata, operation.segments);
+        // 方案二：不再校验归属段不可增删重排，画布可完整替换段列表并回写制作稿。
         preserveSegments(operation.segments);
     }
 }

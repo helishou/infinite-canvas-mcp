@@ -14,6 +14,8 @@ type BackendStore = {
     /** 地址能应答 /health 与 /config、但业务接口不可用（连错后台/密钥失效）。此时不置 disconnected，
      *  以免误报"后台没启动"；横幅单独提示真实原因。 */
     businessError: string;
+    /** 连续连接失败次数：横幅只在连续失败后出现，成功一次即归零并自动消失。 */
+    failures: number;
     setConnection: (url: string, token?: string) => void;
     checkConnection: () => Promise<void>;
     reset: () => void;
@@ -96,6 +98,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
     checking: true,
     error: "",
     businessError: "",
+    failures: 0,
 
     setConnection: (url, token) => {
         persistBackendConnection({ url: url.replace(/\/$/, ""), token: token || "" });
@@ -115,7 +118,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
             if (wasConnected && hasBackendWriteInFlight()) { set({ checking: false }); return; }
             stopBackendEvents();
             structuredSettingsHydrated = false;
-            set({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}` });
+            set({ connected: false, checking: false, businessError: "", error: `无法连接总后台 ${getBackendUrl()}`, failures: get().failures + 1 });
             return;
         }
         // 后端 /config 是 token 权威来源，连接时以后端为准刷新，避免缓存旧 token 导致 401。
@@ -123,7 +126,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         if (!discovered.ok) {
             stopBackendEvents();
             structuredSettingsHydrated = false;
-            set({ connected: false, checking: false, businessError: "", error: "后台可达，但连接未授权；请在连接与协作设置中检查密钥和允许的网页来源" });
+            set({ connected: false, checking: false, businessError: "", error: "后台可达，但连接未授权；请在连接与协作设置中检查密钥和允许的网页来源", failures: get().failures + 1 });
             return;
         }
         if (discovered.ok && discovered.token && discovered.token !== get().token) {
@@ -139,7 +142,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         // 仍保持 connected（后台确实在跑），但把真实原因挂到 businessError 上横幅显示。
         const business = await probeBackendBusinessApi();
         if (wasConnected && !business.ok && hasBackendWriteInFlight()) { set({ checking: false }); return; }
-        set({ connected: true, checking: true, error: "", businessError: business.detail });
+        set({ connected: true, checking: true, error: "", businessError: business.detail, failures: 0 });
         startBackendEvents(getBackendUrl(), get().token);
         if (!structuredSettingsHydrated) {
             const [{ hydrateConfigFromBackend }, { hydratePromptSourcesFromBackend }] = await Promise.all([
@@ -155,7 +158,7 @@ export const useBackendStore = create<BackendStore>((set, get) => ({
         }
     },
 
-    reset: () => { stopBackendEvents(); structuredSettingsHydrated = false; set({ connected: false, checking: false, error: "", businessError: "" }); },
+    reset: () => { stopBackendEvents(); structuredSettingsHydrated = false; set({ connected: false, checking: false, error: "", businessError: "", failures: 0 }); },
 }));
 
 /** 启动时自动检测总后台连接。 */
@@ -178,7 +181,14 @@ export function initBackendConnection() {
     void useBackendStore.getState().checkConnection();
 
     poller = startSingleFlightPoller({
-        intervalMs: 10_000,
+        // 连不上时指数退避：第 1 次失败 2.5s 内复核（分辨抖动），之后 10s → 20s → 40s → 80s 封顶；
+        // 一旦恢复（failures 归零）立即回到 10s 的常规探测节奏。
+        intervalMs: () => {
+            const { connected, failures } = useBackendStore.getState();
+            if (connected || failures <= 0) return 10_000;
+            if (failures === 1) return 2_500;
+            return Math.min(10_000 * 2 ** Math.min(failures - 2, 3), 80_000);
+        },
         initiallyPaused: document.hidden,
         poll: async () => {
             if (hasBackendWriteInFlight()) return;

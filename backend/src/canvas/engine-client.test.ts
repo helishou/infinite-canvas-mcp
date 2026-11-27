@@ -108,3 +108,33 @@ test("引擎产物落回画布媒体库：下载后再入库，下游拿本地 s
         await fake.close();
     }
 });
+
+test("视频轮询遇断线/503 时继续查原任务，不因瞬时错误终止（对齐影策断线重连）", async () => {
+    let polls = 0;
+    let creates = 0;
+    const server = http.createServer((req, res) => {
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (url.pathname === "/v1/videos/v-task-1") {
+            polls++;
+            if (polls === 1) { res.destroy(); return; }             // 第一次连接被重置
+            if (polls === 2) { res.writeHead(503); res.end("busy"); return; } // 第二次服务暂不可用
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ status: "completed", media: [{ url: "/media/v", mimeType: "video/mp4" }] }));
+            return;
+        }
+        if (url.pathname === "/v1/videos") { creates++; res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "v-task-1" })); return; }
+        res.writeHead(404); res.end("not found");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    try {
+        const client = new CanvasEngineClient(url, "secret");
+        const out = await client.waitVideo("v-task-1", { timeoutMs: 20_000, pollMs: 10 });
+        assert.equal(out.status, "succeeded", "断线后应继续轮询原任务直到完成");
+        assert.equal(out.media.length, 1);
+        assert.equal(creates, 0, "重连过程中不得重新创建任务（否则同一段重复出片）");
+        assert.ok(polls >= 3, `应重试查询原任务，实际 polls=${polls}`);
+    } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+});

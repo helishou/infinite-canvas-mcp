@@ -157,7 +157,7 @@ test("按当前方案一键重做：默认 2.1/16:9、真实写回并标脏引�
   assert.equal(command.nodeId, NODE);
   assert.match(command.prompt, /角色定妆照/);
   assert.match(command.prompt, /国风水墨/);
-  assert.match(command.prompt, /16:9/);
+  assert.doesNotMatch(command.prompt, /【参考图用法】|最终输出画幅必须为|用户长期规则：/);
   assert.ok(f.operations.some(op => op.type === "update_node" && op.metadata?.characterImages?.[0]?.storageKey === STORAGE_KEY));
   assert.ok(f.operations.some(op => op.type === "update_h3_segment" && op.patch?.inputOutdated === true));
   assert.equal(f.updates.length, 1, "draft 制作稿必须真写回");

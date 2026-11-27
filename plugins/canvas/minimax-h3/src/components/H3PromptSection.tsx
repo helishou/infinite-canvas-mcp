@@ -699,9 +699,9 @@ export function H3PromptSection({
     promptReverseRequest.current++; setPromptReverseSyncing(false); setPromptReverseSyncError(null);
     promptCompileRequest.current++; setPromptCompileBusy(false); setPromptCompileError(null);
   }, [ctx.projectId, ctx.node.id, selected?.id]);
-  const requestPromptReverseSync = async () => {
-    if (!canReverseSyncPrompt || !selected?.id || promptReverseSyncing) return;
-    const input = { nodeId: ctx.node.id, segmentId: selected.id, prompt,
+  const requestPromptReverseSync = async (promptAtCall = prompt) => {
+    if (!canReverseSyncPrompt || !selected?.id || promptReverseSyncing) return false;
+    const input = { nodeId: ctx.node.id, segmentId: selected.id, prompt: promptAtCall,
       artifactId: String(productionProjection!.artifactId), sourceHash: String(productionProjection!.sourceHash), basePromptHash: String(productionProjection!.promptHash) };
     const request = ++promptReverseRequest.current;
     setPromptReverseSyncing(true); setPromptReverseSyncError(null);
@@ -710,8 +710,26 @@ export function H3PromptSection({
       await textDocument.flush();
       const result = await ctx.production.reverseSyncPrompt(input);
       if (!result.sourceSaved) throw new Error("源稿尚未保存，请在制作工作台核对诊断或恢复原回执。人工 Prompt 已保留。");
-    } catch (error) { if (request === promptReverseRequest.current) setPromptReverseSyncError(error instanceof Error ? error.message : String(error)); }
+      return true;
+    } catch (error) { if (request === promptReverseRequest.current) setPromptReverseSyncError(error instanceof Error ? error.message : String(error)); return false; }
     finally { if (request === promptReverseRequest.current) setPromptReverseSyncing(false); }
+  };
+  // 焦点离开提示词编辑区时自动把已保存的人工改动反向同步：仍走唯一映射 + 6 重基线校验，
+  // 只有具备唯一来源映射且确有人工改动时才触发；刷新、远端事件不产生 blur，不会触发。
+  const autoReverseDoneRef = useRef({ segmentId: "", text: "", error: "" });
+  const handlePromptBlur = (event: { relatedTarget: EventTarget | null; currentTarget: HTMLDivElement }) => {
+    const next = event.relatedTarget as Node | null;
+    if (next && event.currentTarget.contains(next)) return;
+    if (!canReverseSyncPrompt || !selected?.id || textStatus.blocked || promptReverseSyncing) return;
+    const text = textDocument.getSnapshot().text.trim();
+    const marker = autoReverseDoneRef.current;
+    // 同一段同一文本只自动同步一次；失败过一次的文本不再反复重试，保留按钮供用户显式处理。
+    if (marker.segmentId === selected.id && (marker.text === text || marker.error === text)) return;
+    void requestPromptReverseSync(text).then((ok) => {
+      autoReverseDoneRef.current = ok
+        ? { segmentId: selected.id, text, error: "" }
+        : { segmentId: "", text: "", error: text };
+    });
   };
   const compileCurrentPrompt = async () => {
     if (!selected?.id || !textStatus.ready || textStatus.blocked || promptCompileBusy) return;
@@ -1986,7 +2004,7 @@ export function H3PromptSection({
       {unresolvedReferenceMarkers.length ? <div className="minimax-prompt-reference-error" role="alert">
         发现 {unresolvedReferenceMarkers.length} 处未匹配的主体或素材引用（见红色标记）。点击红色标记可从当前 Clip 引用中重新选择，也可以删除。
       </div> : null}
-      <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`}>
+      <div key="prompt-textarea-wrap" className={`minimax-prompt-translate-wrap${selected ? " has-line-map" : ""}`} onBlur={handlePromptBlur}>
         {/* 编译 Prompt 与人工修改共用同一持久文本对象；编译按钮显式重建当前 Clip。 */}
         {selected ? <TextEditor key={selected.id} projectId={ctx.projectId} target={textTarget} editorRef={editorRef} references={editorReferences} chips clipReferenceTags speakers={speakerRoster} dialogue lineMap placeholder="请输入提示词" className="minimax-collaborative-prompt minimax-prompt-line-map-enabled" style={{ minHeight: 160, height: 240, fontSize: 29 }} /> : null}
         {/* 翻译结果：纯只读展示面板，独立存在，不影响上面的原提示词编辑器与文档。 */}

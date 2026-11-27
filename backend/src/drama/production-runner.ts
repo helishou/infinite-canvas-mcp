@@ -512,7 +512,7 @@ export class EpisodeProductionRunner {
                 const node = nodesOf(project).find(n => n.id === group.nodeId);
                 const first = (object(node?.metadata).segments as Array<Record<string, unknown>> || [])[0];
                 if (first?.id && first.id !== group.segmentId) {
-                    this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), [{ type: "move_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, beforeSegmentId: String(first.id) }], { source: { clientId: "episode-production", kind: "system" } });
+                    this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), [{ type: "move_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, beforeSegmentId: String(first.id) }], { runtimeWrite: true, source: { clientId: "episode-production", kind: "system" } });
                     syncReceipt.reordered++;
                 }
                 orderedNodes.add(group.nodeId);
@@ -522,7 +522,7 @@ export class EpisodeProductionRunner {
                 const node = nodesOf(project).find(node => node.id === group.nodeId);
                 const segments = object(node?.metadata).segments as Array<Record<string, unknown>> || [];
                 if (segments.findIndex(segment => segment.id === group.segmentId) !== segments.findIndex(segment => segment.id === prior!.segmentId) + 1) {
-                    this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), [{ type: "move_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, afterSegmentId: prior.segmentId }], { source: { clientId: "episode-production", kind: "system" } });
+                    this.stores.projects.applyOperations(episode.canvasId, Number(project.revision || 0), [{ type: "move_h3_segment", nodeId: group.nodeId, segmentId: group.segmentId, afterSegmentId: prior.segmentId }], { runtimeWrite: true, source: { clientId: "episode-production", kind: "system" } });
                     syncReceipt.reordered++;
                 }
             }

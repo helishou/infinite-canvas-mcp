@@ -11,6 +11,7 @@ import { createStores } from "../stores/index.js";
 import { EpisodeProductionService } from "../drama/production.js";
 import { withSegmentState } from "../drama/segment-state.js";
 import { readSegmentStateRuntime, registerDramaProductionRoutes } from "../server/drama-production-routes.js";
+import { compressStoredJsonText } from "../json-storage.js";
 import { emptyEpisodeProduction } from "@basketikun/canvas-agent/drama/production-contract";
 
 /** 真值 fixture：剧集绑定画布，两个 H3 Clip 分别对应两个 draft 段。 */
@@ -21,8 +22,12 @@ function fixture(t: TestContext) {
     db.createCanvasProject({
         id: "canvas",
         nodes: [{ id: "h3", type: "minimax-h3", metadata: { segments: [
-            { id: "clip-1", prompt: "手写提示词", promptCustom: true, productionClipProjection: { targetId: "E01-SEG01" }, status: "error", resultStorageKey: "" },
-            { id: "clip-2", prompt: "LLM 提示词", promptCustom: false, productionClipProjection: { targetId: "E01-SEG02" }, status: "success", resultStorageKey: "" },
+            { id: "clip-1", prompt: "手写提示词", promptCustom: true, productionClipProjection: { targetId: "E01-SEG01" }, status: "error", errorDetails: { code: "H3_CLIP_OCCUPIED", message: "被占用" }, inputOutdated: true, resultStorageKey: "", tailFrameContinuation: true, taskMode: "ref2va", segmentIndex: 3,
+                referenceBindings: [
+                    { label: "<Picture 1>", storageKey: "image:hero", order: 0 },
+                    { label: "<Picture 2>", storageKey: "image:scene", ordinal: 1 },
+                ] },
+            { id: "clip-2", prompt: "LLM 提示词", promptCustom: false, productionClipProjection: { targetId: "E01-SEG02" }, status: "success", inputOutdated: false, resultStorageKey: "", tailFrameContinuation: false, taskMode: "t2va", referenceBindings: [] },
         ] } }],
         connections: [],
     });
@@ -99,6 +104,51 @@ test("readSegmentStateRuntime 从画布与生成日志派生 custom/videoReproce
     const bare = readSegmentStateRuntime(missing, "ep");
     assert.equal(bare?.customSegments, undefined);
     assert.equal(bare?.reprocessableSegments, undefined);
+});
+
+test("readSegmentStateRuntime 采集画布段 clipStates 真值（status/errorDetails/绑定 storageKey/label/ordinal）", (t) => {
+    const { service } = fixture(t);
+    const runtime = readSegmentStateRuntime(service, "ep") as any;
+    assert.deepEqual(runtime.clipStates["E01-SEG01"], {
+        status: "error",
+        errorDetails: { code: "H3_CLIP_OCCUPIED", message: "被占用" },
+        inputOutdated: true,
+        tailFrameContinuation: true,
+        taskMode: "ref2va",
+        referenceBindings: [
+            { storageKey: "image:hero", label: "<Picture 1>", ordinal: 0 },
+            { storageKey: "image:scene", label: "<Picture 2>", ordinal: 1 },
+        ],
+        segmentIndex: 3,
+    }, "order 与 ordinal 都归一到 ordinal 真值，空 resultStorageKey 不编造");
+    assert.deepEqual(runtime.clipStates["E01-SEG02"].referenceBindings, [], "空绑定数组是真值，保留");
+    assert.deepEqual(runtime.bindingsBySegment["E01-SEG01"], runtime.clipStates["E01-SEG01"].referenceBindings, "bindingsBySegment 与 clipStates 同源");
+    assert.equal(runtime.clipStates["E01-SEG02"].waitReason, undefined, "没有排队原因就不填");
+
+    const bare = readSegmentStateRuntime({
+        storageDatabase: () => service.storageDatabase(),
+        episodeInfo: () => ({ id: "ep", canvasId: null }),
+    } as unknown as EpisodeProductionService, "ep") as any;
+    assert.equal(bare.clipStates, undefined, "无画布 → 不编造 clipStates");
+});
+
+test("readSegmentStateRuntime 接上 tasks/generation_logs 的 params.waitReason（JSON 与 ICBR1 压缩）", (t) => {
+    const { db, service } = fixture(t);
+    const now = new Date().toISOString();
+    // tasks.params_json：明文 JSON，按 Clip id 关联；空 waitReason 是拿到槽位后的真实清空态，不得回填。
+    db.db.prepare("INSERT INTO tasks (id, kind, status, input_json, params_json, created_at, updated_at, project_id, node_id, segment_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run("task-wait-1", "canvas-video", "queued", "{}", JSON.stringify({ waitReason: "渠道并发已满（视频 · 并发 1，前面还有 1 个）" }), now, now, "canvas", "h3", "clip-1");
+    db.db.prepare("INSERT INTO tasks (id, kind, status, input_json, params_json, created_at, updated_at, project_id, node_id, segment_id) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        .run("task-cleared-1", "canvas-video", "succeeded", "{}", JSON.stringify({ waitReason: "" }), now, now, "canvas", "h3", "clip-1");
+    // generation_logs.params_json：ICBR1 Brotli BLOB，按 Clip id 关联（fixture 已有 clip-2 的日志）。
+    db.db.prepare("UPDATE generation_logs SET params_json=? WHERE segment_id=?")
+        .run(compressStoredJsonText(JSON.stringify({ waitReason: "渠道并发已满（图片 · 并发 2，前面还有 3 个）" })), "clip-2");
+
+    const runtime = readSegmentStateRuntime(service, "ep") as any;
+    assert.equal(runtime.clipStates["E01-SEG01"].waitReason, "渠道并发已满（视频 · 并发 1，前面还有 1 个）", "tasks 明文 waitReason 真值");
+    assert.equal(runtime.clipStates["E01-SEG02"].waitReason, "渠道并发已满（图片 · 并发 2，前面还有 3 个）", "generation_logs ICBR1 waitReason 真值");
+    assert.equal(runtime.customSegments["E01-SEG01"], true, "新增真值不破坏 custom");
+    assert.equal(runtime.reprocessableSegments["E01-SEG01"], true, "新增真值不破坏 videoReprocessable");
 });
 
 test("route 派生 runtime 经 withSegmentState 下发到每段 state", (t) => {

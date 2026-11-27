@@ -136,3 +136,13 @@ test("去重：不同 asset 但同一 storageKey（场景图重复绑定）只�
     assert.equal(new Set(keys).size, keys.length, "所有绑定的 storageKey 不重复");
     assert.deepEqual(derived.bindings.map((b) => b.label), derived.bindings.map((_, i) => `<Picture ${i + 1}>`), "编号连续不跳号/不重复");
 });
+
+test("storageOverride：绑定取共享画布节点真图，不读分集缓存的陈旧 storageKey", () => {
+    const { source, director } = fixture();
+    // 分集缓存里蟒妻是旧图 image:char2；共享画布节点真图是 image:char2-shared
+    const override = new Map<string, string>([[CHAR_2, "image:char2-shared"]]);
+    const derived = deriveSegmentReferenceBindings(source, director, "seg-vo", ["shot-2"], source.shots as any, override);
+    const charBinding = derived.bindings.find((b) => b.assetId === CHAR_2);
+    assert.ok(charBinding, "蟒妻绑定应存在");
+    assert.equal(charBinding!.storageKey, "image:char2-shared", "绑定必须取共享节点真图而非缓存旧图");
+});

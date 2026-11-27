@@ -1,6 +1,7 @@
 import { productionNumbering } from "@basketikun/canvas-agent/drama/production-contract";
 import type { BackendDatabase, CanvasProject } from "../db.js";
 import { derivedStoryboardTracks, productionDraftForCanvas } from "../drama/storyboard-track.js";
+import { syncGeneratedProductionAssetImage } from "../drama/pipeline-asset-image.js";
 import { createHash } from 'node:crypto';
 import { h3PromptContent, h3ExpectedDialogues } from '@basketikun/canvas-agent/plugins/minimax-h3/runtime-params';
 import type { CanvasProjectFilter, CanvasProjectStore, H3NodeMaterial, H3ProductionRequirements } from "./types.js";
@@ -67,6 +68,7 @@ export function createProjectStore(db: BackendDatabase): CanvasProjectStore {
         applyOperations: (id, expectedRevision, operations, context) => db.applyCanvasProjectOperations(id, expectedRevision, operations, context),
         writeBackH3Task: (task, binding, output, completion) => db.writeBackH3Task(task, binding, output, completion),
         writeBackCanvasImageTask: (task, input, media) => db.writeBackCanvasImageTask(task, input, media),
+        syncProductionAssetImageWriteBack: (writeBack) => syncGeneratedProductionAssetImage(db, writeBack),
         markCanvasImageTaskFailed: (task, input, error) => db.markCanvasImageTaskFailed(task, input, error),
         writeBackCanvasVideoTask: (task, input, media) => db.writeBackCanvasVideoTask(task, input, media),
         markCanvasVideoTaskFailed: (task, input, error) => db.markCanvasVideoTaskFailed(task, input, error),

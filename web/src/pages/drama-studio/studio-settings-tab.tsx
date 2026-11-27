@@ -6,7 +6,6 @@ import {
     modelOptionLabel,
     modelVideoCapabilitiesOf,
     saveAiConfigConfirmed,
-    selectableModelsByCapability,
     encodeChannelModel,
     setModelMaxVideoSeconds,
     setModelPromptMaxChars,
@@ -14,23 +13,91 @@ import {
     type ReasoningEffort,
 } from "@/stores/use-config-store";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
-import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, fetchBackendDramaEpisodes, fetchEpisodeProduction, editEpisodeProduction, regenerateDramaAssetReference, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
+import { applyDramaEpisodeGrouping, autoPlanDramaEpisodeGrouping, fetchBackendCanvasFolders, fetchBackendAssets, patchDramaPlanningMode, patchDramaTopicArtStyle, previewDramaEpisodeGrouping, fetchBackendDramaEpisodes, fetchEpisodeProduction, editEpisodeProduction, regenerateDramaAssetReference, type DramaEpisodeGroupingPreview } from "@/services/backend-api";
+import { fetchSkillDetail } from "@/services/api/skill-market";
 import { DRAMA_STYLE_FORMS, DRAMA_STYLE_THEMES, composeDramaStyleId, findComposedDramaStyle, findComposedDramaStyleByPrompt, type DramaStyleFormId, type DramaStyleThemeId } from "@/lib/drama/style-composition";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { TOPIC_OPTIONS } from "@basketikun/canvas-agent/drama/topic-options";
-import { ASSET_KIND_SKILL, ASSET_PROMPT_VARIABLES, ASSET_SCHEMES, defaultSchemeFor, renderAssetPromptWithTemplate, schemeAppliesTo, type AssetSchemeId } from "@basketikun/canvas-agent/drama/asset-spec";
+import { ASSET_KIND_SKILL, ASSET_PROMPT_FALLBACK_TEMPLATE, ASSET_PROMPT_VARIABLES, ASSET_SCHEMES, defaultAssetPromptTemplate, defaultSchemeFor, renderAssetPromptWithTemplate, schemeAppliesTo, type AssetSchemeId, type AssetSpecKind } from "@basketikun/canvas-agent/drama/asset-spec";
 import type { DirectorReviewPolicy } from "@basketikun/canvas-agent/drama/production-contract";
-import { PRODUCTION_STAGE_KEYS } from "@/pages/drama/production-progress";
-import { DRAMA_VIDEO_ASPECT_RATIOS, DRAMA_VIDEO_RESOLUTION_TIERS, dramaVideoResolutionShortSide, dramaVideoResolutionToH3, type DramaVideoAspectRatio } from "@basketikun/canvas-agent/drama/video-resolution";
+import { DRAMA_VIDEO_ASPECT_RATIOS } from "@basketikun/canvas-agent/drama/video-resolution";
 import { SkillPickerField, type SkillRef } from "./studio-skill-picker";
+import {
+    BAND_TICK_VALUES,
+    CAMERA_BANDS_DETAIL,
+    CAMERA_BANDS_LABEL,
+    ChoiceButtons,
+    DEFAULT_STUDIO_SETTINGS,
+    DIALOGUE_DETAIL,
+    DIALOGUE_LABEL,
+    DIALOGUE_RULES,
+    EPISODE_PRESETS,
+    MAX_EPISODE_SECONDS,
+    MAX_SEGMENT_SECONDS,
+    MAX_TRANSITION_MS,
+    MIN_EPISODE_SECONDS,
+    MIN_SEGMENT_SECONDS,
+    MIN_TRANSITION_MS,
+    ModelSelect,
+    PACING_AVERAGE_SECONDS,
+    PACING_DETAIL,
+    PERFORMANCE_BANDS_DETAIL,
+    PERFORMANCE_BANDS_LABEL,
+    PACING_LABEL,
+    REVIEW_POLICY_MODES,
+    SEGMENT_MODE_DETAIL,
+    SEGMENT_MODE_LABEL,
+    STUDIO_THINKING_OPTIONS as THINKING_OPTIONS,
+    TRANSITION_DETAIL,
+    TRANSITION_LABEL,
+    VIDEO_ASPECT_OPTIONS,
+    VIDEO_RESOLUTION_OPTIONS,
+    clampRange,
+    formatEpisodeSeconds,
+    levelBandIndex,
+    loadStudioSettings,
+    normalizeReviewPolicy,
+    parseEpisodeSeconds,
+    resolutionTierMatches,
+    reviewPolicyForMode,
+    studioSettingsStorageKey,
+    type StudioProductionSettings,
+} from "./studio-settings-store";
 import { cn } from "@/lib/utils";
+
+// 设置字段/默认值/读写入口已移到 studio-settings-store（新建页复用同一份），这里按原路径继续导出，消费方不用改。
+export { DEFAULT_STUDIO_SETTINGS, loadStudioSettings };
+export type { StudioProductionSettings };
+
+/** 参考图提示词模板上限（码点口径，与后端字数校验一致；超限不允许保存）。 */
+const ASSET_PROMPT_TEMPLATE_MAX = 4000;
+/**
+ * 从技能正文里摘出某个区块（ASSET_KIND_SKILL[kind].section，如「二、角色提示词」）的正文：
+ * 从该标题行下一行读到下一个标题（# 标题 或 一、二、这类中文序号）为止，按码点截断。
+ * 取不到返回空串，由调用方退化为一句说明，不编造正文。
+ */
+function skillSectionExcerpt(content: string, section: string, maxChars = 900): string {
+    const text = String(content || "").replace(/\r\n/g, "\n");
+    const head = String(section || "").replace(/[（(].*$/, "").trim();
+    if (!text.trim() || !head) return "";
+    const lines = text.split("\n");
+    const isHeading = (line: string) => /^#{1,6}\s/.test(line.trim()) || /^[一二三四五六七八九十]+、/.test(line.trim());
+    const start = lines.findIndex((line) => isHeading(line) && line.includes(head));
+    if (start < 0) return "";
+    const body: string[] = [];
+    for (let i = start + 1; i < lines.length; i++) {
+        if (isHeading(lines[i])) break;
+        body.push(lines[i]);
+    }
+    return Array.from(body.join("\n").trim()).slice(0, maxChars).join("").trim();
+}
 
 /**
  * 影策短剧制作台「制作设置」逐项复刻。真值链（逐项只读核实，不是照抄影策）：
  *
  * - 持久化：本组件的值按剧目存 localStorage（loadStudioSettings / onSave）。
  * - 真实下发：index.tsx 的 pipelineOpts 在「启动全自动流水线」时把模型/思考等级/
- *   分镜规则/并发/参考图上限/并行出片/样片模式/审阅与生成节奏，按后端
+ *   分镜规则/并发/参考图上限/并行出片/审阅与生成节奏，按后端
  *   startSchema（drama-pipeline-routes.ts）+ DramaPipelineRuntimeOptions（pipeline.ts）
  *   真实下发给运行期选项；production-runner 的拆镜/提示词 job 读取 storyboardRules。
  *   手动「重新改编本集 / 撰写段提示词」也分别注入 hook/cliffhanger/技能/表演强度/运镜动感。
@@ -49,314 +116,23 @@ import { cn } from "@/lib/utils";
  *   手动跳转仅作为不想覆盖旧图时的引导，不造假按钮。
  */
 
-/** 思考等级用本地文本设置里真实存在的档位（text-settings-panel.tsx）。 */
-const THINKING_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
-    { value: "auto", label: "自动" },
-    { value: "low", label: "低" },
-    { value: "medium", label: "中" },
-    { value: "high", label: "高" },
-    { value: "xhigh", label: "极高" },
-];
-
 /** 剧目级默认参考图方案：选项直接来自共享 ASSET_SCHEMES（影策 AssetSchemePicker 的本地真值）。 */
 const ASSET_SCHEME_OPTIONS = ASSET_SCHEMES.map((s) => ({ value: s.id as AssetSchemeId, name: s.name, description: s.description }));
 
-/** 审阅策略：与 production-contract.directorReviewPolicySchema 同档，按 mode 收敛 shared/scene。 */
-const REVIEW_POLICY_MODES = ["none", "automatic", "mixed", "manual"] as const;
-const DEFAULT_REVIEW_POLICY: DirectorReviewPolicy = { mode: "none", shared: "none", scene: "none" };
+/** 审阅策略与档位收敛逻辑在 studio-settings-store（新建页复用同一份），这里只留展示标签。 */
 const REVIEW_POLICY_MODE_LABELS: Record<string, string> = {
     none: "不审阅", automatic: "自动审阅", mixed: "混合", manual: "人工审阅",
 };
 const REVIEW_POINT_LABELS: Record<string, string> = { none: "不审阅", automatic: "自动", manual: "人工" };
 
-function normalizeReviewPolicy(value: unknown): DirectorReviewPolicy {
-    const p = (value && typeof value === "object" ? value : {}) as Partial<DirectorReviewPolicy>;
-    if (!REVIEW_POLICY_MODES.includes(p.mode as (typeof REVIEW_POLICY_MODES)[number])) return { ...DEFAULT_REVIEW_POLICY };
-    if (p.mode === "none") return { mode: "none", shared: "none", scene: "none" };
-    if (p.mode === "mixed") {
-        return {
-            mode: "mixed",
-            shared: p.shared === "manual" ? "manual" : "automatic",
-            scene: p.scene === "manual" ? "manual" : "automatic",
-        };
-    }
-    // automatic / manual：schema 要求 shared/scene 与 mode 同档，不保存非法组合。
-    return { mode: p.mode, shared: p.mode, scene: p.mode } as DirectorReviewPolicy;
-}
-
-/** 切换审阅预设时保持 mixed 两个审核点的既有选择，其余档位按 schema 收敛。 */
-function reviewPolicyForMode(mode: (typeof REVIEW_POLICY_MODES)[number], current: DirectorReviewPolicy): DirectorReviewPolicy {
-    if (mode === "none") return { mode: "none", shared: "none", scene: "none" };
-    if (mode === "mixed") return {
-        mode: "mixed",
-        shared: current.shared === "manual" ? "manual" : "automatic",
-        scene: current.scene === "manual" ? "manual" : "automatic",
-    };
-    return { mode, shared: mode, scene: mode } as DirectorReviewPolicy;
-}
-
-const PRODUCTION_STAGE_LABELS: Record<string, string> = {
-    script: "剧本", assets: "资产", spatial: "空间", shots: "分镜", keyframes: "关键帧", clips: "成片",
-};
-
-/** 剧目级视频分辨率档位（短边像素）+「模型默认」；档位真值来自共享 drama/video-resolution 模块。 */
-const VIDEO_RESOLUTION_OPTIONS: Array<{ value: string; label: string }> = [
-    { value: "", label: "模型默认" },
-    ...DRAMA_VIDEO_RESOLUTION_TIERS.map((tier) => ({ value: tier, label: tier })),
-];
-/** 剧目级画幅：横屏 / 竖屏（影策 final-view aspectRatioValue 支持 9:16 竖屏）。 */
-const VIDEO_ASPECT_OPTIONS: Array<{ value: DramaVideoAspectRatio; label: string }> = [
-    { value: "16:9", label: "横屏 16:9" },
-    { value: "9:16", label: "竖屏 9:16" },
-];
-
-/** 分辨率档位按短边像素比较，登记写法 "720"/"720P"/"720p" 与 UI 档位 "720p" 视为同一档。 */
-function resolutionTierMatches(registered: string, tier: string) {
-    const shortSide = dramaVideoResolutionShortSide(registered);
-    return shortSide !== null && shortSide === dramaVideoResolutionShortSide(tier);
-}
-
-export type StudioProductionSettings = {
-    // 文字步骤模型（#29）
-    assetExtractModel: string;
-    storyboardModel: string;
-    videoPromptModel: string;
-    // 参考图模型与分辨率（#30）
-    characterImageModel: string;
-    propImageModel: string;
-    sceneImageModel: string;
-    imageResolution: "1k" | "2k" | "4k";
-    // 段落衔接（#31 #46）
-    continuationMode: "tail" | "parallel";
-    // 同时生成数（#32）：text/video/assemble 三池真实下发 pipelineOpts.concurrency（assemble→render）。
-    // image 池后端无剧目级并发覆盖字段，不设假开关。
-    concurrency: { text: number; video: number; assemble: number };
-    // 预算上限（影策 budgetMicrocredits）：微积分；0/不设=不限。达标暂停流水线（budget_exceeded）。
-    budgetMicrocredits: number;
-    // 镜头节奏（#33）
-    pacing: "极快" | "快" | "标准" | "舒缓" | "慢";
-    transitionMs: number;
-    // 表演与运镜（#34）
-    performanceIntensity: number; // 1-10
-    cameraDynamics: number; // 1-10
-    // 剧情段视频模型（段级 selectedVideoModel）+ 剧目级分辨率/画幅（真实下发到 H3 出片参数）
-    videoModel: string;
-    videoResolution: string; // ""=模型默认；480p/720p/1080p=短边像素档
-    videoAspectRatio: DramaVideoAspectRatio; // 横屏 16:9 / 竖屏 9:16
-    // 钩子与悬念（#36）
-    hook: string;
-    cliffhanger: string;
-    // 音色库（#43）
-    voiceProfiles: Array<{ id: string; name: string; description: string; sampleRef: string }>;
-    // 样片模式（#10）
-    sampleMode: boolean;
-    // 审阅方式（影策 reviewMode：sample|every|auto）：启动流水线时真实下发服务端闸门
-    reviewMode: "sample" | "every" | "auto";
-    // 导演审阅策略（production-contract directorReviewPolicySchema）：与 reviewMode 两套独立闸门，
-    // 选择后真写进制作稿 settings.reviewPolicy；控制共享资产/场次审核点是否需人工审阅。
-    reviewPolicy: DirectorReviewPolicy;
-    // 每集确认前的生成节奏（影策 mediaMode：manual|auto）：启动流水线时真实下发 media 放行门
-    mediaMode: "manual" | "auto";
-    // 每段最多参考图（影策 referenceLimit：0=按模型上限）：启动流水线时真实下发
-    referenceLimit: number;
-
-    // ===== 差异#6 补齐项（按剧目 localStorage 持久化 + 启动流水线真实下发 / 手动改编注入） =====
-    // 分镜规则
-    episodeSeconds: number;                                        // 单集时长（秒），影策约 90s
-    segmentMode: "auto" | "fixed" | "range";                        // 剧情段切分方式（智能/固定/范围），下发 storyboardRules.segmentMode
-    segmentRange: { min: number; max: number };                    // 剧情段时长软约束（秒），下发 storyboardRules.segmentRange
-    dialogueDensity: "dense" | "standard" | "restrained" | "custom"; // 对白密度
-    transitionMode: "smart" | "hard" | "fade" | "flash";           // 转场（转场时长见 transitionMs）
-    // 文字步骤：新增「分集规划」模型 + 每步思考等级
-    planModel: string;
-    textThinking: { plan: ReasoningEffort; extract: ReasoningEffort; storyboard: ReasoningEffort; prompt: ReasoningEffort };
-    // 写作技能（来自本地技能库，真值引用 {name,title,path}；plan 用 acheng/story 作默认，其余按槽位映射）
-        textSkills: { plan: SkillRef | null; extract: SkillRef | null; storyboard: SkillRef | null; prompt: SkillRef | null };
-    // 参考图设定版式（用真实 imageKind 值，"auto" = 跟随资产类型）
-    referenceLayout: "auto" | string;
-    // 参考图提示词模板（影策「角色提示词/场景提示词/默认」）：空字符串=沿用内置方案模板
-    assetPromptTemplates: { character: string; scene: string; default: string };
-};
-
-export const DEFAULT_STUDIO_SETTINGS: StudioProductionSettings = {
-    assetExtractModel: "",
-    storyboardModel: "",
-    videoPromptModel: "",
-    characterImageModel: "",
-    propImageModel: "",
-    sceneImageModel: "",
-    imageResolution: "1k",
-    continuationMode: "tail",
-    concurrency: { text: 2, video: 1, assemble: 1 },
-    // 默认值逐项对齐影策 DEFAULT_STORYBOARD（storyboard-rules 默认档）：极快 / 密集 / 150ms / 表演 7 / 运镜 3。
-    // 剧情段切分默认保留本地后端的 auto（pipeline.ts 未收到 segmentMode 时也按 auto 切段），不写影策的 fixed。
-    pacing: "极快",
-    transitionMs: 150,
-    performanceIntensity: 7,
-    cameraDynamics: 3,
-    videoModel: "",
-    videoResolution: "",
-    videoAspectRatio: "16:9",
-    hook: "",
-    cliffhanger: "",
-    voiceProfiles: [],
-    sampleMode: false,
-    reviewMode: "auto",
-    reviewPolicy: { ...DEFAULT_REVIEW_POLICY },
-    budgetMicrocredits: 0,
-    mediaMode: "auto",
-    referenceLimit: 0,
-    // 差异#6
-    episodeSeconds: 90,
-    segmentMode: "auto",
-    segmentRange: { min: 8, max: 15 },
-    dialogueDensity: "dense",
-    transitionMode: "smart",
-    planModel: "",
-    textThinking: { plan: "auto", extract: "auto", storyboard: "auto", prompt: "auto" },
-    textSkills: { plan: null, extract: null, storyboard: null, prompt: null },
-    referenceLayout: "auto",
-    assetPromptTemplates: { character: "", scene: "", default: "" },
-};
-
-/** 单集时长：影策 MIN/MAX_EPISODE_SECONDS 与 EPISODE_PRESETS（lib/drama/storyboard.ts:6-7,38）。 */
-const MIN_EPISODE_SECONDS = 30;
-const MAX_EPISODE_SECONDS = 1200;
-const EPISODE_PRESETS = [60, 90, 120, 180, 300, 600] as const;
-/** 剧情段秒数与转场时长范围：影策 MIN/MAX_SEGMENT_SECONDS、MIN_TRANSITION_MS 与 1500 上限。 */
-const MIN_SEGMENT_SECONDS = 4;
-const MAX_SEGMENT_SECONDS = 60;
-const MIN_TRANSITION_MS = 150;
-const MAX_TRANSITION_MS = 1500;
-
-/** 影策 formatEpisodeSeconds：90 → 「1 分 30 秒」，60 → 「1 分钟」。 */
-function formatEpisodeSeconds(seconds: number) {
-    if (seconds < 60) return `${seconds} 秒`;
-    const minutes = Math.floor(seconds / 60);
-    const rest = seconds % 60;
-    return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`;
-}
-
-/** 影策 parseEpisodeSeconds：解析「90 / 5分钟 / 5min / 2:30 / 1分30秒」，无法识别返回 null。 */
-function parseEpisodeSeconds(raw: string): number | null {
-    const text = raw.trim().toLowerCase().replace(/\s+/g, "");
-    if (!text) return null;
-    const clock = text.match(/^(\d+):(\d{1,2})$/);
-    if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
-    const mixed = text.match(/^(\d+(?:\.\d+)?)(?:分钟?|min|m)(?:(\d+)(?:秒|s)?)?$/);
-    if (mixed) return Math.round(Number(mixed[1]) * 60 + Number(mixed[2] || 0));
-    const seconds = text.match(/^(\d+(?:\.\d+)?)(?:秒|s|sec)?$/);
-    if (seconds) return Math.round(Number(seconds[1]));
-    return null;
-}
-
-/** 影策 storyboard-rules.tsx 档位说明：滑杆刻度下写出当前档位在提示词里的含义（纯展示，不改数据模型）。 */
-const PACING_DETAIL: Record<string, string> = {
-    "极快": "1.5–3 秒短镜连切，冲突与反转处密集切换，几乎不用长镜头",
-    "快": "2–4 秒短镜为主，冲突处密集切换",
-    "标准": "2–5 秒为主，关键台词可到 6 秒",
-    "舒缓": "3–6 秒为主，情绪戏可到 8 秒",
-    "慢": "4–8 秒长镜，可用空镜营造情绪",
-};
-/** 影策 SEGMENT_MODES 档位说明：剧情段切分方式。 */
-const SEGMENT_MODE_DETAIL: Record<string, string> = {
-    "auto": "按场景切换与冲突转折切段，单段不超过视频模型单次上限",
-    "fixed": "每段固定秒数，跨场景也按时长切",
-    "range": "每段在设定范围内，达到下限后在场景切换处断开",
-};
-/** 影策 storyboard-rules.tsx:120-125 DIALOGUE 档位说明（只写适用场景，数值由后端规则决定）。 */
-const DIALOGUE_DETAIL: Record<string, string> = {
-    "dense": "适合爽剧、对手戏",
-    "standard": "适合多数剧情",
-    "restrained": "留给动作与氛围",
-    "custom": "按剧情需要自行安排，全剧统一口径",
-};
-/** 影策 storyboard-rules.tsx:147-152 TRANSITIONS 档位说明。 */
-const TRANSITION_DETAIL: Record<string, string> = {
-    "smart": "默认硬切，场景跳转用黑场，回忆用闪白",
-    "hard": "全部直接切换",
-    "fade": "每次切镜都经过黑场",
-    "flash": "每次切镜都短暂闪白",
-};
-/** 摘要估算：影策 PACING 平均镜头秒数（lib/drama/storyboard.ts:23，本地 canvas-agent/drama/pacing.ts 同表移植）。 */
-const PACING_AVERAGE_SECONDS: Record<string, number> = { "极快": 2, "快": 2.5, "标准": 3.5, "舒缓": 4.5, "慢": 5.5 };
-/** 影策 DIALOGUE_PRESETS 与本地 canvas-agent/drama/pacing.ts dialogueRules 同表：语速、单句秒数、单句字数、气口。 */
-const DIALOGUE_RULES: Record<string, { speechRate: number; lineSeconds: number; lineMaxRunes: number; linePauseMs: number }> = {
-    dense: { speechRate: 4.5, lineSeconds: 3, lineMaxRunes: 12, linePauseMs: 300 },
-    standard: { speechRate: 4.5, lineSeconds: 4.5, lineMaxRunes: 16, linePauseMs: 500 },
-    restrained: { speechRate: 4.5, lineSeconds: 7, lineMaxRunes: 20, linePauseMs: 500 },
-};
-
-const PERFORMANCE_BANDS_DETAIL = [
-    "几乎不动声色，情绪只在眼神、呼吸和极细微的表情里，台词轻声平稳但有潜台词",
-    "表情变化小而准确，靠眼神、停顿传达情绪，关键句压低声音或放慢加力，适合悬疑、文艺",
-    "表情随台词实时变化，台词有轻重缓急和停顿，说话时其他人有可见反应",
-    "冲突处瞪眼、咬牙、冷笑、红眼眶，台词音量随情绪起伏、关键句爆发，适合爽剧",
-    "情绪大开大合、动作放大到一眼可读，爆发处怒吼、哽咽、破音，关键台词后给反应特写",
-] as const;
-const PERFORMANCE_BANDS_LABEL = ["内敛", "克制", "自然", "饱满", "夸张"] as const;
-const CAMERA_BANDS_DETAIL = [
-    "固定机位为主，只做极缓慢的推近，靠构图和表演推动情绪",
-    "固定机位与缓慢推拉为主，对话正反打，情绪高点才推近特写",
-    "推拉摇移服务于情绪，对话正反打与过肩，情绪升级时推近特写，不整段静止",
-    "冲突与反转处快速推近、跟拍、低机位仰拍，多数镜头有机位运动或人物调度",
-    "频繁快速推拉、甩镜、手持跟拍与环绕，每个镜头都有明确运动，节奏紧凑",
-] as const;
-const CAMERA_BANDS_LABEL = ["静态", "稳定", "标准", "动感", "强烈"] as const;
-/** 1–10 档 → 五段索引（1-2/3-4/5-6/7-8/9-10），与影策 performanceBands/cameraBands 同口径。 */
-const levelBandIndex = (value: number) => Math.min(4, Math.max(0, Math.floor((value - 1) / 2)));
-
-const storageKey = (dramaId: string) => `drama-studio:settings:${dramaId}`;
-
-/** 剧情段秒数区间收敛到影策 4–60 秒，并保证 min ≤ max（等价 normalizeStoryboard 的 seconds()/大小互换）。 */
-function clampRange(range: { min: number; max: number }) {
-    const clamp = (value: unknown) => Math.max(MIN_SEGMENT_SECONDS, Math.min(MAX_SEGMENT_SECONDS, Math.round(Number(value) || MIN_SEGMENT_SECONDS)));
-    const low = clamp(range.min);
-    const high = clamp(range.max);
-    return { min: Math.min(low, high), max: Math.max(low, high) };
-}
-
-export function loadStudioSettings(dramaId: string | null): StudioProductionSettings {
-    if (!dramaId) return { ...DEFAULT_STUDIO_SETTINGS };
-    try {
-        const raw = localStorage.getItem(storageKey(dramaId));
-        if (!raw) return { ...DEFAULT_STUDIO_SETTINGS };
-        const parsed = JSON.parse(raw) as Partial<StudioProductionSettings>;
-        return {
-            ...DEFAULT_STUDIO_SETTINGS,
-            ...parsed,
-            concurrency: { ...DEFAULT_STUDIO_SETTINGS.concurrency, ...(parsed.concurrency || {}) },
-            // 老剧目 localStorage 没有 segmentMode 时按默认 auto；非法值收敛，不让坏值进 UI/下发。
-            segmentMode: (["auto", "fixed", "range"] as const).includes(parsed.segmentMode as "auto") ? parsed.segmentMode as "auto" | "fixed" | "range" : DEFAULT_STUDIO_SETTINGS.segmentMode,
-            // 影策 clamp（storyboard.ts:62-85）：剧情段 4–60 秒、单集 30–1200 秒、转场 150–1500 毫秒，越界值收敛后才进 UI/下发。
-            segmentRange: clampRange({ ...DEFAULT_STUDIO_SETTINGS.segmentRange, ...(parsed.segmentRange || {}) }),
-            episodeSeconds: Math.max(MIN_EPISODE_SECONDS, Math.min(MAX_EPISODE_SECONDS, Math.round(Number(parsed.episodeSeconds) || DEFAULT_STUDIO_SETTINGS.episodeSeconds))),
-            transitionMs: Math.max(MIN_TRANSITION_MS, Math.min(MAX_TRANSITION_MS, Math.round(Number(parsed.transitionMs) || MIN_TRANSITION_MS))),
-            textThinking: { ...DEFAULT_STUDIO_SETTINGS.textThinking, ...(parsed.textThinking || {}) },
-            textSkills: { ...DEFAULT_STUDIO_SETTINGS.textSkills, ...(parsed.textSkills || {}) },
-            voiceProfiles: Array.isArray(parsed.voiceProfiles) ? parsed.voiceProfiles : [],
-            // 老剧目没有模板字段时按空（沿用内置方案模板），非字符串值收敛成空串，不让坏值进 UI。
-            assetPromptTemplates: {
-                character: String(parsed.assetPromptTemplates?.character ?? ""),
-                scene: String(parsed.assetPromptTemplates?.scene ?? ""),
-                default: String(parsed.assetPromptTemplates?.default ?? ""),
-            },
-            // 老剧目没有该字段时按默认（不审阅），非法组合按 schema 收敛，不让坏值进 UI。
-            reviewPolicy: normalizeReviewPolicy(parsed.reviewPolicy),
-        };
-    } catch {
-        return { ...DEFAULT_STUDIO_SETTINGS };
-    }
-}
-
 function Section({ icon, title, desc, aside, children, marker }: { icon: React.ReactNode; title: string; desc?: string; aside?: string; children: React.ReactNode; marker?: string }) {
     return (
         <section className="rounded-[8px] border border-foreground/10 bg-card px-4 pt-3 pb-4" data-studio-settings-section={marker}>
-            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                <span className="flex shrink-0 items-center gap-2">
-                    <span className="text-foreground">{icon}</span>
-                    <h3 className="text-[11px] font-semibold" style={{ fontWeight: 600 }}>{title}</h3>
-                </span>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+                <h3 className="flex shrink-0 items-center gap-2 text-[11px] font-semibold" style={{ fontWeight: 600 }}>
+                    <span className="flex shrink-0 items-center text-foreground">{icon}</span>
+                    {title}
+                </h3>
                 {aside ? <span className="text-[11px] leading-relaxed text-foreground/40" data-studio-section-aside>{aside}</span> : null}
             </div>
             {desc ? <p className="mb-2 text-[11px] leading-relaxed text-foreground/40">{desc}</p> : null}
@@ -376,25 +152,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 }
 
 /** 一组并列选项按钮（分段控件），用于智能/固定、对白密度、转场等分段选项。 */
-function ChoiceButtons<T extends string>({ value, options, onChange, marker }: {
-    value: T;
-    options: ReadonlyArray<{ value: T; label: string }>;
-    onChange: (v: T) => void;
-    marker?: string;
-}) {
-    return (
-        <div className="inline-flex w-fit flex-wrap gap-0.5 rounded-[8px] border border-foreground/10 bg-foreground/5 p-1" data-studio-choice={marker}>
-            {options.map((o) => (
-                <button key={o.value} type="button" onClick={() => onChange(o.value)} style={{ fontSize: 11 }}
-                    className={cn("flex h-[26px] items-center rounded-[8px] px-3 text-[11px] transition",
-                        value === o.value ? "bg-card text-foreground" : "text-foreground/55 hover:text-foreground")}>
-                    {o.label}
-                </button>
-            ))}
-        </div>
-    );
-}
-
 /**
  * 滑杆数值气泡（原生 range 与 TickSlider 共用）：绝对定位于手柄正上方，
  * left 按 (value-min)/(max-min) 的百分比推算；thumbPx 用于补偿原生 range 拇指内缩，
@@ -447,8 +204,10 @@ function TickSlider({ value, labels, tickValues, min, max, onValue, readout, bub
                 onPointerLeave={() => setBubbleVisible(false)}
                 onFocus={() => setBubbleVisible(true)}
                 onBlur={() => setBubbleVisible(false)}>
-                {/* 整条轨道按 step 切成等宽可点区段：点哪儿取该档值，不依赖 clientX（避免坐标系错位）。 */}
-                <div className="relative h-5" data-studio-tick-track={marker}>
+                {/* 整条轨道按 step 切成等宽可点区段：点哪儿取该档值，不依赖 clientX（避免坐标系错位）。
+                    h-6 = 24px 命中高度：影策同名滑轨本体只有 12px（轨道 4px），照抄反而更难点，
+                    这里只保留下方 24px 的可点带；轨道/节点仍靠 top-1/2 垂直居中，视觉位置不变。 */}
+                <div className="relative h-6" data-studio-tick-track={marker}>
                     <SliderValueBubble pct={clampPct(frac(value))} text={bubble ?? readout ?? String(value)} visible={bubbleVisible} />
                     <div className="absolute left-0 right-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-foreground/5" />
                     <div className="absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-foreground/80" style={{ width: `${clampPct(frac(value))}%` }} />
@@ -482,50 +241,6 @@ function TickSlider({ value, labels, tickValues, min, max, onValue, readout, bub
             </div>
             {readout ? <span className="w-10 shrink-0 text-right text-[11px] font-semibold tabular-nums text-foreground">{readout}</span> : null}
         </div>
-    );
-}
-
-function ModelSelect({ value, capability, onChange, config }: {
-    value: string;
-    capability: "text" | "image" | "video";
-    onChange: (value: string) => void;
-    config: ReturnType<typeof useConfigStore.getState>["config"];
-}) {
-    const { engineOptions, fallbackOptions } = useMemo(() => {
-        const options = selectableModelsByCapability(config, capability);
-        if (capability !== "text") return { engineOptions: options, fallbackOptions: [] as string[] };
-        // 文字步骤以本地 Hermes 引擎为主：把该渠道的 text 模型置顶，其余保留为回退入口。
-        const engineIds = new Set(config.channels.filter((channel) => channel.kind === "hermes").map((channel) => channel.id));
-        const engine = options.filter((option) => engineIds.has(String(option).split("::")[0]));
-        const fallback = options.filter((option) => !engineIds.has(String(option).split("::")[0]));
-        return { engineOptions: engine, fallbackOptions: fallback };
-    }, [config, capability]);
-    return (
-        <select
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            className="h-[34px] min-w-0 flex-1 rounded-[12px] border border-foreground/10 bg-card px-3 text-[13px] text-foreground outline-none focus:border-primary"
-            data-studio-model-select={capability}
-        >
-            <option value="">跟随默认</option>
-            {engineOptions.length ? (
-                <optgroup label="本地引擎 · Hermes">
-                    {engineOptions.map((option) => (
-                        <option key={option} value={option}>{modelOptionLabel(config, option)}</option>
-                    ))}
-                </optgroup>
-            ) : null}
-            {fallbackOptions.length ? (
-                <optgroup label="其他模型（回退）">
-                    {fallbackOptions.map((option) => (
-                        <option key={option} value={option}>{modelOptionLabel(config, option)}</option>
-                    ))}
-                </optgroup>
-            ) : null}
-            {capability !== "text" ? engineOptions.map((option) => (
-                <option key={option} value={option}>{modelOptionLabel(config, option)}</option>
-            )) : null}
-        </select>
     );
 }
 
@@ -626,16 +341,80 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
     /** 参考图提示词模板当前编辑档：角色 / 场景 / 默认（影策三档）。 */
     const [templateKind, setTemplateKind] = useState<"character" | "scene" | "default">("character");
     const templateInputRef = useRef<HTMLTextAreaElement | null>(null);
+    const [templateImporting, setTemplateImporting] = useState(false);
+    const [templateNote, setTemplateNote] = useState("");
+    const [sampleAssetName, setSampleAssetName] = useState("");
     const assetTemplates = settings.assetPromptTemplates || { character: "", scene: "", default: "" };
+    /** 用户覆盖值：空 = 未自定义，沿用内置默认模板。 */
     const templateValue = String(assetTemplates[templateKind] ?? "");
-    // 预览与后端同一渲染函数（canvas-agent 导出），保证「看到什么就发什么」。
+    /** 档位 → 资产类型：默认档沿用道具分支（未覆盖时它代表回退档）。 */
+    const templateSpecKind: AssetSpecKind = templateKind === "character" ? "character" : templateKind === "scene" ? "scene" : "prop";
+    /** 生效方案：referenceLayout=auto 时按资产类型取默认方案；四格方案只在显式选中时对角色生效。 */
+    const schemeForKind = (kind: AssetSpecKind): AssetSchemeId => {
+        const layout = String(settings.referenceLayout || "auto");
+        if (layout !== "auto" && ASSET_SCHEMES.some((s) => s.id === layout) && schemeAppliesTo(layout as AssetSchemeId, kind)) {
+            return layout as AssetSchemeId;
+        }
+        return defaultSchemeFor(kind);
+    };
+    const templateScheme = schemeForKind(templateSpecKind);
+    /** 默认档代表未单独覆盖时的通用回退，与角色/场景/道具的具体方案模板分开。 */
+    const templateDefault = templateKind === "default" ? ASSET_PROMPT_FALLBACK_TEMPLATE : defaultAssetPromptTemplate(templateSpecKind, templateScheme);
+    /** 有效模板：有覆盖用覆盖，否则预填内置默认模板，文本域不再空白。 */
+    const effectiveTemplate = templateValue.trim() ? templateValue : templateDefault;
+    const templateCustomized = templateValue.trim().length > 0;
+    // 字数按码点计（Array.from），与后端校验同一口径；超 4000 拒绝保存。
+    const templateCharCount = Array.from(effectiveTemplate).length;
+    const templateOverLimit = templateCharCount > ASSET_PROMPT_TEMPLATE_MAX;
+    const sampleName = sampleAssetName.trim() || "示例角色";
+    // 预览示例名取本剧第一个角色资产名；取不到（未建资产 / 后端不可达）退回「示例角色」。
+    useEffect(() => {
+        if (!dramaId) { setSampleAssetName(""); return; }
+        let cancelled = false;
+        void fetchBackendAssets({ kind: "character", dramaId })
+            .then((response) => {
+                if (cancelled) return;
+                const rows = Array.isArray(response?.assets) ? response.assets as Array<Record<string, unknown>> : [];
+                const first = rows.find((row) => String(row?.kind || "") === "character") || rows[0];
+                const data = (first?.data || {}) as Record<string, unknown>;
+                setSampleAssetName(String(data.name || first?.title || "").trim());
+            })
+            .catch(() => { if (!cancelled) setSampleAssetName(""); });
+        return () => { cancelled = true; };
+    }, [dramaId]);
+    // 预览与后端同一渲染函数（canvas-agent 导出），保证「看到什么就发什么」；用有效模板（含预填默认）渲染。
     const templatePreview = useMemo(() => {
+        const templates = (templateKind === "default" ? { default: effectiveTemplate } : { [templateKind]: effectiveTemplate }) as Record<string, string>;
+        return renderAssetPromptWithTemplate(templateSpecKind, sampleName, "示例外观：青衫少年，佩剑", templateScheme,
+            templates, { 资产名称: sampleName, 资产设定: "示例外观：青衫少年，佩剑", 画面规则: "", 项目画风: "" }).prompt;
+    }, [templateKind, effectiveTemplate, templateSpecKind, templateScheme, sampleName]);
+    /**
+     * 影策「从技能导入」：把当前档对应技能区块（ASSET_KIND_SKILL[kind].section）的要点填进模板。
+     * 技能正文取不到时只按区块标题生成一句说明并提示「技能正文不可用」，不编造大段文本。
+     */
+    const importTemplateFromSkill = async () => {
+        if (templateImporting) return;
         const kind = templateKind === "character" ? "character" : templateKind === "scene" ? "scene" : "prop";
-        const scheme = (kind === "character" ? "portrait" : kind === "scene" ? "scene" : "prop") as AssetSchemeId;
-        const templates = templateKind === "default" ? { default: templateValue } : ({ [templateKind]: templateValue } as Record<string, string>);
-        return renderAssetPromptWithTemplate(kind, "示例角色", "示例外观：青衫少年，佩剑", scheme,
-            templates, { 资产名称: "示例角色", 资产设定: "示例外观：青衫少年，佩剑", 画面规则: "", 项目画风: "" }).prompt;
-    }, [templateKind, templateValue]);
+        const skill = ASSET_KIND_SKILL[kind];
+        const kindLabel = kind === "character" ? "角色" : kind === "scene" ? "场景" : "道具";
+        const skillName = settings.textSkills.prompt?.name || skill.skill;
+        setTemplateImporting(true);
+        setTemplateNote("");
+        try {
+            const detail = await fetchSkillDetail(skillName).catch(() => null);
+            const excerpt = skillSectionExcerpt(String(detail?.content || ""), skill.section);
+            const draft = excerpt
+                ? `按技能「${skillName}」的「${skill.section}」写 {{资产名称}} 的${kindLabel}参考图提示词（{{方案名称}} · {{方案要求}}）：\n主体设定：{{资产设定}}\n${excerpt}\n画风：{{项目画风}}`
+                : `按技能「${skillName}」的「${skill.section}」写 {{资产名称}} 的${kindLabel}参考图提示词：先交代外形与材质细节，再定构图与镜头，最后补光线与背景；画幅与画风按 {{项目画风}}、{{方案要求}} 执行。`;
+            const next = Array.from(draft).slice(0, ASSET_PROMPT_TEMPLATE_MAX).join("");
+            patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: next });
+            setTemplateNote(excerpt
+                ? `已导入技能「${skillName}」的「${skill.section}」要点（${Array.from(next).length} 字），可继续精修。`
+                : `技能正文不可用：已按「${skill.section}」生成一句说明，可自行补充。`);
+        } finally {
+            setTemplateImporting(false);
+        }
+    };
     const applyReferenceLayout = async () => {
         const scheme = settings.referenceLayout;
         if (!dramaId || !ASSET_SCHEME_OPTIONS.some((o) => o.value === scheme)) return;
@@ -673,39 +452,6 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
             setLayoutApplying(false);
         }
     };
-
-    // ===== productionStage：只读展示制作稿真值（与 agent 总流程同一字段），不做假开关 =====
-    const [stageTruth, setStageTruth] = useState<{ current: string; done: string[]; episodeNo: number } | null>(null);
-    const [stageNote, setStageNote] = useState("");
-    useEffect(() => {
-        let alive = true;
-        setStageTruth(null);
-        setStageNote("");
-        if (!dramaId) return () => { alive = false; };
-        void (async () => {
-            try {
-                const { episodes } = await fetchBackendDramaEpisodes(dramaId);
-                const first = (episodes || [])[0];
-                if (!first?.id) { if (alive) setStageNote("还没有分集制作稿，暂无阶段游标"); return; }
-                const { production } = await fetchEpisodeProduction(first.id);
-                const raw = (production?.draft as Record<string, any> | undefined)?.settings?.productionStage;
-                const value = raw && typeof raw === "object"
-                    ? {
-                        current: String(raw.current || ""),
-                        done: Array.isArray(raw.done) ? raw.done.map(String) : [],
-                        episodeNo: first.episodeNumber,
-                    }
-                    : null;
-                if (alive) {
-                    setStageTruth(value);
-                    if (!value) setStageNote("该集制作稿尚未初始化生产阶段游标（老项目不拦截）");
-                }
-            } catch {
-                if (alive) setStageNote("制作稿读取失败，阶段信息暂不可用");
-            }
-        })();
-        return () => { alive = false; };
-    }, [dramaId]);
 
     // 分集方式的真值在 folder.productionPlan.episodeMode；缺省（老剧目）按 chapter 解释。
     const episodeFolder = useMemo(() => folders.find((f) => f.id === dramaId) || null, [folders, dramaId]);
@@ -911,12 +657,6 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
         return "";
     }, [config.channels, settings.videoModel]);
 
-    // 与后端共享同一换算：档位 + 画幅 → 真实 H3 出片尺寸（展示值 == 出片值，不是估算假值）。
-    const resolutionEffective = useMemo(
-        () => dramaVideoResolutionToH3(settings.videoResolution, settings.videoAspectRatio),
-        [settings.videoResolution, settings.videoAspectRatio],
-    );
-
     // 当前视频模型的真能力来自模型登记 / 引擎上报的显式字段；缺字段返回 {}，下面一律「缺省不告警/不限制」。
     const modelVideoCapabilities = useMemo(
         () => modelVideoCapabilitiesOf(config, settings.videoModel),
@@ -1022,7 +762,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
     let savedContinuationMode: "tail" | "parallel" = "tail";
     if (dramaId && typeof localStorage !== "undefined") {
         try {
-            const raw = localStorage.getItem(storageKey(dramaId));
+            const raw = localStorage.getItem(studioSettingsStorageKey(dramaId));
             const parsed = raw ? JSON.parse(raw) as Partial<StudioProductionSettings> : null;
             if (parsed?.continuationMode === "parallel") savedContinuationMode = "parallel";
         } catch {
@@ -1089,7 +829,11 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                         <button
                             type="button"
                             onClick={onSave}
-                            disabled={!dramaId || saving || !dirty}
+                            disabled={!dramaId || saving || !dirty || templateOverLimit}
+                            title={templateOverLimit
+                                ? `参考图提示词模板 ${templateCharCount} 字，超过上限 ${ASSET_PROMPT_TEMPLATE_MAX} 字，删减后才能保存`
+                                : "保存当前制作设置"}
+                            data-studio-settings-save
                             className="flex h-[34px] items-center gap-1.5 rounded-[8px] bg-foreground px-3 text-[13px] font-medium text-background! transition hover:opacity-90 disabled:opacity-50"
                             style={{ fontSize: 13 }}
                         >
@@ -1216,9 +960,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                         </p>
                                         <Field label="剧情段">
                                             <ChoiceButtons marker="segment-mode" value={settings.segmentMode}
-                                                options={[
-                                                    { value: "auto", label: "智能" }, { value: "fixed", label: "固定" }, { value: "range", label: "范围" },
-                                                ]}
+                                                options={(["auto", "fixed", "range"] as const).map((value) => ({ value, label: SEGMENT_MODE_LABEL[value] }))}
                                                 onChange={(v) => patch("segmentMode", v)} />
                                         </Field>
                                         <p className="pl-[120px] text-[11px] leading-relaxed text-foreground/40" data-studio-segment-mode-detail>
@@ -1256,20 +998,17 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                             </Field>
                                         ) : null}
                                         <Field label="镜头节奏">
-                                            <TickSlider marker="pacing" value={(["极快", "快", "标准", "舒缓", "慢"] as const).indexOf(settings.pacing as "标准")}
-                                                labels={["极快", "快", "标准", "舒缓", "慢"]} tickValues={[0, 1, 2, 3, 4]} min={0} max={4}
+                                            <TickSlider marker="pacing" value={(PACING_LABEL as readonly string[]).indexOf(settings.pacing)}
+                                                labels={PACING_LABEL} tickValues={[0, 1, 2, 3, 4]} min={0} max={4}
                                                 bubble={settings.pacing}
-                                                onValue={(i) => patch("pacing", (["极快", "快", "标准", "舒缓", "慢"] as const)[i])} />
+                                                onValue={(i) => patch("pacing", PACING_LABEL[i])} />
                                         </Field>
                                         <p className="pl-[120px] text-[11px] leading-relaxed text-foreground/40" data-studio-pacing-detail>
                                             {settings.pacing}：{PACING_DETAIL[settings.pacing] || ""}
                                         </p>
                                         <Field label="对白密度">
                                             <ChoiceButtons marker="dialogue-density" value={settings.dialogueDensity}
-                                                options={[
-                                                    { value: "dense", label: "密集" }, { value: "standard", label: "标准" },
-                                                    { value: "restrained", label: "克制" }, { value: "custom", label: "自定义" },
-                                                ]}
+                                                options={(["dense", "standard", "restrained", "custom"] as const).map((value) => ({ value, label: DIALOGUE_LABEL[value] }))}
                                                 onChange={(v) => patch("dialogueDensity", v)} />
                                         </Field>
                                         <p className="pl-[120px] text-[11px] leading-relaxed text-foreground/40" data-studio-dialogue-detail>
@@ -1297,10 +1036,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                         </p>
                                         <Field label="转场">
                                             <ChoiceButtons marker="transition-mode" value={settings.transitionMode}
-                                                options={[
-                                                    { value: "smart", label: "智能" }, { value: "hard", label: "硬切" },
-                                                    { value: "fade", label: "黑场过渡" }, { value: "flash", label: "闪白" },
-                                                ]}
+                                                options={(["smart", "hard", "fade", "flash"] as const).map((value) => ({ value, label: TRANSITION_LABEL[value] }))}
                                                 onChange={(v) => patch("transitionMode", v)} />
                                         </Field>
                                         <p className="pl-[120px] text-[11px] leading-relaxed text-foreground/40" data-studio-transition-detail>
@@ -1372,8 +1108,8 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                     </select>
                                                 </Field>
                                                 { row.skillKey ? (
-                                                    <div className="mt-2 flex items-start gap-3 pl-1">
-                                                        <span className="w-14 shrink-0 pt-0.5 text-[11px] font-semibold text-foreground/55" title={`留空默认：acheng/${ { plan: "story", extract: "assets", storyboard: "shots", prompt: "model" }[row.skillKey] }`}>技能</span>
+                                                    <div className="mt-2 flex items-start gap-2">
+                                                        <span className="w-28 shrink-0 pt-0.5 text-[11px] font-semibold text-foreground/55" title={`留空默认：acheng/${ { plan: "story", extract: "assets", storyboard: "shots", prompt: "model" }[row.skillKey] }`}>技能</span>
                                                         <SkillPickerField step={row.skillKey}
                                                             value={settings.textSkills[row.skillKey]}
                                                             onChange={(ref) => patch("textSkills", { ...settings.textSkills, [row.skillKey]: ref })} />
@@ -1428,7 +1164,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                 })}
                                             </div>
                                         </Field>
-                                        <div className="flex flex-wrap items-center gap-2 pl-1">
+                                        <div className="flex flex-wrap items-center gap-2">
                                             <button type="button" onClick={() => void applyReferenceLayout()}
                                                 disabled={!dramaId || layoutApplying}
                                                 data-studio-reference-layout-apply
@@ -1437,9 +1173,9 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                             </button>
                                             <span className="text-[10px] text-muted-foreground">真写回：选中写入本剧设置随「保存设置」落盘；应用后按资产类型写进每集资产卡 view_layout，与「项目资产 → 参考图方案」同一字段，可单条覆盖。</span>
                                         </div>
-                                        {layoutNote ? <p className="pl-1 text-[10px] text-emerald-600" data-studio-reference-layout-note>{layoutNote}</p> : null}
+                                        {layoutNote ? <p className="text-[10px] text-emerald-600" data-studio-reference-layout-note>{layoutNote}</p> : null}
                                         <div className="rounded-md border border-border bg-background/40 p-2.5" data-studio-ref-preview>
-                                            <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">实际发送预览（只读 · 来自本地技能模板）</div>
+                                            <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">内置方案模板对照（只读 · 来自本地技能模板）</div>
                                             <ul className="space-y-0.5 text-[11px] leading-relaxed">
                                                 <li>角色 · {ASSET_KIND_SKILL.character.imageKind}｜{ASSET_KIND_SKILL.character.section}</li>
                                                 <li>场景 · {ASSET_KIND_SKILL.scene.imageKind}｜{ASSET_KIND_SKILL.scene.section}</li>
@@ -1447,56 +1183,88 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                             </ul>
                                             <p className="mt-1.5 text-[10px] text-muted-foreground">真实提示词由资产设定卡按技能模板拼装；到「项目资产 · 设定详情」可查看并精修发送内容。</p>
                                         </div>
-                                    </Section>
-
-                    <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图" desc="一键按资产卡设定 + 当前方案真出图并写回；不想覆盖旧图时，仍可用下方按钮到资产库手动重做。">
-                                        {/* 影策「资产方案 → 提示词」：角色/场景/默认三档模板，留空沿用内置方案模板。 */}
+                                        {/* 影策「资产方案 → 提示词」：三档模板 + 从技能导入 + 插入变量 + 实际发送预览（渲染函数与真发同一入口）。 */}
                                         <div className="rounded-[8px] border border-border bg-background/40 p-3" data-studio-prompt-templates>
-                                            <div className="mb-2 flex flex-wrap items-center gap-1.5">
-                                                {([["character", "角色提示词"], ["scene", "场景提示词"], ["default", "默认"]] as const).map(([key, label]) => (
-                                                    <button key={key} type="button" onClick={() => setTemplateKind(key)}
-                                                        aria-pressed={templateKind === key}
-                                                        data-studio-prompt-template-tab={key}
-                                                        className={cn("h-7 rounded-md px-2.5 text-[11px] transition", templateKind === key ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground")}>
-                                                        {label}{String(assetTemplates[key] || "").trim() ? " ·" : ""}
-                                                    </button>
-                                                ))}
+                                            <div className="mb-3 flex flex-wrap items-center gap-2">
+                                                {/* 影策实测：胶囊条 40 高（padding 4 + 内高 30）、内胶囊 30 高 / 11px / 圆角 8 / 选中白底描边阴影 */}
+                                                <div className="flex items-center gap-0.5 rounded-[8px] border border-foreground/10 bg-foreground/[0.03] p-1" role="tablist" aria-label="参考图提示词模板档位">
+                                                    {([["character", "角色提示词"], ["scene", "场景提示词"], ["default", "默认"]] as const).map(([key, label]) => (
+                                                        <button key={key} type="button" role="tab" aria-selected={templateKind === key}
+                                                            onClick={() => setTemplateKind(key)}
+                                                            data-studio-prompt-template-tab={key}
+                                                            className={cn("h-[30px] rounded-[8px] px-4 text-[11px] transition",
+                                                                templateKind === key ? "border border-foreground/10 bg-card font-medium text-foreground shadow-sm" : "border border-transparent text-foreground/55 hover:text-foreground")}>
+                                                            {label}
+                                                        </button>
+                                                    ))}
+                                                </div>
                                                 <span className="flex-1" />
-                                                <button type="button" disabled={!templateValue.trim()}
-                                                    onClick={() => patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: "" })}
-                                                    className="h-7 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:bg-muted disabled:opacity-40"
-                                                    data-studio-prompt-template-reset>恢复默认</button>
+                                                <span data-studio-prompt-template-state={templateCustomized ? "custom" : "default"}
+                                                    className="rounded-[999px] border border-foreground/10 bg-foreground/[0.03] px-2 py-0.5 text-[10px] text-foreground/55">
+                                                    {templateCustomized ? "已自定义" : "默认模板"}
+                                                </span>
+                                                <button type="button" disabled={templateImporting} onClick={() => void importTemplateFromSkill()}
+                                                    data-studio-prompt-template-import
+                                                    title="把当前档对应技能的方法要点填进模板"
+                                                    className="flex h-7 items-center gap-1.5 rounded-[8px] px-2 text-[12px] font-medium text-foreground/[0.68] transition hover:bg-muted hover:text-foreground disabled:opacity-40">
+                                                    <Wand2 className="size-3.5" /> {templateImporting ? "导入中…" : "从技能导入"}
+                                                </button>
+                                                <button type="button"
+                                                    onClick={() => { patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: "" }); setTemplateNote(templateCustomized ? "已清空自定义，回到内置默认模板。" : ""); }}
+                                                    data-studio-prompt-template-reset
+                                                    title="清空自定义，回到内置默认模板"
+                                                    className="flex h-7 items-center gap-1.5 rounded-[8px] px-2 text-[12px] font-medium text-foreground/[0.68] transition hover:bg-muted hover:text-foreground disabled:opacity-40">
+                                                    <RotateCcw className="size-3.5" /> 恢复默认
+                                                </button>
                                             </div>
-                                            <textarea ref={templateInputRef} rows={10} value={templateValue} spellCheck={false}
-                                                data-studio-prompt-template-input={templateKind}
-                                                aria-label={`${templateKind === "character" ? "角色" : templateKind === "scene" ? "场景" : "默认"}参考图提示词模板`}
-                                                placeholder={"留空则用内置方案模板。可用变量：{{资产名称}} {{资产设定}} {{方案要求}} {{画面规则}} {{项目画风}} {{方案名称}}"}
-                                                onChange={(e) => patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: e.target.value })}
-                                                className="w-full resize-y rounded-[12px] border border-border bg-background px-3 py-2 text-foreground outline-none focus:border-foreground/30"
-                                                style={{ fontSize: 13, lineHeight: 1.6 }} />
+                                            <div className="relative">
+                                                <textarea ref={templateInputRef} rows={8} value={effectiveTemplate} spellCheck={false}
+                                                    data-studio-prompt-template-input={templateKind}
+                                                    aria-label={`${templateKind === "character" ? "角色" : templateKind === "scene" ? "场景" : "默认"}参考图提示词模板`}
+                                                    aria-invalid={templateOverLimit || undefined}
+                                                    placeholder={"编辑即保存为自定义模板；清空则用内置默认模板。可用变量：{{资产名称}} {{资产设定}} {{方案要求}} {{画面规则}} {{项目画风}} {{方案名称}}"}
+                                                    onChange={(e) => patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: e.target.value })}
+                                                    className={cn("w-full resize-y rounded-[8px] border bg-background px-3 py-1.5 pb-7 text-foreground outline-none",
+                                                        templateOverLimit ? "border-destructive focus:border-destructive" : "border-border focus:border-foreground/30")}
+                                                    style={{ fontSize: 13, lineHeight: 1.6 }} />
+                                                <span data-studio-prompt-template-count aria-live="polite"
+                                                    className={cn("pointer-events-none absolute bottom-2 right-3 text-[11px]", templateOverLimit ? "font-medium text-destructive" : "text-foreground/45")}>
+                                                    {templateCharCount} / {ASSET_PROMPT_TEMPLATE_MAX}
+                                                </span>
+                                            </div>
                                             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                                <span className="text-[10px] text-muted-foreground">插入变量</span>
+                                                <span className="text-[11px] text-foreground/40">插入变量</span>
                                                 {ASSET_PROMPT_VARIABLES.map((name) => (
                                                     <button key={name} type="button"
                                                         onClick={() => {
                                                             const token = `{{${name}}}`;
                                                             const el = templateInputRef.current;
-                                                            const start = el?.selectionStart ?? templateValue.length;
-                                                            const end = el?.selectionEnd ?? templateValue.length;
-                                                            const next = `${templateValue.slice(0, start)}${token}${templateValue.slice(end)}`;
+                                                            const start = el?.selectionStart ?? effectiveTemplate.length;
+                                                            const end = el?.selectionEnd ?? effectiveTemplate.length;
+                                                            const next = `${effectiveTemplate.slice(0, start)}${token}${effectiveTemplate.slice(end)}`;
                                                             patch("assetPromptTemplates", { ...assetTemplates, [templateKind]: next });
                                                             requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(start + token.length, start + token.length); });
                                                         }}
                                                         data-studio-prompt-template-insert={name}
-                                                        className="h-6 rounded border border-border px-1.5 text-[10px] text-muted-foreground transition hover:bg-muted hover:text-foreground">{`{{${name}}}`}</button>
+                                                        className="h-6 rounded-[4px] border border-foreground/10 bg-card px-1.5 text-[11px] text-foreground/60 transition hover:bg-muted hover:text-foreground">{name}</button>
                                                 ))}
                                             </div>
-                                            <p className="mt-2 whitespace-pre-wrap break-words text-[10px] leading-relaxed text-muted-foreground" data-studio-prompt-template-preview>
-                                                {templateValue.trim()
-                                                    ? `实际发送预览：${templatePreview.slice(0, 160)}${templatePreview.length > 160 ? "…" : ""}`
-                                                    : "当前使用内置方案模板；填模板后立即在「生成参考图 / 一键按当前方案重做」时生效，已生成的图片不会自动重做。"}
-                                            </p>
+                                            {templateNote ? <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground" data-studio-prompt-template-import-note>{templateNote}</p> : null}
+                                            <div className="mt-3 rounded-[6px] border border-foreground/10 bg-foreground/[0.02] p-2.5">
+                                                <div className="mb-1.5 flex flex-wrap items-baseline gap-1.5">
+                                                    <span className="text-[12px] font-medium text-foreground/70" data-studio-prompt-template-preview-title>实际发送预览</span>
+                                                    <span className="text-[11px] text-foreground/40">以「{sampleName}」为例</span>
+                                                    {templateOverLimit ? <span className="text-[11px] text-destructive">已超上限 {ASSET_PROMPT_TEMPLATE_MAX} 字，禁止保存</span> : null}
+                                                </div>
+                                                <div className="max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[12px] leading-[1.7] text-foreground/60" data-studio-prompt-template-preview>
+                                                    {templatePreview}
+                                                </div>
+                                            </div>
                                         </div>
+
+                                    </Section>
+
+                    <Section marker="redo-guide" icon={<ImageIcon className="size-4" />} title="重做参考图" desc="一键按资产卡设定 + 当前方案真出图并写回；不想覆盖旧图时，仍可用下方按钮到资产库手动重做。">
                                         <div className="rounded-md border border-border bg-background/40 p-2.5" data-studio-regen-one-click>
                                             <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">一键按当前方案重做（真出图 · 真写回）</div>
                                             <div className="flex flex-wrap items-center gap-2">
@@ -1548,7 +1316,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                 <span className="text-[10px] text-emerald-600">已登记 {registeredPromptMaxChars} 字</span>
                                             )}
                                         </Field>
-                                        <p className="pl-1 text-[10px] leading-relaxed text-muted-foreground" data-studio-prompt-max-chars-hint>
+                                        <p className="text-[10px] leading-relaxed text-muted-foreground" data-studio-prompt-max-chars-hint>
                                             本地引擎实测未上报字数上限：留空 = 不启用硬上限（段提示词沿用软提醒）。填写后按码点硬校验、超限拒绝；8000 是影策视频模型参考默认值，不是本地模型实测值，请按模型实际能力登记。
                                         </p>
                                         {promptMaxCharsError ? <p className="text-xs text-destructive" role="alert" data-studio-prompt-max-chars-error>{promptMaxCharsError}</p> : null}
@@ -1573,7 +1341,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                 <span className="text-[10px] text-emerald-600" data-studio-model-max-video-seconds-registered>已登记 {registeredMaxVideoSeconds} 秒</span>
                                             )}
                                         </Field>
-                                        <p className="pl-1 text-[10px] leading-relaxed text-muted-foreground" data-studio-model-max-video-seconds-hint>
+                                        <p className="text-[10px] leading-relaxed text-muted-foreground" data-studio-model-max-video-seconds-hint>
                                             本地引擎实测未上报单次时长上限：留空 = 未知/不限制（不写 0、不写默认 15）。填写后只写入当前视频模型的 maxVideoSeconds（1–600 的正整数），影策段卡的「N 镜 · 上限 Xs」直接读这个值。
                                         </p>
                                         {maxVideoSecondsError ? <p className="text-xs text-destructive" role="alert" data-studio-model-max-video-seconds-error>{maxVideoSecondsError}</p> : null}
@@ -1608,13 +1376,6 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                     </button>
                                                 ))}
                                             </div>
-                                        </Field>
-                                        <Field label="实际出片尺寸" hint="与后端共用换算（estimateH3Dimensions），显示值即真实出片参数">
-                                            <span className="text-xs text-muted-foreground" data-studio-video-size>
-                                                {resolutionEffective
-                                                    ? `${resolutionEffective.size} · megapixels=${resolutionEffective.megapixels} · ${resolutionEffective.aspectRatio}`
-                                                    : "跟随视频模型默认（本地 H3 原生由 Clip 保存值决定）"}
-                                            </span>
                                         </Field>
                                         {ratioProblem ? (
                                             <p className="text-xs text-destructive" role="alert" data-studio-video-warning="ratio">
@@ -1686,7 +1447,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                     </Section>
 
                     <Section marker="voice-library" icon={<Music2 className="size-4" />} title="音色库" desc="影策 voice-profiles：登记音色档案与声音样本 storageKey。这里登记后，在「项目资产 → 角色 → 声音样本」的下拉里即可选中该档案；选中立即真写进对应角色的 character.voice（含 storageKey），随角色开口段发送，不是只存本地的下拉装饰。">
-                                        <p className="pl-1 text-[10px] leading-relaxed text-muted-foreground">样本 storageKey 需是素材库里真实存在的音频；「音色描述」会作为该角色声线写回 voice_description。未填样本 storageKey 的档案不会进入绑定下拉。</p>
+                                        <p className="text-[10px] leading-relaxed text-muted-foreground">样本 storageKey 需是素材库里真实存在的音频；「音色描述」会作为该角色声线写回 voice_description。未填样本 storageKey 的档案不会进入绑定下拉。</p>
                                         <div className="space-y-2">
                                             {settings.voiceProfiles.map((vp, index) => (
                                                 <div key={vp.id} className="flex items-center gap-2 rounded-md border border-border bg-background/40 p-2">
@@ -1746,36 +1507,13 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                         {reviewPolicyNote ? <p className="text-[10px] text-emerald-600" data-studio-review-policy-note>{reviewPolicyNote}</p> : null}
                                     </Section>
 
-                    <Section marker="production-stage" icon={<Gauge className="size-4" />} title="制作阶段（只读）" desc="六段制作阶段游标是制作稿的真值，设置页只读展示、不造假开关：数据源为当前集 draft.settings.productionStage，与 agent 总流程和制作进度条同一字段。">
-                                        <div className="flex flex-wrap gap-1.5" data-studio-production-stage>
-                                            {PRODUCTION_STAGE_KEYS.map((key) => {
-                                                const done = Boolean(stageTruth?.done.includes(key));
-                                                const current = stageTruth?.current === key;
-                                                return (
-                                                    <span key={key} className={cn("rounded-md border px-2 py-1 text-[11px]",
-                                                        current ? "border-primary bg-primary/10 text-primary"
-                                                            : done ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
-                                                                : "border-border text-muted-foreground")}>
-                                                        {PRODUCTION_STAGE_LABELS[key] || key}{current ? " · 当前" : done ? " · 完成" : ""}
-                                                    </span>
-                                                );
-                                            })}
-                                        </div>
-                                        <p className="text-[10px] text-muted-foreground" data-studio-production-stage-truth>
-                                            {stageTruth ? `第 ${stageTruth.episodeNo} 集当前阶段：${PRODUCTION_STAGE_LABELS[stageTruth.current] || stageTruth.current || "未设置"}；已完成：${stageTruth.done.map((k) => PRODUCTION_STAGE_LABELS[k] || k).join("、") || "无"}` : (stageNote || "读取中…")}
-                                        </p>
-                                        <p className="text-[10px] leading-relaxed text-muted-foreground">阶段游标由制作流程按序推进并写回制作稿；设置页不提供手动改写入口，避免绕过开工报告的真值。</p>
-                                    </Section>
                 </div>
                 <aside className="space-y-3 lg:sticky lg:top-4">
                     <Section marker="work" icon={<BookOpen className="size-4" />} title="作品" desc="影策记为“开工时确定”，只读展示当前剧目的真实信息。">
                                         <dl className="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1.5 text-xs">
-                                            <dt className="text-muted-foreground">剧目</dt><dd className="truncate">{studioInfo?.dramaName || "—"}</dd>
-                                            <dt className="text-muted-foreground">分集</dt><dd>{studioInfo ? `${studioInfo.episodeCount} 集` : "—"}</dd>
-                                            <dt className="text-muted-foreground">原文章节</dt><dd>{studioInfo ? `${studioInfo.chapterCount} 章` : "—"}</dd>
-                                            <dt className="text-muted-foreground">画幅</dt><dd title="画幅真值取自「视频 · 画幅」：资产参考图与成片都按同一画幅出片">{settings.videoAspectRatio === "9:16" ? "9:16（竖版）" : "16:9（横版）"}</dd>
-                                            <dt className="text-muted-foreground">视觉风格</dt><dd className="truncate">{artStyle || <span className="text-muted-foreground">剧目规划未设置</span>}</dd>
-                                            <dt className="text-muted-foreground">对白语言</dt><dd>{dialogueLanguage || <span className="text-muted-foreground">剧目规划未设置</span>}
+                                            <dt className="text-muted-foreground">画幅</dt><dd className="text-right" title="画幅真值取自「视频 · 画幅」：资产参考图与成片都按同一画幅出片">{settings.videoAspectRatio === "9:16" ? "9:16（竖版）" : "16:9（横版）"}</dd>
+                                            <dt className="text-muted-foreground">视觉风格</dt><dd className="truncate text-right">{artStyle || <span className="text-muted-foreground">剧目规划未设置</span>}</dd>
+                                            <dt className="text-muted-foreground">对白语言</dt><dd className="text-right">{dialogueLanguage || <span className="text-muted-foreground">剧目规划未设置</span>}
                                                 <span className="ml-1 text-[10px] text-muted-foreground/70">（可选：{TOPIC_OPTIONS.language.join(" / ")}）</span></dd>
                                         </dl>
                                     </Section>
@@ -1838,7 +1576,7 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                 <input type="range" min={1} max={8} value={settings.concurrency[key]}
                                                     onChange={(e) => patch("concurrency", { ...settings.concurrency, [key]: Number(e.target.value) })}
                                                     className="flex-1" />
-                                                <span className="w-6 text-center tabular-nums">{settings.concurrency[key]}</span>
+                                                <span className="w-6 text-right tabular-nums">{settings.concurrency[key]}</span>
                                             </Field>
                                         ))}
                                     </Section>
@@ -1861,13 +1599,6 @@ export function StudioSettingsTab({ dramaId, settings, onChange, onSave, onReset
                                                 className="flex-1" data-studio-budget-input />
                                             <span className="text-[10px] text-muted-foreground">0=不限</span>
                                         </Field>
-                                    </Section>
-
-                    <Section icon={<FilmIcon />} title="样片模式" desc="影策以第1集为样片。开启后流水线把第1集视频设为审阅闸门：第1集成片需人工确认，才继续其余集；与下方审阅方式叠加。">
-                                        <label className="flex items-center gap-2 text-xs">
-                                            <input type="checkbox" checked={settings.sampleMode} onChange={(e) => patch("sampleMode", e.target.checked)} className="size-3.5" />
-                                            启用样片模式（第1集作为样片）
-                                        </label>
                                     </Section>
                 </aside>
             </div>

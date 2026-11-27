@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
+import { Fragment, lazy, Suspense, useEffect, useId, useState, type MouseEvent, type ReactNode } from "react";
 import { App, Button, Modal, Popover } from "antd";
 import { Brain, CheckCircle2, ChevronDown, ChevronRight, Circle, CircleAlert, Copy, ExternalLink, FilePenLine, FileText, FolderOpen, ListChecks, LoaderCircle, Search, ShieldAlert, TerminalSquare, Wrench, XCircle } from "lucide-react";
-import { extractTableDataFromElement, Streamdown, tableDataToMarkdown, type LinkSafetyModalProps } from "streamdown";
+// 只取类型：streamdown 的运行时（含 mermaid）走下面的 lazy 模块，不进首屏图。
+import type { LinkSafetyModalProps } from "streamdown";
 import { useTranslation } from "react-i18next";
 
 import i18n from "@/i18n";
@@ -23,6 +24,13 @@ const streamdownProps = () => ({
     },
 } as const);
 const streamdownAnimation = { duration: 20, stagger: 0, sep: "word" } as const;
+
+// streamdown 连带 mermaid（JS 4MB+），只在真正渲染对话 markdown 时按需加载；加载期间用纯文本占位。
+const AgentStreamdown = lazy(() => import("./agent-streamdown").then((module) => ({ default: module.AgentStreamdown })));
+
+function AgentMarkdownFallback({ text }: { text: string }) {
+    return <div className="whitespace-pre-wrap break-words">{text}</div>;
+}
 
 function AgentLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalProps) {
     const { t } = useTranslation();
@@ -106,13 +114,26 @@ export type AgentChatMessageItem = {
 export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: { item: AgentChatMessageItem; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onRejectTool?: (id: string) => void; onApproveTool?: (id: string) => void }) {
     const isUser = item.role === "user";
     const isSystem = item.role === "system";
-    const color = item.role === "error" ? "#dc2626" : item.role === "tool" ? "#2563eb" : theme.node.text;
+    const color = item.role === "tool" ? "#2563eb" : theme.node.text;
     if (isSystem) {
         return (
-            <div className="flex justify-center text-xs">
-                <div className="max-w-[88%] px-3 py-1.5 text-center" style={{ color: theme.node.muted }}>
+            <div className="flex min-w-0 items-start gap-2 py-0.5" data-agent-status-row="info">
+                <FileText aria-hidden className="mt-[3px] size-4 shrink-0" style={{ color: "#2563eb" }} />
+                <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[14px] leading-6" style={{ color: theme.node.muted }}>
                     {item.text}
                     {item.meta ? <span className="ml-2 opacity-60">{item.meta}</span> : null}
+                </div>
+            </div>
+        );
+    }
+    if (item.role === "error") {
+        return (
+            <div className="flex min-w-0 items-start gap-2 py-0.5" data-agent-status-row="error">
+                <CircleAlert aria-hidden className="mt-[3px] size-4 shrink-0 text-red-600" />
+                <div className="min-w-0 flex-1">
+                    {item.title ? <p className="break-words text-[15px] font-semibold leading-6" style={{ color: theme.node.text }}>{item.title}</p> : null}
+                    {item.text ? <p className={`whitespace-pre-wrap break-words leading-5 ${item.title ? "mt-0.5 text-[13px] opacity-80" : "text-[15px]"}`} style={{ color: theme.node.muted }}>{item.text}</p> : null}
+                    {item.meta ? <p className="mt-1 text-[11px] tabular-nums opacity-55">{item.meta}</p> : null}
                 </div>
             </div>
         );
@@ -122,10 +143,11 @@ export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: {
         return <AgentToolCard title={item.title || tr("toolCall")} text={item.text} detail={item.detail} theme={theme} />;
     }
     return (
-        <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+        <div className={`flex ${isUser ? "justify-end" : "justify-start"} py-0.5`}>
             <div
-                className={isUser ? "min-w-0 max-w-[82%] py-1 text-right text-sm leading-6" : "min-w-0 w-full text-left text-sm leading-6"}
+                className={isUser ? "min-w-0 max-w-[85%] text-right text-[15px] leading-7" : "min-w-0 w-full text-left text-[15px] leading-7"}
                 style={{ color }}
+                data-agent-message-role={isUser ? "user" : "assistant"}
             >
                 {isUser ? (
                     <AgentUserMessageContent text={item.text} references={item.canvasReferences || []} skill={item.skill} theme={theme} />
@@ -141,7 +163,7 @@ export function AgentChatMessage({ item, theme, onRejectTool, onApproveTool }: {
 
 function AgentAssistantMessageContent({ text, isAnimating }: { text: string; isAnimating: boolean }) {
     const copyText = useCopyText();
-    const copyTable = (event: MouseEvent<HTMLDivElement>) => {
+    const copyTable = async (event: MouseEvent<HTMLDivElement>) => {
         const target = event.target;
         if (!(target instanceof Element)) return;
         const button = target.closest("button");
@@ -150,10 +172,17 @@ function AgentAssistantMessageContent({ text, isAnimating }: { text: string; isA
         if (!(table instanceof HTMLTableElement)) return;
         event.preventDefault();
         event.stopPropagation();
-        copyText(tableDataToMarkdown(extractTableDataFromElement(table)), tr("copied"));
+        const { tableElementToMarkdown } = await import("./agent-streamdown");
+        copyText(tableElementToMarkdown(table), tr("copied"));
     };
 
-    return <div onClickCapture={copyTable}><Streamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={isAnimating}>{text}</Streamdown></div>;
+    return (
+        <div onClickCapture={copyTable}>
+            <Suspense fallback={<AgentMarkdownFallback text={text} />}>
+                <AgentStreamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={isAnimating}>{text}</AgentStreamdown>
+            </Suspense>
+        </div>
+    );
 }
 
 function AgentUserMessageContent({ text, references, skill, theme }: { text: string; references: AgentCanvasReference[]; skill?: AgentSkillReference; theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {
@@ -319,7 +348,9 @@ function AgentReasoningSummary({ text, detail, theme }: { text: string; detail?:
                 </div>
             </summary>
             <div className="break-words pb-1 pl-6 pr-2 text-xs leading-5 [&_code]:rounded [&_code]:px-1 [&_p]:my-1 [&_pre]:my-2" style={{ color: theme.node.muted }}>
-                <Streamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={running}>{text}</Streamdown>
+                <Suspense fallback={<AgentMarkdownFallback text={text} />}>
+                    <AgentStreamdown {...streamdownProps()} animated={streamdownAnimation} isAnimating={running}>{text}</AgentStreamdown>
+                </Suspense>
             </div>
         </details>
     );
@@ -440,27 +471,27 @@ export function AgentWorkingMessage({ text, detail, status = "running", mcpStatu
         return () => window.clearInterval(timer);
     }, [activityKey]);
     return (
-        <div className="min-w-0 py-1" aria-live="polite">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm" style={{ color: theme.node.muted }}>
-                {status === "running" ? <LoaderCircle className="size-3.5 shrink-0 animate-spin" /> : status === "ready" ? <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600" /> : <XCircle className="size-3.5 shrink-0 text-red-600" />}
-                <span className="min-w-0">{text}</span>
+        <div className="min-w-0 py-0.5" aria-live="polite" data-agent-status-row={status}>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[15px] leading-6" style={{ color: theme.node.muted }}>
+                {status === "running" ? <LoaderCircle className="size-4 shrink-0 animate-spin" /> : status === "ready" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" /> : <XCircle className="size-4 shrink-0 text-red-600" />}
+                <span className={`min-w-0 ${status === "error" ? "font-semibold" : ""}`} style={{ color: status === "error" ? theme.node.text : undefined }}>{text}</span>
                 {status === "running" && elapsed >= 5 ? <span className="shrink-0 text-[11px] tabular-nums opacity-60">{waitingTime(elapsed)}</span> : null}
             </div>
-            {detail ? <div className="ml-5.5 mt-1 text-xs leading-5 opacity-65" style={{ color: theme.node.muted }}>{detail}</div> : null}
+            {detail ? <div className="mt-1 break-words pl-6 text-[13px] leading-5 opacity-80" style={{ color: theme.node.muted }}>{detail}</div> : null}
             {mcpStatuses.length ? (
-                <div className="ml-5.5 mt-3 space-y-2">
+                <div className="mt-3 space-y-2 pl-6">
                     {mcpStatuses.map((item) => (
-                        <div key={item.name} className="flex min-w-0 items-start gap-2 text-xs leading-5" style={{ color: theme.node.muted }}>
+                        <div key={item.name} className="flex min-w-0 items-start gap-2 text-[13px] leading-5" style={{ color: theme.node.muted }}>
                             {item.status === "running" ? <LoaderCircle className="mt-0.5 size-3.5 shrink-0 animate-spin" /> : item.status === "ready" ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-emerald-600" /> : <XCircle className="mt-0.5 size-3.5 shrink-0 text-red-600" />}
                             <div className="min-w-0">
                                 <div className="font-medium" style={{ color: theme.node.text }}>{item.name}</div>
-                                <div className="opacity-65">{item.detail}</div>
+                                <div className="opacity-70">{item.detail}</div>
                             </div>
                         </div>
                     ))}
                 </div>
             ) : null}
-            {status === "running" && elapsed >= 30 ? <div className="mt-1 text-xs leading-5 opacity-65" style={{ color: theme.node.muted }}>{t("agent.message.slowResponse")}</div> : null}
+            {status === "running" && elapsed >= 30 ? <div className="mt-1 pl-6 text-[13px] leading-5 opacity-70" style={{ color: theme.node.muted }}>{t("agent.message.slowResponse")}</div> : null}
         </div>
     );
 }

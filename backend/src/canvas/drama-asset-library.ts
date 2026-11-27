@@ -579,14 +579,9 @@ export function writeDramaAsset(db: BackendDatabase, asset: Asset, command: Asse
         if (local && command.canvasSource && local.type === asset.kind && command.canvasSource.projectId !== source.sourceProjectId) {
             const sourceNode = effectiveSourceNode(nodes(rawProject(db, source.sourceProjectId)).find(n => n.id === source!.sourceNodeId)!, asset.kind);
             const reference: SharedAssetReference = { ...source };
-            if (!local.metadata?.sharedAssetReference && !command.discardLocal) {
-                const edits: NonNullable<SharedAssetReference["edits"]> = {};
-                for (const f of sharedAssetFields(local.type)) {
-                    const value = assetField(local, f), shared = assetField(sourceNode, f);
-                    if (value !== undefined && !sameAssetValue(value, shared) && !(f === "metadata.content" && local.metadata?.storageKey && local.metadata.storageKey === sourceNode.metadata?.storageKey)) edits[f] = { base: shared, value };
-                }
-                if (Object.keys(edits).length) reference.edits = edits;
-            }
+            // 首次存入资产库时，本地内容已写进 canonical 共享节点；不再把整份共享字段留存为分集 edits。
+            // 否则 resolveSharedAssetNode 会优先用 edits 里的旧快照，共享节点后续改图/改造型永远传不到分集。
+            // 分集自己的独立造型走 characterLookOf 形态卡，不靠 edits 覆盖共享内容。
             const resolved = resolveSharedAssetNode({ ...local, metadata: { ...local.metadata, sharedAssetReference: reference } }, sourceNode);
             const patch = nodePatch(resolved);
             patch.metadata = { ...patch.metadata as Record<string, unknown>, sharedAssetReference: reference, ...(asset.kind === "character" ? { characterAssetId: asset.id } : {}) };

@@ -10,6 +10,7 @@ export function BackendBanner() {
     const checking = useBackendStore((s) => s.checking);
     const error = useBackendStore((s) => s.error);
     const businessError = useBackendStore((s) => s.businessError);
+    const failures = useBackendStore((s) => s.failures);
     const [requestError, setRequestError] = useState("");
     useEffect(() => {
         const unavailable = (event: Event) => {
@@ -28,7 +29,10 @@ export function BackendBanner() {
         };
     }, []);
 
+    // 一次健康检查抖动（后端某个同步写阻塞了事件循环）不弹横幅：
+    // 连续失败 ≥2 次才认为真的连不上；恢复后 connected/failures 归零，横幅自动消失。
     if (connected && !businessError && !requestError) return null;
+    if (!connected && !requestError && failures < 2) return null;
     const connecting = checking && !connected;
     const retry = async () => {
         const wasConnected = useBackendStore.getState().connected;

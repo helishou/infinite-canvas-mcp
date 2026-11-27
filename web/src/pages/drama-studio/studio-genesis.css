@@ -1,4 +1,7 @@
-/* 影策 drama.css 的 drama-genesis 段：变量换成本地主题（无 --drama-*/--workspace-accent）。 */
+/* 影策 drama.css 的 drama-genesis 段：变量换成本地主题（无 --drama- 前缀与 --workspace-accent）。
+   注意注释里不能出现星号紧跟斜杠的连写：旧注释在「--drama-」后误写了注释结束符，
+   浏览器会提前闭合注释并把紧随其后的 .drama-genesis 规则整块丢弃，四步卡退化成块级、
+   贴在详情列左上角并贴顶。 */
 
 .drama-genesis {
     display: grid;

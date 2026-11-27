@@ -14,6 +14,7 @@ import type { BackendEventBus } from "../events.js";
 import type { CanvasVideoDispatcher } from "./video-dispatcher.js";
 import { holdUnknownSubmission, submissionDecision } from "../engine-contract/submission-outcome.js";
 import { capAudioReferences, effectiveAudioLimit, resolveModelMaxAudios } from "./model-audio-capability.js";
+import { waitReasonHooks, withChannelSlot } from "./channel-slot.js";
 import { assertVideoPromptWithinLimit } from "./model-video-capability.js";
 import { voiceSkipNotesFromRefs, mergeVoiceReferenceNotes, normalizeVoiceOverrides, applyVoiceOverridesToRefs } from "../drama/auto-voice.js";
 import type { Stores } from "../stores/types.js";
@@ -313,7 +314,7 @@ export class CanvasH3Runner {
         const task = this.stores.tasks.update(created.id, { result: { plans: runPlan.plans } });
         this.publish(task, "task.created");
         this.bindParent(task);
-        void this.execute(task).catch((error) => this.fail(task.id, error));
+        void this.runWithSlot(task).catch((error) => this.fail(task.id, error));
         return task;
     }
 
@@ -357,11 +358,27 @@ export class CanvasH3Runner {
                 if (page.length < 500) break;
             }
         }
+        const nodes = Array.isArray(project.nodes) ? project.nodes as Array<Record<string, unknown>> : [];
         return active.find((task) => {
                 const targets = task.result?.plans;
                 const original = normalizeInput(task.input as H3RunInput);
                 const keys = Array.isArray(targets) ? targets.map((plan) => `${String(recordOf(plan).nodeId || "")}:${String(recordOf(plan).segmentId || "")}`) : this.targetKeys(project, { ...original, skipCompleted: false });
-                return keys.some((key) => requested.has(key));
+                // 方案二：尾帧链一次规划整条链，但段是逐段绑定/释放的。已终态释放的段
+                // （error/cancelled/success 且无 parentTaskId 与 runtimeTaskId）不再被该任务
+                // 占用，允许单独重提；仍活动绑定的段继续拒绝，保障同段不被两个任务同时生成。
+                // 段不存在或无法判定时保守算占用，保留刚创建未绑定段的并发保护。
+                const occupied = keys.filter((key) => {
+                    const split = key.indexOf(":");
+                    const nodeId = key.slice(0, split), segmentId = key.slice(split + 1);
+                    const node = nodes.find((item) => String(item.id || "") === nodeId);
+                    const segments = Array.isArray(recordOf(node?.metadata).segments) ? recordOf(node?.metadata).segments as H3Segment[] : [];
+                    const segment = segments.find((item) => String(item.id || "") === segmentId);
+                    if (!segment) return true;
+                    const released = ["error", "cancelled", "success", "succeeded", "ready"].includes(String(segment.status || "").toLowerCase())
+                        && !String(segment.parentTaskId || "") && !String(segment.runtimeTaskId || "");
+                    return !released;
+                });
+                return occupied.some((key) => requested.has(key));
             }) || null;
     }
 
@@ -379,7 +396,7 @@ export class CanvasH3Runner {
             return task;
         }
         if (task.kind !== "canvas-h3-run" || !["queued", "running"].includes(task.status)) return task;
-        void this.execute(task).catch((error) => this.fail(task.id, error));
+        void this.runWithSlot(task).catch((error) => this.fail(task.id, error));
         return task;
     }
 
@@ -439,7 +456,7 @@ export class CanvasH3Runner {
             this.restorePrevious(input.projectId, pending, true);
             this.finishParentNode(updated, "cancelled");
         } else {
-            void this.execute(updated).catch((error) => this.fail(id, error));
+            void this.runWithSlot(updated).catch((error) => this.fail(id, error));
         }
         return this.stores.tasks.get(id)!;
     }
@@ -695,6 +712,24 @@ export class CanvasH3Runner {
     }
 
     /**
+     * 启动恢复：后端在写回窗口内重启会杀掉父任务的执行循环，遗留 status=running
+     * 的父任务和 loading 段，而其当前子任务可能已终态（如查询 ComfyUI 失败）。
+     * 这类僵尸父任务不会再有人收敛，画布段永远 loading、界面永远「生成中」。
+     * 仅当父任务仍 running 且其当前子任务已 failed/cancelled 时收敛；
+     * 子任务仍在跑/排队时不得触碰，避免误杀真在执行的任务。
+     */
+    reconcileOrphanedRunning(task: RuntimeTask) {
+        if (task.kind !== "canvas-h3-run" || task.status !== "running") return false;
+        const childId = String(task.result?.currentChildTaskId || "");
+        if (!childId) return false;
+        const child = this.stores.tasks.get(childId);
+        if (!child || !["failed", "cancelled"].includes(child.status)) return false;
+        // 子任务已终态失败而父任务仍 running —— 执行循环已随进程重启消失，收敛它。
+        this.fail(task.id, child.error || "H3 子任务已失败，但父任务执行循环因后端重启丢失，启动时收敛");
+        return true;
+    }
+
+    /**
      * 修复已落库的终态父任务：任务事件是权威结果，节点 metadata 只是投影。
      * 后端在写回窗口内重启，或旧版本静默吞掉回写失败时，节点可能长期停在 loading；
      * 启动时重放缺失的 Clip 回写，再按父任务终态收口节点状态。
@@ -740,6 +775,16 @@ export class CanvasH3Runner {
         }
         this.finishParentNode(task, "cancelled", "任务已取消");
         return task;
+    }
+
+    /**
+     * H3 父任务的统一执行入口：和图片/文字/音频一样经过渠道并发闸门。
+     * 未配置全局渠道并发上限（0）时完全沿用原路径；超限时任务保持 queued，
+     * 拿到槽位才真正执行，父任务进入等待确认或终态后 execute 返回并释放槽位。
+     * start/resume/确认决议/竞态重跑全部走这里，避免某条入口绕过配额。
+     */
+    private runWithSlot(task: RuntimeTask): Promise<void> {
+        return withChannelSlot(this.stores, "video", undefined, () => this.execute(task), waitReasonHooks(this.stores, task.id, null));
     }
 
     private async execute(initial: RuntimeTask) {
@@ -948,7 +993,7 @@ export class CanvasH3Runner {
             const latest = this.stores.tasks.get(initial.id);
             if (latest?.status === "running" && ["second_pass", "remaining"].includes(String(latest.result?.phase || "")) && latest.updatedAt !== initial.updatedAt && confirmationOf(latest).pending.length) {
                 // 决议与上一轮执行退出竞态：上一轮释放互斥后再次唤醒。
-                queueMicrotask(() => void this.execute(latest).catch((error) => this.fail(latest.id, error)));
+                queueMicrotask(() => void this.runWithSlot(latest).catch((error) => this.fail(latest.id, error)));
             }
         }
     }
@@ -1382,9 +1427,15 @@ export class CanvasH3Runner {
         }
         const selectedVideoDuration = Number(params.duration || segment.duration || 5);
         const requestedEngine = String(params.minimaxEngine || params.engine || metadata.minimaxEngine || "auto");
+        const sizeDims = estimateH3Dimensions(params);
         const selectedVideoParams = {
             mode: runtimeTaskMode, taskMode: runtimeTaskMode, duration: selectedVideoDuration,
             selectedVideoModelFieldValues: params.selectedVideoModelFieldValues,
+            // 画幅真值：段的 aspectRatio+megapixels 换算成对齐后的 width/height 一并下发。
+            // 自选视频模型工作流只认 width/height（不认 aspectRatio/megapixels），缺了就
+            // 回落引擎默认 9:16，段上写 16:9 也不生效。轮询兜底（video-dispatcher 把
+            // params 里的 width/height 提到顶层）只有在它们出现在 params 时才生效。
+            ...(sizeDims ? { width: sizeDims.width, height: sizeDims.height } : {}),
             // 剧目级 videoResolution 派生尺寸：size/resolution 非 H3_PARAM_KEYS，随请求下发到
             // 自选模型工作流（video-dispatcher 的 workflowValues → engine.createVideo），真正影响出片。
             ...(params.size !== undefined ? { size: String(params.size) } : {}),
@@ -1805,7 +1856,11 @@ function recordOf(value: unknown): Record<string, unknown> { return value && typ
  */
 export function describeFailure(error: unknown, depth = 0): string {
     if (error instanceof Error) return error.message || error.name || "未知错误";
-    if (typeof error === "string") return error.trim() || "未知错误";
+    if (typeof error === "string") {
+        const s = error.trim();
+        if (s === "[object Object]") return "引擎错误对象未能解析（[object Object]）；请查引擎 :8300 / ComfyUI :8188 日志确认真实失败原因";
+        return s || "未知错误";
+    }
     if (error && typeof error === "object") {
         // 嵌套过深直接收口：自引用/环形结构不能让失败路径自己栈溢出。
         if (depth >= 3) {

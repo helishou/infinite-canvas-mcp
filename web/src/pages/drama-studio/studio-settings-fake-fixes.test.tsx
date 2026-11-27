@@ -35,13 +35,15 @@ test("参考图默认方案：可选真实 AssetSchemeId，方案卡片可写，
     assert.match(html, /view_layout/, "说明真实写回的字段");
 });
 
-test("重做参考图：按钮文案诚实标为手动，不再假装能重做", () => {
+test("重做参考图：既有到资产库手动重做的入口，也有真出图真写回的一键重做", () => {
     const html = render();
     assert.match(html, /前往画布手动重做角色参考图/);
     assert.match(html, /前往画布手动重做道具参考图/);
     assert.match(html, /前往画布手动重做场景参考图/);
     assert.doesNotMatch(html, />重做(角色|道具|场景)参考图</, "不能出现假装一键重做的按钮文案");
-    assert.match(html, /没有「按当前方案一键重做参考图」的后端能力/);
+    // 一键重做参考图能力已落地（commit bdeeaf82）：真出图 + 真写回，不再是降级话术。
+    assert.match(html, /data-studio-regen-one-click="true"/);
+    assert.match(html, /一键按当前方案重做（真出图 · 真写回）/);
 });
 
 test("transitionMs / episodeSeconds 明确标注软约束，影响拆镜提示词", () => {
@@ -76,12 +78,13 @@ test("审阅策略 mixed 档展开共享资产/场次两个审核点", () => {
     assert.match(html, /场次/);
 });
 
-test("制作阶段 productionStage：只读展示六段游标，明确来自制作稿真值", () => {
+test("制作阶段只读块已删除：设置页不再展示 productionStage 游标", () => {
     const html = render();
-    assert.match(html, /data-studio-production-stage/);
-    for (const label of ["剧本", "资产", "空间", "分镜", "关键帧", "成片"]) assert.match(html, new RegExp(label));
-    assert.match(html, /draft\.settings\.productionStage/);
-    assert.match(html, /不造假开关/);
+    assert.doesNotMatch(html, /data-studio-production-stage/);
+    assert.doesNotMatch(html, /制作阶段（只读）/);
+    const source = readFileSync(new URL("./studio-settings-tab.tsx", import.meta.url), "utf8");
+    assert.doesNotMatch(source, /data-studio-production-stage/, "读制作稿的只读游标渲染与 state 一并删除，不留死代码");
+    assert.doesNotMatch(source, /PRODUCTION_STAGE_KEYS/, "不再依赖制作阶段常量");
 });
 
 test("loadStudioSettings 缺省与非法 reviewPolicy 都收敛为合法档", () => {

@@ -300,3 +300,44 @@ test("编译存活：写入四字段进入投影指纹，经真画布 op 后保�
         } finally { db.close(); }
     } finally { await f.close(); }
 });
+
+test("rewritePrompts 选段：onlyIndexes 只写指定段，其余不动", async () => {
+    const f = await fixture();
+    try {
+        // fixture 只有 1 段（index 0）；指定只写 index 5 → 没有段被写，runPrompts 抛 NOTHING_WRITTEN
+        let threw = false;
+        try { await f.p.rewritePrompts(EP, [5]); } catch (e) { threw = String(e).includes("NOTHING_WRITTEN"); }
+        assert.ok(threw, "选段全落空时抛出 PROMPTS_NOTHING_WRITTEN");
+        assert.equal(f.state.generationCalls, 0, "被过滤掉的段不跑 LLM");
+        assert.equal(f.state.ops.length, 0, "不写回画布");
+    } finally { await f.close(); }
+});
+
+test("rewritePrompts：暂停态下可重写，但保持 status/pause_reason 一致、不唤醒出片作业", async () => {
+    const f = await fixture();
+    try {
+        // 模拟「手动暂停」+ 带旧提示词生成的下游作业（video/render 已 failed、script/assets 已 succeeded）
+        f.p.pause(DRAMA, "manual");
+        // 用 store 直接准备作业（dedupe_key 幂等）；视频/渲染作业模拟「旧提示词已 failed」
+        f.p.store.enqueue({ id: "j-script", dramaId: DRAMA, episodeId: EP, kind: "script", stage: "script", dedupeKey: "dk-script" });
+        f.p.store.enqueue({ id: "j-assets", dramaId: DRAMA, episodeId: EP, kind: "assets", stage: "assets", dedupeKey: "dk-assets" });
+        f.p.store.enqueue({ id: "j-video", dramaId: DRAMA, episodeId: EP, kind: "video", stage: "video", dedupeKey: "dk-video" });
+        f.p.store.enqueue({ id: "j-render", dramaId: DRAMA, episodeId: EP, kind: "render", stage: "render", dedupeKey: "dk-render" });
+        const db = (f.p.store as any).db;
+        for (const id of ["j-video", "j-render"]) {
+            db.prepare("UPDATE drama_pipeline_jobs SET status='failed', attempt=5, error='old prompt' WHERE id=?").run(id);
+        }
+
+        const result = await f.p.rewritePrompts(EP);
+        assert.equal(result.written, 1, "即使处于暂停态，显式重写也能完成");
+        // 关键回归：重写后必须保持一致的暂停态，不能出现「pause_reason=manual 但 status=running」
+        // 那种界面显示暂停、调度器仍在派发出片的分裂状态。
+        assert.equal(f.p.store.get(DRAMA)?.status, "paused", "重写不把流水线改成 running");
+        const pausedRow = (f.p.store as any).db.prepare("SELECT pause_reason FROM drama_pipelines WHERE drama_id=?").get(DRAMA);
+        assert.equal(pausedRow?.pause_reason, "manual", "pause_reason 保持 manual，与 status 一致");
+        const byId = (id: string) => f.p.store.job(id)!;
+        assert.equal(byId("j-video").status, "failed", "暂停态下重写不重排出片作业，不触发出片");
+        assert.equal(byId("j-video").attempt, 5, "视频作业 attempt 不被重置");
+        assert.equal(byId("j-render").status, "failed", "渲染作业同样不被唤醒");
+    } finally { await f.close(); }
+});

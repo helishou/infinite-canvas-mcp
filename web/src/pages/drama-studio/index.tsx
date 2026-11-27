@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Checkbox, Input } from "antd";
 import {
@@ -28,6 +28,7 @@ import {
     MoreHorizontal,
     Pencil,
     BookOpen,
+    ScrollText,
     Film,
     Scissors,
     Sparkles,
@@ -41,19 +42,17 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WorkspaceViewSwitcher } from "@/components/production/workspace-view-switcher";
-import DramaPage from "@/pages/drama/index";
-import { AdaptStoryboardPanel } from "@/pages/drama/adapt-storyboard-panel";
 import { backendMediaUrl } from "@/services/backend-api";
 import { resolveBackendAgentEndpoint, runVideoConcatTask } from "@/services/api/comfyui";
 import { saveAs } from "file-saver";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { useStudioData, type StudioEpisode, type StudioStatus } from "./use-studio-data";
+import { useStudioData, type StudioEpisode, type StudioStatus, type StudioInboxItem } from "./use-studio-data";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Dropdown, Modal, type MenuProps } from "antd";
 import { dramaWorkbenchPath } from "@/pages/drama/workbench-entry";
 import { WorkbenchCanvas } from "@/pages/drama/workbench-canvas";
 import { useWorkbenchCanvas } from "@/lib/canvas/canvas-host";
-import { StudioSettingsTab, loadStudioSettings, type StudioProductionSettings } from "./studio-settings-tab";
+import { loadStudioSettings, type StudioProductionSettings } from "./studio-settings-store";
 import { skillInstruction } from "./studio-skill-picker";
 import { fetchSkillDetail } from "@/services/api/skill-market";
 import { launchPlanningDirector } from "@/pages/drama/planning-director-launch";
@@ -69,17 +68,35 @@ import { collectPackRefs, importPackRefs } from "@/lib/director-pack-assets";
 import { productionCanvasNodes } from "@/pages/drama/production-canvas-nodes";
 import {
     startDramaPipeline, pauseDramaPipeline, resumeDramaPipeline, fetchDramaPipelineStatus,
-    retryFailedDramaPipeline, approveDramaPipelineEpisode, releaseDramaPipelineMedia, rewriteDramaEpisodeScript, type DramaPipelineStatus,
+    retryFailedDramaPipeline, retryDramaPipelineJob, approveDramaPipelineEpisode, releaseDramaPipelineMedia, rewriteDramaEpisodeScript, type DramaPipelineStatus,
 } from "@/services/backend-api";
-import { StudioAssetsTab } from "./studio-assets-tab";
 import { StudioDetailPanel, type DetailTab } from "./studio-detail-panel";
-import { StudioGenesis } from "./studio-genesis";
 import { deriveReviewBanners } from "./studio-review-banner";
-import { StudioInboxTab } from "./studio-inbox-tab";
 import type { DirectorWorkspace } from "@/pages/drama/director-panel";
 import { StudioChapterPickerModal } from "./studio-chapter-picker";
 import { StudioVersionCompare } from "./studio-version-compare";
 import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
+import { orderStudioQueue } from "./studio-queue-order";
+
+/**
+ * 首屏按需分包：默认 tab=制作/剧本 只需要左栏 + 剧本面板；
+ * 资产/待处理/设置三个 tab、空态开场卡与「拆镜」弹窗都是非首屏交互，拆成独立 chunk 后再加载。
+ * 组件本身不变，只把静态 import 换成 lazy（默认导出包装），行为与原先一致。
+ */
+const StudioAssetsTab = lazy(() => import("./studio-assets-tab").then((m) => ({ default: m.StudioAssetsTab })));
+const StudioInboxTab = lazy(() => import("./studio-inbox-tab").then((m) => ({ default: m.StudioInboxTab })));
+const StudioSettingsTab = lazy(() => import("./studio-settings-tab").then((m) => ({ default: m.StudioSettingsTab })));
+const StudioGenesis = lazy(() => import("./studio-genesis").then((m) => ({ default: m.StudioGenesis })));
+const AdaptStoryboardPanel = lazy(() => import("@/pages/drama/adapt-storyboard-panel").then((m) => ({ default: m.AdaptStoryboardPanel })));
+
+/** 分块加载占位：与原有「加载制作稿…」同款，不新增布局跳动。 */
+function TabChunkFallback() {
+    return (
+        <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-xs text-muted-foreground" data-studio-tab-chunk-loading>
+            <LoaderCircle className="size-4 animate-spin" /> 加载中…
+        </div>
+    );
+}
 
 /**
  * 影策（open-ai-canvas）短剧制作台的像素级复刻 + 真实数据/逻辑接线。
@@ -187,6 +204,74 @@ function StatusChip({ episode }: { episode: StudioEpisode }) {
     );
 }
 
+/** 影策 drama-shared.tsx:106-115 的 episodeTone 六态：完成/制作中/待生成(条纹)/待审阅/失败 + idle。
+ *  关键区别：awaitingMedia（已拆镜有镜头、成片未发布 = 本地 status「待生成」）在影策是 **ready 条纹**，
+ *  不是「待审阅」；橙色 review 只在 stage==="review"（提示词等人工确认）出现。本地流水线没有独立 review
+ *  阶段，所以 review 不会被派生出来——宁可留空也不把「待生成」涂成待审阅。 */
+type EpisodeTone = "done" | "working" | "pending" | "review" | "failed" | "ready";
+const EPISODE_TONE_ORDER: EpisodeTone[] = ["done", "working", "ready", "review", "failed"];
+const EPISODE_TONE_LABEL: Record<EpisodeTone, string> = {
+    done: "完成",
+    working: "制作中",
+    ready: "剧本就绪 · 待生成画面",
+    pending: "待生成",
+    review: "待审阅",
+    failed: "失败",
+};
+/** 图例用短标签（影策 legend 写「待生成」）；格子 title 用 LABEL 里的完整口径。 */
+const EPISODE_TONE_LEGEND_LABEL: Record<EpisodeTone, string> = {
+    done: "完成",
+    working: "制作中",
+    ready: "待生成",
+    pending: "待生成",
+    review: "待审阅",
+    failed: "失败",
+};
+/** 图例圆点（影策 drama.css:1365 9px：完成绿 / 制作中主色 / 待生成条纹 / 待审阅橙 / 失败红）。 */
+const EPISODE_TONE_DOT: Record<EpisodeTone, string> = {
+    done: "bg-emerald-500",
+    working: "bg-primary",
+    ready: "",
+    pending: "bg-foreground/20",
+    review: "bg-amber-500",
+    failed: "bg-rose-500",
+};
+/** 待生成（ready）在影策是一条 135° 斜条纹（drama.css:4431），用主题色叠出来而不是纯色块。 */
+const EPISODE_TONE_READY_STYLE: React.CSSProperties = {
+    background:
+        "repeating-linear-gradient(135deg, color-mix(in oklab, var(--primary) 55%, transparent) 0 3px, color-mix(in oklab, var(--primary) 22%, transparent) 3px 6px)",
+};
+/** 状态格子的底色；前景色保证深浅主题下都可读（不写死浅色分支）。
+ *  对齐影策 drama.css:1378-1406 的 .drama-cell：方格、色块为主、集号 hover 才显形。 */
+const EPISODE_TONE_CELL: Record<EpisodeTone, string> = {
+    done: "bg-emerald-500 text-white hover:bg-emerald-500/90",
+    working: "bg-primary text-background hover:bg-primary/90",
+    ready: "text-foreground hover:brightness-110",
+    pending: "bg-foreground/10 text-foreground/70 hover:bg-foreground/15",
+    review: "bg-amber-500/90 text-amber-950 hover:bg-amber-500",
+    failed: "bg-rose-500 text-white hover:bg-rose-500/90",
+};
+function episodeTone(ep: StudioEpisode): EpisodeTone {
+    if (ep.status === "需要处理" || ep.error) return "failed";
+    if (ep.status === "已完成") return "done";
+    if (ep.status === "制作中") return "working";
+    // 影策 awaitingMedia（ready 条纹）= 剧本就绪但还没出片；已有段视频产出并仍在推进的集是 video 阶段 → active(灰)。
+    if (ep.shotCount > 0 && (ep.videoReady ?? 0) > 0) return "working";
+    if (ep.shotCount > 0) return "ready";
+    return "pending";
+}
+/** 影策 episode-rail.tsx:21-28 分页：待生成=ready、待处理=失败+待审阅、制作中=active、已完成=done。
+ *  计数与过滤共用这一个判定，保证 tab 数字与实际格子数始终一致。 */
+function episodeMatchesFilter(ep: StudioEpisode, filter: EpisodeFilter): boolean {
+    const tone = episodeTone(ep);
+    if (filter === "全部") return true;
+    if (filter === "待生成") return tone === "ready";
+    if (filter === "需要处理") return tone === "failed" || tone === "review";
+    if (filter === "制作中") return tone === "working";
+    if (filter === "已完成") return tone === "done";
+    return true;
+}
+
 /** 队列任务状态图标（对齐影策 job-detail.tsx 的 JobStatusIcon 分类）。 */
 function JobStatusIcon({ status, className = "size-3.5 shrink-0" }: { status: string; className?: string }) {
     const s = String(status || "").toLowerCase();
@@ -215,8 +300,34 @@ function formatJobElapsed(start?: string, end?: string): string {
     if (!start || !end) return "—";
     const ms = new Date(end).getTime() - new Date(start).getTime();
     if (!Number.isFinite(ms) || ms < 0) return "—";
+    return formatJobDuration(ms);
+}
+/** 队列行 64px 时间列：当天显示 HH:MM，跨天显示 MM-DD；缺失/非法值返回「—」。 */
+function formatJobClock(value?: string): string {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "—";
+    const sameDay = date.toDateString() === new Date().toDateString();
+    return sameDay
+        ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
+        : `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+/** 后端按作业补的 durationMs（finished-started）→ 中文用时；缺失不编造。 */
+function formatJobDuration(ms?: number | null): string {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "—";
     const seconds = Math.round(ms / 1000);
     return seconds >= 60 ? `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+}
+/** 后端状态码本地化：paused_by_user 等只在内部分支里出现，展示层不把原始码丢给用户。 */
+const JOB_ERROR_LABEL: Record<string, string> = {
+    paused_by_user: "已暂停取消",
+    canceled_by_user: "已取消",
+    cancelled_by_user: "已取消",
+    paused: "已暂停",
+};
+function localizeJobText(value?: string | null): string {
+    if (!value) return "";
+    return String(value).replace(/\b(paused_by_user|paused|canceled_by_user|cancelled_by_user)\b/g, (code) => JOB_ERROR_LABEL[code] || code);
 }
 
 /** 影策 queue-bar.tsx:88 的 JOB_KIND_LABEL：队列行里显示中文工作类型，而不是原始 kind。 */
@@ -229,12 +340,49 @@ const PIPELINE_STAGE_LABEL: Record<string, string> = {
     script: "改编拆镜", assets: "资产参考图", prompts: "段提示词",
     video: "生成视频", render: "合成成片", review: "等待审阅",
 };
+/**
+ * 后端 attempts_json 的投影：每次真实尝试一条（失败带 error、成功带 result）。
+ * attempt 是那一轮 DB 里的重试计数；老数据/老作业没有该数组，按「未采集」处理，不臆造。
+ */
+type QueueAttemptRecord = { at?: string; attempt?: number; error?: string; result?: Record<string, unknown> };
+function queueAttemptsOf(value: unknown): QueueAttemptRecord[] {
+    if (!Array.isArray(value)) return [];
+    return value.filter((item): item is QueueAttemptRecord => Boolean(item) && typeof item === "object");
+}
+/** 成功记录的简短摘要：把制作稿/流水线常见结果字段翻成中文，未知字段回退成 key 列表。
+ *  只做展示层翻译，不改结果真值；数组/对象不展开，避免一行塞满。 */
+const ATTEMPT_RESULT_LABEL: Record<string, string> = {
+    total: "共", created: "新建", images: "出图", imageFailed: "失败图",
+    segments: "段", shots: "镜", prompts: "提示词", videos: "视频",
+    durationMs: "耗时ms", storageKey: "产物", nodes: "节点", restoredAssets: "复用资产",
+};
+function attemptResultSummary(result?: Record<string, unknown>): string {
+    if (!result || typeof result !== "object") return "";
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(result)) {
+        if (parts.length >= 4) break;
+        if (value === null || value === undefined) continue;
+        if (typeof value === "object") continue;
+        const label = ATTEMPT_RESULT_LABEL[key];
+        parts.push(label ? `${label} ${String(value)}` : `${key}=${String(value)}`);
+    }
+    return parts.join(" · ");
+}
 /** 队列行状态文案（影策 drama-job.is-* 的本地对齐）。 */
 const JOB_STATUS_LABEL: Record<string, string> = {
     running: "运行中", queued: "排队中", waiting: "排队中", pending: "排队中",
     succeeded: "已完成", success: "已完成", done: "已完成", completed: "已完成",
-    failed: "失败", error: "失败", cancelled: "已取消", canceled: "已取消",
+    failed: "失败", error: "失败", retry: "重试中", rejected: "已拒绝",
+    cancelled: "已取消", canceled: "已取消", paused: "已暂停",
+    // 暂停取消：后端把 running 退回 queued 并写 error=paused_by_user，展示层按中文状态呈现。
+    paused_by_user: "已暂停取消", canceled_by_user: "已取消", cancelled_by_user: "已取消",
+    checking: "检查中", compiling: "编译中", applying: "应用中", blocked: "等待上游",
 };
+/** 队列行状态文案：优先中文状态表，未收录的原始码也保持原样而非隐藏真值。 */
+function jobStatusText(status?: string): string {
+    const key = String(status || "").toLowerCase();
+    return JOB_STATUS_LABEL[key] || localizeJobText(key) || "—";
+}
 
 /** 影策 job-detail.tsx:57-65 的请求参数显示名；未列出的键按原始 key 展示，不编造参数。 */
 const GENERATION_PARAM_LABEL: Record<string, string> = {
@@ -313,9 +461,10 @@ function headStageLabel(ep: StudioEpisode): string {
     // 「已完成」必须同时满足：已发布成片 + 每段都有真实视频（视频 0/47 却显示已完成是被 publish 标记骗了）。
     const allVideoReady = ep.segmentCount === 0 || (ep.videoReady ?? 0) >= ep.segmentCount;
     if (ep.publishedVersion > 0 && allVideoReady) return "已完成";
-    // 已拆镜有镜头、未发布 = 本地「待生成」= 影策等待审阅（与审批横幅同一真实口径）。
-    if (ep.status === "待生成" && ep.shotCount > 0) return "等待审阅";
-    if (ep.status === "已完成") return "等待审阅";
+    // 已拆镜未发布 = 影策 awaitingMedia：0 段视频时是「待生成画面」，已有视频产出并继续推进的是「生成视频」。
+    // 不再写「等待审阅」——本地流水线没有独立 review 阶段，那样会把待生成的集误标成等人确认。
+    if (ep.status === "待生成" && ep.shotCount > 0) return (ep.videoReady ?? 0) > 0 ? "生成视频" : "待生成画面";
+    if (ep.status === "已完成") return "已完成";
     if (ep.stage === "video") return "生成视频";
     if (ep.stage === "shots") return "撰写段提示词";
     // 影策无独立「资产」阶段；本地 assets 表示剧本已就绪、尚未拆镜，折到改编剧本。
@@ -403,6 +552,15 @@ export default function DramaStudioPage() {
     return <WorkbenchCanvas storageKey="drama-studio"><DramaStudioInner /></WorkbenchCanvas>;
 }
 
+/** 后端 /pipeline/status 的暂停真值（backend pipeline.status().pause）：前端类型尚未同步该字段，读侧容忍。 */
+type PipelinePauseLite = {
+    paused?: boolean;
+    reason?: string | null;
+    lastResult?: { canceledTasks?: number; canceledQueuedTasks?: number; failedTasks?: number; pausedJobs?: number } | null;
+};
+const pipelinePauseOf = (status: DramaPipelineStatus | null | undefined): PipelinePauseLite | undefined =>
+    (status as { pause?: PipelinePauseLite } | null | undefined)?.pause;
+
 function DramaStudioInner() {
     const navigate = useNavigate();
     const canvasHost = useWorkbenchCanvas();
@@ -423,7 +581,14 @@ function DramaStudioInner() {
         : dramaFolders[0]?.id || null;
     const currentFolder = dramaFolders.find((f) => f.id === dramaId);
 
-    const data = useStudioData(dramaId, query.get("episodeId"));
+    // 全自动流水线状态（影策服务端自动编排的本地等价物），运行时每 3s 轮询。
+    // 提前到 useStudioData 之前声明：数据 hook 需要「流水线是否在跑」来决定是否轮询制作稿/成片。
+    const [pipeline, setPipeline] = useState<DramaPipelineStatus | null>(null);
+    /** 运行期轮询信号：流水线运行中，或确有 running 作业（暂停残留的 queued 不计，避免空闲空转）。 */
+    const pipelinePollActive = pipeline?.pipeline?.status === "running"
+        || (pipeline?.jobs || []).some((job) => String(job.status).toLowerCase() === "running");
+
+    const data = useStudioData(dramaId, query.get("episodeId"), { pollActive: pipelinePollActive });
     // 参考图绑定里常有空的 name（历史数据只存 <Picture N>）：把资产真名整理成表，传给段弹窗做兜底。
     const detailAssetNames = useMemo(() => {
         const out: Record<string, string> = {};
@@ -440,7 +605,7 @@ function DramaStudioInner() {
     }, [data.assets]);
     const {
         episodes, rawEpisodes, assets, stage, production, batches, counts, queue,
-        jobCounts, inbox, productionState, clipMedia, clipFailureByTarget,
+        jobCounts, inbox: hookInbox, productionState, clipMedia, clipFailureByTarget,
         sourceChapterTruth, bibleReady, firstSampleReady,
         loading, detailLoading, connected, refreshAll, addEpisode, batchCreateEpisodes, insertEpisode, removeEpisode, adaptEpisode, extractEpisodeAssets, writeSegmentPrompt, approveEpisodeVideo, renameEpisode, toggleBatch,
     } = data;
@@ -469,11 +634,8 @@ function DramaStudioInner() {
     const [assetsInitialKind, setAssetsInitialKind] = useState<"角色" | "道具" | "场景" | undefined>(undefined);
     /** 按集核查「打开资产设定」：资产库要选中的真实资产记录（ID+名称+分类）。 */
     const [assetsFocus, setAssetsFocus] = useState<{ assetId: string; name: string; kind: string } | null>(null);
-    // 全自动流水线状态（影策服务端自动编排的本地等价物），运行时每 3s 轮询。
-    const [pipeline, setPipeline] = useState<DramaPipelineStatus | null>(null);
     const [pipelineBusy, setPipelineBusy] = useState(false);
     const [bannerBusy, setBannerBusy] = useState<"release" | "approve" | null>(null);
-    const [createWizardOpen, setCreateWizardOpen] = useState(() => query.get("new") === "1");
     const [splitOpen, setSplitOpen] = useState(false);
     /** 版本记录与对比弹窗：真版本对比，入口在工具菜单；数据全部来自 version-compare API。 */
     const [versionCompareOpen, setVersionCompareOpen] = useState(false);
@@ -514,40 +676,68 @@ function DramaStudioInner() {
             return next;
         });
     };
+    // 后端真值校正只做一次/剧目：避免轮询把用户刚点的本地状态反复覆盖。
+    const pauseSyncedRef = useRef<string | null>(null);
     const [queueOpen, setQueueOpen] = useState(false);
     const [queueFilter, setQueueFilter] = useState<"all" | "active" | "failed">("all");
-    const [queueDetail, setQueueDetail] = useState<{ id: string; title: string; error: string; prompt?: string; status?: string; episodeId?: string; kind?: string; createdAt?: string; waitReason?: string } | null>(null);
+    const [queueDetail, setQueueDetail] = useState<{
+        id: string; title: string; error: string; prompt?: string; status?: string; episodeId?: string; kind?: string;
+        createdAt?: string; startedAt?: string; finishedAt?: string; durationMs?: number; runtimeTaskId?: string;
+        attempt?: number; waitReason?: string; attempts?: QueueAttemptRecord[];
+    } | null>(null);
     const [queueAttempts, setQueueAttempts] = useState<BackendGenerationLog[] | null>(null);
     const [queueAttemptsLoading, setQueueAttemptsLoading] = useState(false);
+    /** 详情日志与选中作业的关联口径：job=按 runtimeTaskId 命中本作业；episode=仅本集上下文（非本作业）。 */
+    const [queueLogScope, setQueueLogScope] = useState<"job" | "episode" | "none">("none");
     /** 「全部」页签的成功生成历史（近期 generation_logs.status=success）；只读，不参与进行中/失败过滤。 */
     const [queueHistory, setQueueHistory] = useState<BackendGenerationLog[]>([]);
     const [queueHistoryLoading, setQueueHistoryLoading] = useState(false);
     const [queueHistoryError, setQueueHistoryError] = useState("");
-    // 懒加载：只在队列面板展开时拉一次近期成功日志；关闭后不轮询，重开可刷新。
+    // 队列面板打开时每 3s 刷新一次（对齐影策 queue-bar 的 refetchInterval），关闭后停止。
     useEffect(() => {
         if (!queueOpen) return;
         let alive = true;
-        setQueueHistoryLoading(true);
-        setQueueHistoryError("");
-        // 队列「全部」要同时看到活跃任务与历史：成功历史 + 排队/运行中。失败项由待处理 inbox 承载，不在这里重复。
-        fetchBackendGenerationLogs({ dramaId: dramaId ?? undefined, limit: 120, summary: true })
-            .then((res) => { if (alive) setQueueHistory((res.logs || []).filter((log) => ["success", "running", "queued"].includes(String(log.status)))); })
-            .catch((error: unknown) => {
-                if (!alive) return;
-                setQueueHistory([]);
-                setQueueHistoryError((error as Error)?.message || "未知错误");
-            })
-            .finally(() => { if (alive) setQueueHistoryLoading(false); });
-        return () => { alive = false; };
+        let timer: number | null = null;
+        const load = (first: boolean) => {
+            if (first) { setQueueHistoryLoading(true); setQueueHistoryError(""); }
+            // 队列「全部」要同时看到活跃任务与历史：成功历史 + 排队/运行中。失败项由待处理 inbox 承载，不在这里重复。
+            void fetchBackendGenerationLogs({ dramaId: dramaId ?? undefined, limit: 120, summary: true })
+                .then((res) => {
+                    if (!alive) return;
+                    setQueueHistory((res.logs || []).filter((log) => ["success", "running", "queued"].includes(String(log.status))));
+                    setQueueHistoryError("");
+                })
+                .catch((error: unknown) => {
+                    if (!alive) return;
+                    if (first) setQueueHistory([]);
+                    setQueueHistoryError((error as Error)?.message || "未知错误");
+                })
+                .finally(() => { if (alive && first) setQueueHistoryLoading(false); });
+        };
+        load(true);
+        timer = window.setInterval(() => load(false), 3000);
+        return () => { alive = false; if (timer) window.clearInterval(timer); };
     }, [queueOpen, dramaId]);
-    /** 影策 job-detail.tsx:105-128 的 facts：只取已 fetch 的真实字段，缺失显示「—」。 */
+    /** 影策 job-detail.tsx:105-128 的 facts：只取该作业自己的真实字段，缺失显示「—」。 */
     const queueFacts = useMemo(() => {
-        const logs = queueAttempts || [];
-        const started = logs.map((l) => String(l.startedAt || "")).filter(Boolean).sort()[0] || "";
-        const ended = logs.map((l) => String(l.finishedAt || "")).filter(Boolean).sort().pop() || "";
-        const joined = String(queueDetail?.createdAt || logs.map((l) => String(l.createdAt || "")).filter(Boolean).sort()[0] || "");
-        return { joined, started, ended, elapsed: formatJobElapsed(started, ended), attempts: queueAttempts ? logs.length : null };
-    }, [queueAttempts, queueDetail?.createdAt]);
+        // 后端已给每个 job 补 createdAt/startedAt/finishedAt/durationMs：facts 只用作业自身字段，
+        // 不再跨整集日志聚合（之前把整集 44 条日志的跨度当成本作业用时）。
+        const started = String(queueDetail?.startedAt || "");
+        const ended = String(queueDetail?.finishedAt || "");
+        const joined = String(queueDetail?.createdAt || started || "");
+        const elapsed = typeof queueDetail?.durationMs === "number"
+            ? formatJobDuration(queueDetail.durationMs)
+            : formatJobElapsed(started, ended);
+        // 尝试次数：流水线作业用后端 attempt；生成日志行按 runtimeTaskId 命中条数；关联不到就「—」。
+        const attempts = typeof queueDetail?.attempt === "number"
+            ? queueDetail.attempt
+            : queueLogScope === "job" && queueAttempts
+                ? queueAttempts.length
+                : null;
+        return { joined, started, ended, elapsed, attempts };
+    }, [queueDetail?.startedAt, queueDetail?.finishedAt, queueDetail?.createdAt, queueDetail?.durationMs, queueDetail?.attempt, queueLogScope, queueAttempts]);
+    /** 「尝试记录」展示顺序：后端数组最旧在前（slice(-20) 保留最近 20 条），这里按时间倒序。 */
+    const queueDetailAttempts = useMemo(() => (queueDetail?.attempts || []).slice().reverse(), [queueDetail]);
     // #2 剪映草稿预检弹窗：真预检 API 的三分类清单（可用 / 缺失 / 旧版本是可用子集）。
     const [jianyingOpen, setJianyingOpen] = useState(false);
     const [jianyingRoot, setJianyingRoot] = useState(() => {
@@ -573,34 +763,38 @@ function DramaStudioInner() {
     const [importOpening, setImportOpening] = useState(false);
     const [importRefs, setImportRefs] = useState(true);
     const [importPrompts, setImportPrompts] = useState(true);
-    // 详情弹窗的 canvasId / 任务是否活跃收敛成基础类型，避免 episodes 数组身份变化重启轮询。
+    // 详情弹窗的任务是否活跃收敛成基础类型，避免 episodes 数组身份变化重启轮询。
     // 影策 job-detail.tsx:72 refetchInterval: running/queued ? 3000 : false。
-    const queueDetailCanvasId = queueDetail?.episodeId
-        ? episodes.find((e) => e.id === queueDetail.episodeId)?.canvasId
-        : undefined;
+    const queueDetailRuntimeTaskId = String(queueDetail?.runtimeTaskId || "");
     const queueDetailActive = ["running", "queued", "waiting", "pending", "checking", "compiling", "applying"]
         .includes(String(queueDetail?.status || "").toLowerCase());
     useEffect(() => {
-        if (!queueDetail?.episodeId) { setQueueAttempts(null); return; }
-        if (!queueDetailCanvasId) { setQueueAttempts([]); setQueueAttemptsLoading(false); return; }
+        if (!queueDetail) { setQueueAttempts(null); setQueueLogScope("none"); return; }
+        // 影策作业详情只列「这个任务自己的重试历史」。本地流水线阶段作业没有 runtimeTaskId，
+        // 拿不到作业级日志时宁可不列，也不把本集其它任务的历史日志混进来当成本作业的重试记录。
+        if (!queueDetailRuntimeTaskId) {
+            setQueueAttempts([]); setQueueAttemptsLoading(false); setQueueLogScope("none");
+            return;
+        }
         let alive = true;
         let timer: ReturnType<typeof setTimeout> | null = null;
         let active = queueDetailActive;
         setQueueAttemptsLoading(true);
+        setQueueLogScope("job");
         // 弹窗开着且任务含 running/queued 时每 3 秒真拉一次 generation logs，全部终态即停。
         // 只在首次/切换任务时翻 loading，轮询刷新不翻，避免卸载列表重置用户滚动位置。
-        // 选中任务存于 queueDetail，本 effect 只更新 queueAttempts，不动用户当前选中项。
         const load = (first: boolean) => {
             // 详情弹窗必须读全量日志：summary=true 会把 params 清成 {}（server.ts:1949-1953），
             // 「请求参数」表取自这里真实返回的 params，不用 summary 的假空值充数。
-            void fetchBackendGenerationLogs({ projectId: queueDetailCanvasId, limit: 100 })
+            void fetchBackendGenerationLogs({ runtimeTaskId: queueDetailRuntimeTaskId, limit: 50 })
                 .then((r) => {
                     if (!alive) return;
-                    const logs = r.logs || [];
-                    setQueueAttempts(logs);
+                    // 后端过滤之外再精确过滤一次：只保留本作业这条 runtimeTaskId 的记录。
+                    const scopedLogs = (r.logs || []).filter((l) => String(l.runtimeTaskId || "") === queueDetailRuntimeTaskId);
+                    setQueueAttempts(scopedLogs);
                     // 已有日志以日志真实状态为准；尚未拉到日志时沿用任务状态等待日志出现。
-                    active = logs.length
-                        ? logs.some((l) => l.status === "running" || l.status === "queued")
+                    active = scopedLogs.length
+                        ? scopedLogs.some((l) => l.status === "running" || l.status === "queued")
                         : active;
                     if (active) timer = setTimeout(() => load(false), 3000);
                 })
@@ -613,7 +807,7 @@ function DramaStudioInner() {
         };
         load(true);
         return () => { alive = false; if (timer) clearTimeout(timer); };
-    }, [queueDetail?.episodeId, queueDetailCanvasId, queueDetailActive]);
+    }, [queueDetail?.id, queueDetailRuntimeTaskId, queueDetailActive]);
     /** #6 真实导入计划：全部数量从已解包的 DirectorPack 内容算出，不编造接口或数字。 */
     const importPlan = useMemo(() => {
         if (!importPack) return null;
@@ -669,7 +863,18 @@ function DramaStudioInner() {
     useEffect(() => {
         if (!dramaId || !connected) { setPipeline(null); return; }
         let alive = true;
-        const poll = () => { void fetchDramaPipelineStatus(dramaId).then(s => { if (alive && s?.ok) setPipeline(s); }).catch(() => undefined); };
+        const poll = () => {
+            void fetchDramaPipelineStatus(dramaId).then(s => {
+                if (!alive || !s?.ok) return;
+                setPipeline(s);
+                // 初始化（每剧目一次）用后端 pause 真值校正本地暂停态：刷新后按钮不会与后端相反。
+                const pause = pipelinePauseOf(s);
+                if (pause && pause.paused !== undefined && pauseSyncedRef.current !== dramaId) {
+                    pauseSyncedRef.current = dramaId;
+                    setPausedPersist(Boolean(pause.paused));
+                }
+            }).catch(() => undefined);
+        };
         poll();
         const timer = window.setInterval(poll, 3000);
         return () => { alive = false; window.clearInterval(timer); };
@@ -689,7 +894,6 @@ function DramaStudioInner() {
             // 剧目级段视频分辨率 + 画幅：后端 video 段真实写 H3 Clip 出片参数，不是空开关。
             videoResolution: studioSettings.videoResolution || undefined,
             videoAspectRatio: studioSettings.videoAspectRatio,
-            sampleMode: studioSettings.sampleMode,
             textThinking: {
                 plan: studioSettings.textThinking.plan,
                 storyboard: studioSettings.textThinking.storyboard,
@@ -739,6 +943,8 @@ function DramaStudioInner() {
     const pipelineAllDone = Boolean(pipeline?.jobs?.length) && (pipeline?.jobs || []).every((j) => String(j.status) === "succeeded");
     /** 影策「重试失败」入口的 N：只取 pipeline jobs 里 status=failed 的真实数量，不拿 generation-logs 近似。 */
     const pipelineFailedCount = useMemo(() => (pipeline?.jobs || []).filter((j) => String(j.status) === "failed").length, [pipeline]);
+    /** 「待重试」只算后端真会重排的作业；熔断终态需人工介入，点了重试也不会变。 */
+    const pipelineRetryableCount = useMemo(() => (pipeline?.jobs || []).filter((j) => String(j.status) === "failed" && !j.retryExhausted).length, [pipeline]);
     const pipelineModeLabel = `${studioSettings.reviewMode === "auto" ? "全自动" : studioSettings.reviewMode === "sample" ? "样片确认" : "每集审阅"} · ${studioSettings.mediaMode === "auto" ? "自动出片" : "手动放行"}`;
 
     const handlePipelineStart = () => {
@@ -865,7 +1071,7 @@ function DramaStudioInner() {
         // 影策 episode-rail.tsx:81-89：集号支持「第N集」归一化，标题与简介都参与匹配。
         const noQuery = q.replace(/^第|集$/g, "").trim();
         return episodes.filter((ep) => {
-            if (filter !== "全部" && ep.status !== filter) return false;
+            if (!episodeMatchesFilter(ep, filter)) return false;
             if (!q) return true;
             const no = String(ep.no);
             return no === noQuery || `第${no}集`.includes(q.replace(/\s+/g, "")) || ep.title.includes(q) || ep.synopsis.includes(q);
@@ -874,13 +1080,27 @@ function DramaStudioInner() {
     // 影策 episode-rail.tsx:90 + drama.css:1247：卡片固定 60px + 行间 2px，虚拟化高度与布局一致。
     const episodeVirtualizer = useVirtualizer({ count: visibleEpisodes.length, getScrollElement: () => episodeListRef.current, estimateSize: () => 62, overscan: 8 });
 
-    const filters: { key: EpisodeFilter; count: number }[] = [
-        { key: "全部", count: episodes.length },
-        ...(counts["待生成"] || filter === "待生成" ? [{ key: "待生成" as EpisodeFilter, count: counts["待生成"] }] : []),
-        { key: "需要处理", count: counts["需要处理"] },
-        { key: "制作中", count: counts["制作中"] },
-        { key: "已完成", count: counts["已完成"] },
+    // 影策 episode-rail 的状态分页：全部 / 待生成 / 待处理 / 制作中 / 已完成。
+    // 计数与 visibleEpisodes 共用 episodeMatchesFilter，tab 数字即实际可显示的集数。
+    const statusTabCounts = useMemo(() => {
+        const countsByFilter: Record<"全部" | "待生成" | "需要处理" | "制作中" | "已完成", number> = { 全部: episodes.length, 待生成: 0, 需要处理: 0, 制作中: 0, 已完成: 0 };
+        for (const ep of episodes) {
+            if (episodeMatchesFilter(ep, "待生成")) countsByFilter.待生成 += 1;
+            else if (episodeMatchesFilter(ep, "需要处理")) countsByFilter.需要处理 += 1;
+            else if (episodeMatchesFilter(ep, "已完成")) countsByFilter.已完成 += 1;
+            else if (episodeMatchesFilter(ep, "制作中")) countsByFilter.制作中 += 1;
+        }
+        return countsByFilter;
+    }, [episodes]);
+    // 影策 episode-rail.tsx:142：待生成分页在没有此类集时不显示（选中时仍保留）。
+    const allFilters: { key: EpisodeFilter; label: string; count: number }[] = [
+        { key: "全部", label: "全部", count: statusTabCounts.全部 },
+        { key: "待生成", label: "待生成", count: statusTabCounts.待生成 },
+        { key: "需要处理", label: "待处理", count: statusTabCounts.需要处理 },
+        { key: "制作中", label: "制作中", count: statusTabCounts.制作中 },
+        { key: "已完成", label: "已完成", count: statusTabCounts.已完成 },
     ];
+    const filters = allFilters.filter((item) => item.key !== "待生成" || item.count > 0 || filter === "待生成");
 
     const selectedId = query.get("episodeId");
     const current: StudioEpisode | undefined = episodes.find((ep) => ep.id === selectedId) || episodes[0];
@@ -1333,13 +1553,14 @@ function DramaStudioInner() {
         setEpisodeDraft(draft);
     };
 
-    const handleAddEpisode = () => {
-        // 影策 detail.tsx:821：planDone=false（前面的章节还在分集规划）时禁止追加。
-        if (planningState.planDone === false) return void message.warning(PLAN_GATE_TIP_ADD);
+    const handleAddEpisode = (options?: { ignorePlanningGate?: boolean }) => {
+        // 影策 episode-rail.tsx:123-124：顶部「+ 添加第 N 集」**不受分集规划门禁**，随时可加；
+        // 只有底部整行入口在 planning 时隐藏/禁用（:232）。本地原来两处都卡门禁，导致规划没跑完加不出第 4 集。
+        if (!options?.ignorePlanningGate && planningState.planDone === false) return void message.warning(PLAN_GATE_TIP_ADD);
         openEpisodeDraft({ mode: "add" });
     };
 
-    /** 复用 studio-create.tsx 的文件解析：TXT/MD/CSV/TSV ≤2MB，UTF-8 失败回退 GBK。 */
+    /** 单集素材导入的文件解析：TXT/MD/CSV/TSV ≤2MB，UTF-8 失败回退 GBK（与新建页同口径）。 */
     const importEpisodeFile = async (file: File) => {
         if (!EPISODE_TEXT_FILE.test(file.name)) return void message.warning("支持 TXT、Markdown、CSV、TSV 文本文件");
         if (file.size > EPISODE_FILE_MAX_BYTES) return void message.warning("单集文件不超过 2MB");
@@ -1440,7 +1661,15 @@ function DramaStudioInner() {
             await fetchDramaPipelineStatus(dramaId).then((s) => setPipeline(s)).catch(() => undefined);
             await refreshAll();
             const requeued = Number(result?.requeued || 0);
-            message.success(requeued > 0 ? `已重新排队 ${requeued} 项失败任务` : "没有可重试的失败任务，已刷新全部制作数据");
+            const skipped = Number(result?.skippedByLimit || 0);
+            // 熔断作业保留 failed 终态：只说「没有可重试」会让人误以为错误已解决，必须点明需人工介入。
+            if (skipped > 0) {
+                message.warning(requeued > 0
+                    ? `已重新排队 ${requeued} 项失败任务；另有 ${skipped} 项已达重试上限，需人工处理`
+                    : `${skipped} 项已达重试上限，需人工处理（已刷新制作数据；重试不会重排这些作业）`);
+            } else {
+                message.success(requeued > 0 ? `已重新排队 ${requeued} 项失败任务` : "没有可重试的失败任务，已刷新全部制作数据");
+            }
         } catch (error) {
             message.error(`重试失败：${(error as Error).message}`);
         } finally {
@@ -1454,8 +1683,10 @@ function DramaStudioInner() {
             setBusy("pause");
             try {
                 await toggleBatch(running.runId, paused ? "resume" : "pause");
-                setPausedPersist((p) => !p);
-                message.success(paused ? "已继续当前生成" : "已暂停当前生成");
+                // 显式赋值：快速连点时 (p)=>!p 会按旧闭包反转，可能落成相反状态。
+                const nextPaused = !paused;
+                setPausedPersist(nextPaused);
+                message.success(nextPaused ? "已暂停当前生成" : "已继续当前生成");
             } catch (error) {
                 message.error(`操作失败：${(error as Error).message}`);
             } finally {
@@ -1466,15 +1697,69 @@ function DramaStudioInner() {
             if (!dramaId) return void message.warning("请先选择剧目");
             setBusy("pause");
             try {
-                if (paused) { await resumeDramaPipeline(dramaId); message.success("已恢复全自动流水线"); }
-                else { await pauseDramaPipeline(dramaId); message.success("已暂停全自动流水线"); }
-                setPausedPersist((p) => !p);
+                if (paused) {
+                    await resumeDramaPipeline(dramaId);
+                    setPausedPersist(false);
+                    message.success("已恢复全自动流水线");
+                } else {
+                    // pause 返回本次取消摘要（canceledTasks/canceledQueuedTasks/failedTasks），原样展示后端真值。
+                    const report = await pauseDramaPipeline(dramaId) as { ok?: boolean } & NonNullable<PipelinePauseLite["lastResult"]>;
+                    setPausedPersist(true);
+                    const canceled = Number(report?.canceledTasks || 0);
+                    const queued = Number(report?.canceledQueuedTasks || 0);
+                    const failed = Number(report?.failedTasks || 0);
+                    const detail = canceled
+                        ? `已暂停：取消 ${canceled} 个画布任务（其中排队 ${queued} 个）`
+                        : "已暂停全自动流水线：当前没有在跑的画布任务";
+                    if (failed > 0) message.warning(`${detail}；${failed} 个任务取消失败，可能仍会跑完`);
+                    else message.success(detail);
+                }
                 setPipeline(await fetchDramaPipelineStatus(dramaId));
             } catch (error) {
                 message.error(`操作失败：${(error as Error).message}`);
             } finally {
                 setBusy(null);
             }
+        }
+    };
+
+    /** 影策语义：暂停不是硬闸门。点生成/重试时先把全局暂停转回运行（对应暂停横幅里那句
+     *  「重新改编、生成视频或重试会自动继续制作」），失败则抛出由调用方就地提示。 */
+    const resumeIfPaused = async () => {
+        if (!paused) return;
+        if (!dramaId) throw new Error("请先选择剧目");
+        await resumeDramaPipeline(dramaId);
+        setPausedPersist(false);
+        setPipeline(await fetchDramaPipelineStatus(dramaId));
+        message.success("已自动继续制作");
+    };
+
+    /** 人工确认的重试：后端按作业重置 attempt 绕过熔断上限；暂停时先恢复，否则重排了也不会派发。 */
+    const handleRetryJobs = async (jobIds: string[]) => {
+        if (!dramaId) return void message.warning("请先选择剧目");
+        if (!jobIds.length) return;
+        setBusy("retry");
+        try {
+            await resumeIfPaused();
+            let requeued = 0;
+            const failures: string[] = [];
+            for (const jobId of jobIds) {
+                try {
+                    const res = await retryDramaPipelineJob(dramaId, jobId);
+                    if (res?.ok) requeued += 1;
+                    else failures.push(`${jobId}：后端未确认`);
+                } catch (error) {
+                    failures.push(`${jobId}：${(error as Error).message}`);
+                }
+            }
+            await fetchDramaPipelineStatus(dramaId).then((s) => setPipeline(s)).catch(() => undefined);
+            await refreshAll();
+            if (failures.length) message.warning(`已手动重新排队 ${requeued} 项；${failures.length} 项失败：${failures[0]}`);
+            else message.success(`已手动重新排队 ${requeued} 项失败任务（尝试次数已重置）`);
+        } catch (error) {
+            message.error(`手动重试失败：${(error as Error).message}`);
+        } finally {
+            setBusy(null);
         }
     };
 
@@ -1511,7 +1796,32 @@ function DramaStudioInner() {
         return sum + (Number.isFinite(f) && f > 0 ? f / headFps : 0);
     }, 0);
 
-    // 影策 inbox：真实生成错误 + 阶段缺口，已由数据层按集归并
+    // 影策 inbox：真实生成错误 + 阶段缺口，已由数据层按集归并。
+    // 数据层的 inbox 只来自 generation_logs，不含 pipeline.jobs 的失败作业（script/assets/
+    // prompts/video/render）。这些作业失败是流水线真正的错误，底部队列能看到、待处理页却
+    // 显示「一切顺利」，两处口径不一致。这里把失败的 pipeline 作业补进待处理页。
+    const inbox = useMemo<StudioInboxItem[]>(() => {
+        const items: StudioInboxItem[] = [...hookInbox];
+        for (const j of pipeline?.jobs || []) {
+            if (String(j.status || "").toLowerCase() !== "failed") continue;
+            const stage = String(j.stage || "");
+            const ep = episodes.find((e) => e.id === String(j.episodeId || ""));
+            const label = PIPELINE_STAGE_LABEL[stage] || stage || "作业";
+            items.push({
+                id: `pipeline:${String(j.id || "")}`,
+                kind: "job_failed",
+                severity: "error",
+                title: `${ep ? `第 ${ep.no} 集` : "剧目"} · ${label}失败`,
+                detail: String(j.error || `${label}作业失败${Number(j.attempt) > 1 ? `（已重试 ${j.attempt} 次）` : ""}`),
+                episodeId: ep?.id,
+                episodeNo: ep?.no,
+                retryExhausted: Boolean(j.retryExhausted),
+                jobId: String(j.id || ""),
+            });
+        }
+        return items;
+    }, [hookInbox, pipeline?.jobs, episodes]);
+
     // 底部队列失败项：覆盖 inbox 全部真实失败 kind（cast_failed 参考图 / segment_failed 段视频 /
     // episode_error 分集错误 / job_failed 任务失败），排除 stage_gap（规划缺口非生成失败）。
     // 之前只取 episode_error|job_failed，漏掉 cast_failed（如缺主图1参考图）→ 队列显示「无失败任务」但「待重试6」。
@@ -1521,8 +1831,14 @@ function DramaStudioInner() {
     // 见 use-studio-data.ts:205 状态派生；stage=video 反而是"已发布成片"，不能用来判 awaiting。
     const awaitingCount = episodes.filter((ep) => !ep.error && ep.status === "待生成").length;
 
-    // 底部队列统一视图（对齐影策 queue-bar）：errorInbox + 批次，带筛选状态
-    type QueueJob = { id: string; title: string; error: string; prompt?: string; status: string; episodeId?: string; kind?: string; createdAt?: string; waitReason?: string; stage?: string; attempt?: number };
+    // 底部队列统一视图（对齐影策 queue-bar）：errorInbox + 批次，带筛选状态。
+    // 时间字段全部来自后端按作业补的真值（pipeline.jobs / generation_logs），缺失才留空显示「—」。
+    type QueueJob = {
+        id: string; title: string; error: string; prompt?: string; status: string; episodeId?: string; kind?: string;
+        createdAt?: string; startedAt?: string; finishedAt?: string; durationMs?: number;
+        runtimeTaskId?: string; waitReason?: string; stage?: string; attempt?: number;
+        attempts?: QueueAttemptRecord[];
+    };
     // 「全部」并入近期成功生成：数据来自 generation_logs（与 jobCounts/inbox 同源），按 id 去重后截断上限。
     const QUEUE_ALL_LIMIT = 120;
     /** 生成日志只有 taskMode/platform，没有队列承接 work 的 kind：按真实字段归类，识别不出就留空不编造。 */
@@ -1539,19 +1855,37 @@ function DramaStudioInner() {
         return {
             id: log.id, title: `${ep ? `第 ${ep.no} 集` : "画布"} · ${log.model || JOB_KIND_LABEL[kind] || log.platform || "生成"}`,
             error: log.error || "", prompt: log.prompt, status: log.status, episodeId: ep?.id,
-            kind: kind ? JOB_KIND_LABEL[kind] || kind : undefined, createdAt: log.createdAt,
+            kind: kind ? JOB_KIND_LABEL[kind] || kind : undefined,
+            createdAt: log.createdAt, startedAt: log.startedAt, finishedAt: log.finishedAt,
+            durationMs: log.durationMs, runtimeTaskId: log.runtimeTaskId,
             ...(log.waitReason ? { waitReason: log.waitReason } : {}),
         };
     });
     const queueJobs: QueueJob[] = [
-        ...errorInbox.map((it) => ({
-            id: it.id, title: it.title, error: it.detail || "", prompt: undefined,
-            status: "failed", episodeId: it.episodeId,
-            kind: it.kind === "cast_failed" ? "参考图失败"
-                : it.kind === "segment_failed" ? "段视频失败"
-                    : it.kind === "job_failed" ? "任务失败"
-                        : it.kind === "stage_gap" ? "阶段缺口" : "分集错误",
-        })),
+        // inbox 的 pipeline:<jobId> 项与下面的流水线行同源，且去重时排在前面：把该作业自己的
+        // 时间/attempt/attempts 一并带上，否则详情里只剩最终错误，逐次尝试不可查。
+        ...errorInbox.map((it) => {
+            const jobId = it.id.startsWith("pipeline:") ? it.id.slice("pipeline:".length) : "";
+            const job = jobId ? (pipeline?.jobs || []).find((j) => String(j.id || "") === jobId) : undefined;
+            return {
+                id: it.id, title: it.title, error: it.detail || "", prompt: undefined,
+                status: "failed", episodeId: it.episodeId,
+                kind: it.kind === "cast_failed" ? "参考图失败"
+                    : it.kind === "segment_failed" ? "段视频失败"
+                        : it.kind === "job_failed" ? "任务失败"
+                            : it.kind === "stage_gap" ? "阶段缺口" : "分集错误",
+                ...(job ? {
+                    stage: String(job.stage || "") || undefined,
+                    attempt: Number(job.attempt) || 0,
+                    createdAt: job.createdAt ? String(job.createdAt) : undefined,
+                    startedAt: job.startedAt ? String(job.startedAt) : undefined,
+                    finishedAt: job.finishedAt ? String(job.finishedAt) : undefined,
+                    durationMs: typeof job.durationMs === "number" ? job.durationMs : undefined,
+                    runtimeTaskId: job.runtimeTaskId ? String(job.runtimeTaskId) : undefined,
+                    attempts: queueAttemptsOf(job.attempts),
+                } : {}),
+            };
+        }),
         ...batches.map((b) => ({
             id: b.runId, title: `批次 v${b.version} · ${b.targets?.length || 0} 目标`,
             error: b.error || "", status: (b.status || "").toLowerCase(), episodeId: b.episodeId,
@@ -1559,19 +1893,25 @@ function DramaStudioInner() {
             kind: "批次生成", createdAt: b.createdAt,
         })),
         // 流水线阶段作业（script/assets/prompts/video/render）是真正在跑的操作，
-        // 后端 status.jobs 已带 stage/status/attempt/error/episodeId，之前完全没进队列才显示空。
+        // 后端 status.jobs 已带 stage/status/attempt/error/episodeId 与 createdAt/startedAt/finishedAt/durationMs。
         ...(pipeline?.jobs || []).map((j) => {
             const stage = String(j.stage || "");
             const ep = episodes.find((e) => e.id === String(j.episodeId || ""));
             const status = String(j.status || "").toLowerCase();
             const err = j.error ? String(j.error) : "";
+            const durationMs = typeof j.durationMs === "number" ? j.durationMs : undefined;
             return {
                 id: `pipeline:${String(j.id || "")}`,
                 title: `${ep ? `第 ${ep.no} 集` : "剧目"} · ${PIPELINE_STAGE_LABEL[stage] || stage || "作业"}${Number(j.attempt) > 1 ? `（第 ${j.attempt} 次）` : ""}`,
                 error: err, status, episodeId: ep?.id,
                 kind: PIPELINE_STAGE_LABEL[stage] || undefined,
                 stage, attempt: Number(j.attempt) || 0,
-                ...(err ? { prompt: err } : {}),
+                createdAt: j.createdAt ? String(j.createdAt) : undefined,
+                startedAt: j.startedAt ? String(j.startedAt) : undefined,
+                finishedAt: j.finishedAt ? String(j.finishedAt) : undefined,
+                durationMs,
+                // 逐次尝试记录：后端 attempts_json 投影，旧作业没有该字段 → 空数组（详情里如实说明未采集）。
+                attempts: queueAttemptsOf(j.attempts),
             } as QueueJob;
         }),
     ];
@@ -1584,13 +1924,17 @@ function DramaStudioInner() {
                 if (queueFilter === "all") return true;
                 if (queueFilter === "failed") return ["failed", "error", "retry"].includes(j.status) || Boolean(j.error);
                 return ["running", "checking", "compiling", "applying", "queued"].includes(j.status);
-            })
-            .filter((j) => {
+            });
+        const deduped = rows.filter((j) => {
                 if (seenQueueIds.has(j.id)) return false;
                 seenQueueIds.add(j.id);
                 return true;
             });
-        return queueFilter === "all" ? rows.slice(0, QUEUE_ALL_LIMIT) : rows;
+        // 影策队列排序：运行中永远置顶，其次排队，然后失败/待重试，最后完成历史；
+        // 桶内按真实时间排。流水线作业（created_at ASC）与生成日志（created_at DESC）
+        // 的数据源顺序相反，按到达顺序拼接会乱排，统一交给 studio-queue-order 处理。
+        const ordered = orderStudioQueue(deduped);
+        return queueFilter === "all" ? ordered.slice(0, QUEUE_ALL_LIMIT) : ordered;
     })();
 
     /** 作品/分集方式展示用的真实分集口径（来自 folder.productionPlan.sourceSplit / episodeMode）。 */
@@ -1748,16 +2092,16 @@ function DramaStudioInner() {
     };
 
     /** 顶栏「…」：本地特有入口（影策没有）全部收进一个菜单，主行右侧只留影策四个动作。 */
-    const moreActionsLabel = pipelineFailedCount > 0
-        ? `更多操作：${pipelineLabel} / 重试失败 ${pipelineFailedCount} / 工具`
+    const moreActionsLabel = pipelineRetryableCount > 0
+        ? `更多操作：${pipelineLabel} / 重试失败 ${pipelineRetryableCount} / 工具`
         : `更多操作：${pipelineLabel} / 工具`;
     const moreMenu: MenuProps = {
         items: [
             {
                 key: "pipeline",
                 icon: <Zap className="size-3.5" />,
-                title: `${pipelineLabel}：全自动流水线，一键从剧本推进到成片（对齐影策服务端自动编排）`,
-                disabled: pipelineBusy,
+                title: paused ? "已暂停，继续后可生成" : `${pipelineLabel}：全自动流水线，一键从剧本推进到成片（对齐影策服务端自动编排）`,
+                disabled: pipelineBusy || paused,
                 label: (
                     <span data-studio-pipeline-toggle-menu={pipelineLabel}>
                         {pipelineBusy
@@ -1773,11 +2117,11 @@ function DramaStudioInner() {
                 key: "retry",
                 icon: <CircleAlert className="size-3.5" />,
                 danger: true,
-                title: busy === "retry" ? "重试中…" : `重试流水线里 ${pipelineFailedCount} 个失败任务（真值来自 pipeline jobs）`,
-                disabled: pipelineFailedCount === 0 || busy === "retry",
+                title: busy === "retry" ? "重试中…" : `重试流水线里 ${pipelineRetryableCount} 个可重排的失败任务（已达上限的需人工介入）`,
+                disabled: pipelineRetryableCount === 0 || busy === "retry",
                 label: (
-                    <span data-studio-retry-failed-menu={pipelineFailedCount}>
-                        {busy === "retry" ? "重试中…" : `重试失败（${pipelineFailedCount}）`}
+                    <span data-studio-retry-failed-menu={pipelineRetryableCount}>
+                        {busy === "retry" ? "重试中…" : `重试失败（${pipelineRetryableCount}）`}
                     </span>
                 ),
                 onClick: () => void handleRetryAll(),
@@ -1791,6 +2135,46 @@ function DramaStudioInner() {
                 children: toolsMenu.items ?? [],
             },
         ],
+    };
+
+    /** 详情头「…」：本集二级动作（分镜改编 / 拆镜 / 导演讨论）。
+     *  影策 detail 头右侧只保留「剧本 / 分镜 / 成片 + 在画布中打开本集」，这三个本地入口原先平铺在
+     *  同一行，窄屏会把右缘按钮推出可视区；收进真实菜单后功能不丢，头部也不会被裁。 */
+    const detailMoreMenu: MenuProps = {
+        items: [
+            { key: "adapt", icon: <Wand2 className="size-3.5" />, disabled: !current, label: <span title="切到剧本页改编本集剧本并生成分镜">分镜改编</span>, onClick: () => openWorkspace("story") },
+            { key: "split", icon: <Scissors className="size-3.5" />, disabled: !current, label: <span title="把本集分场剧本拆成结构化镜头并同步到画布">拆镜</span>, onClick: () => setSplitOpen(true) },
+            { key: "discuss", icon: <Sparkles className="size-3.5" />, disabled: !current, label: <span title="带上本集上下文打开导演对话，优化台词/动作/景别/运镜">导演讨论</span>, onClick: () => discussWithDirector() },
+        ],
+    };
+
+    /** 影策状态格子（drama.css:1378-1406）：一格一集，按真实状态着色；选中集 2px 描边；
+     *  title / aria-label 带集号+标题+状态，点击切换当前集。格子默认只显示色块，hover 才显示集号。 */
+    const renderStatusCell = (ep: StudioEpisode) => {
+        const tone = episodeTone(ep);
+        const active = current?.id === ep.id;
+        const label = EPISODE_TONE_LABEL[tone];
+        return (
+            <button
+                key={ep.id}
+                type="button"
+                data-studio-status-cell={tone}
+                data-studio-status-cell-no={ep.no}
+                aria-current={active}
+                aria-pressed={active}
+                aria-label={`第 ${ep.no} 集 · ${ep.title} · ${label}`}
+                title={`第 ${ep.no} 集 · ${ep.title} · ${label}`}
+                onClick={() => selectEpisode(ep)}
+                style={tone === "ready" ? EPISODE_TONE_READY_STYLE : undefined}
+                className={cn(
+                    "group flex aspect-square w-full min-w-0 items-center justify-center rounded-[4px] text-[11px] font-semibold tabular-nums transition-colors",
+                    EPISODE_TONE_CELL[tone],
+                    active && "outline-2 outline-offset-1 outline-foreground",
+                )}
+            >
+                <span className="text-transparent transition-colors group-hover:text-current">{ep.no}</span>
+            </button>
+        );
     };
 
     /** 影策 episode-rail.tsx:200-216 / drama.css:1242-1314：60px 单行卡，38px 序号列，
@@ -1808,7 +2192,7 @@ function DramaStudioInner() {
                 type="button"
                 aria-current={current?.id === ep.id}
                 onClick={() => selectEpisode(ep)}
-                className="grid h-full w-full grid-cols-[24px_minmax(0,1fr)] items-center gap-2 pl-2.5 pr-1 text-left"
+                className="grid h-full w-full grid-cols-[30px_minmax(0,1fr)] items-center gap-2 pl-2 pr-2 text-left"
             >
                 {/* 影策 .drama-rail-item 行内是纯序号文本（无彩色方块），副行显示「视频 ready/段数」。 */}
                 <span className="text-[11px] font-semibold tabular-nums text-muted-foreground">
@@ -1845,9 +2229,11 @@ function DramaStudioInner() {
     );
 
     return (
+        /* 影策全局 button 是 cursor:pointer、disabled 是 not-allowed；本地 Tailwind preflight 默认 default，
+           整页按钮「看不出能点」。在制作台作用域一次性对齐，不改全局样式表。 */
         <div
             data-drama-studio="shell"
-            className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground"
+            className="flex h-full min-h-0 flex-col overflow-hidden bg-background text-foreground [&_button:not(:disabled)]:cursor-pointer [&_button:disabled]:cursor-not-allowed [&_summary]:cursor-pointer"
         >
             {/* 制作台 ↔ 画布 切换器（复用老版制作台同款，两态同一工作台） */}
             <WorkspaceViewSwitcher
@@ -1856,7 +2242,8 @@ function DramaStudioInner() {
             />
             {/* 标题区 */}
             <div className="shrink-0 border-b border-border">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pb-2.5 pt-3">
+                {/* 影策 .drama-topbar：padding 0 16 0 8 / 高 56 / gap 12；返回键与左栏内边距成同一条竖线（8px）。 */}
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2 pl-2 pr-4">
                     <button
                         type="button"
                         aria-label="返回"
@@ -1893,22 +2280,10 @@ function DramaStudioInner() {
                         aria-label="新建短剧"
                         title="新建短剧：从小说原文/剧本/分镜开始"
                         onClick={() => navigate("/drama-studio/new")}
-                        className="flex h-8 items-center gap-1 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                        className="flex h-8 items-center gap-1 rounded-md border border-border px-3 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
                     >
                         <Plus className="size-3.5" /> 新建短剧
                     </button>
-                    {createWizardOpen ? <DramaPage
-                        createOnly
-                        onCreated={(folderId) => {
-                            setCreateWizardOpen(false);
-                            const next = new URLSearchParams(query);
-                            next.set("dramaId", folderId);
-                            next.delete("episodeId");
-                            next.delete("new");
-                            setQuery(next);
-                            void refreshAll();
-                        }}
-                    /> : null}
                     <Modal
                         title="拆镜 · 分场剧本转结构化镜头"
                         open={splitOpen}
@@ -1917,14 +2292,14 @@ function DramaStudioInner() {
                         width={960}
                         destroyOnClose
                     >
-                        {dramaId ? <AdaptStoryboardPanel
+                        {dramaId ? <Suspense fallback={<TabChunkFallback />}><AdaptStoryboardPanel
                             dramaId={dramaId}
                             episodes={rawEpisodes}
                             defaultEpisodeId={current?.id}
                             // 拆镜写稿会发布制作稿；资产建档会在其后单独进行（create_manual_director_asset 会标 stale），
                             // 所以这里只刷新，不自动建档——避免刚发布的镜头被标 stale。
                             onWritten={() => { void refreshAll(); }}
-                        /> : null}
+                        /></Suspense> : null}
                     </Modal>
                     {/* 影策 detail.tsx:420-430：等待媒体显示「剧本就绪 · 待生成视频」，否则制作状态。 */}
                     {/* 数据未就绪（URL 有剧目但 folders 还没到）时显示加载态，避免「制作中 0/0 集」的假状态闪烁 */}
@@ -1969,9 +2344,8 @@ function DramaStudioInner() {
                     )}
 
                     {/* 右侧操作区整组：宽屏与左侧同一行（ml-auto 顶到最右），窄屏整组换行，不会只掉一个按钮到第二行。 */}
-                    <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-2">
-                        {/* 顶层 Tab：影策 detail.tsx:443-460 / drama.css:1777-1823 的 sunken 容器 + 图标 + aria-current */}
-                        <nav className="flex shrink-0 items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-1 shadow-inner" aria-label="制作台视图">
+                    {/* 顶层 Tab：影策 .drama-nav 是进度条之后的独立子项（margin-left 12），不并进右侧动作组；位置与影策一致。 */}
+                    <nav className="ml-3 flex shrink-0 items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-1 shadow-inner" aria-label="制作台视图">
                             {TOP_TABS.map((tab) => {
                                 const Icon = TOP_TAB_ICONS[tab];
                                 const active = topTab === tab;
@@ -1999,12 +2373,14 @@ function DramaStudioInner() {
                             })}
                         </nav>
 
-                        <div className="flex flex-wrap items-center gap-1.5 border-l border-border pl-3">
+                    {/* 右侧动作组：影策 .drama-topbar-actions（gap 8、margin-left auto 贴右缘、按钮 padding 12）。 */}
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-2">
+                        <div className="flex flex-wrap items-center gap-2">
                             {/* 影策同款四个动作，顺序与影策一致；本地特有入口全部收进右侧「…」菜单，不再占主行。 */}
                             <Dropdown menu={assetPackMenu} trigger={["click"]} placement="bottomRight">
                                 <button
                                     type="button"
-                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
                                 >
                                     <Package className="size-3.5" /> 资产包
                                 </button>
@@ -2020,7 +2396,7 @@ function DramaStudioInner() {
                             <button
                                 type="button"
                                 onClick={() => openInCanvas()}
-                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
                             >
                                 <Palette className="size-3.5" /> 精修画布
                             </button>
@@ -2029,9 +2405,10 @@ function DramaStudioInner() {
                                     type="button"
                                     data-studio-release-all
                                     aria-label={`全部生成视频 · ${awaitingCount} 集`}
-                                    title={`全部生成视频 · ${awaitingCount} 集`}
+                                    title={paused ? "已暂停，继续后可生成" : `全部生成视频 · ${awaitingCount} 集`}
                                     onClick={confirmReleaseAll}
-                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                    disabled={paused}
+                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
                                 >
                                     <Play className="size-3.5" /> 全部生成视频 · {awaitingCount} 集
                                 </button>
@@ -2043,13 +2420,12 @@ function DramaStudioInner() {
                                     disabled={busy === "pause"}
                                     aria-label={runLabel}
                                     title={runLabel}
-                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
+                                    className="flex h-8 items-center gap-1.5 rounded-md border border-border px-3 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
                                 >
                                     {paused ? <Play className="size-3.5" /> : <Pause className="size-3.5" />}
                                     {runLabel}
                                 </button>
                             ) : null}
-                            <span className="mx-0.5 h-5 w-px shrink-0 bg-border" aria-hidden />
                             {/* 本地特有入口（一键全自动 / 重试失败 / 工具）收进一个「…」菜单，主行只留影策四个动作。 */}
                             <Dropdown menu={moreMenu} trigger={["click"]} placement="bottomRight">
                                 <button
@@ -2074,15 +2450,16 @@ function DramaStudioInner() {
             {/* 主体两栏 */}
             <div className="flex min-h-0 flex-1">
                 {/* 左栏：剧集列表。影策只有「制作」页带集列表侧栏；项目资产 / 待处理 / 设置是全宽页面。 */}
-                {topTab === "制作" ? <aside className="flex w-[300px] shrink-0 flex-col border-r border-border bg-card/40">
-                    <div className="flex items-center gap-1.5 px-3 pt-3">
+                {topTab === "制作" ? <aside className="flex w-[292px] shrink-0 flex-col border-r border-border bg-card/40">
+                    {/* 影策 .drama-rail-head：padding 8 / gap 8；搜索框高 32，左缘与顶栏返回键同一竖线（8px）。 */}
+                    <div className="flex items-center gap-2 px-2 pt-2">
                         <div className="flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-background px-2">
                             <Search className="size-3.5 shrink-0 text-muted-foreground" />
                             <input
                                 value={search}
                                 onChange={(e) => setSearch(e.target.value)}
                                 onKeyDown={(e) => { if (e.key === "Enter" && visibleEpisodes[0]) selectEpisode(visibleEpisodes[0]); }}
-                                placeholder="集号 / 标题 / 简介"
+                                placeholder="集号或标题"
                                 aria-label="搜索剧集"
                                 className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/70"
                             />
@@ -2094,72 +2471,68 @@ function DramaStudioInner() {
                         </div>
                         <button
                             type="button"
-                            aria-label="添加剧集"
-                            onClick={handleAddEpisode}
-                            disabled={busy === "add" || !planningState.planDone}
-                            title={!planningState.planDone ? PLAN_GATE_TIP_ADD : "添加剧集"}
+                            aria-label={`添加第 ${total + 1} 集`}
+                            onClick={() => handleAddEpisode({ ignorePlanningGate: true })}
+                            disabled={busy === "add"}
+                            title={`添加第 ${total + 1} 集：粘贴或导入下一集的原文、剧本或分镜`}
                             className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
                         >
                             {busy === "add" ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
                         </button>
-                        <div className="flex shrink-0 items-center rounded-md border border-border p-0.5" role="group" aria-label="分集视图">
-                            <button type="button" aria-label="列表视图" aria-pressed={view === "list"} onClick={() => setViewPersist("list")} className={cn("flex size-6 items-center justify-center rounded", view === "list" ? "bg-accent text-accent-foreground" : "text-muted-foreground")}>
-                                <List className="size-3.5" />
-                            </button>
-                            <button type="button" aria-label="网格视图" aria-pressed={view === "grid"} onClick={() => setViewPersist("grid")} className={cn("flex size-6 items-center justify-center rounded", view === "grid" ? "bg-accent text-accent-foreground" : "text-muted-foreground")}>
-                                <LayoutGrid className="size-3.5" />
-                            </button>
-                        </div>
+                        {/* 影策 episode-rail.tsx:135-139：列表/矩阵是同「一个」32×32 按钮来回切（aria-pressed 表示当前是矩阵），
+                            不是两个 24px 小按钮；热区与语义都按影策来。 */}
+                        <button type="button" data-studio-view={view} aria-pressed={view === "grid"}
+                            aria-label={view === "grid" ? "切换列表视图" : "切换矩阵视图"}
+                            title={view === "grid" ? "列表视图" : "矩阵视图：一屏看清全剧进度"}
+                            onClick={() => setViewPersist(view === "grid" ? "list" : "grid")}
+                            className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:bg-muted hover:text-foreground">
+                            {view === "grid" ? <List className="size-4" /> : <LayoutGrid className="size-4" />}
+                        </button>
                     </div>
 
-                    {/* 影策 episode-rail.tsx:150-174：矩阵视图 5 色图例（完成/制作中/待生成/待审阅/失败）。纯 UI。 */}
+                    {/* 影策 episode-rail 状态分页：全部 / 待处理 / 制作中 / 已完成，选中为深底胶囊。 */}
+                    <div className="thin-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto px-2 pt-2" role="group" aria-label="分集状态分页" data-studio-status-tabs>
+                        {filters.map((f) => (
+                            <button
+                                key={f.key}
+                                type="button"
+                                data-studio-status-tab={f.key}
+                                aria-pressed={filter === f.key}
+                                onClick={() => setFilter(f.key)}
+                                className={cn(
+                                    "h-[26px] shrink-0 rounded-full px-2 text-[11px] leading-none transition-colors",
+                                    filter === f.key
+                                        ? "bg-foreground/10 font-medium text-foreground ring-1 ring-foreground/15"
+                                        : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+                                )}
+                            >
+                                {f.label}
+                                {/* 影策 .drama-filter.is-alert b：待处理有内容时只把计数标红。 */}
+                                <b className={cn("ml-0.5 font-semibold tabular-nums", f.key === "需要处理" && f.count > 0 ? "text-rose-500" : "opacity-70")}>{f.count}</b>
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* 影策 episode-rail.tsx:150-191：图例与状态格子只属于矩阵（宫格）视图；
+                        列表视图只有集行，不出宫格也不出图例。 */}
                     {view === "grid" ? (
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 pb-1.5 text-[10px] text-muted-foreground" role="group" aria-label="分集状态图例">
-                            {[
-                                { label: "完成", dot: "bg-emerald-500" },
-                                { label: "制作中", dot: "bg-amber-500" },
-                                { label: "待生成", dot: "bg-sky-500" },
-                                { label: "待审阅", dot: "bg-violet-500" },
-                                { label: "失败", dot: "bg-rose-500" },
-                            ].map((item) => (
-                                <span key={item.label} className="inline-flex items-center gap-1">
-                                    <i aria-hidden className={cn("size-1.5 rounded-full", item.dot)} /> {item.label}
+                        <div className="flex shrink-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-2 pt-2 text-[10px] text-muted-foreground" role="group" aria-label="分集状态图例">
+                            {EPISODE_TONE_ORDER.map((tone) => (
+                                <span key={tone} className="inline-flex items-center gap-1">
+                                    <i aria-hidden className={cn("size-2 rounded-full", EPISODE_TONE_DOT[tone])} style={tone === "ready" ? EPISODE_TONE_READY_STYLE : undefined} /> {EPISODE_TONE_LEGEND_LABEL[tone]}
                                 </span>
                             ))}
                         </div>
                     ) : null}
 
-                    <div className="thin-scrollbar flex items-center gap-1 overflow-x-auto px-3 pb-2 pt-2.5">
-                        {filters.map((f) => (
-                            <button
-                                key={f.key}
-                                type="button"
-                                onClick={() => setFilter(f.key)}
-                                style={f.key === "需要处理" && f.count > 0
-                                    ? { color: "#e11d48", backgroundColor: "rgba(225,29,72,0.12)", boxShadow: "inset 0 0 0 1px rgba(225,29,72,0.45)" }
-                                    : undefined}
-                                className={cn(
-                                    "h-6 shrink-0 rounded-full px-2 text-[11px] leading-none transition",
-                                    filter === f.key
-                                        ? "bg-card font-medium text-foreground shadow-sm ring-1 ring-border"
-                                        : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
-                                    // 影策 episode-rail.tsx:143：待处理有内容时红字高亮提醒。
-                                    f.key === "需要处理" && f.count > 0 && "bg-rose-50 text-rose-600 ring-1 ring-rose-500/40 dark:bg-rose-500/10 dark:text-rose-400",
-                                )}
-                            >
-                                {f.key} <b className="ml-0.5 font-semibold tabular-nums opacity-75">{f.count}</b>
-                            </button>
-                        ))}
-                    </div>
-
-                    <div ref={episodeListRef} className={cn("min-h-0 flex-1 overflow-y-auto px-3 pb-2", view === "grid" && "grid grid-cols-2 content-start gap-2")}>
+                    <div ref={episodeListRef} className={cn("min-h-0 flex-1 overflow-y-auto p-2", view === "grid" && "grid grid-cols-10 content-start gap-1")} data-studio-status-grid={view === "grid" ? "grid" : "list"}>
                         {loading ? (
-                            <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground">
+                            <div className={cn("flex items-center justify-center gap-2 py-10 text-xs text-muted-foreground", view === "grid" && "col-span-10")}>
                                 <LoaderCircle className="size-4 animate-spin" /> 加载剧集…
                             </div>
                         ) : null}
                         {view === "grid" ? (
-                            visibleEpisodes.map((ep) => <div key={ep.id}>{renderEpisodeCard(ep)}</div>)
+                            visibleEpisodes.map((ep) => renderStatusCell(ep))
                         ) : visibleEpisodes.length ? (
                             <div className="relative w-full" style={{ height: episodeVirtualizer.getTotalSize() }}>
                                 {episodeVirtualizer.getVirtualItems().map((item) => (
@@ -2176,7 +2549,7 @@ function DramaStudioInner() {
                             </div>
                         ) : null}
                         {!loading && visibleEpisodes.length === 0 ? (
-                            <div className="py-10 text-center text-xs text-muted-foreground">
+                            <div className={cn("py-10 text-center text-xs text-muted-foreground", view === "grid" && "col-span-10")}>
                                 {dramaId ? "没有匹配的剧集" : "请先在剧目列表创建一个短剧"}
                             </div>
                         ) : null}
@@ -2184,17 +2557,17 @@ function DramaStudioInner() {
                             本地真实信号 planningState.planDone（fetchDramaPlanningState），
                             且必须等信号拉回（planningLoaded）才显示，默认未加载不误报。 */}
                         {planningLoaded && !planningState.planDone && dramaId ? (
-                            <div className="col-span-2 py-3 pl-1 text-left text-[10px] text-muted-foreground/70">后续章节正在分集…</div>
+                            <div className={cn("py-3 pl-1 text-left text-[10px] text-muted-foreground/70", view === "grid" && "col-span-10")}>后续章节正在分集…</div>
                         ) : null}
                     </div>
 
-                    <div className="shrink-0 space-y-1.5 border-t border-border p-3">
+                    <div className="shrink-0 space-y-1.5 border-t border-border p-2">
                         {studioInfo.excludedCount > 0 ? (
                             <button
                                 type="button"
                                 aria-label="继续选章"
                                 onClick={() => setChapterPickerOpen(true)}
-                                className="flex h-8 w-full items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                className="flex h-9 w-full items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
                             >
                                 <BookOpen className="size-3.5" /> 原著还有 {studioInfo.excludedCount} 章 · 继续选章
                             </button>
@@ -2205,17 +2578,17 @@ function DramaStudioInner() {
                                 onClick={handleBatchCreateEpisodes}
                                 disabled={busy === "add"}
                                 title="读取剧目原文，按章节一次性建好全部集"
-                                className="flex h-8 w-full items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/5 px-2 text-[11px] text-primary transition hover:bg-primary/10 disabled:opacity-60"
+                                className="flex h-9 w-full items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/5 px-2 text-[11px] text-primary transition hover:bg-primary/10 disabled:opacity-60"
                             >
                                 <BookOpen className="size-3.5" /> 按原文批量建集
                             </button>
                         ) : null}
                         <button
                             type="button"
-                            onClick={handleAddEpisode}
+                            onClick={() => handleAddEpisode()}
                             disabled={busy === "add" || !planningState.planDone}
                             title={!planningState.planDone ? PLAN_GATE_TIP_ADD : undefined}
-                            className="flex h-8 w-full items-center justify-center gap-1 rounded-md border border-dashed border-border text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
+                            className="flex h-9 w-full items-center justify-center gap-1 rounded-md border border-dashed border-border text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-60"
                         >
                             <Plus className="size-3.5" /> {total ? `添加第 ${total + 1} 集` : "添加第一集"}
                         </button>
@@ -2225,105 +2598,101 @@ function DramaStudioInner() {
                 {/* 右栏：详情 */}
                 <section className="flex min-w-0 flex-1 flex-col bg-background">
                     {/* 详情头：影策只在「制作」页显示集头 + 剧本/分镜/成片分页 */}
-                    {topTab === "制作" ? <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-5 py-3">
-                        <span className="text-xs text-muted-foreground">
-                            {current ? `第 ${current.no} 集 · ${headStageLabel(current)}` : "未选择剧集"}
-                        </span>
-                        {/* 影策 detail.tsx:602-633 的 eyebrow（集号·阶段）与标题是两行；本地并排在同一行，
-                            用极细分隔线断开，避免「第1集·排队中 第1集·标题」读起来像连成一串。 */}
-                        {current ? <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" /> : null}
-                        {current && renaming ? (
-                            <span className="flex items-center gap-2">
-                                <input
-                                    autoFocus
-                                    aria-label="集标题"
-                                    defaultValue={current.title}
-                                    maxLength={60}
-                                    disabled={busy === "rename"}
-                                    onFocus={(e) => e.currentTarget.select()}
-                                    onBlur={(e) => void saveEpisodeTitle(current, e.currentTarget.value)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter") e.currentTarget.blur();
-                                        if (e.key === "Escape") {
-                                            e.currentTarget.value = current.title;
-                                            setRenaming(false);
-                                            e.currentTarget.blur();
-                                        }
-                                    }}
-                                    className="h-7 w-56 rounded-md border border-primary bg-background px-2 text-sm font-semibold outline-none"
-                                />
-                                <span className="text-[10px] text-muted-foreground">回车保存 · Esc 取消</span>
+                    {topTab === "制作" ? <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-5 py-2">
+                        {/* 左组（集号/标题/统计）：min-w-0 + flex-1，空间不够时自身换行，右组 shrink-0 永不被裁。 */}
+                        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                                {current ? `第 ${current.no} 集 · ${headStageLabel(current)}` : "未选择剧集"}
                             </span>
-                        ) : (
-                            <h2 className="text-sm font-semibold">{current?.title || "—"}</h2>
-                        )}
-                        {current && !renaming ? (
-                            <button
-                                type="button"
-                                aria-label="重命名本集"
-                                title="重命名本集"
-                                onClick={() => handleRenameEpisode(current)}
-                                className="flex size-6 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                            {/* 影策 detail.tsx:602-633 的 eyebrow（集号·阶段）与标题是两行；本地并排在同一行，
+                                用极细分隔线断开，避免「第1集·排队中 第1集·标题」读起来像连成一串。 */}
+                            {current ? <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" /> : null}
+                            {current && renaming ? (
+                                <span className="flex min-w-0 items-center gap-2">
+                                    <input
+                                        autoFocus
+                                        aria-label="集标题"
+                                        defaultValue={current.title}
+                                        maxLength={60}
+                                        disabled={busy === "rename"}
+                                        onFocus={(e) => e.currentTarget.select()}
+                                        onBlur={(e) => void saveEpisodeTitle(current, e.currentTarget.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Enter") e.currentTarget.blur();
+                                            if (e.key === "Escape") {
+                                                e.currentTarget.value = current.title;
+                                                setRenaming(false);
+                                                e.currentTarget.blur();
+                                            }
+                                        }}
+                                        className="h-7 w-56 min-w-0 rounded-md border border-primary bg-background px-2 text-sm font-semibold outline-none"
+                                    />
+                                    <span className="shrink-0 text-[10px] text-muted-foreground">回车保存 · Esc 取消</span>
+                                </span>
+                            ) : (
+                                <h2 className="min-w-0 max-w-[46ch] truncate text-sm font-semibold" title={current?.title || undefined}>{current?.title || "—"}</h2>
+                            )}
+                            {current && !renaming ? (
+                                <button
+                                    type="button"
+                                    aria-label="重命名本集"
+                                    title="重命名本集"
+                                    onClick={() => handleRenameEpisode(current)}
+                                    className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                >
+                                    <Pencil className="size-3.5" />
+                                </button>
+                            ) : null}
+                            {/* 影策 detail.tsx:635-639 只有「N 镜」；场次/段数是本地额外信息，弱化保留不强删。 */}
+                            <span
+                                className="whitespace-nowrap text-[10px] text-muted-foreground/70"
+                                title="本地额外信息：真实制作稿的镜头数 / 场次 / 剧情段数"
                             >
-                                <Pencil className="size-3.5" />
-                            </button>
-                        ) : null}
-                        {/* 影策 detail.tsx:635-639 只有「N 镜」；场次/段数是本地额外信息，弱化保留不强删。 */}
-                        <span
-                            className="text-[10px] text-muted-foreground/70"
-                            title="本地额外信息：真实制作稿的镜头数 / 场次 / 剧情段数"
-                        >
-                            {shots.length} 镜{headDurationSec > 0 ? ` · ${Math.floor(headDurationSec / 60)}分${String(Math.round(headDurationSec % 60)).padStart(2, "0")}秒` : ""} · {scenes.length} 场 · {clipGroups.length} 段
-                        </span>
-                        {current ? <StagePips episode={current} size="md" /> : null}
-                        <div className="ml-auto flex items-center gap-2">
-                            <div className="flex items-center rounded-md border border-border p-0.5" aria-label="制作工作台">
-                                {WORKSPACE_TABS.map((tab) => (
+                                {shots.length} 镜{headDurationSec > 0 ? ` · ${Math.floor(headDurationSec / 60)}分${String(Math.round(headDurationSec % 60)).padStart(2, "0")}秒` : ""} · {scenes.length} 场 · {clipGroups.length} 段
+                            </span>
+                            {current ? <span className="shrink-0"><StagePips episode={current} size="md" /></span> : null}
+                        </div>
+                        {/* 右组：分页 + 「…」+ 主操作。shrink-0 保证按钮自身不被压缩；整组放不下时由外层
+                            flex-wrap 换行，且组内也允许换行——任何宽度都不会把按钮推出可视区。 */}
+                        <div className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-2">
+                            <div className="flex items-center rounded-md border border-border p-1" aria-label="制作工作台">
+                                {WORKSPACE_TABS.map((tab) => {
+                                    /* 影策 .drama-tab：高 30 / 左右内边距 16 / 图标 14 + 8 间距，整枚按钮可点；
+                                       本地原先只有 8px 内边距且无图标，热区比影策窄一截。 */
+                                    const TabIcon = tab.key === "story" ? ScrollText : tab.key === "shots" ? Clapperboard : Film;
+                                    return (
                                     <button
                                         key={tab.key}
                                         type="button"
                                         data-studio-workspace={tab.key}
                                         onClick={() => openWorkspace(tab.key)}
                                         className={cn(
-                                            "shrink-0 whitespace-nowrap rounded px-2 py-1 text-[11px] transition",
+                                            "inline-flex h-[30px] shrink-0 items-center gap-2 whitespace-nowrap rounded px-4 text-[11px] transition",
                                             activeStudioTab === tab.key ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:text-foreground",
                                         )}
                                     >
+                                        <TabIcon className="size-3.5 shrink-0" aria-hidden />
                                         {tab.label}
                                     </button>
-                                ))}
+                                    );
+                                })}
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => openWorkspace("story")}
-                                disabled={!current}
-                                title="切到剧本页改编本集剧本并生成分镜"
-                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
-                            >
-                                <Wand2 className="size-3.5" /> 分镜改编
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setSplitOpen(true)}
-                                disabled={!current}
-                                title="把本集分场剧本拆成结构化镜头并同步到画布"
-                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
-                            >
-                                <Scissors className="size-3.5" /> 拆镜
-                            </button>
-                            <button
-                                type="button"
-                                onClick={discussWithDirector}
-                                disabled={!current}
-                                title="带上本集上下文打开导演对话，优化台词/动作/景别/运镜"
-                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
-                            >
-                                <Sparkles className="size-3.5" /> 导演讨论
-                            </button>
+                            {/* 本地三个二级动作收进「…」：影策同一行没有这些按钮，功能不丢、头部不溢出。 */}
+                            <Dropdown menu={detailMoreMenu} trigger={["click"]} placement="bottomRight">
+                                <button
+                                    type="button"
+                                    data-studio-detail-more=""
+                                    aria-label="更多本集操作"
+                                    title="更多本集操作：分镜改编 / 拆镜 / 导演讨论"
+                                    className="flex h-8 shrink-0 items-center justify-center rounded-md border border-border px-2 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                >
+                                    <MoreHorizontal className="size-3.5" />
+                                </button>
+                            </Dropdown>
                             <button
                                 type="button"
                                 onClick={() => openInCanvas()}
-                                className="flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                                className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-border px-2.5 text-[11px] text-muted-foreground transition hover:bg-muted hover:text-foreground"
                             >
                                 <ExternalLink className="size-3.5" /> 在画布中打开本集
                             </button>
@@ -2345,6 +2714,21 @@ function DramaStudioInner() {
                         </div>
                     ) : topTab === "制作" ? (
                         <>
+                            {/* 影策 detail.tsx:669-677：暂停横幅（原因 + 继续制作）。暂停是服务端真值，
+                                没有暂停就不渲染；继续按钮复用同一 handleTogglePause，不另造入口。 */}
+                            {paused && productionState.stage !== "done" ? (
+                                <div data-studio-banner="paused" className="mx-5 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+                                    <span className="font-medium">制作已暂停</span>
+                                    <span className="min-w-0 flex-1 truncate text-amber-700/80 dark:text-amber-200/70" title={productionState.pauseReason || undefined}>
+                                        {productionState.pauseReason || "不会再派发新的生成任务；重新改编、生成视频或重试会自动继续制作。"}
+                                    </span>
+                                    <button type="button" onClick={handleTogglePause} disabled={busy === "pause"}
+                                        className="flex h-7 shrink-0 items-center gap-1 rounded-md bg-primary px-2.5 text-[11px] font-medium text-background transition hover:bg-primary/90 disabled:opacity-60"
+                                        data-studio-banner-resume>
+                                        <Play className="size-3" /> 继续制作
+                                    </button>
+                                </div>
+                            ) : null}
                             {current?.error ? (
                                 <div className="mx-5 mt-3 flex shrink-0 items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
                                     <CircleAlert className="size-3.5 shrink-0" />
@@ -2362,7 +2746,8 @@ function DramaStudioInner() {
                                     <span className="text-amber-700/80 dark:text-amber-200/70">手动放行模式下参考图闸门还未放行；确认素材已就绪后放行，流水线继续生成本集视频。</span>
                                     <button
                                         type="button"
-                                        disabled={bannerBusy !== null}
+                                        disabled={paused || bannerBusy !== null}
+                                        title={paused ? "已暂停，继续后可生成" : undefined}
                                         onClick={() => void handleBannerReleaseMedia()}
                                         className="ml-auto flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-primary px-2.5 text-[11px] text-primary-foreground hover:opacity-90 disabled:opacity-50"
                                     >
@@ -2380,7 +2765,8 @@ function DramaStudioInner() {
                                     </div>
                                     <button
                                         type="button"
-                                        disabled={bannerBusy !== null}
+                                        disabled={paused || bannerBusy !== null}
+                                        title={paused ? "已暂停，继续后可生成" : undefined}
                                         onClick={() => void handleBannerApprove()}
                                         className="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-primary px-2.5 text-[11px] text-primary-foreground hover:opacity-90 disabled:opacity-50"
                                     >
@@ -2412,14 +2798,14 @@ function DramaStudioInner() {
                             ) : !current ? (
                                 // 影策 detail.tsx: !episodes.length → StudioGenesis；没有剧目时才退回空态兜底。
                                 dramaId ? (
-                                    <StudioGenesis
+                                    <Suspense fallback={<TabChunkFallback />}><StudioGenesis
                                         productionState={productionState}
                                         paused={paused}
                                         chapterTruth={sourceChapterTruth}
                                         bibleReady={bibleReady}
                                         episodeCount={episodes.length}
                                         firstSampleReady={firstSampleReady}
-                                    />
+                                    /></Suspense>
                                 ) : (
                                     <EmptyState
                                         icon={<Film className="size-9 text-muted-foreground/40" />}
@@ -2437,6 +2823,8 @@ function DramaStudioInner() {
                                     clipFailureByTarget={clipFailureByTarget}
                                     dramaId={dramaId}
                                     busy={Boolean(busy)}
+                                    paused={paused}
+                                    onAutoResume={resumeIfPaused}
                                     processJobs={(pipeline?.jobs || []).filter((j) => j.episodeId === current.id).map((j) => ({ id: String(j.id), stage: String(j.stage), status: String(j.status), attempt: Number(j.attempt) || 0, error: j.error ? String(j.error) : null }))}
                                     onDiscussShot={discussShotWithDirector}
                                     onRescript={() => void (async () => {
@@ -2555,7 +2943,7 @@ function DramaStudioInner() {
                             )}
                         </>
                     ) : topTab === "项目资产" ? (
-                        <StudioAssetsTab
+                        <Suspense fallback={<TabChunkFallback />}><StudioAssetsTab
                             dramaId={dramaId}
                             sharedAssetCanvasId={String((currentFolder as Record<string, unknown> | null)?.sharedAssetCanvasId || "") || null}
                             artStyle={String(((currentFolder?.productionPlan as Record<string, unknown> | undefined)?.topic as Record<string, unknown> | undefined)?.artStyle || "")}
@@ -2585,24 +2973,25 @@ function DramaStudioInner() {
                             focusAsset={assetsFocus}
                             onOpenSegment={(episodeId, segmentId) => openSegmentFor(episodeId, segmentId)}
                             onOpenCast={openAssetSettings}
-                        />
+                        /></Suspense>
                     ) : topTab === "待处理" ? (
-                        <StudioInboxTab
+                        <Suspense fallback={<TabChunkFallback />}><StudioInboxTab
                             inbox={inbox}
                             episodes={episodes}
                             loading={loading || detailLoading}
                             busy={Boolean(busy)}
-                            onOpenEpisode={(id) => openEpisodeWorkspace(id, "story")}
+                            onOpenEpisode={(id) => openEpisodeWorkspace(id, "shots")}
                             onReview={(id) => openEpisodeWorkspace(id, "shots")}
                             onOpenSettings={() => setTopTab("设置")}
                             onStartVideo={() => void handlePipelineStart()}
                             onRetryAll={() => void handleRetryAll()}
+                            onRetryJobs={(jobIds) => void handleRetryJobs(jobIds)}
                             onReleaseMedia={handleReleaseMedia}
                             onOpenAssets={openAssetsFor}
                             onOpenSegment={openSegmentFor}
-                        />
+                        /></Suspense>
                     ) : (
-                        <StudioSettingsTab
+                        <Suspense fallback={<TabChunkFallback />}><StudioSettingsTab
                             dramaId={dramaId}
                             settings={studioSettings}
                             onChange={setStudioSettings}
@@ -2619,14 +3008,92 @@ function DramaStudioInner() {
                                     planDone: Boolean(res.planDone), planCursor: Number(res.planCursor || 0), lastChapterIndex: Number(res.lastChapterIndex || 0),
                                 });
                             }}
-                        />
+                        /></Suspense>
                     )}
                 </section>
             </div>
 
             {/* 底部任务队列栏 */}
-            <div className="relative shrink-0 border-t border-border bg-card/40">
-                <div className="flex h-[42px] items-center gap-4 overflow-x-auto px-4 text-[11px] tabular-nums thin-scrollbar">
+            <div className="relative shrink-0 border-t border-border bg-card/40" data-studio-queue-bar>
+                {/* 展开区在底部汇总条上方 in-flow 占位（影策 queue-bar 同款）：不再用 absolute 浮层盖住画布内容。 */}
+                {queueOpen ? (
+                    <div className="border-b border-border px-2 pb-2 pt-2" data-studio-queue-panel id="studio-queue-panel">
+                        <div className="mb-1.5 flex h-[26px] items-center gap-1.5" role="tablist" aria-label="队列筛选">
+                            {(["all", "active", "failed"] as const).map((key) => (
+                                <button key={key} type="button" role="tab" aria-selected={queueFilter === key}
+                                    onClick={() => setQueueFilter(key)}
+                                    className={cn("h-[26px] rounded-full px-3 !text-[11px] leading-none transition",
+                                        queueFilter === key ? "bg-foreground/[0.08] font-medium text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground")}>
+                                    {key === "all" ? "全部" : key === "active" ? "进行中" : "失败"}
+                                </button>
+                            ))}
+                            <span className="ml-auto truncate text-[11px] text-muted-foreground">
+                                {queueFilter === "all" && queueHistoryLoading ? "读取生成历史…" : null}
+                                {queueFilter === "all" && queueHistoryError ? <span className="text-rose-500" role="alert">生成历史读取失败：{queueHistoryError}</span> : null}
+                                {queueFilter === "all" && !queueHistoryLoading && !queueHistoryError ? "点击任一行查看请求详情" : null}
+                                {queueFilter !== "all" ? "点击任一行查看请求详情" : null}
+                            </span>
+                        </div>
+                        {/* 影策：7 列 grid + 34px 行高 + 11px 字号 + 圆角 8 / hover 底色；列表 max-h 280（约 8 行）。 */}
+                        <div className="max-h-[280px] overflow-y-auto overflow-x-hidden thin-scrollbar" role="list" data-studio-queue-list>
+                            {filteredQueue.map((job) => {
+                                const rowTone = ["succeeded", "success", "done", "completed"].includes(job.status)
+                                    ? "text-emerald-500"
+                                    : ["queued", "waiting", "pending"].includes(job.status)
+                                        ? "text-amber-500"
+                                        : ["running", "checking", "compiling", "applying"].includes(job.status)
+                                            ? "text-foreground"
+                                            : "text-rose-500";
+                                // 只有真实排队（后端写入了 waitReason）才替换状态文案；错误码先本地化。
+                                const waitNote = job.status === "queued" && job.waitReason ? job.waitReason : "";
+                                const jobError = localizeJobText(job.error);
+                                const statusText = waitNote || jobError || jobStatusText(job.status);
+                                const statusTitle = jobError || waitNote || jobStatusText(job.status);
+                                const timeValue = job.startedAt || job.createdAt || job.finishedAt;
+                                const timeTitle = [
+                                    job.createdAt ? `加入 ${formatJobTime(job.createdAt)}` : "",
+                                    job.startedAt ? `开始 ${formatJobTime(job.startedAt)}` : "",
+                                    job.finishedAt ? `结束 ${formatJobTime(job.finishedAt)}` : "",
+                                    typeof job.durationMs === "number" ? `用时 ${formatJobDuration(job.durationMs)}` : "",
+                                ].filter(Boolean).join(" · ");
+                                return (
+                                    <button key={job.id} type="button" role="listitem"
+                                        onClick={() => setQueueDetail({
+                                            id: job.id, title: job.title, error: job.error, prompt: job.prompt, status: job.status,
+                                            episodeId: job.episodeId, kind: job.kind, createdAt: job.createdAt,
+                                            startedAt: job.startedAt, finishedAt: job.finishedAt, durationMs: job.durationMs,
+                                            runtimeTaskId: job.runtimeTaskId, attempt: job.attempt,
+                                            attempts: job.attempts,
+                                            ...(job.waitReason ? { waitReason: job.waitReason } : {}),
+                                        })}
+                                        className="grid h-[34px] w-full grid-cols-[16px_72px_1.1fr_2fr_64px_72px_14px] items-center gap-2 rounded-[8px] px-2 text-left !text-[11px] leading-none text-muted-foreground transition hover:bg-foreground/[0.04]"
+                                        title={job.title}
+                                        data-studio-queue-row={job.id}
+                                    >
+                                        <JobStatusIcon status={job.status} className="size-4 shrink-0" />
+                                        <span className="truncate">{job.kind ? (JOB_KIND_LABEL[job.kind] || job.kind) : "—"}</span>
+                                        {/* 影策 queue-bar.tsx:89-92：完整标题走 title，窄列只显示省略文本。 */}
+                                        <span className="truncate text-foreground/90" title={job.title}>{job.title}</span>
+                                        <span className={cn("truncate", rowTone)} title={statusTitle}>{statusText}</span>
+                                        {/* 时间列：优先 startedAt，其次 createdAt；后端按作业补的 durationMs 放 title。 */}
+                                        <span className="truncate tabular-nums text-muted-foreground/70" title={timeTitle || "后端未提供该作业时间"}>{formatJobClock(timeValue)}</span>
+                                        {/* 花费列：后端没有按作业计费字段，displayed 为「—」，不写 0。 */}
+                                        <span className="truncate text-muted-foreground/50" title="后端暂未提供按作业计费字段">—</span>
+                                        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50" />
+                                    </button>
+                                );
+                            })}
+                            {!filteredQueue.length ? (
+                                <div className="py-2 text-center text-[11px] text-muted-foreground">
+                                    {queueFilter === "failed" ? "没有失败的工作" : queueFilter === "active" ? "没有进行中的工作" : "还没有调度记录"}
+                                </div>
+                            ) : null}
+                        </div>
+                    </div>
+                ) : null}
+                {/* 影策 .drama-queue-bar：padding 0 8 0 16 / 高 42 / gap 16；统计靠左、预算与展开按钮靠右。
+                    pr-28 给右侧固定「导演」浮钮留位：浮钮 86×40 在视口右下，之前正好压住队列开关导致点不开。 */}
+                <div className="flex h-[42px] items-center gap-4 overflow-x-auto pl-4 pr-28 text-[11px] tabular-nums thin-scrollbar">
                     {(() => {
                         // 统计与队列列表同源：把流水线阶段作业一并计入，避免列表有「运行中」顶部却写 0。
                         const pj = pipeline?.jobs || [];
@@ -2637,103 +3104,52 @@ function DramaStudioInner() {
                         const queued = queue.queued + pjQueued;
                         const done = jobCounts.succeeded + pjDone;
                         return (
-                            <>
-                                <span className="flex items-center gap-1.5 text-muted-foreground">{running > 0 ? <LoaderCircle className="size-3.5 animate-spin" /> : <span className="size-3.5 rounded-full bg-muted-foreground/40" />} 运行中 <b className="font-semibold text-foreground">{running}</b></span>
-                                <span className="flex items-center gap-1.5 text-muted-foreground"> 排队 <b className="font-semibold text-foreground">{queued}</b></span>
-                                <span className="flex items-center gap-1.5 text-muted-foreground"> 已完成 <b className="font-semibold text-foreground">{done}</b></span>
-                            </>
+                            <div className="flex shrink-0 items-center gap-4">
+                                <span className="flex items-center gap-2 text-muted-foreground">{running > 0 ? <LoaderCircle className="size-3.5 animate-spin" /> : <span className="size-3.5 rounded-full bg-muted-foreground/40" />} 运行中 <b className="font-semibold text-foreground">{running}</b></span>
+                                <span className="flex items-center gap-2 text-muted-foreground"> 排队 <b className="font-semibold text-foreground">{queued}</b></span>
+                                <span className="flex items-center gap-2 text-muted-foreground"> 已完成 <b className="font-semibold text-foreground">{done}</b></span>
+                            </div>
                         );
                     })()}
-                    {(() => {
-                        const b = pipeline?.budget;
-                        if (!b) return null;
-                        const limit = Number(b.limitMicrocredits || 0);
-                        const spent = Number(b.spentMicrocredits || 0);
-                        const usage = limit > 0 ? Math.min(1, spent / limit) : 0;
-                        return (
-                            <span className="flex items-center gap-1.5 text-muted-foreground" title="运行期预算（后端 status.budget 真值）">
-                                {limit > 0 ? <span className="inline-block h-1.5 w-12 overflow-hidden rounded-full bg-muted"><span className={cn("block h-full rounded-full", usage >= 0.9 ? "bg-rose-500" : "bg-emerald-500")} style={{ width: `${Math.max(usage * 100, spent ? 3 : 0)}%` }} /></span> : null}
-                                已用 <b className="font-semibold text-foreground">{spent}</b> 积分
-                                {limit > 0 ? <> / {limit} 积分</> : <> · 不限预算</>}
-                            </span>
-                        );
-                    })()}
-                    {jobCounts.failed + queue.retry > 0 ? (
+                    {/* 待重试要把流水线失败作业算进去：待处理页已显示 pipeline.jobs 失败项，
+                        这里若只算日志/批次会与待处理页数字打架。三处口径统一：日志失败 + 批次重试 + 流水线失败。 */}
+                    {jobCounts.failed + queue.retry + pipelineRetryableCount > 0 ? (
                         <>
-                            <span className="flex items-center gap-1.5 text-rose-600"><CircleAlert className="size-3.5" /> 待重试 <b className="font-semibold">{jobCounts.failed + queue.retry}</b></span>
+                            <span className="flex items-center gap-2 text-rose-600"><CircleAlert className="size-3.5" /> 待重试 <b className="font-semibold">{jobCounts.failed + queue.retry + pipelineRetryableCount}</b></span>
                             <button
                                 type="button"
                                 onClick={handleRetryAll}
                                 disabled={busy === "retry"}
-                                className="font-medium text-foreground underline-offset-2 hover:underline disabled:opacity-60"
+                                className="inline-flex h-6 items-center rounded px-1.5 font-medium text-foreground underline-offset-2 hover:bg-foreground/5 hover:underline disabled:opacity-60"
                             >
                                 {busy === "retry" ? "重试中…" : "全部重试"}
                             </button>
                         </>
                     ) : null}
-                    <div className="ml-auto flex items-center gap-3 text-muted-foreground">
+                    <div className="ml-auto flex shrink-0 items-center gap-4 text-muted-foreground">
+                        {(() => {
+                            const b = pipeline?.budget;
+                            if (!b) return null;
+                            const limit = Number(b.limitMicrocredits || 0);
+                            const spent = Number(b.spentMicrocredits || 0);
+                            const usage = limit > 0 ? Math.min(1, spent / limit) : 0;
+                            return (
+                                <span className="flex items-center gap-2 text-muted-foreground" title="运行期预算（后端 status.budget 真值）">
+                                    {limit > 0 ? <span className="inline-block h-1.5 w-12 overflow-hidden rounded-full bg-muted"><span className={cn("block h-full rounded-full", usage >= 0.9 ? "bg-rose-500" : "bg-emerald-500")} style={{ width: `${Math.max(usage * 100, spent ? 3 : 0)}%` }} /></span> : null}
+                                    已用 <b className="font-semibold text-foreground">{spent}</b> 积分
+                                    {limit > 0 ? <> / {limit} 积分</> : <> · 不限预算</>}
+                                </span>
+                            );
+                        })()}
                         <span>{assets.length} 项资产 · {inbox.length} 项待处理</span>
-                        <button type="button" onClick={() => setQueueOpen((o) => !o)} className="flex items-center gap-1 hover:text-foreground">
+                        <button type="button" onClick={() => setQueueOpen((o) => !o)} data-studio-queue-toggle
+                            aria-expanded={queueOpen} aria-controls="studio-queue-panel"
+                            className="flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 hover:bg-foreground/5 hover:text-foreground">
                             {queueOpen ? "收起队列" : "展开队列"}
                             <ChevronDown className={cn("size-3.5 transition", queueOpen && "rotate-180")} />
                         </button>
                     </div>
                 </div>
-                {queueOpen ? (
-                    <div className="absolute bottom-full left-0 right-0 z-20 border-t border-border bg-card/95 px-5 py-2 shadow-[0_-10px_28px_rgba(0,0,0,0.16)] backdrop-blur">
-                        <div className="mb-1.5 flex items-center gap-2" role="tablist" aria-label="队列筛选">
-                            {(["all", "active", "failed"] as const).map((key) => (
-                                <button key={key} type="button" role="tab" aria-selected={queueFilter === key}
-                                    onClick={() => setQueueFilter(key)}
-                                    className={cn("rounded px-2 py-0.5 text-[11px] transition", queueFilter === key ? "bg-accent font-medium text-accent-foreground" : "text-muted-foreground hover:text-foreground")}>
-                                    {key === "all" ? "全部" : key === "active" ? "进行中" : "失败"}
-                                </button>
-                            ))}
-                            <span className="ml-auto text-[10px] text-muted-foreground">
-                                {queueFilter === "all" && queueHistoryLoading ? "读取生成历史…" : null}
-                                {queueFilter === "all" && queueHistoryError ? <span className="text-rose-500" role="alert">生成历史读取失败：{queueHistoryError}</span> : null}
-                                {queueFilter === "all" && !queueHistoryLoading && !queueHistoryError ? "点击任一行查看请求详情" : null}
-                                {queueFilter !== "all" ? "点击任一行查看请求详情" : null}
-                            </span>
-                        </div>
-                        <div className="max-h-36 space-y-1 overflow-y-auto" role="list">
-                            {filteredQueue.map((job) => {
-                                const rowTone = ["succeeded", "success", "done", "completed"].includes(job.status)
-                                    ? "text-emerald-500/80"
-                                    : ["queued", "waiting", "pending"].includes(job.status)
-                                        ? "text-amber-500/80"
-                                        : "text-rose-500/80";
-                                // 只有真实排队（后端写入了 waitReason）才替换状态文案；没排队照旧显示 error/状态。
-                                const waitNote = job.status === "queued" && job.waitReason ? job.waitReason : "";
-                                return (
-                                    <button key={job.id} type="button" role="listitem"
-                                        onClick={() => setQueueDetail({ id: job.id, title: job.title, error: job.error, prompt: job.prompt, status: job.status, episodeId: job.episodeId, kind: job.kind, createdAt: job.createdAt, ...(job.waitReason ? { waitReason: job.waitReason } : {}) })}
-                                        className="flex w-full items-center gap-2 text-left text-[11px] text-muted-foreground transition hover:text-foreground"
-                                        data-studio-queue-row={job.id}
-                                    >
-                                        <JobStatusIcon status={job.status} />
-                                        {job.kind ? (
-                                            <span className="shrink-0 rounded border border-border bg-muted/40 px-1 py-px text-[9px] text-muted-foreground">{JOB_KIND_LABEL[job.kind] || job.kind}</span>
-                                        ) : null}
-                                        {/* 影策 queue-bar.tsx:89-92：完整标题走 title，窄列只显示省略文本。 */}
-                                        <span className="min-w-0 flex-1 truncate" title={job.title}>{job.title}</span>
-                                        <span className={cn("max-w-[28%] shrink-0 truncate", rowTone)} title={waitNote || job.error || job.status}>{waitNote || job.error || JOB_STATUS_LABEL[job.status] || job.status}</span>
-                                        {/* 影策 queue-bar.tsx:102：时间取真实 createdAt；本地队列无 costMicrocredits 真字段，花费列不渲染。 */}
-                                        {job.createdAt ? (
-                                            <span className="shrink-0 tabular-nums text-muted-foreground/70" title={job.createdAt}>{formatJobTime(job.createdAt)}</span>
-                                        ) : null}
-                                        <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-                                    </button>
-                                );
-                            })}
-                            {!filteredQueue.length ? (
-                                <div className="py-1 text-center text-[11px] text-muted-foreground">
-                                    {queueFilter === "failed" ? "没有失败的工作" : queueFilter === "active" ? "没有进行中的工作" : "还没有调度记录"}
-                                </div>
-                            ) : null}
-                        </div>
-                    </div>
-                ) : null}
             </div>
 
             {/* #2 导出剪映草稿预检：真预检 API 的三分类清单 + 跳过勾选 */}
@@ -2920,14 +3336,14 @@ function DramaStudioInner() {
                 open={Boolean(queueDetail)}
                 onCancel={() => setQueueDetail(null)}
                 footer={null}
-                width={640}
+                width={760}
                 destroyOnClose
             >
                 {queueDetail ? (
-                    <div className="space-y-3 py-2">
+                    <div className="space-y-3 py-2" data-studio-queue-detail>
                         <div className="flex items-center gap-2">
                             <JobStatusIcon status={queueDetail.status || ""} />
-                            <div className="text-[11px] text-muted-foreground">状态：{queueDetail.status || "—"}</div>
+                            <div className="text-[11px] text-muted-foreground">状态：{jobStatusText(queueDetail.status)}</div>
                             {queueDetail.episodeId ? (
                                 <button type="button" onClick={() => { openEpisodeWorkspace(queueDetail.episodeId!, "shots"); setQueueDetail(null); }}
                                     className="ml-auto flex items-center gap-1 rounded border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-muted" data-studio-queue-locate>
@@ -2940,6 +3356,8 @@ function DramaStudioInner() {
                                 排队原因：{queueDetail.waitReason}
                             </div>
                         ) : null}
+                        {/* facts 全部来自该作业自身字段（后端已补 createdAt/startedAt/finishedAt/durationMs），
+                            不再把整集日志跨度当成本作业用时；关联不到就是「—」。 */}
                         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 rounded-md border border-border bg-muted/30 p-2.5 text-[11px]" data-studio-queue-facts>
                             <div><span className="text-muted-foreground">任务类型：</span>{queueDetail.kind || "—"}</div>
                             <div><span className="text-muted-foreground">加入队列：</span>{formatJobTime(queueFacts.joined)}</div>
@@ -2947,6 +3365,10 @@ function DramaStudioInner() {
                             <div><span className="text-muted-foreground">结束：</span>{formatJobTime(queueFacts.ended)}</div>
                             <div><span className="text-muted-foreground">用时：</span>{queueFacts.elapsed}</div>
                             <div><span className="text-muted-foreground">尝试次数：</span>{queueFacts.attempts === null ? "—" : queueFacts.attempts >= 100 ? `${queueFacts.attempts}+ 次（日志上限）` : `${queueFacts.attempts} 次`}</div>
+                            <div className="col-span-2 text-[11px] text-muted-foreground">
+                                作业标识：<code>{queueDetail.id}</code>
+                                {queueDetail.runtimeTaskId ? <> · runtimeTaskId <code>{queueDetail.runtimeTaskId}</code></> : <> · 后端未提供 runtimeTaskId</>}
+                            </div>
                         </div>
                         <div>
                             <div className="mb-1 flex items-center justify-between text-xs font-medium">
@@ -2954,7 +3376,44 @@ function DramaStudioInner() {
                                 <button type="button" onClick={() => void navigator.clipboard.writeText(queueDetail.error || "").then(() => message.success("已复制错误信息"))}
                                     className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"><Copy className="size-3" /> 复制错误信息</button>
                             </div>
-                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-relaxed">{queueDetail.error || "无错误信息"}</pre>
+                            <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-relaxed">{localizeJobText(queueDetail.error) || "无错误信息"}</pre>
+                        </div>
+                        {/* 尝试记录：后端 attempts_json 的逐次真值（失败/熔断/成功各一条），回答「重试到上限前几次为什么失败」。
+                            与下方按 generation_logs 关联的「请求记录」区分：那是 provider 请求日志，这里只讲本作业每一轮的结果。 */}
+                        <div data-studio-queue-try-log>
+                            <div className="mb-1 flex items-baseline gap-2 text-xs font-medium">
+                                <span>尝试记录</span>
+                                <span className="text-[11px] font-normal text-muted-foreground">本作业每一轮的结果与时间（最多留最近 20 条）。</span>
+                                {(queueDetail.attempt || 0) > queueDetailAttempts.length ? (
+                                    <span className="text-[11px] font-normal text-amber-500" data-studio-queue-try-partial>共尝试 {queueDetail.attempt} 次，只有 {queueDetailAttempts.length} 条逐次记录（更早的失败未被采集）</span>
+                                ) : null}
+                            </div>
+                            {queueDetailAttempts.length ? (
+                                <div className="max-h-48 space-y-1 overflow-y-auto">
+                                    {queueDetailAttempts.map((record, i) => {
+                                        // 第 N 次：失败记录带 DB 的 attempt 真值；成功记录未记 attempt，按总数回推该轮序号。
+                                        const order = typeof record.attempt === "number" && record.attempt > 0
+                                            ? record.attempt
+                                            : queueDetailAttempts.length - i;
+                                        const resultSummary = attemptResultSummary(record.result);
+                                        return (
+                                            <div key={`${record.at || "na"}-${i}`} className="flex items-baseline gap-2 rounded border border-border bg-muted/30 px-2 py-1 text-[11px]" data-studio-queue-try>
+                                                <span className="shrink-0 font-medium">第 {order} 次</span>
+                                                {record.error ? (
+                                                    <span className="min-w-0 truncate text-rose-400" title={record.error}>{localizeJobText(record.error)}</span>
+                                                ) : (
+                                                    <span className="min-w-0 truncate text-emerald-500" title={resultSummary || "成功"}>成功{resultSummary ? ` · ${resultSummary}` : ""}</span>
+                                                )}
+                                                <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground">{formatJobTime(record.at)}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            ) : (
+                                <div className="rounded border border-dashed border-border px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground" data-studio-queue-try-empty>
+                                    该作业没有逐次记录（历史数据未采集），只有最终错误。
+                                </div>
+                            )}
                         </div>
                         {queueDetail.prompt ? (
                             <div>
@@ -2966,9 +3425,12 @@ function DramaStudioInner() {
                                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 text-[11px] leading-relaxed">{queueDetail.prompt}</pre>
                             </div>
                         ) : null}
-                        {queueDetail.episodeId ? (
+                        {queueLogScope === "job" ? (
                             <div data-studio-queue-attempts>
-                                <div className="mb-1 text-xs font-medium">请求尝试记录（来自生成日志）</div>
+                                <div className="mb-1 flex items-baseline gap-2 text-xs font-medium">
+                                    <span>请求记录</span>
+                                    <span className="text-[11px] font-normal text-muted-foreground">只列该 runtimeTaskId 的请求记录（生成日志口径），用时与尝试次数取自本作业。</span>
+                                </div>
                                 {queueAttemptsLoading ? (
                                     <p className="text-[11px] text-muted-foreground">正在读取请求记录…</p>
                                 ) : queueAttempts && queueAttempts.length ? (
@@ -2977,7 +3439,7 @@ function DramaStudioInner() {
                                             <div key={log.id} className="rounded border border-border bg-muted/30 px-2 py-1.5 text-[11px]">
                                                 <div className="flex items-center gap-2">
                                                     <span className="font-medium">第 {queueAttempts.length - i} 次</span>
-                                                    <span className={log.status === "success" ? "text-emerald-500" : log.status === "failed" ? "text-rose-500" : "text-amber-500"}>{log.status}</span>
+                                                    <span className={log.status === "success" ? "text-emerald-500" : log.status === "failed" ? "text-rose-500" : "text-amber-500"}>{jobStatusText(log.status)}</span>
                                                     <span className="text-muted-foreground">{log.taskMode || log.platform}</span>
                                                     <span className="ml-auto text-[10px] text-muted-foreground">{log.startedAt ? new Date(log.startedAt).toLocaleString("zh-CN") : ""}</span>
                                                 </div>
@@ -2992,7 +3454,7 @@ function DramaStudioInner() {
                                                     {typeof log.durationMs === "number" && log.durationMs > 0 ? <span>耗时 {(log.durationMs / 1000).toFixed(1)}s</span> : null}
                                                     <span>提示词 {log.prompt ? <span className="text-emerald-500/80">已记录</span> : <span className="text-amber-500/80">无</span>}</span>
                                                 </div>
-                                                {log.error ? <div className="mt-0.5 truncate text-[10px] text-rose-400">{log.error}</div> : null}
+                                                {log.error ? <div className="mt-0.5 truncate text-[10px] text-rose-400" title={log.error}>{localizeJobText(log.error)}</div> : null}
                                                 <div className="mt-1.5 border-t border-border pt-1.5" data-studio-queue-result>
                                                     <div className="mb-1 text-[11px] font-medium">生成结果</div>
                                                     <GenerationOutputs outputs={Array.isArray(log.outputs) ? log.outputs : []} />
@@ -3014,8 +3476,12 @@ function DramaStudioInner() {
                                         ))}
                                     </div>
                                 ) : (
-                                    <p className="text-[11px] text-muted-foreground">本集暂无生成日志</p>
+                                    <p className="text-[11px] text-muted-foreground">该作业暂无生成日志</p>
                                 )}
+                            </div>
+                        ) : queueDetail ? (
+                            <div className="rounded border border-dashed border-border px-2 py-1.5 text-[11px] leading-relaxed text-muted-foreground" data-studio-queue-attempts-empty>
+                                该作业没有可关联的 runtimeTaskId（后端流水线作业未下发），拿不到它自己的请求记录；这里不展示本集其它任务的历史日志。用时与尝试次数取自本作业自身。
                             </div>
                         ) : null}
                     </div>

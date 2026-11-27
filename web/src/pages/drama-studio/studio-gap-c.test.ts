@@ -58,6 +58,10 @@ test("段状态接入后端 segment.state：提示词失败/等待/过期按影�
     // 待撰写 / 提示词已过期（先于视频 ready 分支）。
     assert.deepEqual(segmentCardState({ prompt: "", promptStatus: "none" }), { tone: "idle", label: "待撰写提示词" });
     assert.deepEqual(segmentCardState({ prompt: "p", promptStatus: "stale", hasVideo: true }), { tone: "stale", label: "提示词已过期" });
+    // 视频真在跑时 prompt stale 不能抢在前：否则徽标「提示词已过期」会与按钮/遮罩「生成中」并存，
+    // 占位处还会透出叠加文案「提示生成中过期」。视频态优先，过期提示等任务结束后再出现。
+    assert.deepEqual(segmentCardState({ prompt: "p", promptStatus: "stale", videoStatus: "loading" }), { tone: "busy", label: "生成视频中" });
+    assert.equal(segmentCardState({ prompt: "p", promptStatus: "stale", videoStatus: "error" }).tone, "failed");
     // 视频等待原因真值也走 blocked，不冒充「排队提交中」。
     assert.deepEqual(segmentCardState({ prompt: "p", videoStatus: "queued", waitReason: "排队中：上游队列较长" }), {
         tone: "blocked", label: "排队中", detail: "排队中：上游队列较长",
@@ -111,7 +115,9 @@ test("draft segment.state 真值接进段卡片：状态细分与未附图原因
             },
         },
     } as any;
-    const card = boardData(production).cards[0];
+    // 卡片视频真值必须来自画布段的 video: 产物；测试补上真实产物，不拿 artifact 快照冒充成片。
+    const readyClip = [{ id: "c1", targetId: "seg1", title: "镜1", storageKey: "video:real", duration: 1, status: "success", inputOutdated: false }] as any;
+    const card = boardData(production, readyClip).cards[0];
     assert.equal(card.state.tone, "blocked");
     assert.equal(card.state.label, "并发已满");
     assert.equal(card.state.detail, "并发已满：同时生成数达上限");
@@ -124,7 +130,7 @@ test("draft segment.state 真值接进段卡片：状态细分与未附图原因
     // 后端尚未落 state 时：卡片按本地真值派生，参考图不带 sent/原因，不编造未附图。
     const noState = structuredClone(production);
     delete noState.draft.director.source.segments[0].state;
-    const legacy = boardData(noState).cards[0];
+    const legacy = boardData(noState, readyClip).cards[0];
     assert.equal(legacy.state.label, "视频已生成");
     assert.equal(legacy.thumbnails[0].sent, undefined);
     assert.equal(referenceMissingLabel(legacy.thumbnails[0]), null);
@@ -203,10 +209,12 @@ test("boardData 透传 segment.state.custom / videoReprocessable 到卡片状态
             },
         },
     } as any;
+    // 手写段 stale 的用例同样需要真实 video: 产物，否则「视频已生成」是无真值编造。
+    const readyClip = [{ id: "c0", targetId: "seg1", title: "镜1", storageKey: "video:real", duration: 1, status: "success", inputOutdated: false }] as any;
     // custom=true + stale：手写提示词不被判过期，有视频产物 → 视频已生成。
     const customProd = structuredClone(base);
     customProd.draft.director.source.segments[0].state = { promptStatus: "stale", custom: true };
-    assert.equal(boardData(customProd).cards[0].state.label, "视频已生成");
+    assert.equal(boardData(customProd, readyClip).cards[0].state.label, "视频已生成");
     // videoReprocessable=true + H3 段 status=error → 视频后处理失败。
     const reprocessProd = structuredClone(base);
     reprocessProd.draft.director.source.segments[0].state = { videoReprocessable: true };
@@ -214,4 +222,102 @@ test("boardData 透传 segment.state.custom / videoReprocessable 到卡片状态
     const reprocessCard = boardData(reprocessProd, clipMedia).cards[0];
     assert.equal(reprocessCard.state.label, "视频后处理失败");
     assert.equal(reprocessCard.state.detail, "画布 H3 段 status=error；未记录具体原因，详见生成日志。");
+});
+
+test("segment.state.videoStatus/request 接入影策 6 态：failed/blocked/busy/stale/ready/idle", () => {
+    // failed：state 的视频失败原因直接展示，不编造。
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "failed", videoError: "提交被拒：配额耗尽" }), {
+        tone: "failed", label: "视频生成失败", detail: "提交被拒：配额耗尽",
+    });
+    // 无 videoError 真值时 detail 缺省（不写「详见日志」这类本地臆测）。
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "failed" }), { tone: "failed", label: "视频生成失败" });
+    // blocked：提示词等待 + 视频排队等待原因都取冒号/括号前短标签。
+    assert.deepEqual(segmentCardState({ prompt: "p", promptStatus: "queued", waitReason: "并发已满：同时生成数达上限" }), {
+        tone: "blocked", label: "并发已满", detail: "并发已满：同时生成数达上限",
+    });
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "queued", waitReason: "排队中：上游队列较长" }), {
+        tone: "blocked", label: "排队中", detail: "排队中：上游队列较长",
+    });
+    // blocked：loading 中 request.firstFramePending 真值 → 等上一段（不误报「生成视频中」）。
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "loading", request: { firstFramePending: true } }), {
+        tone: "blocked", label: "等待上一段",
+    });
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "running", request: { firstFramePending: false } }), {
+        tone: "busy", label: "生成视频中",
+    });
+    // busy：提示词撰写中 / 视频排队 / 生成中带上游阶段。
+    assert.deepEqual(segmentCardState({ prompt: "p", promptStatus: "running" }), { tone: "busy", label: "撰写提示词中" });
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "queued" }), { tone: "busy", label: "排队提交中" });
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "loading", upstreamStage: "正在合成" }), {
+        tone: "busy", label: "正在合成", detail: "上游进度：正在合成",
+    });
+    // stale：提示词过期 / 视频需重新生成 / 输入已改。
+    assert.deepEqual(segmentCardState({ prompt: "p", promptStatus: "stale" }), { tone: "stale", label: "提示词已过期" });
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "stale" }), { tone: "stale", label: "视频需重新生成" });
+    assert.equal(segmentCardState({ prompt: "p", inputOutdated: true }).label, "视频需重新生成（输入已更改）");
+    // ready / idle：state ready 是真值；无提示词且无 video 真值只说待撰写。
+    assert.deepEqual(segmentCardState({ prompt: "p", stateVideoStatus: "ready" }), { tone: "ready", label: "视频已生成" });
+    assert.deepEqual(segmentCardState({ prompt: "", promptStatus: "none" }), { tone: "idle", label: "待撰写提示词" });
+    assert.deepEqual(segmentCardState({ prompt: "p" }), { tone: "idle", label: "待生成视频" });
+});
+
+test("videoWaitLabel 取冒号/括号前的短标签，兼容中英文标点", () => {
+    assert.equal(videoWaitLabel("并发已满: 同时生成数达上限"), "并发已满");
+    assert.equal(videoWaitLabel("账号配额耗尽(稍后重试)"), "账号配额耗尽");
+    assert.equal(videoWaitLabel("排队中（上游队列较长）"), "排队中");
+    assert.equal(videoWaitLabel("：冒号开头"), "：冒号开头");
+    assert.equal(videoWaitLabel(""), "");
+});
+
+test("state.videoError 显示真值，画布 errorDetails 仍兼容，两者皆无则不带 detail", () => {
+    const base = {
+        draft: { director: {
+            source: { shots: [{ id: "sh1", segment_id: "seg1", duration_frames: 24 }], segments: [{ id: "seg1", shot_ids: ["sh1"], mode: "auto" }] },
+            artifacts: [{ kind: "h3", targetId: "seg1", prompt: "p", status: "ok", receipt: {} }],
+        } },
+    } as any;
+    const withStateError = structuredClone(base);
+    withStateError.draft.director.source.segments[0].state = { videoStatus: "failed", videoError: "H3 返回 429：并发超限" };
+    const stateCard = boardData(withStateError).cards[0];
+    assert.equal(stateCard.state.label, "视频生成失败");
+    assert.equal(stateCard.state.detail, "H3 返回 429：并发超限");
+
+    // 画布 H3 节点级 errorDetails 优先（更贴近产物的真实原因），state 原因不覆盖。
+    const bothErrors = structuredClone(base);
+    bothErrors.draft.director.source.segments[0].state = { videoStatus: "failed", videoError: "state 原因" };
+    const clipMedia = [{ id: "c1", targetId: "seg1", title: "镜1", storageKey: "", duration: 1, status: "error", errorDetails: "ComfyUI 不可达（ECONNREFUSED）", inputOutdated: false }] as any;
+    assert.equal(boardData(bothErrors, clipMedia).cards[0].state.detail, "ComfyUI 不可达（ECONNREFUSED）");
+
+    // 只有画布 status=error 时继续走原有兜底文案，不回归。
+    const clipOnly = structuredClone(base);
+    assert.equal(boardData(clipOnly, clipMedia).cards[0].state.label, "视频生成失败");
+    assert.equal(boardData(clipOnly, clipMedia).cards[0].state.detail, "ComfyUI 不可达（ECONNREFUSED）");
+});
+
+test("boardData 的 videoReprocessable 分流对 state.videoStatus 同样生效", () => {
+    const base = {
+        draft: { director: {
+            source: { shots: [{ id: "sh1", segment_id: "seg1", duration_frames: 24 }], segments: [{ id: "seg1", shot_ids: ["sh1"], mode: "auto" }] },
+            artifacts: [{ kind: "h3", targetId: "seg1", prompt: "p", status: "ok", receipt: {} }],
+        } },
+    } as any;
+    const reprocess = structuredClone(base);
+    reprocess.draft.director.source.segments[0].state = { videoStatus: "failed", videoError: "尾帧合成失败", videoReprocessable: true };
+    assert.equal(boardData(reprocess).cards[0].state.label, "视频后处理失败");
+
+    const generate = structuredClone(base);
+    generate.draft.director.source.segments[0].state = { videoStatus: "failed", videoError: "尾帧合成失败", videoReprocessable: false };
+    assert.equal(boardData(generate).cards[0].state.label, "视频生成失败");
+
+    // 提示词失败仍先于视频失败。
+    const promptFirst = structuredClone(base);
+    promptFirst.draft.director.source.segments[0].state = {
+        promptStatus: "failed", promptError: "文本模型不可用", videoStatus: "failed", videoError: "尾帧合成失败", videoReprocessable: true,
+    };
+    assert.deepEqual(boardData(promptFirst).cards[0].state, { tone: "failed", label: "提示词撰写失败", detail: "文本模型不可用" });
+
+    // request.firstFramePending 通过 boardData 透传到卡片 blocked 态。
+    const pending = structuredClone(base);
+    pending.draft.director.source.segments[0].state = { videoStatus: "loading", request: { firstFramePending: true, operation: "generate", referencesSent: 2, referenceLimited: false } };
+    assert.deepEqual(boardData(pending).cards[0].state, { tone: "blocked", label: "等待上一段" });
 });

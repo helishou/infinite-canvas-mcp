@@ -28,6 +28,10 @@ export type StudioInboxItem = {
     segmentId?: string;
     nodeId?: string;
     logId?: string;
+    /** 流水线作业已达重试上限被熔断：只有用户显式确认的手动重试才会重排。 */
+    retryExhausted?: boolean;
+    /** 流水线作业 id，供卡片上的手动重试调用真接口。 */
+    jobId?: string;
 };
 
 export type InboxLog = {

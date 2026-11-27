@@ -92,9 +92,13 @@ export function readSubmission(
     if (isSubmissionRecord(stored)) return { record: stored, explicit: true };
 
     const submitted = [...events].reverse().find((event) => event.type === "submitted");
-    if (submitted) {
-        const payload = recordOf(submitted.payload);
-        const providerRequestId = [payload.taskId, payload.promptId].find((value) => typeof value === "string" && value) as string | undefined;
+    // 引擎渠道（canvas-video）写的是 engine_submitted 而非 submitted；只认后者会把
+    // 已提交到引擎的任务判成 fail（submissionDecision），重启后误判失败并重复提交。
+    const engineSubmitted = [...events].reverse().find((event) => event.type === "engine_submitted");
+    const submittedEvent = submitted || engineSubmitted;
+    if (submittedEvent) {
+        const payload = recordOf(submittedEvent.payload);
+        const providerRequestId = [payload.taskId, payload.promptId, payload.engineTaskId].find((value) => typeof value === "string" && value) as string | undefined;
         const credentialFingerprint = typeof payload.credentialFingerprint === "string" ? payload.credentialFingerprint : undefined;
         return {
             explicit: false,

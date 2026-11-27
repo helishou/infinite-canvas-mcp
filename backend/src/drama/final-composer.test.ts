@@ -107,12 +107,13 @@ test("isFinalStale：inputOutdated 或段视频晚于合成时间（含 1s 容�
     assert.equal(isFinalStale(final, [{ generatedAt: "not-a-date" }]), false);
 });
 
-test("collectFinalVideos：按段顺序收集 resultStorageKey + results[].storageKey 并去重", () => {
+test("collectFinalVideos：每段只取当前有效产物，results[] 历史不参与拼接", () => {
     const c = { nodes: [{ metadata: { segments: [
         { resultStorageKey: "video:a", results: [{ storageKey: "video:b" }, { storageKey: "video:a" }] },
         { resultStorageKey: "video:c", results: [] },
+        { results: [{ storageKey: "video:old" }, { storageKey: "video:latest" }] },
     ] } }] };
-    assert.deepEqual(collectFinalVideos(c), ["video:a", "video:b", "video:c"]);
+    assert.deepEqual(collectFinalVideos(c), ["video:a", "video:c", "video:latest"]);
     assert.deepEqual(collectFinalVideos(null), []);
 });
 

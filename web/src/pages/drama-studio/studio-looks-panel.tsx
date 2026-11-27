@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { App, InputNumber, Modal } from "antd";
-import { Shirt, RefreshCw, Plus, Pencil, Trash2, Play, Upload, Library, Sparkles, Lock, AlertCircle, Check, X } from "lucide-react";
+import { App, InputNumber, Modal, Switch } from "antd";
+import { Shirt, RefreshCw, Plus, Trash2, Play, Upload, Library, Sparkles, Lock, AlertCircle, Check } from "lucide-react";
 
 import {
     fetchBackendProject,
     fetchBackendDramaEpisode,
     applyBackendCanvasOperations,
     backendMediaUrl,
+    backendThumbUrl,
     fetchDramaCastImpact,
     restyleDramaCast,
     startCanvasGeneration,
@@ -52,6 +53,14 @@ type LookImage = {
 };
 type LookStatus = NonNullable<LookImage["status"]>;
 type LookStatusInfo = { status: LookStatus; error?: string; generationLogId?: string };
+/** 一条造型形象图的历史版本：真值来自 generation_logs（同产物 storageKey 的多条日志），不编造版本号。 */
+type LookVersion = { id: string; createdAt: string; status: string; model: string };
+/** 版本行日期：与影策「11月17日」同粒度（月日，本地时区）。 */
+function versionDate(value: string) {
+    const time = new Date(value);
+    if (!value || Number.isNaN(time.getTime())) return "—";
+    return `${time.getMonth() + 1}月${time.getDate()}日`;
+}
 /** generation_logs.status → 造型图状态；success 即 ready，cancelled 按失败处理。 */
 function toLookStatusInfo(log: BackendGenerationLog): LookStatusInfo {
     const status: LookStatus = log.status === "success" ? "ready"
@@ -135,14 +144,18 @@ function LookThumbStates({ locked, busy, failed, error }: { locked?: boolean; bu
     );
 }
 
-export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onOpenCanvas, onCountChange }: {
+export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, focusLook, onOpenCanvas, onCountChange, artStyle }: {
     /** 剧目 ID：单设定 restyle 影响集查询/提交必须带它，null 时只保留诚实提示。 */
     dramaId: string | null;
     sharedAssetCanvasId: string | null;
     episodeIds?: string[];
+    /** 角色卡造型缩略图点进来的定位目标：lookId/storageKey 是画布真值身份，seq 变化即重新定位。 */
+    focusLook?: { castId?: string; castName?: string; lookId?: string; storageKey?: string; seq: number } | null;
     onOpenCanvas: () => void;
     /** 汇报剧目级额外妆造总数（每个角色本体之外），供分类 tab 显示真实计数。 */
     onCountChange?: (count: number) => void;
+    /** 剧目规划 topic.artStyle 真值：只有确有值时卡片副标题才写「沿用作品风格」（对齐影策），无真值只写角色名。 */
+    artStyle?: string;
 }) {
     const { message, modal } = App.useApp();
     const config = useConfigStore((s) => s.config);
@@ -151,6 +164,9 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
     const [characters, setCharacters] = useState<CharacterLook[]>([]);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
+    /** 锁定开关写回中/写回失败的当前造型：失败只就地报错，不改 UI（刷新后才按真值显示）。 */
+    const [lockSaving, setLockSaving] = useState(false);
+    const [lockError, setLockError] = useState<{ key: string; message: string } | null>(null);
     const [selectedCast, setSelectedCast] = useState<string>("");
     const [refreshTick, setRefreshTick] = useState(0);
     const [editing, setEditing] = useState<{ castId: string; index: number | null } | null>(null);
@@ -167,10 +183,16 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
     // instant 只记本面板 generateLook 的即时反馈（新槽位无 storageKey，日志无法按图定位，非跨刷新真值）。
     const [derivedStatuses, setDerivedStatuses] = useState<Record<string, LookStatusInfo>>({});
     const [instantStatuses, setInstantStatuses] = useState<Record<string, LookStatusInfo>>({});
+    /** 版本记录真值：按产物 storageKey 命中 generation_logs（同一条链派生状态），不另建版本表。 */
+    const [lookVersions, setLookVersions] = useState<Record<string, LookVersion[]>>({});
+    /** 「从素材库选择」弹层：复用 pickLibraryImage 的真实素材写入链路。 */
+    const [libraryOpen, setLibraryOpen] = useState(false);
     // 造型卡选中态：仅面板内 UI 焦点，不写回画布（对齐影策造型行选中描边反馈）。
     // index=null 表示该角色本体（基础造型）；选中的卡所属角色同时决定右栏上下文。
     const [selectedLook, setSelectedLook] = useState<{ castId: string; index: number | null } | null>(null);
     const customRef = useRef<HTMLInputElement | null>(null);
+    /** 已应用的缩略图定位序号：刷新导致 characters 变化时不重复抢选中态。 */
+    const appliedFocusSeq = useRef(0);
 
     const episodeKey = (episodeIds || []).join("|");
     useEffect(() => {
@@ -314,7 +336,7 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
     useEffect(() => {
         let disposed = false;
         const images = characters.flatMap((c) => c.images.map((im) => ({ im, canvasId: c.canvasId })));
-        if (!images.length) { setDerivedStatuses({}); return; }
+        if (!images.length) { setDerivedStatuses({}); setLookVersions({}); return; }
         const byNode = new Map<string, string>();
         for (const { im, canvasId } of images) {
             if (im._srcNodeId && im._srcCanvasId) {
@@ -323,7 +345,7 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                 byNode.set(im._srcNodeId, canvasId);
             }
         }
-        if (!byNode.size) { setDerivedStatuses({}); return; }
+        if (!byNode.size) { setDerivedStatuses({}); setLookVersions({}); return; }
         void Promise.all([...byNode].map(async ([nodeId, projectId]) => {
             try {
                 const res = await fetchBackendGenerationLogs({ nodeId, projectId, limit: 200 });
@@ -335,14 +357,26 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
             if (disposed) return;
             const logs = groups.flat();
             const next: Record<string, LookStatusInfo> = {};
+            const versions: Record<string, LookVersion[]> = {};
             for (const { im } of images) {
                 if (!im.storageKey) continue;
-                const matched = logs
+                const matchedAll = logs
                     .filter((log) => (log.outputs || []).some((o) => o && String(o.storageKey || "") === im.storageKey))
-                    .sort((a, b) => String(b.createdAt || b.startedAt || "").localeCompare(String(a.createdAt || a.startedAt || "")))[0];
+                    .sort((a, b) => String(b.createdAt || b.startedAt || "").localeCompare(String(a.createdAt || a.startedAt || "")));
+                const matched = matchedAll[0];
                 if (matched) next[`log:${im.storageKey}`] = toLookStatusInfo(matched);
+                // 版本记录：同一产物被多次生成的日志按时间倒序，最新一条即「当前」。
+                if (matchedAll.length) {
+                    versions[`log:${im.storageKey}`] = matchedAll.slice(0, 5).map((log) => ({
+                        id: String(log.id),
+                        createdAt: String(log.createdAt || log.startedAt || ""),
+                        status: String(log.status || ""),
+                        model: String(log.model || ""),
+                    }));
+                }
             }
             setDerivedStatuses(next);
+            setLookVersions(versions);
         });
         return () => { disposed = true; };
     }, [characters, refreshTick]);
@@ -373,13 +407,19 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
         const isRoleName = !raw || raw === ch.castName || raw === ch.canonicalName || raw === "主角" || raw === "配角";
         return isRoleName ? "未命名造型" : raw;
     };
+    /**
+     * 影策卡片副标题第二段（角色 · 风格来源）：单条造型本地没有独立风格真值字段，
+     * 只用剧目 planning topic.artStyle 判定是否沿用作品风格；无真值就只写角色名，不编「沿用作品风格」。
+     */
+    const styleInherited = Boolean(String(artStyle || "").trim());
+    const styleSubtitle = (ch: CharacterLook) => styleInherited ? `${ch.castName} · 沿用作品风格` : ch.castName;
     /** 卡片/右栏共用：真值优先的造型状态（generation_logs 派生 + 本面板即时反馈 + 面板内生成中兜底）。 */
     const lookStatus = (ch: CharacterLook, im: LookImage, i: number) => {
         const info = mergeLookStatus(instantStatuses[lookStateKey(im, ch.castId, i)], im.storageKey ? derivedStatuses[`log:${im.storageKey}`] : undefined);
         const failed = info?.status === "failed";
         const busy = !failed && (info?.status === "queued" || info?.status === "running" || (ch.castId === selectedCast && generatingIndex === i));
-        const badge = failed ? "生成失败" : busy ? "生成中" : im.locked ? "已锁定" : im.storageKey ? "已生成" : "待生成";
-        return { info, failed, busy, badge };
+        // 不再派生「已生成/待生成/已锁定」文案徽标：影策卡片只有图 + 两行文字，锁定由缩略图角标表示。
+        return { info, failed, busy };
     };
 
     /** 真提交单设定 restyle：先查真实影响集→用户确认→后端标脏引用段，正在生成的段由后端跳过。 */
@@ -481,6 +521,28 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
         setSelectedLook({ castId: ch.castId, index });
         openEditFor(ch, index);
     };
+    /**
+     * 角色卡造型缩略图点进来：按画布真值身份定位造型并设为当前（右栏表单/预览跟着换）。
+     * lookId（characterImages[].id）优先，其次 storageKey（媒体键）；两者都精确匹配，不靠 URL/序号猜。
+     * 匹配不到时只切角色，绝不选中一张别的造型冒充。
+     */
+    useEffect(() => {
+        if (!focusLook || focusLook.seq === appliedFocusSeq.current) return;
+        // 造型还没读到时先不消费序号：等 characters 到位后同一 effect 再应用。
+        if (!characters.length) return;
+        appliedFocusSeq.current = focusLook.seq;
+        const hit = characters
+            .map((ch) => ({
+                ch,
+                index: ch.images.findIndex((im) => (focusLook.lookId && String(im.id || "") === focusLook.lookId)
+                    || (focusLook.storageKey && String(im.storageKey || "") === focusLook.storageKey)),
+            }))
+            .find((item) => item.index >= 0);
+        if (hit) { openLookCard(hit.ch, hit.index); return; }
+        const target = characters.find((c) => (focusLook.castId && c.castId === focusLook.castId)
+            || (focusLook.castName && c.castName === focusLook.castName));
+        if (target) setSelectedCast(target.castId);
+    }, [focusLook, characters]);
     const submitForm = () => {
         if (!selected || !editing || editing.castId !== selected.castId) return;
         // 影策 LookForm：valid = name.trim() && appearance.trim()，两项都必填。
@@ -667,9 +729,50 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
     const activeLookName = selected && activeLookImage ? lookLabel(selected, activeLookImage) : "";
     const activeLookStorageKey = activeLookImage?.storageKey || "";
     const activeLookStatus = selected && activeLookImage && activeLookIndex !== null ? lookStatus(selected, activeLookImage, activeLookIndex) : null;
-    const onEditActiveLook = () => { if (selected && activeLookIndex !== null) openEditFor(selected, activeLookIndex); };
+    /** 当前造型的版本记录（真值：生成该形象图的 generation_logs，按时间倒序，首条为「当前」）。 */
+    const activeLookVersions = activeLookStorageKey ? lookVersions[`log:${activeLookStorageKey}`] || [] : [];
     const onGenerateActiveLook = () => { if (activeLookIndex !== null && activeLookImage) triggerGenerate(activeLookIndex, activeLookImage); };
     const onRemoveActiveLook = () => { if (activeLookIndex !== null) removeLook(activeLookIndex); };
+    /** 当前造型唯一键：锁定写回的 saving/错误提示都按它定位，不串到别的造型。 */
+    const activeLookKey = selected && activeLookImage && activeLookIndex !== null ? lookStateKey(activeLookImage, selected.castId, activeLookIndex) : "";
+    /**
+     * 锁定开关真值写回：locked 真值 = 画布角色节点 metadata.characterImages[]（造型页读的同一数组）。
+     * 先重读画布拿最新 revision，再只改该造型的 locked，走现成 update_node op；
+     * 失败只就地报错、不做乐观改 UI，成功后刷新按真值重读。
+     */
+    const toggleLookLock = async (nextLocked: boolean) => {
+        if (!selected || !activeLookImage || activeLookIndex === null) return;
+        const im = activeLookImage;
+        const key = activeLookKey;
+        const canvasId = im._srcCanvasId || selected.canvasId;
+        const nodeId = im._srcNodeId || selected.nodeId;
+        setLockSaving(true);
+        setLockError(null);
+        try {
+            if (!canvasId || !nodeId) throw new Error("找不到该造型所属的画布角色节点");
+            const fresh = await fetchBackendProject(canvasId);
+            const node = ((fresh.project?.nodes || []) as Array<Record<string, unknown>>).find((n) => String(n.id) === nodeId);
+            if (!node) throw new Error("造型所属画布节点已不存在");
+            const md = (node.metadata || {}) as Record<string, unknown>;
+            const images = (Array.isArray(md.characterImages) ? md.characterImages : []) as LookImage[];
+            // 只认精确身份（lookId → storageKey），旧记录两者都缺时才退回按下标；
+            // 匹配不到就报错，绝不把 locked 写到别的造型上。
+            const matches = (entry: LookImage, index: number) => Boolean(im.id && String(entry.id || "") === String(im.id))
+                || Boolean(im.storageKey && String(entry.storageKey || "") === im.storageKey)
+                || (!im.id && !im.storageKey && index === activeLookIndex);
+            if (!images.some(matches)) throw new Error("该造型已不在画布节点上，请刷新后重试");
+            const nextImages = images.map((entry, index) => matches(entry, index) ? { ...entry, locked: nextLocked } : entry);
+            await applyBackendCanvasOperations(canvasId, [
+                { type: "update_node", id: nodeId, metadata: { characterImages: nextImages } },
+            ], Number(fresh.project?.revision || 0));
+            message.success(nextLocked ? "已锁定该造型形象图" : "已解锁该造型形象图");
+            setRefreshTick((t) => t + 1);
+        } catch (error) {
+            setLockError({ key, message: (error as Error).message });
+        } finally {
+            setLockSaving(false);
+        }
+    };
 
     return (
         <div className="flex min-h-0 flex-1 flex-col" data-studio-looks>
@@ -702,8 +805,9 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                         )}
                         {restyleSubmitting ? <span className="ml-1 text-[11px] text-primary">提交中…</span> : null}
                     </label>
-                    <button type="button" onClick={() => setRefreshTick((t) => t + 1)} className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"><RefreshCw className="size-3" /> 刷新</button>
-                    <button type="button" onClick={onOpenCanvas} className="text-[11px] text-muted-foreground hover:text-foreground">在画布中精修造型 →</button>
+                    {/* 影策页头工具按钮 ≥24px 高；这两个文字入口原只有 22px，热区偏小。 */}
+                    <button type="button" onClick={() => setRefreshTick((t) => t + 1)} className="flex h-6 items-center gap-1 rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/5 hover:text-foreground"><RefreshCw className="size-3" /> 刷新</button>
+                    <button type="button" onClick={onOpenCanvas} className="flex h-6 items-center rounded px-1 text-[11px] text-muted-foreground hover:bg-foreground/5 hover:text-foreground">在画布中精修造型 →</button>
                 </div>
             </div>
 
@@ -730,17 +834,13 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                                 </button>
                             ) : null}
                         </div>
-                        <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
-                            <Sparkles className="mt-0.5 size-3.5 shrink-0" />
-                            角色本体即基础造型（唯一，取自画布节点的主图索引）；新增妆造建议不超过 {MAX_EXTRA_LOOKS} 套；存量跨集合并可能更多。改名、换图、删除都会按来源写回画布角色节点。
-                        </div>
-
+                        {/* 影策造型卡：封面 + 两行文字（造型名 / 角色 · 风格来源）；不放状态徽标与外观描述行。 */}
                         {lookCards.length === 0 ? (
                             <div className="rounded-lg border border-dashed border-border py-8 text-center text-[11px] text-muted-foreground" data-studio-look-empty>
                                 还没有造型。点「添加造型」新建，或在画布角色节点里添加造型/服装图后刷新。
                             </div>
                         ) : (
-                            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))" }}>
+                            <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
                                 {lookCards.map(({ ch, im, i }) => {
                                     const lookName = lookLabel(ch, im);
                                     const st = lookStatus(ch, im, i);
@@ -751,21 +851,26 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                                             onClick={() => openLookCard(ch, i)}
                                             className={cn("overflow-hidden rounded-[8px] border bg-card/40 text-left transition-colors duration-150 hover:border-foreground/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                                                 isSelected ? "border-primary ring-1 ring-primary/60" : "border-border")}>
-                                            {/* 封面真值 = 该造型 storageKey；无图用占位并由徽标标注「待生成」。 */}
+                                            {/* 封面真值 = 该造型 storageKey；无图只留占位，不再用「待生成」徽标刷屏。 */}
                                             <span className="relative block aspect-[4/3] overflow-hidden bg-muted/40" data-studio-look-cover>
                                                 {im.storageKey ? (
-                                                    <img src={backendMediaUrl(im.storageKey)} alt={lookName} className="size-full object-cover" loading="lazy" draggable={false} />
+                                                    <img src={backendThumbUrl(im.storageKey, 240)} alt={lookName} className="size-full object-cover" loading="lazy" draggable={false} />
                                                 ) : (
                                                     <span className="grid size-full place-items-center text-muted-foreground"><Shirt className="size-6 opacity-40" /></span>
                                                 )}
                                                 <LookThumbStates locked={im.locked} busy={st.busy} failed={st.failed} error={st.info?.error} />
-                                                <span className={cn("absolute left-1.5 top-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium backdrop-blur",
-                                                    st.failed ? "bg-rose-500/90 text-white" : st.busy ? "bg-primary/90 text-background" : im.locked ? "bg-amber-500/90 text-black" : "bg-background/85 text-foreground")} data-studio-look-status>{st.badge}</span>
+                                                {/* 只有真在生成/失败时才出状态标（对齐影策：状态交给缩略图覆盖层与分类筛选）。 */}
+                                                {st.failed || st.busy ? (
+                                                    <span className={cn("absolute left-1.5 top-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium backdrop-blur",
+                                                        st.failed ? "bg-rose-500/90 text-white" : "bg-primary/90 text-background")} data-studio-look-status>{st.failed ? "失败" : "生成中"}</span>
+                                                ) : null}
                                             </span>
-                                            <span className="block p-2">
-                                                <span className="block truncate text-[11px] font-medium" title={lookName}>{lookName}</span>
-                                                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{ch.castName} · {chapterLabel(im.fromChapter, im.toChapter)}</span>
-                                                <span className="mt-1 block line-clamp-2 text-[11px] text-muted-foreground">{im.outfitDescription || "（无外观描述）"}</span>
+                                            <span className="block px-2 py-1.5">
+                                                <span className="block truncate text-[12px] font-medium" title={lookName}>{lookName}</span>
+                                                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground" data-studio-look-subtitle
+                                                    title={styleInherited ? `角色 · 沿用作品风格${artStyle ? `（${artStyle}）` : ""}` : "角色"}>
+                                                    {styleSubtitle(ch)}
+                                                </span>
                                             </span>
                                         </button>
                                     );
@@ -776,124 +881,153 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                 )}
                 </div>
 
-                {/* 右：现有造型编辑流程（本体 + 选中造型；复用 editing/form 与生成/删除写回，不建第二套逻辑） */}
+                {/* 右：造型设定（对齐影策右栏顺序：形象图 → 造型设定 → 名称/外观 → 章节 → restyle → 按钮组 → 说明 → 版本记录；本体选择器保留在底部） */}
                 <aside className="min-h-0 overflow-y-auto border-l border-border bg-card/30 p-4 thin-scrollbar" data-studio-look-detail>
                     {selected ? (
-                        <div className="space-y-4">
-                        {/* 角色本体 = 基础造型 */}
-                        <div data-studio-look-base>
-                            <div className="mb-2 text-[11px] font-semibold">角色本体 · 基础造型</div>
-                            <div
-                                role="button"
-                                tabIndex={0}
-                                aria-pressed={activeLook?.index === null}
-                                onClick={() => setSelectedLook({ castId: selectedCast, index: null })}
-                                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedLook({ castId: selectedCast, index: null }); } }}
-                                className={cn(
-                                    "flex cursor-pointer items-center gap-2 rounded-[8px] border bg-card/40 p-2 text-left transition-colors duration-150 hover:border-foreground/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                                    activeLook?.index === null ? "border-primary ring-1 ring-primary/60" : "border-foreground/30",
-                                )}
-                            >
-                                {/* 缩略图对齐影策：40×40 / radius8 / object-cover（本地 rounded-lg 为 10px，故用精确 8px 定值）。 */}
-                                <div className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-muted/40">
-                                    {baseImage?.storageKey ? <img src={backendMediaUrl(baseImage.storageKey)} alt={selected.castName} className="size-full object-cover cursor-zoom-in" data-studio-look-preview onClick={(e) => { e.stopPropagation(); setPreview({ key: baseImage.storageKey!, title: `${selected.castName} · 本体` }); }} /> : <Shirt className="size-4 opacity-40" />}
-                                </div>
-                                <div className="min-w-0 text-[11px]">
-                                    <div className="font-medium">{selected.castName}</div>
-                                    <div className="mt-0.5 line-clamp-2 text-muted-foreground">{selected.description || "（无角色描述）"}</div>
-                                    <div className="mt-1 text-[11px] text-muted-foreground">
-                                        {baseImage?.storageKey
-                                            ? "主图已设为本体参考"
-                                            : "本体参考图尚未就绪：请先在画布生成或上传本体图，造型图需要以它为底图（当前已禁用生成）"}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                            {editing && editing.castId === selected.castId ? (
-                                <div className="space-y-2 rounded-md border border-border bg-muted/40 p-2.5 text-[13px]" data-studio-look-form>
-                                    {/* 对齐影策 .drama-look-form：容器 gap 8 / padding 10 / radius 8 / 中性描边 + 下沉底，控件字号统一 13。 */}
-                                    <div className="text-[11px] font-semibold tracking-[0.06em] text-muted-foreground">{editing.index === null ? "新增造型" : "编辑造型"}</div>
-                                    {/* 字段与顺序对齐影策 cast-looks.tsx LookForm：造型名 → 造型外观 → 参考图 → 说明 → 章节区间 → 按钮。 */}
-                                    <input aria-label="造型名" value={form.name} maxLength={60} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="造型名，如 外门弟子、霸道总裁"
-                                        className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 text-[13px] outline-none" />
-                                    <textarea aria-label="造型外观" value={form.appearance} maxLength={1000} onChange={(e) => setForm({ ...form, appearance: e.target.value })} rows={2}
-                                        placeholder="这套造型的服装、发型与妆容；五官脸型沿用角色本体"
-                                        className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 text-[13px] leading-[21px] outline-none" />
-                                    <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" data-studio-look-image-source>
-                                        <Library className="size-3.5" />
-                                        <select aria-label="造型图片素材库" value={form.storageKey} onChange={(e) => pickLibraryImage(e.target.value)}
-                                            className="h-[34px] max-w-52 rounded-[12px] border border-border bg-background px-3 text-foreground outline-none">
-                                            <option value="">素材库（选择图片）</option>
-                                            {imageAssets.map((a) => <option key={a.id} value={a.data.storageKey || a.id}>{a.title}</option>)}
-                                        </select>
-                                        <button type="button" onClick={() => customRef.current?.click()} className="flex h-[34px] items-center gap-1 rounded-[12px] border border-border px-3 text-foreground transition hover:bg-muted">
-                                            <Upload className="size-3" /> 自定义图
-                                        </button>
-                                        <input ref={(el) => { customRef.current = el; }} type="file" accept="image/*" hidden data-studio-look-upload
-                                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadCustom(f); }} />
-                                        {form.storageKey ? <span className="text-[11px] text-emerald-500">已设置造型图，保存后写回并锁定</span> : null}
-                                    </div>
-                                    <small className="block text-foreground/90">以角色本体图保持人物一致。确认只保存设定，点击“生成造型图”才调用模型。</small>
-                                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
-                                        <span className="shrink-0 whitespace-nowrap" title="本段视频按本集章节序号自动选默认造型：范围包含本集第一章；多套命中取起点最晚、范围最窄；0 或留空不限，无命中回退角色本体">默认适用</span>
-                                        <InputNumber size="small" min={0} precision={0} style={{ width: 88, height: 28, borderRadius: "12px" }} value={form.from === "" ? null : Number(form.from)}
-                                            placeholder="起始章" aria-label="起始章" onChange={(value) => setForm((f) => ({ ...f, from: value === null || value === undefined ? "" : String(value) }))} />
-                                        <span className="shrink-0">至</span>
-                                        <InputNumber size="small" min={0} precision={0} style={{ width: 88, height: 28, borderRadius: "12px" }} value={form.to === "" ? null : Number(form.to)}
-                                            placeholder="结束章" aria-label="结束章" onChange={(value) => setForm((f) => ({ ...f, to: value === null || value === undefined ? "" : String(value) }))} />
-                                        <small className="w-full">0 或留空表示该端不限；对应章节的分集默认用这套造型</small>
-                                    </div>
-                                    <div className="flex items-center justify-end gap-1.5 text-[12px]">
-                                        <button type="button" onClick={() => setEditing(null)} className="flex h-7 items-center gap-2 rounded-md border border-border px-2 text-foreground hover:bg-muted">
-                                            <X className="size-3.5" /> 取消
-                                        </button>
-                                        <button type="button" onClick={submitForm} disabled={saving || !form.name.trim() || !form.appearance.trim()}
-                                            className="flex h-7 items-center gap-2 rounded-md bg-foreground px-2 font-medium text-background disabled:opacity-50">
-                                            <Check className="size-3.5" /> {saving ? "保存中…" : "确认保存"}
-                                        </button>
-                                    </div>
+                        <div className="space-y-3">
+                            {activeLookIndex !== null && activeLookImage && activeLookStatus ? (
+                                <div className="relative overflow-hidden rounded-[8px] border border-border bg-muted/30" data-studio-look-selected>
+                                    {activeLookStorageKey ? (
+                                        <img src={backendMediaUrl(activeLookStorageKey)} alt={activeLookName}
+                                            className="max-h-[200px] w-full cursor-zoom-in object-contain" data-studio-look-preview
+                                            onClick={() => setPreview({ key: activeLookStorageKey, title: `${selectedCastName} · ${activeLookName}` })} />
+                                    ) : (
+                                        <div className="grid h-32 place-items-center text-muted-foreground"><Shirt className="size-6 opacity-40" /></div>
+                                    )}
+                                    <LookThumbStates locked={activeLookImage.locked} busy={activeLookStatus.busy} failed={activeLookStatus.failed} error={activeLookStatus.info?.error} />
                                 </div>
                             ) : null}
 
-                            {activeLookIndex !== null && activeLookImage && activeLookStatus ? (
-                                <div className="rounded-lg border border-border bg-card/40 p-2" data-studio-look-selected>
-                                    <div className="relative overflow-hidden rounded-md bg-muted/30">
-                                        {activeLookStorageKey ? (
-                                            <img src={backendMediaUrl(activeLookStorageKey)} alt={activeLookName}
-                                                className="max-h-[260px] w-full cursor-zoom-in object-contain" data-studio-look-preview
-                                                onClick={() => setPreview({ key: activeLookStorageKey, title: `${selectedCastName} · ${activeLookName}` })} />
-                                        ) : (
-                                            <div className="grid h-32 place-items-center text-muted-foreground"><Shirt className="size-6 opacity-40" /></div>
-                                        )}
-                                        <LookThumbStates locked={activeLookImage.locked} busy={activeLookStatus.busy} failed={activeLookStatus.failed} error={activeLookStatus.info?.error} />
+                            <div className="flex items-center justify-between gap-2">
+                                <span className="text-[12px] font-semibold">造型设定</span>
+                                {/* 锁定形象：真值在画布角色节点 metadata.characterImages[].locked；写回失败就地报错，不乐观改开关。 */}
+                                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground" data-studio-look-lock>
+                                    {activeLookImage ? (
+                                        <>
+                                            {activeLookImage.locked ? <Lock className="size-3.5 text-amber-500" /> : null}
+                                            <span>{activeLookImage.locked ? "已锁定形象" : "未锁定形象"}</span>
+                                            <Switch size="small" checked={Boolean(activeLookImage.locked)} loading={lockSaving}
+                                                disabled={lockSaving || !activeLookStorageKey}
+                                                title={activeLookStorageKey ? "锁定后重新生成需先解锁；开关写回画布角色节点" : "该造型还没有形象图，上传或生成后才能锁定"}
+                                                aria-label="锁定造型形象图" data-studio-look-lock-switch
+                                                onChange={(next) => void toggleLookLock(next)} />
+                                        </>
+                                    ) : editing ? "新增造型" : "未选择造型"}
+                                </span>
+                            </div>
+                            {lockError && lockError.key === activeLookKey ? (
+                                <p className="rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive"
+                                    role="alert" data-studio-look-lock-error>
+                                    锁定写回失败：{lockError.message}
+                                </p>
+                            ) : null}
+                            <p className="text-[11px] leading-relaxed text-muted-foreground">
+                                所属角色：{selected.castName}。造型沿用角色本体的五官与脸型，服装、发型与妆容独立设置；保存写回画布角色节点。
+                            </p>
+
+                            {editing && editing.castId === selected.castId ? (
+                                <div className="space-y-2" data-studio-look-form>
+                                    <label className="block text-[11px] text-muted-foreground" htmlFor="studio-look-name">造型名称</label>
+                                    <input id="studio-look-name" aria-label="造型名称" value={form.name} maxLength={60} onChange={(e) => setForm({ ...form, name: e.target.value })}
+                                        placeholder="造型名，如 农夫装、囚服"
+                                        className="h-[34px] w-full rounded-[12px] border border-border bg-background px-3 text-[13px] outline-none" />
+                                    <label className="block text-[11px] text-muted-foreground" htmlFor="studio-look-appearance">外貌描述</label>
+                                    <textarea id="studio-look-appearance" aria-label="外貌描述" value={form.appearance} maxLength={1000} onChange={(e) => setForm({ ...form, appearance: e.target.value })} rows={3}
+                                        placeholder="这套造型的服装、发型与妆容；五官脸型沿用角色本体"
+                                        className="w-full resize-none rounded-[12px] border border-border bg-background px-3 py-1.5 text-[13px] leading-[21px] outline-none" />
+                                    <div className="flex flex-wrap items-center gap-2 text-[11px]" data-studio-look-image-source>
+                                        <input ref={(el) => { customRef.current = el; }} type="file" accept="image/*" hidden data-studio-look-upload
+                                            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) void uploadCustom(f); }} />
+                                        {form.storageKey
+                                            ? <span className="text-emerald-500">已设置形象图：保存后写回画布角色节点并锁定这套造型</span>
+                                            : <span className="text-muted-foreground">当前用角色本体图；上传形象图或从素材库选择可替换这套造型的形象图</span>}
                                     </div>
-                                    <div className="mt-2 flex items-center gap-2 text-[11px]">
-                                        <span className="truncate font-medium" title={activeLookName}>{activeLookName}</span>
-                                        <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                                            activeLookStatus.failed ? "bg-rose-500/15 text-rose-500" : activeLookStatus.busy ? "bg-primary/15 text-primary" : activeLookImage.locked ? "bg-amber-500/15 text-amber-600" : "bg-muted text-muted-foreground")}>{activeLookStatus.badge}</span>
+
+                                    <div className="space-y-1 border-t border-border pt-2 text-[11px] text-muted-foreground">
+                                        <span className="block font-medium text-foreground">默认适用章节<span className="font-normal text-muted-foreground">（留空=不限）</span></span>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            <span className="shrink-0 whitespace-nowrap">起始章</span>
+                                            <InputNumber size="small" min={0} precision={0} style={{ width: 88, height: 28, borderRadius: "12px" }} value={form.from === "" ? null : Number(form.from)}
+                                                placeholder="留空" aria-label="起始章" onChange={(value) => setForm((f) => ({ ...f, from: value === null || value === undefined ? "" : String(value) }))} />
+                                            <span className="shrink-0">至</span>
+                                            <InputNumber size="small" min={0} precision={0} style={{ width: 88, height: 28, borderRadius: "12px" }} value={form.to === "" ? null : Number(form.to)}
+                                                placeholder="留空" aria-label="结束章" onChange={(value) => setForm((f) => ({ ...f, to: value === null || value === undefined ? "" : String(value) }))} />
+                                            <span className="shrink-0">结束章</span>
+                                            <small className="w-full">当前 {chapterLabel(form.from === "" ? undefined : Number(form.from), form.to === "" ? undefined : Number(form.to))}</small>
+                                        </div>
                                     </div>
-                                    <div className="mt-0.5 text-[11px] text-muted-foreground">所属角色 {selected.castName} · {chapterLabel(activeLookImage.fromChapter, activeLookImage.toChapter)}</div>
-                                    <div className="mt-1 line-clamp-3 text-[11px] text-muted-foreground">{activeLookImage.outfitDescription || "（无外观描述）"}</div>
-                                    <div className="mt-2 flex flex-wrap items-center gap-2" data-studio-look-actions>
-                                        <button type="button" onClick={onGenerateActiveLook} data-studio-look-generate
-                                            disabled={!baseImage?.storageKey || activeLookStatus.busy}
-                                            title={!baseImage?.storageKey
-                                                ? "请先生成或上传角色本体参考图，造型图需要以它为底图"
-                                                : activeLookStatus.failed
-                                                    ? "上次造型图生成失败，点此重试"
-                                                    : activeLookImage.locked
-                                                        ? "已锁定：重新生成会覆盖当前造型图"
-                                                        : activeLookImage.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
-                                            className={cn("flex items-center gap-1 rounded-md border border-border px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted disabled:opacity-50", activeLookStatus.busy && "text-primary", activeLookStatus.failed && "text-rose-500")}>
-                                            <Play className="size-3" /> {activeLookStatus.busy ? "生成中…" : activeLookStatus.failed ? "重试生成" : activeLookImage.locked ? "重新生成" : activeLookImage.storageKey ? "重新生成" : "生成造型图"}
+
+                                    {/* 单条造型的引用段统计：后端只提供按角色的影响集（/cast/:assetId/impact），
+                                        拿不到造型粒度就显示 —，不用角色数字冒充造型数字。 */}
+                                    <label className="flex flex-wrap items-center gap-1.5 border-t border-border pt-2 text-[11px] text-muted-foreground" data-studio-look-restyle-look
+                                        title="勾选后保存设定会把引用该角色的剧情段视频标脏（后端只有角色粒度影响集）">
+                                        <input type="checkbox" checked={restyle} onChange={(e) => setRestyle(e.target.checked)} />
+                                        让引用它的剧情段视频重新生成
+                                        <span className="ml-auto font-medium text-foreground" data-studio-look-restyle-look-impact>— 集 · — 段</span>
+                                        <small className="w-full">单条造型的引用段暂无统计口径：后端影响集只按角色统计（角色行见页头）。</small>
+                                    </label>
+
+                                    <div className="flex flex-wrap items-center gap-1.5" data-studio-look-actions>
+                                        <button type="button" onClick={submitForm} disabled={saving || !form.name.trim() || !form.appearance.trim()} data-studio-look-save
+                                            className="flex h-7 items-center gap-1 rounded-md bg-foreground px-2 text-[12px] font-medium text-background disabled:opacity-50">
+                                            <Check className="size-3.5" /> {saving ? "保存中…" : "保存设定"}
                                         </button>
-                                        <button type="button" onClick={onEditActiveLook} aria-label={`编辑造型 ${activeLookName}`}
-                                            className="rounded-md border border-border p-1 text-muted-foreground hover:bg-muted"><Pencil className="size-3" /></button>
-                                        <button type="button" onClick={onRemoveActiveLook} aria-label={`删除造型 ${activeLookName}`}
-                                            className="rounded-md border border-border p-1 text-rose-500 hover:bg-rose-500/10"><Trash2 className="size-3" /></button>
-                                        <button type="button" onClick={onEditActiveLook} className="flex items-center gap-1 rounded-md border border-border px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted"><Library className="size-3" /> 素材库</button>
-                                        <button type="button" onClick={onEditActiveLook} className="flex items-center gap-1 rounded-md border border-border px-1.5 py-1 text-[11px] text-muted-foreground hover:bg-muted"><Upload className="size-3" /> 自定义图</button>
+                                        <button type="button" onClick={() => customRef.current?.click()}
+                                            className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-foreground hover:bg-muted">
+                                            <Upload className="size-3.5" /> 上传形象图
+                                        </button>
+                                        <button type="button" onClick={() => setLibraryOpen(true)}
+                                            title={imageAssets.length ? "从素材库挑一张已有图片作为这套造型的形象图" : "素材库还没有图片"}
+                                            className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-foreground hover:bg-muted disabled:opacity-50">
+                                            <Library className="size-3.5" /> 从素材库选择
+                                        </button>
+                                        {activeLookImage ? (
+                                            <button type="button" onClick={onGenerateActiveLook} data-studio-look-generate
+                                                disabled={!baseImage?.storageKey || activeLookStatus?.busy}
+                                                title={!baseImage?.storageKey
+                                                    ? "请先生成或上传角色本体参考图，造型图需要以它为底图"
+                                                    : activeLookStatus?.failed
+                                                        ? "上次造型图生成失败，点此重试"
+                                                        : activeLookImage.locked
+                                                            ? "已锁定：重新生成会覆盖当前造型图"
+                                                            : activeLookImage.storageKey ? "按外观描述重新生成造型图" : "生成这套造型图"}
+                                                className={cn("flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-muted-foreground hover:bg-muted disabled:opacity-50",
+                                                    activeLookStatus?.busy && "text-primary", activeLookStatus?.failed && "text-rose-500")}>
+                                                <Play className="size-3.5" /> {activeLookStatus?.busy ? "生成中…" : "重新生成"}
+                                            </button>
+                                        ) : null}
+                                        <button type="button" onClick={onOpenCanvas}
+                                            className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-foreground hover:bg-muted">
+                                            <Sparkles className="size-3.5" /> 在画布中精修
+                                        </button>
+                                        {activeLookImage ? (
+                                            <button type="button" onClick={onRemoveActiveLook}
+                                                className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-[12px] text-rose-500 hover:bg-rose-500/10">
+                                                <Trash2 className="size-3.5" /> 删除造型
+                                            </button>
+                                        ) : null}
+                                    </div>
+
+                                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                                        旧版本保留在版本记录里；锁定后形象图不会被重新生成。上传或从素材库采用的形象图会自动锁定，生成剧情段视频时随请求发送，并要求外貌、发型与服装以它为准。
+                                    </p>
+
+                                    <div className="space-y-1 border-t border-border pt-2" data-studio-look-versions>
+                                        <div className="flex items-center justify-between text-[11px] font-semibold">
+                                            <span>版本记录</span>
+                                            <span className="font-normal text-muted-foreground">{activeLookVersions.length ? `${activeLookVersions.length} 个版本` : "暂无"}</span>
+                                        </div>
+                                        {activeLookVersions.length ? activeLookVersions.map((version, vi) => (
+                                            <div key={version.id} className="flex items-center gap-1.5 text-[11px] text-muted-foreground" data-studio-look-version>
+                                                <span className="font-medium text-foreground">V{activeLookVersions.length - vi}</span>
+                                                <span>{version.status === "success" ? "生成" : version.status === "failed" ? "失败" : "生成中"}</span>
+                                                {version.model ? <span>{version.model}</span> : null}
+                                                <span className="ml-auto">{versionDate(version.createdAt)}</span>
+                                                {vi === 0 ? <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] text-primary">当前</span> : null}
+                                            </div>
+                                        )) : (
+                                            <p className="text-[11px] text-muted-foreground">没有匹配到生成日志（形象图可能来自素材库采用、上传或其它画布）；在本面板生成后按生成日志记录版本。</p>
+                                        )}
                                     </div>
                                 </div>
                             ) : (
@@ -901,14 +1035,65 @@ export function StudioLooksPanel({ dramaId, sharedAssetCanvasId, episodeIds, onO
                                     点左侧造型卡，在右栏编辑名称、外观与章节区间，或生成/上传造型图；「添加造型」给当前角色新建。
                                 </div>
                             )}
+
+                            {/* 角色本体 = 基础造型：既有交互保留（点它把右栏切回本体图说明）。 */}
+                            <div data-studio-look-base>
+                                <div className="mb-2 text-[11px] font-semibold">角色本体 · 基础造型</div>
+                                <div
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-pressed={activeLook?.index === null}
+                                    onClick={() => setSelectedLook({ castId: selectedCast, index: null })}
+                                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelectedLook({ castId: selectedCast, index: null }); } }}
+                                    className={cn(
+                                        "flex cursor-pointer items-center gap-2 rounded-[8px] border bg-card/40 p-2 text-left transition-colors duration-150 hover:border-foreground/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                        activeLook?.index === null ? "border-primary ring-1 ring-primary/60" : "border-foreground/30",
+                                    )}
+                                >
+                                    {/* 缩略图对齐影策：40×40 / radius8 / object-cover（本地 rounded-lg 为 10px，故用精确 8px 定值）。 */}
+                                    <div className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-muted/40">
+                                        {baseImage?.storageKey ? <img src={backendMediaUrl(baseImage.storageKey)} alt={selected.castName} className="size-full object-cover cursor-zoom-in" data-studio-look-preview onClick={(e) => { e.stopPropagation(); setPreview({ key: baseImage.storageKey!, title: `${selected.castName} · 本体` }); }} /> : <Shirt className="size-4 opacity-40" />}
+                                    </div>
+                                    <div className="min-w-0 text-[11px]">
+                                        <div className="font-medium">{selected.castName}</div>
+                                        <div className="mt-0.5 line-clamp-2 text-muted-foreground">{selected.description || "（无角色描述）"}</div>
+                                        <div className="mt-1 text-[11px] text-muted-foreground">
+                                            {baseImage?.storageKey
+                                                ? "主图已设为本体参考"
+                                                : "本体参考图尚未就绪：请先在画布生成或上传本体图，造型图需要以它为底图（当前已禁用生成）"}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     ) : null}
                 </aside>
+
             </div>
 
             {/* 造型图放大预览（对齐影策 cast-looks 放大查看） */}
             <Modal title={preview?.title || "造型图"} open={Boolean(preview)} onCancel={() => setPreview(null)} footer={null} width={560} centered>
                 {preview ? <img src={backendMediaUrl(preview.key)} alt={preview.title} className="mx-auto max-h-[70vh] max-w-full object-contain" /> : null}
+            </Modal>
+
+            {/* 从素材库选择：点图走 pickLibraryImage 真值写入（storageKey/url），保存设定才写回画布。 */}
+            <Modal title="从素材库选择形象图" open={libraryOpen} onCancel={() => setLibraryOpen(false)} footer={null} width={640} centered>
+                {imageAssets.length ? (
+                    <div className="grid max-h-[60vh] grid-cols-4 gap-2 overflow-y-auto thin-scrollbar" data-studio-look-library>
+                        {imageAssets.map((asset) => (
+                            <button type="button" key={asset.id} onClick={() => { pickLibraryImage(asset.id); setLibraryOpen(false); }}
+                                className="overflow-hidden rounded-[8px] border border-border bg-card/40 text-left transition hover:border-foreground/50">
+                                <span className="block aspect-square overflow-hidden bg-muted/40">
+                                    <img src={asset.data.dataUrl || (asset.data.storageKey ? backendMediaUrl(asset.data.storageKey) : "")} alt={asset.title}
+                                        className="size-full object-cover" loading="lazy" draggable={false} />
+                                </span>
+                                <span className="block truncate px-1.5 py-1 text-[11px]">{asset.title}</span>
+                            </button>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="py-6 text-center text-[11px] text-muted-foreground" data-studio-look-library-empty>素材库还没有图片；先到资产库上传，或用「上传形象图」直接选本地文件。</p>
+                )}
             </Modal>
         </div>
     );

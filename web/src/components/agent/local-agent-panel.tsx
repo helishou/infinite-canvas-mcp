@@ -163,7 +163,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
     // canvasContext is intentionally excluded because project updates it every frame during dragging and resizing.
     // The panel uses it only for ref synchronization and debounced postState calls, never during rendering.
     // Subscribing here would rerender the panel every frame and amplify the #185 crash, so it is observed imperatively below.
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals, creativeLaunch, scopedTask, queuedPrompts, pausedPromptQueueScopes, codexRuntime } = useAgentStore(
+    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, conversation, connectError, pendingTool, pendingApprovals, creativeLaunch, scopedTask, queuedPrompts, pausedPromptQueueScopes, codexRuntime, agentEngine } = useAgentStore(
         useShallow((state) => ({
             width: state.width,
             url: state.url,
@@ -196,6 +196,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
             queuedPrompts: state.queuedPrompts,
             pausedPromptQueueScopes: state.pausedPromptQueueScopes,
             codexRuntime: state.codexRuntime,
+            agentEngine: state.agentEngine,
         })),
     );
     const setAgentState = useAgentStore((state) => state.setAgentState);
@@ -372,7 +373,10 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
         let sequence = ++loadThreadsSequenceRef.current;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${legacyHistoryRef.current ? "codex" : "hermes"}`);
+            // 历史来源只由设置里的导演渠道决定：未选 Codex 时一律读 Hermes，
+            // 不从会话 id 推断，避免遗留会话把请求带进 Codex 分支并拉起本机 Codex。
+            const source = useAgentStore.getState().agentEngine === "codex" ? "codex" : "hermes";
+            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/codex/threads?source=${source}`);
             if (sequence !== loadThreadsSequenceRef.current) return;
             if (data.conversation) {
                 applyConversationState(data.conversation);
@@ -398,9 +402,6 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
 
     useEffect(() => {
         if (!activeThreadId) return;
-        const legacy = !activeThreadId.startsWith("llm-");
-        legacyHistoryRef.current = legacy;
-        setLegacyHistory(legacy);
         void loadThreads(true);
     }, [activeThreadId, loadThreads]);
 
@@ -1919,7 +1920,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                 value={activeTab}
                 theme={theme}
                 leading={
-                    <div className="flex min-w-0 items-center gap-1">
+                    <div className="flex min-w-0 items-center gap-2">
                         {headerAction || <span className="grid size-8 place-items-center">
                             <Bot className="size-4" />
                         </span>}
@@ -1979,7 +1980,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     busy={sending || waiting || conversationBusy}
                     connected={connected}
                     legacyHistory={legacyHistory}
-                    onLegacyHistoryChange={value => { legacyHistoryRef.current = value; setLegacyHistory(value); void loadThreads(true); }}
+                    onLegacyHistoryChange={agentEngine === "codex" ? value => { legacyHistoryRef.current = value; setLegacyHistory(value); void loadThreads(true); } : undefined}
                     onRefresh={() => void loadThreads()}
                     onNewThread={() => void startNewThread()}
                     onResumeThread={(threadId) => void resumeThread(threadId)}
@@ -2001,7 +2002,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect, compact, head
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
                     <AgentChatQueue items={promptQueue.items} paused={promptQueue.paused} canInsert={promptQueue.canInsert} theme={theme} onRemove={promptQueue.remove} onInsert={(id) => void promptQueue.insert(id)} onRetry={promptQueue.retry} onEdit={editQueuedPrompt} onResume={promptQueue.resume} />
                     <AgentChatComposer
-                        className="mr-20 shrink-0"
+                        className="shrink-0"
                         prompt={prompt}
                         attachments={attachments.map((attachment) => agentAttachmentToChatAttachment(attachment, endpoint, token))}
                         disabled={!connected || !conversationCanAcceptInput || loadingThreads || Boolean(creativeLaunch)}

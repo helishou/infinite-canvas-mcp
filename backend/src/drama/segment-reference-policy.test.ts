@@ -121,6 +121,36 @@ test("set_segment_reference_policy writes source truth, restores auto, and is id
     assert.equal(Object.hasOwn((auto.draft.director!.source.segments as any[])[0], "referenceOverrides"), false);
 });
 
+test("additions append from studio and replace from canvas keep sorting policy", async (t) => {
+    const { service } = await seed(t);
+    const refA = { id: "a-ref", assetId: "a-asset", label: "A", role: "other", storageKey: "image:a", mediaType: "image", enabled: true, usage: "reference" };
+    const refB = { id: "b-ref", assetId: "b-asset", label: "B", role: "other", storageKey: "image:b", mediaType: "image", enabled: true, usage: "reference" };
+    // 制作台追加 + 人工排序启停
+    let current = service.get("episode");
+    let saved = await service.edit("episode", {
+        operationId: "studio-add", expectedRevision: current.revision,
+        ops: [{ type: "set_segment_reference_policy", segmentId: "seg-1", mode: "manual", order: ["a-ref", "b-ref"], disabled: ["b-ref"], additions: [refA, refB] }],
+    });
+    let policy = (saved.draft.director!.source.segments as any[])[0].referenceOverrides;
+    assert.deepEqual(policy.additions.map((r: any) => r.id), ["a-ref", "b-ref"]);
+    assert.deepEqual(policy.disabled, ["b-ref"]);
+    // 画布手工删除 b、保留 a：replace 才真的移除，且保留人工排序/启停策略。
+    current = service.get("episode");
+    saved = await service.edit("episode", {
+        operationId: "canvas-replace", expectedRevision: current.revision,
+        ops: [{ type: "set_segment_reference_policy", segmentId: "seg-1", mode: "manual", order: ["a-ref"], disabled: [], additions: [refA], additionsMode: "replace" }],
+    });
+    policy = (saved.draft.director!.source.segments as any[])[0].referenceOverrides;
+    assert.deepEqual(policy.additions.map((r: any) => r.id), ["a-ref"]);
+    assert.equal(policy.mode, "manual");
+    assert.deepEqual(policy.order, ["a-ref"]);
+    assert.deepEqual(policy.disabled, []);
+    // 投影结果只剩 a，且不会再冒出被删的 b
+    const projected = applySegmentReferenceOverrides({ referenceBindings: [] },
+        [{ id: "seg-1", referenceOverrides: policy }], "seg-1");
+    assert.deepEqual(projected.referenceBindings.map((r: any) => r.id), ["a-ref"]);
+});
+
 test("set_segment_reference_policy rejects unknown segment and stale revision", async (t) => {
     const { service } = await seed(t);
     const current = service.get("episode");

@@ -12,8 +12,8 @@ import { resolveTaskLivePreview } from "../canvas/engine-preview.js";
  *
  * 保留三类接口，形状不变，画布前端不用改：
  * 1. 状态 / 媒体桥 → 转发引擎或读引擎 /health 里的 ComfyUI 地址；
- * 2. 任务查询与取消 → 读画布自己的任务库（任务 id 是画布的）：
- * 3. 已废弃的模型清单 / H3 预设 / 预设执行 / 地址配置 → 410 + 迁移说明。
+ * 2. 任务查询 → 读画布自己的任务库（任务 id 是画布的）；
+ * 3. 已废弃的模型清单 / H3 预设 / 预设执行 / 地址配置 / 任务取消 → 410 + 迁移说明。
  *
  * 实时预览帧由引擎 `/api/tasks/{id}` 提供；画布任务与引擎任务是两套 id，这里不再混用。
  */
@@ -140,10 +140,18 @@ export function registerComfyRoutes(
         res.json({ ok: true, task, preview: await resolveTaskLivePreview(stores, taskId), events: stores.tasks.events(taskId, Number(req.query.after || 0)) });
     });
 
-    app.post(routePath("/comfy/tasks/:id/cancel"), (req, res) => {
-        const task = stores.tasks.cancel(String(req.params.id));
-        ctx.events?.publish({ type: "task.updated", entityId: task.id, payload: task });
-        res.json({ ok: true, task });
+    /**
+     * 取消已下线。这里原先只把画布任务标成 cancelled，既不转发引擎、也不中断 ComfyUI，
+     * 调用方拿到「已取消」而显卡照旧满载——是假取消。画布自己的任务各有取消通道
+     * （H3 片段 → h3-runner.cancel，画布视频 → video-dispatcher.cancel），引擎任务走
+     * `POST /v1/tasks/{id}/cancel`。这里统一回 410，避免再被当成取消通道使用。
+     */
+    app.post(routePath("/comfy/tasks/:id/cancel"), (_req, res) => {
+        res.status(410).json({
+            ok: false,
+            code: "COMFY_CONSOLE_MOVED",
+            error: "ComfyUI 控制台任务取消已下线：画布任务请在对应卡片上停止，引擎任务请调用 POST /v1/tasks/{id}/cancel",
+        });
     });
 
     /** 代理 ComfyUI 媒体预览（/view） */

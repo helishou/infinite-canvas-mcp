@@ -5,6 +5,11 @@ import { refreshDueSources } from "@/services/api/prompts";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 
 const CHECK_INTERVAL_MS = 60_000;
+/**
+ * 首屏延后窗口：调度器一挂载就会给每个启用的提示词源读一次后端缓存（实测单次首页 10 条 /prompts/cache，
+ * 合计 ~1.2MB），和首屏关键请求抢带宽。缓存 TTL 是 30 分钟，晚 6 秒做第一轮不影响正确性。
+ */
+const FIRST_TICK_DELAY_MS = 6_000;
 
 /** Periodically update only the sources whose last successful refresh is due. */
 export function usePromptSourceScheduler() {
@@ -35,8 +40,12 @@ export function usePromptSourceScheduler() {
                 running = false;
             }
         };
-        void tick();
+        // 首屏后再跑第一轮：提示词源缓存的刷新是后台维护（缓存 TTL 30 分钟），不必抢首屏带宽。
+        const firstTimer = window.setTimeout(() => void tick(), FIRST_TICK_DELAY_MS);
         const timer = window.setInterval(() => void tick(), CHECK_INTERVAL_MS);
-        return () => window.clearInterval(timer);
+        return () => {
+            window.clearTimeout(firstTimer);
+            window.clearInterval(timer);
+        };
     }, [hydrated, intervalMinutes, queryClient]);
 }

@@ -42,6 +42,10 @@ export type PipelineAssetImageResult = {
 };
 
 const text = (value: unknown) => String(value || "").trim();
+const record = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
+const rows = (value: unknown): Row[] => Array.isArray(value)
+    ? value.filter((item): item is Row => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
 
 /**
  * 幂等写回：相同 storageKey 重复调用只会更新同一个 selectedResult，不会堆图片。
@@ -316,4 +320,82 @@ export function restoreAssetsFromCanvas(db: BackendDatabase, episodeId: string):
         } catch { skipped += 1; }
     }
     return { restored, skipped };
+}
+
+export type GeneratedAssetWriteBackInput = {
+    /** 生成结果实际写入的画布（分集画布或剧目共享资产画布）。 */
+    projectId: string;
+    nodeId: string;
+    storageKey: string;
+    taskId?: string;
+};
+
+export type GeneratedAssetWriteBackResult =
+    | { ok: true; scope: "episode" | "shared"; assetId: string; storageKey: string }
+    | { ok: false; reason: string };
+
+/**
+ * 画布生成完成的制作资产回写。普通图片任务只把结果写进节点顶层 storageKey，
+ * 而制作台资产卡和 H3 参考图解析读的是 draft.assets[assetId] 与实体节点的
+ * sceneImage / characterImages / propImage。此函数把两者接到同一份已归档媒体上：
+ *  - 分集实体节点 → bindPipelineAssetImage（写制作稿 + 实体节点权威图，标 generated）；
+ *  - 共享画布 canonical 节点 → adoptSharedAssetImage（写共享源并经 writeThrough 传播到消费分集）。
+ * 没有正式生产实体绑定、类别不符或媒体未归档时明确跳过，不猜资产、不造假图。
+ */
+function assetIdForEntityNode(db: BackendDatabase, episodeId: string, nodeId: string, entityId: string): string {
+    const row = db.db.prepare("SELECT draft_json, published_json FROM episode_productions WHERE episode_id=?")
+        .get(episodeId) as { draft_json: unknown; published_json: unknown } | undefined;
+    // draft 是当前权威编辑源：published 可能属于旧版本，不能用它把本轮结果写到历史资产卡上。
+    for (const raw of [row?.draft_json, row?.published_json]) {
+        if (raw == null) continue;
+        const director = record(decodeStoredJson<Row>(raw).director);
+        // 先按节点身份定位：同一个实体可能有多张资产卡，节点绑定才是唯一落点。
+        for (const [id, asset] of Object.entries(record(director.assets))) {
+            if (text(record(asset).nodeId) === nodeId) return id;
+        }
+        const plan = rows(record(director.source).asset_plan)
+            .find(item => text(item.entity_id || item.entityId) === entityId || text(item.id || item.asset_id) === entityId);
+        if (plan) return text(plan.id || plan.asset_id);
+    }
+    return "";
+}
+
+function productionAssetImageMatches(db: BackendDatabase, episodeId: string, assetId: string, storageKey: string): boolean {
+    const row = db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?")
+        .get(episodeId) as { draft_json: unknown } | undefined;
+    if (row?.draft_json == null) return false;
+    const asset = record(record(decodeStoredJson<Row>(row.draft_json).director).assets)[assetId];
+    return text(record(asset).storageKey) === storageKey && text(record(asset).status) === "generated";
+}
+
+export function syncGeneratedProductionAssetImage(db: BackendDatabase, input: GeneratedAssetWriteBackInput): GeneratedAssetWriteBackResult {
+    const projectId = text(input.projectId), nodeId = text(input.nodeId), storageKey = text(input.storageKey);
+    if (!projectId || !nodeId || !storageKey) return { ok: false, reason: "NO_TARGET" };
+    const media = db.getMediaFile(storageKey);
+    if (!media || !fs.existsSync(media.filePath)) return { ok: false, reason: "MEDIA_MISSING" };
+
+    const node = ((db.getCanvasProject(projectId)?.nodes as Row[] | undefined) || []).find(item => text(item.id) === nodeId);
+    if (!node) return { ok: false, reason: "NODE_MISSING" };
+    const kind = text(node.type);
+    if (!["character", "scene", "prop"].includes(kind)) return { ok: false, reason: "NOT_ENTITY_NODE" };
+    const metadata = record(node.metadata);
+    const binding = record(metadata.productionEntity);
+    // 共享画布 canonical 节点可能只带 productionAssetId，分集正式实体节点必须带 productionEntity 归属。
+    const entityId = text(binding.entityId) || text(metadata.productionAssetId);
+
+    const context = productionCanvasContext(db, projectId);
+    if (context.role === "shared-assets") {
+        adoptSharedAssetImage(db, { projectId, nodeId, storageKey, taskId: text(input.taskId) });
+        return { ok: true, scope: "shared", assetId: entityId || nodeId, storageKey };
+    }
+    if (text(binding.ownerKind) === "episode" && text(binding.ownerId) && entityId) {
+        const episodeId = text(binding.ownerId);
+        const assetId = assetIdForEntityNode(db, episodeId, nodeId, entityId);
+        if (!assetId) return { ok: false, reason: "ASSET_NOT_FOUND" };
+        // 同一张图重复回写只更新一次 revision，避免任务重放/重复钩子污染制作稿版本。
+        if (!productionAssetImageMatches(db, episodeId, assetId, storageKey))
+            bindPipelineAssetImage(db, { episodeId, assetId, nodeId, storageKey, taskId: text(input.taskId), source: "canvas" });
+        return { ok: true, scope: "episode", assetId, storageKey };
+    }
+    return { ok: false, reason: "NO_PRODUCTION_OWNER" };
 }

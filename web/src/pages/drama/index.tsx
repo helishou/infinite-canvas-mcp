@@ -1,35 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { App, Button, Input, Modal, Radio, Tag } from "antd";
+import { useEffect, useState } from "react";
+import { App, Button, Input, Tag } from "antd";
 import { ArrowUpRight, Clapperboard, Plus, Search, Trash2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
-import { nanoid } from "nanoid";
 
-import { applyBackendCanvasOperations, createBackendDramaEpisode, ensureSharedAssetCanvas, startCanvasGeneration, upsertBackendCanvasFolder, type DramaEpisode } from "@/services/backend-api";
-import { resolveImageUrl, uploadImage, type UploadedImage } from "@/services/image-storage";
+import type { DramaEpisode } from "@/services/backend-api";
+import { resolveImageUrl } from "@/services/image-storage";
 import { useCanvasStore, type CanvasFolder } from "@/stores/canvas/use-canvas-store";
-import { ModelPicker } from "@/components/model-picker";
 import { PageSectionHeader } from "@/components/layout/page-header";
-import { useConfigStore } from "@/stores/use-config-store";
-import { dramaProductionPlanSchema, type DramaProductionPlan } from "@basketikun/canvas-agent/drama/production-contract";
-import { splitSourceIntoEpisodes, chaptersFromAnalysis, NOVEL_MAX_CHARS, NOVEL_MIN_CHARS } from "@/lib/drama/adapt";
-import { EPISODE_SOURCE_CHARS } from "@basketikun/canvas-agent/drama/chapter-episodes";
-import { analyzeNovelChapters } from "@basketikun/canvas-agent/drama/novel-chapters";
 import { cn } from "@/lib/utils";
 
-import { NewDramaFooter, NewDramaWizard, NEW_DRAMA_STEPS, newDramaStepValid } from "./new-drama-wizard";
-import { clearNewDramaDraft, newDramaDraftHasContent, readNewDramaDraft, writeNewDramaDraft } from "./new-drama-draft";
-import { planningPrompt, stashPlanningHandoff } from "./planning-director-launch";
-import { TOPIC_DEFAULTS } from "./planning-topic-logic";
 import { confirmDeleteDrama } from "./confirm-delete-drama";
-import { dramaProjectDestination, matchesProjectQuery } from "@/pages/projects/directory-data";
+import { matchesProjectQuery } from "@/pages/projects/directory-data";
 import { useDramaDirectory } from "@/pages/projects/use-drama-directory";
 
-export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false, createOnly = false, onCreated }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean; createOnly?: boolean; onCreated?: (folderId: string) => void } = {}) {
+/**
+ * 剧目目录页。新建剧目已改成整页表单（`/drama-studio/new`，new-drama-page.tsx），
+ * 旧的三步弹窗（NewDramaWizard）不再从这里打开：入口只负责导航。
+ */
+export default function DramaPage({ searchQuery, compactEmpty = false, headingHidden = false }: { searchQuery?: string; compactEmpty?: boolean; headingHidden?: boolean } = {}) {
     const { t } = useTranslation();
     const hydrated = useCanvasStore((state) => state.hydrated);
-    const createFolder = useCanvasStore((state) => state.createFolder);
-    const modelConfig = useConfigStore((state) => state.config);
     const [localQuery, setLibraryQuery] = useState("");
     const libraryQuery = searchQuery ?? localQuery;
     const [query] = useSearchParams();
@@ -50,168 +41,12 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
     const shownDramaFolders = [...dramaFolders]
         .sort((a, b) => (Date.parse(b.updatedAt || b.createdAt) || 0) - (Date.parse(a.updatedAt || a.createdAt) || 0))
         .filter(folder => matchesProjectQuery(folder.name, libraryQuery));
-    const [createOpen, setCreateOpen] = useState(false);
-    const [newDramaName, setNewDramaName] = useState("");
-    const [newDramaPlan, setNewDramaPlan] = useState<DramaProductionPlan>(() => dramaProductionPlanSchema.parse({}));
-    const [styleMode, setStyleMode] = useState<"upload" | "prompt" | "none">("upload");
-    const [styleImageFile, setStyleImageFile] = useState<File>();
-    const [stylePrompt, setStylePrompt] = useState("");
-    const [creatingDrama, setCreatingDrama] = useState(false);
-    const [wizardStep, setWizardStep] = useState(0);
-    const [restoredDraft, setRestoredDraft] = useState("");
-    const [autoEpisodes, setAutoEpisodes] = useState(true);
-    const [handoff, setHandoff] = useState(true);
-    const creationRef = useRef<{ folderId: string; image?: UploadedImage; imageNodeId: string; operationId: string; taskKey: string; mode: "upload" | "prompt" | "none"; prompt: string; plan: DramaProductionPlan } | undefined>(undefined);
-    const openCreateDrama = async () => {
-        const blank = dramaProductionPlanSchema.parse({});
-        const restored = await readNewDramaDraft().catch(() => null);
-        if (restored && newDramaDraftHasContent(restored)) {
-            // 上次没填完的草稿整份回填；上传的参考图留不住，回来要重选。
-            setNewDramaName(restored.name);
-            setNewDramaPlan(restored.plan);
-            setStyleMode(restored.styleMode);
-            setStyleImageFile(undefined);
-            setStylePrompt(restored.stylePrompt);
-            setWizardStep(Math.min(Math.max(0, restored.step), NEW_DRAMA_STEPS.length - 1));
-            setAutoEpisodes(restored.autoEpisodes);
-            setHandoff(restored.handoff);
-            setRestoredDraft(restored.savedAt);
-        } else {
-            setNewDramaName(t("drama.defaultProjectName"));
-            // 默认值与导演大师一致：女性 / 全龄 / 甜虐 / HE / 60 集 / 中文 / 时长交给模型。
-            setNewDramaPlan({ ...blank, topic: { ...blank.topic, ...TOPIC_DEFAULTS, tones: [...TOPIC_DEFAULTS.tones] } });
-            setStyleMode("none");
-            setStyleImageFile(undefined);
-            setStylePrompt("");
-            setWizardStep(0);
-            setAutoEpisodes(true);
-            setHandoff(true);
-            setRestoredDraft("");
-        }
-        creationRef.current = undefined;
-        setCreateOpen(true);
-    };
-    /** 关弹窗时留一份草稿：原文与设置都在里面，下次打开接着填（空表单不留）。 */
-    const closeCreateDrama = () => {
-        if (creatingDrama) return;
-        const draft = { name: newDramaName, plan: newDramaPlan, styleMode, stylePrompt, autoEpisodes, handoff, step: wizardStep };
-        if (newDramaDraftHasContent(draft)) void writeNewDramaDraft(draft);
-        else void clearNewDramaDraft();
-        setCreateOpen(false);
-    };
-    const discardDraft = () => {
-        void clearNewDramaDraft();
-        const blank = dramaProductionPlanSchema.parse({});
-        setRestoredDraft("");
-        setNewDramaName(t("drama.defaultProjectName"));
-        setNewDramaPlan({ ...blank, topic: { ...blank.topic, ...TOPIC_DEFAULTS, tones: [...TOPIC_DEFAULTS.tones] } });
-        setStyleMode("none");
-        setStyleImageFile(undefined);
-        setStylePrompt("");
-        setWizardStep(0);
-    };
-    const createDrama = async () => {
-        const name = newDramaName.trim();
-        if (!name || creatingDrama || styleMode === "upload" && !styleImageFile || styleMode === "prompt" && !stylePrompt.trim()) return;
-        // 单集原文超上限时先减章：超限的集写不进一次提示词，建出来也做不下去。
-        if (splitBlocked) {
-            message.error(t("newDrama.split.oversize", { label: splitBlocked.label, chars: splitBlocked.chars, limit: EPISODE_SOURCE_CHARS }));
-            setWizardStep(1);
-            return;
-        }
-        setCreatingDrama(true);
-        try {
-            let creation = creationRef.current;
-            if (!creation) {
-                const uploaded = styleMode === "upload" && styleImageFile ? await uploadImage(styleImageFile, { category: "library" }) : undefined;
-                const imageNodeId = (styleMode !== "none") ? nanoid() : "";
-                const plan = {
-                    ...newDramaPlan,
-                    ...(imageNodeId ? { styleAnchorNodeId: imageNodeId } : {}),
-                } as DramaProductionPlan;
-                const folderId = createFolder(name, true, plan);
-                creation = { folderId, image: uploaded, imageNodeId, operationId: nanoid(), taskKey: nanoid(), mode: styleMode, prompt: stylePrompt.trim(), plan };
-                creationRef.current = creation;
-            }
-            const folder = useCanvasStore.getState().folders.find(item => item.id === creation!.folderId);
-            if (!folder) throw new Error("新剧目已创建，但读取不到本地剧目信息");
-            const saved = await upsertBackendCanvasFolder(folder as unknown as Record<string, unknown>);
-            if (saved.folder) useCanvasStore.setState(state => ({ folders: state.folders.map(item => item.id === creation!.folderId ? saved.folder as unknown as CanvasFolder : item) }));
-            // 共享资产画布是新制作台资产库的真值容器：无论有没有风格图都必须建（styleMode=none 也要），
-            // ensure 幂等（已绑定直接返回），保证从原文新建的剧目天然具备共享资产画布。
-            const { project } = await ensureSharedAssetCanvas(creation.folderId);
-            if (creation.imageNodeId) {
-                const image = creation.image;
-                const node = creation.mode === "prompt"
-                    ? { type: "add_node", id: creation.imageNodeId, nodeType: "config", title: t("drama.createProjectStyleNode"), position: { x: 0, y: 0 }, width: 360, height: 260, metadata: { smart: true, generationMode: "image", prompt: creation.prompt, composerContent: creation.prompt, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, status: "idle", generationType: "generation", count: 1, styleMother: true } }
-                    : { type: "add_node", id: creation.imageNodeId, nodeType: "image", title: t("drama.createProjectStyleNode"), position: { x: 0, y: 0 }, width: 360, height: Math.max(220, Math.min(420, 360 * ((image?.height || 1) / Math.max(1, image?.width || 1)))), metadata: { content: image?.url, storageKey: image?.storageKey, status: "success", naturalWidth: image?.width, naturalHeight: image?.height, bytes: image?.bytes, mimeType: image?.mimeType, styleMother: true } };
-                await applyBackendCanvasOperations(String(project.id), [node], Number(project.revision || 0), creation.operationId);
-                if (creation.mode === "prompt") {
-                    await startCanvasGeneration({ mode: "image", projectId: String(project.id), nodeId: creation.imageNodeId, model: creation.plan.imageModelsByKind.style || creation.plan.imageModel || undefined, prompt: creation.prompt, count: 1, clientTaskId: creation.taskKey, idempotencyKey: creation.taskKey });
-                }
-            }
-            const episodeCount = autoEpisodes ? Number(creation.plan.topic?.episodes || 0) : 0;
-            // 原文拆集不在建剧时做：原文与分集口径只进规划契约，建集统一在
-            // 「剧目规划 · 原剧本」点「批量建集」，用的是同一份拆章结果，不做第二套。
-            const split = splitSourceIntoEpisodes(creation.plan.sourceScript || "", creation.plan.sourceSplit);
-            if (!split.groups.length) {
-                for (let number = 1; number <= episodeCount; number += 1) {
-                    try {
-                        await createBackendDramaEpisode(creation.folderId, { episodeNumber: number });
-                    } catch (error) {
-                        message.warning(`${t("newDrama.episodeFailed", { number })}：${error instanceof Error ? error.message : String(error)}`);
-                        break;
-                    }
-                }
-            }
-            void clearNewDramaDraft();
-            if (handoff) {
-                stashPlanningHandoff(creation.folderId, planningPrompt("outline", {
-                    dramaId: creation.folderId,
-                    name: creation.plan.topic?.logline ? `${name}` : name,
-                    pendingEpisodes: Array.from({ length: episodeCount }, (_, index) => index + 1),
-                }));
-            }
-            setCreateOpen(false);
-            creationRef.current = undefined;
-            // 嵌入新制作台时把新建的剧目 id 交回宿主，由宿主跳到新制作台（不跳老版 /production）。
-            if (onCreated) { onCreated(creation.folderId); return; }
-            // 有原文时落到「原剧本」页签：分集列表与批量建集就在那里，省掉找入口。
-            const destination = split.groups.length
-                ? `${dramaProjectDestination(creation.folderId, query.toString())}&workspace=series&seriesView=planning&seriesTab=source`
-                : handoff
-                    ? `${dramaProjectDestination(creation.folderId, query.toString())}&workspace=series&seriesView=planning`
-                    : dramaProjectDestination(creation.folderId, query.toString());
-            navigate(destination);
-        } catch (error) {
-            message.error(error instanceof Error ? error.message : String(error));
-        } finally { setCreatingDrama(false); }
-    };
-
-    // 建集与界面用同一份拆章结果：原文只在文本变化时切一次，勾选与每集章数是廉价派生。
-    const sourceAnalysis = useMemo(() => {
-        const source = newDramaPlan.sourceScript || "";
-        if (!source.trim()) return null;
-        return analyzeNovelChapters(source, { maxChars: newDramaPlan.sourceSplit?.maxChars || NOVEL_MAX_CHARS, minChars: NOVEL_MIN_CHARS });
-    }, [newDramaPlan.sourceScript, newDramaPlan.sourceSplit?.maxChars]);
-    const splitPreview = useMemo(
-        () => chaptersFromAnalysis(sourceAnalysis, { excluded: newDramaPlan.sourceSplit?.excluded, perEpisode: newDramaPlan.sourceSplit?.perEpisode }),
-        [sourceAnalysis, newDramaPlan.sourceSplit],
-    );
-    const splitBlocked = splitPreview.groups.find(group => group.oversized);
-
-    const updateAssetImageModel = (kind: keyof DramaProductionPlan["imageModelsByKind"], model: string) => setNewDramaPlan(current => ({
-        ...current,
-        imageModelsByKind: { ...current.imageModelsByKind, [kind]: model || undefined },
-    }));
-
-    // createOnly（嵌入新制作台，原文已写进草稿）：挂载即打开设置向导，自动回填草稿。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(() => { if (createOnly && hydrated) void openCreateDrama(); }, [createOnly, hydrated]);
+    /** 新建改成整页（/drama-studio/new）；旧弹窗已删除，草稿与创建都在那一页里。 */
+    const openCreateDrama = () => navigate("/drama-studio/new");
 
     return (
         <section className="text-foreground" aria-label={t("projects.drama")}>
-            {!createOnly && (searchQuery === undefined ? (
+            {searchQuery === undefined ? (
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-5">
                     <Input className="!w-full sm:!w-80" size="large" allowClear prefix={<Search className="mr-1 size-4 text-muted-foreground" />} aria-label={t("landing.searchSeries")} placeholder={t("landing.searchSeries")} value={libraryQuery} onChange={event => setLibraryQuery(event.target.value)} />
                     <Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>
@@ -222,8 +57,8 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                     description={headingHidden ? undefined : t("projects.dramaDescription")}
                     actions={<Button type="primary" disabled={!hydrated} onClick={openCreateDrama} icon={<Plus className="size-4" />}>{t("drama.createProject")}</Button>}
                 />
-            ))}
-            {!createOnly && <section className="mt-6">
+            )}
+            <section className="mt-6">
                 {!hydrated ? (
                     <div role="status" className="flex min-h-72 items-center justify-center rounded-xl border border-border bg-card/50 text-sm text-muted-foreground">{t("canvas.loading")}</div>
                 ) : dramaFolders.length ? (
@@ -241,53 +76,7 @@ export default function DramaPage({ searchQuery, compactEmpty = false, headingHi
                         <Button type="primary" className={cn("shrink-0", compactEmpty ? "col-start-2 justify-self-start" : "mt-5")} icon={<Plus className="size-4" />} onClick={openCreateDrama}>{t("drama.createProject")}</Button>
                     </div>
                 )}
-            </section>}
-            <Modal
-                width={760}
-                open={createOpen}
-                title={t("drama.createProject")}
-                footer={null}
-                maskClosable={false}
-                onCancel={closeCreateDrama}
-            >
-                <div className="mb-4 flex flex-wrap items-center gap-2" data-new-drama-steps>
-                    {NEW_DRAMA_STEPS.map((key, index) => <span key={key} data-new-drama-step-tab={key} data-state={index === wizardStep ? "current" : index < wizardStep ? "done" : "todo"}
-                        className={index === wizardStep ? "rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground" : index < wizardStep ? "rounded-full border border-primary/40 px-2.5 py-1 text-[11px] text-primary" : "rounded-full border border-border px-2.5 py-1 text-[11px] text-muted-foreground"}>
-                        {index + 1} · {t(`newDrama.step.${key}`)}
-                    </span>)}
-                    {restoredDraft ? (
-                        <span className="flex items-center gap-2 text-[11px] text-muted-foreground" data-new-drama-draft>
-                            <span>{t("newDrama.draftRestored")}</span>
-                            <button type="button" className="underline hover:text-foreground" onClick={discardDraft}>{t("newDrama.draftDiscard")}</button>
-                        </span>
-                    ) : null}
-                </div>
-                <div className="min-h-[320px]">
-                <NewDramaWizard
-                    step={wizardStep}
-                    name={newDramaName} onName={setNewDramaName}
-                    plan={newDramaPlan} onPlan={(patch) => setNewDramaPlan((current) => typeof patch === "function" ? patch(current) : { ...current, ...patch })}
-                    styleMode={styleMode} onStyleMode={setStyleMode}
-                    styleImageFile={styleImageFile} onStyleImageFile={setStyleImageFile}
-                    stylePrompt={stylePrompt} onStylePrompt={setStylePrompt}
-                    autoEpisodes={autoEpisodes} onAutoEpisodes={setAutoEpisodes}
-                    handoff={handoff} onHandoff={setHandoff}
-                    config={modelConfig}
-                />
-                </div>
-                <div className="mt-5 border-t border-border pt-4">
-                    <NewDramaFooter
-                        step={wizardStep}
-                        busy={creatingDrama}
-                        valid={newDramaStepValid(wizardStep, { name: newDramaName, plan: newDramaPlan, styleMode, styleImageFile, stylePrompt }) && !splitBlocked}
-                        blockedHint={wizardStep === 0 ? t("newDrama.needName") : wizardStep === 1 ? t("newDrama.needStyle") : splitBlocked ? t("newDrama.split.oversize", { label: splitBlocked.label, chars: splitBlocked.chars, limit: EPISODE_SOURCE_CHARS }) : undefined}
-                        onPrev={() => setWizardStep((current) => Math.max(0, current - 1))}
-                        onNext={() => setWizardStep((current) => Math.min(NEW_DRAMA_STEPS.length - 1, current + 1))}
-                        onCreate={createDrama}
-                        onCancel={closeCreateDrama}
-                    />
-                </div>
-            </Modal>
+            </section>
         </section>
     );
 }

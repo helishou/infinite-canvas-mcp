@@ -6,6 +6,7 @@ import {
     fetchEpisodeProductionVersions,
     restoreEpisodeProduction,
     fetchProductionSharedAssets,
+    fetchBackendDramaEpisode,
     request,
     backendMediaUrl,
     type ProductionTarget,
@@ -510,7 +511,7 @@ function AssetVersionCompare({ versions, loading = false, onAdopted }: { version
                                     disabled={v.reviewStatus === "approved" || v.id === adoptedId || Boolean(adoptingId)}
                                     title={v.reviewStatus === "approved" || v.id === adoptedId ? "该版本已是当前采用，不重复采纳" : `采纳 v${v.sourceVersion} 的参考图并锁定到共享资产`}
                                     onClick={() => void handleAdopt(v)}
-                                    className="mt-1 flex h-6 w-fit items-center gap-1 rounded border border-primary/40 bg-primary/5 px-2 text-[10px] text-primary transition hover:bg-primary/10 disabled:cursor-default disabled:opacity-50">
+                                    className="mt-1 flex h-6 w-fit cursor-pointer items-center gap-1 rounded border border-primary/40 bg-primary/5 px-2 text-[10px] text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50">
                                     <CheckCircle2 className="size-3" />
                                     {adoptingId === v.id ? "采纳中…" : v.reviewStatus === "approved" || v.id === adoptedId ? "当前采用" : "采纳此版本"}
                                 </button>
@@ -587,15 +588,50 @@ export function StudioAssetsTab({ dramaId, sharedAssetCanvasId, artStyle, episod
     useEffect(() => {
         let disposed = false;
         void Promise.all(episodes.map(async (ep) => {
-            const prod = await productionOf(ep.id);
+            const [prod, epRes] = await Promise.all([
+                productionOf(ep.id),
+                fetchBackendDramaEpisode(ep.id).catch(() => null),
+            ]);
+            // 造型真值取分集实体节点上真实归档的图；制作稿残留的 storageKey 不算造型。
+            const entityImages: Record<string, string[]> = {};
+            const nodes = ((epRes?.canvas?.nodes || []) as Array<Record<string, any>>);
+            const planRows = ((prod?.source?.asset_plan || []) as Array<Record<string, any>>);
+            for (const node of nodes) {
+                if (node.type !== "character") continue;
+                const md = (node.metadata || {}) as Record<string, any>;
+                const entityId = String(md?.productionEntity?.entityId || "");
+                const plan = planRows.find(p => String(p.entity_id || p.id) === entityId && entityId);
+                const aid = String(plan?.id || plan?.asset_id || md.characterAssetId || "");
+                const keys = ((Array.isArray(md.characterImages) ? md.characterImages : []) as Array<Record<string, any>>)
+                    .map(im => String(im?.storageKey || "")).filter(Boolean);
+                if (aid && keys.length) entityImages[aid] = keys;
+            }
             return {
                 episodeNo: ep.no, episodeId: ep.id, revision: prod?.revision ?? 0, source: prod?.source || null,
                 assets: prod?.assets || {}, assetCards: prod?.assetCards || [], canvasId: ep.canvasId || undefined,
+                entityImages,
             } as CastSource;
         }))
             .then(list => { if (!disposed) setCastSources(list); });
         return () => { disposed = true; };
     }, [episodes, productionOf, reloadTick]);
+
+    // 出图进行中自动刷新：任一角色/道具/场景/造型卡处于 queued/running/generating 时每 4s 重读制作稿，
+    // 出图成功或失败后 busy 归零即停表。资产卡的遮罩由 StudioCastPanel 的 genStatus 真实派生。
+    const castGenerating = useMemo(() => {
+        const BUSY = new Set(["queued", "running", "generating", "pending"]);
+        return castSources.some(src => {
+            const assets = (src.assets || {}) as Record<string, unknown>;
+            const assetBusy = Object.values(assets).some(a => BUSY.has(String((a as Record<string, unknown>)?.status || "").toLowerCase()));
+            const cardBusy = (src.assetCards || []).some(c => BUSY.has(String((c as Record<string, unknown>)?.generation_status || "").toLowerCase()));
+            return assetBusy || cardBusy;
+        });
+    }, [castSources]);
+    useEffect(() => {
+        if (!castGenerating) return;
+        const timer = window.setInterval(() => setReloadTick(v => v + 1), 4_000);
+        return () => window.clearInterval(timer);
+    }, [castGenerating]);
 
     // 跟随制作台当前选集：URL episodeId 变化时两个子视图一起切过去；
     // 用户在子视图里手动点集（只改本地 state、不改 URL）不会被拉回，仍可独立查看其它集。
@@ -800,13 +836,17 @@ export function StudioAssetsTab({ dramaId, sharedAssetCanvasId, artStyle, episod
                             onClick={() => void handleExtract()}
                             disabled={extracting}
                             title="从本集分场剧本提取角色/场景/道具并建档（影策资产段）"
-                            className="flex h-7 items-center gap-1 rounded border border-primary/40 bg-primary/5 px-2 text-[11px] text-primary transition hover:bg-primary/10 disabled:opacity-50"
+                            className="flex h-7 cursor-pointer items-center gap-1 rounded border border-primary/40 bg-primary/5 px-2 text-[11px] text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                             {extracting ? "提取中…" : "从剧本提取设定"}
                         </button>
                     </span>
                 ) : null}
-                <button type="button" onClick={onOpenCanvas} className={onExtractAssets ? "text-xs text-muted-foreground hover:text-foreground" : "ml-auto text-xs text-muted-foreground hover:text-foreground"}>在画布中精修 →</button>
+                {/* 影策同名入口「在画布中精修」是 34px 高、8px 圆角、0 12px 内距、13px 字的按钮；本行原来是无内距的
+                    纯文本链接（101×22，看着点不到），这里只对齐高度/内距/圆角/字号，保留本页 muted 文字色与 hover 底色。
+                    字号走 inline：未分层的 button 前置重置（shadcn preflight）压过 Tailwind 的 text-[13px]。 */}
+                <button type="button" onClick={onOpenCanvas} data-studio-open-canvas style={{ fontSize: 13 }}
+                    className={cn("flex h-[34px] shrink-0 cursor-pointer items-center rounded-[8px] px-3 font-medium text-muted-foreground transition hover:bg-muted/60 hover:text-foreground", onExtractAssets ? "" : "ml-auto")}>在画布中精修 →</button>
             </div>
 
             {sub === "library" ? (

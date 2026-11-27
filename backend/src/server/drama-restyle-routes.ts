@@ -6,6 +6,7 @@ import type { Stores } from "../stores/types.js";
 import type { CanvasGenerationService } from "../canvas/generation-service.js";
 
 type Row = Record<string, any>;
+type RestyleNode = { projectId: string; nodeId: string; type: string; metadata: Row };
 const obj = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value.filter((item): item is Row => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
 const str = (value: unknown) => value === undefined || value === null ? "" : String(value);
@@ -34,17 +35,15 @@ export type RestylePlan = {
 };
 
 /** 从角色节点的 castId（characterAssetId / productionEntity.entityId / 节点 id）派生可匹配别名。 */
-function characterAliases(db: BackendDatabase, assetId: string, groupId: string): Set<string> {
+function characterAliases(nodes: RestyleNode[], assetId: string, groupId: string): Set<string> {
     const aliases = new Set<string>();
     if (assetId) aliases.add(assetId);
     if (groupId) aliases.add(groupId);
-    for (const project of db.listCanvasProjects()) {
-        for (const node of (project.nodes || []) as Row[]) {
-            if (str(node.type) !== "character") continue;
-            const md = obj(node.metadata), entity = obj(md.productionEntity);
-            const ids = [str(md.characterAssetId), str(entity.entityId), str(node.id)].filter(Boolean);
-            if (ids.some(id => id === assetId || id === groupId)) for (const id of ids) aliases.add(id);
-        }
+    for (const node of nodes) {
+        if (node.type !== "character") continue;
+        const md = obj(node.metadata), entity = obj(md.productionEntity);
+        const ids = [str(md.characterAssetId), str(entity.entityId), node.nodeId].filter(Boolean);
+        if (ids.some(id => id === assetId || id === groupId)) for (const id of ids) aliases.add(id);
     }
     return aliases;
 }
@@ -100,34 +99,33 @@ const ACTIVE_SEGMENT_STATUSES = new Set(["pending", "queued", "loading", "runnin
 export function planRestyle(db: BackendDatabase, options: RestylePlanOptions): RestylePlan {
     const assetId = str(options.assetId).trim(), groupId = str(options.groupId).trim();
     if (!assetId && !groupId) throw new Error("RESTYLE_ASSET_REQUIRED: 需要 assetId 或 groupId");
-    const aliases = characterAliases(db, assetId, groupId);
+    const nodes = db.listCanvasNodesForRestyle();
+    const aliases = characterAliases(nodes, assetId, groupId);
     const episodes = episodeByCanvas(db, str(options.dramaId));
     const all: RestyleTarget[] = [];
     const seen = new Set<string>();
-    for (const project of db.listCanvasProjects()) {
-        for (const node of (project.nodes || []) as Row[]) {
-            const metadata = obj(node.metadata);
-            const segments = rows(metadata.segments);
-            if (!segments.length) continue;
-            for (const segment of segments) {
-                if (!segmentReferences(segment, aliases, groupId)) continue;
-                const segmentId = str(segment.id), nodeId = str(node.id), projectId = str(project.id);
-                const key = `${projectId}\0${nodeId}\0${segmentId}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                const status = str(segment.status).toLowerCase();
-                const hasActiveTask = options.isActive
-                    ? options.isActive({ projectId, nodeId, segmentId })
-                    : ACTIVE_SEGMENT_STATUSES.has(status) || Boolean(segment.runtimeTaskId) && !["succeeded", "success", "failed", "error", "cancelled", "canceled"].includes(status);
-                all.push({
-                    projectId, nodeId, segmentId,
-                    title: str(segment.title),
-                    episodeId: episodes.get(projectId) || "",
-                    resultStorageKey: str(segment.resultStorageKey || segment.result),
-                    inputOutdated: segment.inputOutdated === true,
-                    hasActiveTask,
-                });
-            }
+    for (const node of nodes) {
+        const metadata = obj(node.metadata);
+        const segments = rows(metadata.segments);
+        if (!segments.length) continue;
+        for (const segment of segments) {
+            if (!segmentReferences(segment, aliases, groupId)) continue;
+            const segmentId = str(segment.id), nodeId = node.nodeId, projectId = node.projectId;
+            const key = `${projectId}\0${nodeId}\0${segmentId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            const status = str(segment.status).toLowerCase();
+            const hasActiveTask = options.isActive
+                ? options.isActive({ projectId, nodeId, segmentId })
+                : ACTIVE_SEGMENT_STATUSES.has(status) || Boolean(segment.runtimeTaskId) && !["succeeded", "success", "failed", "error", "cancelled", "canceled"].includes(status);
+            all.push({
+                projectId, nodeId, segmentId,
+                title: str(segment.title),
+                episodeId: episodes.get(projectId) || "",
+                resultStorageKey: str(segment.resultStorageKey || segment.result),
+                inputOutdated: segment.inputOutdated === true,
+                hasActiveTask,
+            });
         }
     }
     const episodeSet = new Set(all.map(target => target.episodeId || target.projectId));
@@ -172,9 +170,23 @@ export function applyRestylePlan(db: BackendDatabase, plan: RestylePlan, idempot
 }
 
 /** 任务仓库判断在跑任务：幂等的核心——正在生成的段不再提交/标脏。 */
-export function makeActiveTaskChecker(stores: Stores) {
+export function makeActiveTaskChecker(stores: Stores, db?: BackendDatabase) {
+    let byProject: Map<string, Array<{ nodeIds: string[]; segmentIds: string[] }>> | null = null;
     return (target: Pick<RestyleTarget, "projectId" | "nodeId" | "segmentId">) => {
         try {
+            if (db) {
+                if (!byProject) {
+                    byProject = new Map();
+                    for (const task of db.listActiveTaskBindings()) {
+                        const list = byProject.get(task.projectId) || [];
+                        list.push({ nodeIds: task.nodeIds, segmentIds: task.segmentIds });
+                        byProject.set(task.projectId, list);
+                    }
+                }
+                return (byProject.get(target.projectId) || []).some(task =>
+                    (!target.nodeId || task.nodeIds.includes(target.nodeId))
+                    && (!target.segmentId || task.segmentIds.includes(target.segmentId)));
+            }
             return stores.tasks.list({ projectId: target.projectId }).some(task =>
                 ["queued", "running", "awaiting_confirmation"].includes(task.status)
                 && (target.nodeId ? task.nodeId === target.nodeId || str((task.input as Row | undefined)?.nodeId) === target.nodeId : true)
@@ -189,7 +201,7 @@ export function registerDramaRestyleRoutes(router: Router, db: BackendDatabase, 
         groupId: typeof req.query.groupId === "string" ? req.query.groupId : "",
         dramaId: String(req.params.dramaId || ""),
         restyleSegments: true,
-        isActive: makeActiveTaskChecker(stores),
+        isActive: makeActiveTaskChecker(stores, db),
     });
 
     // 影策 GET /dramas/:id/cast/:castId/impact —— 只读预览影响集。
@@ -221,7 +233,7 @@ export function registerDramaRestyleRoutes(router: Router, db: BackendDatabase, 
                 groupId: typeof req.query.groupId === "string" ? req.query.groupId : str(body.groupId),
                 dramaId: String(req.params.dramaId || ""),
                 restyleSegments: true,
-                isActive: makeActiveTaskChecker(stores),
+                isActive: makeActiveTaskChecker(stores, db),
             });
             const idempotencyBase = `${req.params.dramaId}\0${req.params.assetId}\0${str(body.groupId)}`;
             const { marked } = applyRestylePlan(db, plan, idempotencyBase);

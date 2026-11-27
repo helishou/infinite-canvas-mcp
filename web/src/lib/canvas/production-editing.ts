@@ -407,6 +407,30 @@ export function createProductionEditing(projectId: string, getNode: (id: string)
         await flush();
         const response = await fetchCanvasStoryboardTracks(projectId, input?.nodeId);
         return { revision: Number(response.revision || 0), tracks: response.tracks as CanvasStoryboardTracks["tracks"] };
+    }, setSegmentReferencePolicy: async (input: { nodeId: string; segmentId: string; targetId: string; additions: Array<Record<string, unknown>> }) => {
+        await flush();
+        const node = getNode(input.nodeId);
+        const clip = (Array.isArray(node?.metadata?.segments) ? node!.metadata!.segments as Array<Record<string, any>> : [])
+            .find(item => String(item.id || "") === input.segmentId);
+        if (!clip || String((clip.productionClipProjection as Record<string, unknown> | undefined)?.targetId || "") !== input.targetId) {
+            throw new Error("STORYBOARD_PROJECTION_MISMATCH");
+        }
+        const context = (await fetchProductionCanvasContext(projectId)).context;
+        const owner: ProductionTarget | undefined = context.owner?.kind === "episode" ? context.owner.id
+            : context.owner?.kind === "scene" ? { sceneId: context.owner.id }
+                : context.owner?.kind === "canvas" ? { projectId: context.owner.id } : undefined;
+        if (!owner) throw new Error("PRODUCTION_EDITOR_NOT_READY");
+        const { production } = await fetchEpisodeProduction(owner);
+        const segments = ((production?.draft?.director?.source as Record<string, unknown> | undefined)?.segments || []) as Array<Record<string, unknown>>;
+        const override = segments.find(s => String(s.id || "") === input.targetId)?.referenceOverrides as Record<string, unknown> | undefined;
+        // 画布手工编辑是全量清单：replace 才会移除被删的绑定；保留制作台已有排序/启停，不强制改回 auto。
+        await editEpisodeProduction(owner, Number(production?.revision || 0), [{
+            type: "set_segment_reference_policy", segmentId: input.targetId,
+            ...(override?.mode === "manual" ? { mode: "manual" as const, order: (override.order as string[]) || [], disabled: (override.disabled as string[]) || [] } : {}),
+            additions: input.additions, additionsMode: "replace",
+        }]);
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("drama-production:refresh-storyboard-track", { detail: { canvasId: projectId } }));
+        return { sourceSaved: true };
     }, replaceStoryboardTrack: async (input: CanvasProductionStoryboardEditor) => {
         await flush();
         let node = getNode(input.nodeId);

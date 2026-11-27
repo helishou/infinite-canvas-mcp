@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BackendDatabase, type Asset } from "../db.js";
-import { adoptSharedAssetImage, findPipelineAssetEntityNode, generatedMediaStorageKey } from "./pipeline-asset-image.js";
+import { adoptSharedAssetImage, findPipelineAssetEntityNode, generatedMediaStorageKey, syncGeneratedProductionAssetImage } from "./pipeline-asset-image.js";
 import { ensureProductionCanvas } from "./production-canvas.js";
 
 test("generatedMediaStorageKey 取结果里第一张真实媒体，并兼容顶层 storageKey", () => {
@@ -64,7 +64,7 @@ function adoptFixture() {
     const shared = ensureProductionCanvas(db, "shared-assets", "drama");
     db.applyCanvasProjectOperations(shared.project.id, undefined, [{ type: "add_node", id: "shared-character", nodeType: "character",
         title: "共享角色", position: { x: 20, y: 30 }, width: 240, height: 320,
-        metadata: { characterName: "共享角色", characterDescription: "共享设定", characterImages: [{ storageKey: "image:old", url: "/media/image%3Aold" }], characterPrimaryIndex: 0 } }], { runtimeWrite: true });
+        metadata: { productionAssetId: "C1", characterName: "共享角色", characterDescription: "共享设定", characterImages: [{ storageKey: "image:old", url: "/media/image%3Aold" }], characterPrimaryIndex: 0 } }], { runtimeWrite: true });
     const source = { dramaId: "drama", assetId: "shared-asset", sourceProjectId: shared.project.id, sourceNodeId: "shared-character" };
     const asset: Asset = { id: "shared-asset", kind: "character", dramaId: "drama", title: "共享角色", coverUrl: "", tags: [], folderId: null,
         note: null, source: "production-shared", metadata: { sharedAssetSource: source }, data: {}, createdAt: "now", updatedAt: "now" };
@@ -130,4 +130,77 @@ test("adopt-shared-image 拒绝非共享画布、缺失媒体与缺失节点", (
         assert.throws(() => adoptSharedAssetImage(db, { projectId: shared.project.id, nodeId: "shared-character", storageKey: "image:missing" }), /MEDIA_MISSING/);
         assert.throws(() => adoptSharedAssetImage(db, { projectId: shared.project.id, nodeId: "missing-node", storageKey: "image:new" }), /NODE_MISSING/);
     } finally { db.close(); }
+});
+
+function episodeEntityFixture() {
+    const db = new BackendDatabase(":memory:");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "entity-writeback-"));
+    registerAdoptImage(db, dir, "image:scene-new", Buffer.from("scene-image-bytes"));
+    db.upsertCanvasFolder({ id: "drama", name: "剧目", isDrama: true, createdAt: "now" });
+    const episodeId = "episode-1", canvasId = "episode-canvas";
+    db.createCanvasProject({ id: canvasId, nodes: [], connections: [] });
+    db.upsertDramaEpisode({ id: episodeId, dramaId: "drama", episodeNumber: 1, title: "第1集", synopsis: "", fullPlot: "",
+        canvasId, createdAt: "now", updatedAt: "now" });
+    db.applyCanvasProjectOperations(canvasId, undefined, [{ type: "add_node", id: "entity-scene", nodeType: "scene", title: "雪夜",
+        position: { x: 10, y: 20 }, width: 300, height: 200,
+        metadata: { sceneName: "雪夜", prompt: "雪夜全景", storageKey: "image:scene-new",
+            productionEntity: { ownerKind: "episode", ownerId: episodeId, kind: "scene", entityId: "SC-1" } } }], { runtimeWrite: true });
+    const director = {
+        schemaVersion: 1, engine: "h3", sourceHash: "seed", artifacts: [], modules: {}, boundaries: [], unresolved: [],
+        executionAuthorized: false, shotInputs: {}, workflow: {},
+        source: { version: 1, asset_plan: [{ id: "asset-scene", kind: "scene", entity_id: "SC-1", version: "v1", status: "planned" }],
+            asset_cards: [], shots: [], segments: [], utterances: [] },
+        assets: { "asset-scene": { status: "planned", version: "v1" } },
+    };
+    db.db.prepare("INSERT INTO episode_productions (episode_id,revision,draft_json,published_json,published_version,updated_at) VALUES (?,?,?,NULL,0,?)")
+        .run(episodeId, 1, JSON.stringify({ director, keyframes: [], keyframeReviews: [], settings: {} }), "now");
+    return { db, dir, episodeId, canvasId };
+}
+
+test("生成结果写回分集实体节点时同步制作稿资产与 sceneImage，并标为 generated", () => {
+    const { db, dir, episodeId, canvasId } = episodeEntityFixture();
+    try {
+        const result = syncGeneratedProductionAssetImage(db, {
+            projectId: canvasId, nodeId: "entity-scene", storageKey: "image:scene-new", taskId: "task-scene",
+        });
+        assert.deepEqual(result, { ok: true, scope: "episode", assetId: "asset-scene", storageKey: "image:scene-new" });
+        const draft = JSON.parse((db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get(episodeId) as any).draft_json);
+        assert.equal(draft.director.assets["asset-scene"].storageKey, "image:scene-new");
+        assert.equal(draft.director.assets["asset-scene"].status, "generated");
+        assert.equal(draft.director.assets["asset-scene"].selectedResult.taskId, "task-scene");
+        const node = (db.getCanvasProject(canvasId)!.nodes as any[]).find(n => n.id === "entity-scene");
+        assert.equal(node.metadata.sceneImage.storageKey, "image:scene-new");
+        assert.equal(node.metadata.generationTaskId, "task-scene");
+        // 相同 storageKey 重复调用幂等：不重复加 revision。
+        const revision = Number((db.db.prepare("SELECT revision FROM episode_productions WHERE episode_id=?").get(episodeId) as any).revision);
+        syncGeneratedProductionAssetImage(db, { projectId: canvasId, nodeId: "entity-scene", storageKey: "image:scene-new", taskId: "task-scene" });
+        assert.equal(Number((db.db.prepare("SELECT revision FROM episode_productions WHERE episode_id=?").get(episodeId) as any).revision), revision);
+    } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("共享画布生成结果走 canonical 节点采用并传播消费分集", () => {
+    const { db, dir, shared, episodeId } = adoptFixture();
+    try {
+        const result = syncGeneratedProductionAssetImage(db, {
+            projectId: shared.project.id, nodeId: "shared-character", storageKey: "image:new", taskId: "task-shared",
+        });
+        assert.deepEqual(result, { ok: true, scope: "shared", assetId: "C1", storageKey: "image:new" });
+        const canonical = (db.getCanvasProject(shared.project.id)!.nodes as any[]).find(n => n.id === "shared-character");
+        assert.equal(canonical.metadata.characterImages[canonical.metadata.characterPrimaryIndex].storageKey, "image:new");
+        const draft = JSON.parse((db.db.prepare("SELECT draft_json FROM episode_productions WHERE episode_id=?").get(episodeId) as any).draft_json);
+        assert.equal(draft.director.assets.asset.storageKey, "image:new");
+        assert.equal(draft.director.assets.asset.status, "generated");
+    } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("非生产实体节点与缺失媒体明确跳过，不猜资产不造假图", () => {
+    const { db, dir, canvasId } = episodeEntityFixture();
+    try {
+        db.applyCanvasProjectOperations(canvasId, undefined, [{ type: "add_node", id: "plain-image", nodeType: "image", title: "普通图",
+            position: { x: 0, y: 0 }, width: 100, height: 100, metadata: {} }], { runtimeWrite: true });
+        assert.deepEqual(syncGeneratedProductionAssetImage(db, { projectId: canvasId, nodeId: "plain-image", storageKey: "image:scene-new" }),
+            { ok: false, reason: "NOT_ENTITY_NODE" });
+        assert.deepEqual(syncGeneratedProductionAssetImage(db, { projectId: canvasId, nodeId: "entity-scene", storageKey: "image:missing" }),
+            { ok: false, reason: "MEDIA_MISSING" });
+    } finally { db.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
